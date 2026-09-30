@@ -69,6 +69,48 @@ def hairline(width):
     return ["case", ["==", width, 0], 1, width]
 
 
+# MapLibre's line antialiasing inks a line thinner than ~0.9 px as if it
+# were wider (0.2 px draws ~0.36 px of ink, averaged over sub-pixel
+# positions at device pixel ratio 1); Qt inks exactly the width. Opacity
+# factors by width in CSS px, measured against QGIS renders.
+_THIN_LINE_FACTORS = ((0.1, 0.29), (0.2, 0.56), (0.3, 0.71), (0.4, 0.85), (0.5, 0.89),
+                      (0.6, 0.92), (0.7, 0.96), (0.8, 0.98), (0.9, 1.0))
+
+
+def _thin_line_factor(width_px: float) -> float:
+    if width_px >= _THIN_LINE_FACTORS[-1][0]:
+        return 1.0
+    if width_px <= _THIN_LINE_FACTORS[0][0]:
+        # Below 0.1 px MapLibre draws a ~0.34 px floor.
+        return max(0.0, width_px / 0.34)
+    for (w0, f0), (w1, f1) in zip(_THIN_LINE_FACTORS, _THIN_LINE_FACTORS[1:]):
+        if w0 <= width_px <= w1:
+            return f0 + (f1 - f0) * (width_px - w0) / (w1 - w0)
+    return 1.0
+
+
+def thin_line_opacity(width, opacity):
+    """``line-opacity`` giving lines thinner than a pixel the ink Qt gives
+    them (see ``_THIN_LINE_FACTORS``); map-unit widths as a zoom curve."""
+    if ex.is_number(width):
+        factor = _thin_line_factor(width)
+        return opacity if factor >= 1.0 else ex.mul(opacity, round(factor, 4))
+    if not ex.is_zoom_curve(width) or ex.is_zoom_curve(opacity):
+        return opacity
+    try:
+        zooms = [z / 2.0 for z in range(0, 49)]
+        factors = [_thin_line_factor(ex.evaluate_zoom_curve(width, z)) for z in zooms]
+    except ex.ExpressionError:
+        return opacity
+    if min(factors) >= 1.0:
+        return opacity
+    curve: List[Any] = ["interpolate", ["linear"], ["zoom"]]
+    for zoom, factor in zip(zooms, factors):
+        value = ex.mul(opacity, round(factor, 4)) if factor < 1.0 else opacity
+        curve += [zoom, value]
+    return curve
+
+
 _PROPERTY_NAMES: Dict[type, Dict[int, str]] = {}
 
 
@@ -2618,6 +2660,8 @@ class QgisMapLibreStyleExporter:
                 layer_def["paint"]["line-offset"] = offset
 
             width_value = layer_def["paint"]["line-width"]
+            layer_def["paint"]["line-opacity"] = thin_line_opacity(
+                width_value, layer_def["paint"]["line-opacity"])
             width_px = width_value if ex.is_number(width_value) else \
                 PropertyExtractor.static_pixels(symbol_layer.width(), symbol_layer.widthUnit())
             dasharray = LinePropertyExtractor.get_line_dasharray(symbol_layer, width_px)

@@ -81,6 +81,10 @@ def _compare(tmp_path, layer, metric="near", center=CENTER):
     browser_png = str(tmp_path / "v_browser.png")
     if metric == "shape":  # pixel-level mismatch (the gallery score)
         return gallery.score(qgis_png, browser_png)["shape"]
+    if metric == "darkness":  # total ink, 1 = one fully black pixel (qgis, browser)
+        from PIL import Image
+        return tuple(sum(255 - v for v in Image.open(path).convert("L").getdata()) / 255.0
+                     for path in (qgis_png, browser_png))
     if metric == "ink":  # inked pixel counts (qgis, browser)
         result = gallery.score(qgis_png, browser_png)
         return result["ink_qgis"], result["ink_browser"]
@@ -204,3 +208,33 @@ def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
     # 0.16 em (8 px here) too high shifted most of the ink off its place.
     assert _compare(tmp_path, layer, metric="shape") < 0.12
+
+
+def test_thin_lines_get_the_ink_qgis_gives_them(tmp_path):
+    """Qt inks a 0.3 px line with 0.3 px of ink; MapLibre's antialiasing
+    alone gives it ~0.43 px (1.2 px lines agree): opacity compensates."""
+    from qgis.core import QgsCategorizedSymbolRenderer, QgsField, QgsRendererCategory
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import to_geopackage as save
+    res = gallery.EARTH / (512 * 2 ** ZOOM)
+    widths = [0.15, 0.3, 0.45, 0.6, 0.75]
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "thin", "memory")
+    memory.dataProvider().addAttributes([QgsField("k", QVariant.Int)])
+    memory.updateFields()
+    for k in range(len(widths)):
+        for row in range(4):  # a spread of sub-pixel positions
+            feature = QgsFeature(memory.fields())
+            feature.setAttributes([k])
+            y = CENTER[1] + ((k * 4 + row) - 10) * 7.3 * res
+            feature.setGeometry(QgsGeometry.fromWkt(
+                f"LINESTRING({CENTER[0] - 150 * res} {y}, {CENTER[0] + 150 * res} {y})"))
+            memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "thin.gpkg"))
+    categories = []
+    for k, width in enumerate(widths):
+        line = QgsSimpleLineSymbolLayer(QColor("black"), width * res)
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        categories.append(QgsRendererCategory(k, QgsLineSymbol([line]), str(k)))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("k", categories))
+    qgis, browser = _compare(tmp_path, layer, metric="darkness")
+    assert browser == pytest.approx(qgis, rel=0.12)

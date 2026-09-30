@@ -42,6 +42,11 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Random marker fills draw the QGIS number of markers (positions differ: QGIS draws them
   in screen space); map-unit font markers on points are exported as glyph outlines;
   font markers with characters beyond U+FFFF are sprites.
+* Point-pattern fills clipped to the shape are drawn by QGIS through a texture whose cell
+  is truncated to whole pixels (`int(2 × spacing)`): at a given scale its rows drift up to
+  a cell against the true spacing, and patterns of markers larger than their spacing break
+  at the texture seams. The export draws the pattern the style describes; the gallery
+  scores such items high although nothing is misplaced.
 * Line labels with map-unit text sizes are drawn (MapLibre dropped them below zoom 18);
   "show all labels" layers allow overlapping labels. A line label may still sit on a
   different stretch of the line than in QGIS (QGIS prefers the middle) and repeats every
