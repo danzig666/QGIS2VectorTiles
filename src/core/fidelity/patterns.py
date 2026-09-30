@@ -122,10 +122,35 @@ def render_line_pattern(spec: LinePatternSpec, cell: PeriodicCell,
     return img
 
 
+SUPERSAMPLE = 4
+
+
 def tile_markers(marker, cell_w: int, cell_h: int, positions):
     """Paint ``marker`` (RGBA, centred on its origin) at ``positions`` in a
     ``cell_w × cell_h`` repeat cell, wrapping across edges so the cell tiles
-    seamlessly."""
+    seamlessly.
+
+    Positions off the pixel grid (a dense pattern spaced 2.1 px) are painted
+    on a ``SUPERSAMPLE``-times larger cell and averaged down: rounding each
+    marker to a whole pixel made gaps of 2 and 3 px, seen as a grid of seams.
+    The enlarged marker is the pixel render QGIS would draw, smoothly scaled:
+    rendering it finer drew thin outlines lighter than QGIS does.
+    """
+    from PIL import Image  # pylint: disable=import-outside-toplevel
+
+    half_w, half_h = marker.width / 2.0, marker.height / 2.0
+    off_grid = any(abs((x - half_w) - round(x - half_w)) > 0.05
+                   or abs((y - half_h) - round(y - half_h)) > 0.05 for x, y in positions)
+    if not off_grid:
+        return _paste_markers(marker, cell_w, cell_h, positions)
+    big = marker.resize((marker.width * SUPERSAMPLE, marker.height * SUPERSAMPLE), Image.BICUBIC)
+    cell = _paste_markers(big, cell_w * SUPERSAMPLE, cell_h * SUPERSAMPLE,
+                          [(x * SUPERSAMPLE, y * SUPERSAMPLE) for x, y in positions])
+    return cell.resize((max(1, cell_w), max(1, cell_h)), Image.BOX)
+
+
+def _paste_markers(marker, cell_w: int, cell_h: int, positions):
+    """``tile_markers`` with every marker rounded to whole pixels."""
     from PIL import Image  # pylint: disable=import-outside-toplevel
 
     cell = Image.new("RGBA", (max(1, cell_w), max(1, cell_h)), (0, 0, 0, 0))

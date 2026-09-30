@@ -118,3 +118,15 @@ def test_atlas_stays_roughly_square():
     width, height = atlas.sheets[1].size
     assert max(width, height) < 1.5 * min(width, height)
     assert max(atlas.sheets[2].size) <= 16384
+
+
+def test_dense_off_grid_markers_have_no_seams():
+    """Építési hely Eger: markers 2.1 px apart rounded to whole pixels left
+    gaps of 2 and 3 px, seen as a grid of lighter seams."""
+    from fidelity.patterns import point_pattern_cell, tile_markers
+    width, height, positions, _ = point_pattern_cell(2.094, 2.094, 0, 0)
+    marker = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+    cell = tile_markers(marker, width, height, positions)
+    alpha = cell.getchannel("A")
+    columns = [sum(alpha.getpixel((x, y)) for y in range(height)) for x in range(width)]
+    assert min(columns) > 0.6 * max(columns)

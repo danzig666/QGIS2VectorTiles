@@ -115,6 +115,7 @@ now has a regression test.
 | 57 | Screen-spaced marker lines with gaps (Tervezési terület corners, Tervezett fasor trees) | MapLibre's line placement drops a symbol that would overhang the end of a line piece: every tile edge and ring start | positions materialized per zoom (interval, offset along and line offset converted at the middle of each zoom); native placement only beyond the last tile zoom; `test_screen_interval_markers_are_placed_per_zoom` |
 | 58 | Marker line missing (Vasúti fővonal white half-squares) | a 5.55e-17 offset (float noise in the style) built a zero offset curve and the rule failed silently | offsets below 1e-9 are zero; failed rules are reported as `Q2VT_RULE_EXPORT_FAILED`; `test_marker_line_with_float_noise_offset_is_exported` |
 | 59 | Pattern textures 1.4x too sparse or large between zooms (Kis szaggatott) | MapLibre draws `fill-pattern` in the pixels of the tile's integer zoom, so a texture grows 2x with the map until the next zoom; map-unit textures were laid out for the middle of the zoom and screen-unit ones at their QGIS size | map-unit textures rendered at the integer zoom (exact at every zoom), screen-unit parts at 1/sqrt(2) (0.71x-1.41x instead of 1x-2x); `test_pattern_textures_keep_the_qgis_spacing_between_zooms` |
+| 60 | Dense point-pattern textures with a grid of lighter seams (Építési hely Eger) | markers 2.1 px apart were pasted at whole pixels: gaps of 2 and 3 px | markers between pixels painted on a 4x cell and averaged down; `test_dense_off_grid_markers_have_no_seams` |
 
 ### Resolved suspicions
 
