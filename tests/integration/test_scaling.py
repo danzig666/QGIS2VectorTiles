@@ -96,8 +96,10 @@ def test_large_detailed_layer_patterns_scale(plugin, tmp_path):
     produced = {}
     for rule in rules:
         if rule.recipe is not None:
-            produced[rule.recipe.kind] = produced.get(rule.recipe.kind, 0) + \
-                by_name[rule.output_dataset].featureCount()
+            # Random points stay one multipoint per polygon: count the parts.
+            produced[rule.recipe.kind] = produced.get(rule.recipe.kind, 0) + sum(
+                f.geometry().constGet().partCount()
+                for f in by_name[rule.output_dataset].getFeatures())
     print(f"\nexport of {SIDE * SIDE} polygons: {elapsed:.1f} s; features: {produced}")
     assert set(produced) >= {"grid_points", "random_points", "dash_segments"}
     area = sum(f.geometry().area() for f in layer.getFeatures())

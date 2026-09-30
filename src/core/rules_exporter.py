@@ -811,15 +811,26 @@ class RulesExporter:
                                              COLUMN=anchors)
 
         self._check_cancel()
+        # Random fill points stay one multipoint per polygon: vector tiles
+        # carry multipoints and the viewer places a symbol at every point, so
+        # splitting hundreds of thousands of them would only cost time.
+        multipoints = grp.recipe is not None and grp.recipe.kind == "random_points"
         cleaned = self._run_alg_safe(
             "removenullgeometries", "native",
             INPUT=transformed,
             REMOVE_EMPTY=True,
+            **({"OUTPUT": output_path} if multipoints else {}),
         )
         check = QgsVectorLayer(cleaned, "check", "ogr")
         if not check.isValid() or check.featureCount() <= 0:
+            del check
+            if multipoints and exists(output_path):
+                os.remove(output_path)  # an existing output counts as done
             self._report_empty_output(grp, transbase)
             return None
+        del check
+        if multipoints:
+            return cleaned
         self._check_cancel()
         return self._run_alg_safe(
             "multiparttosingleparts", "native",
@@ -881,7 +892,13 @@ class RulesExporter:
             POINTS_NUMBER=QgsProperty.fromExpression(number), MIN_DISTANCE=0,
             MAX_TRIES_PER_POINT=50, SEED=max(1, int(recipe.param("seed") or 1)),
             INCLUDE_POLYGON_ATTRIBUTES=True, OUTPUT=points)
+        # One multipoint per polygon: the later per-feature steps (fields,
+        # geometry expression, cleaning) then touch a few features instead of
+        # hundreds of thousands; the final single-part split restores points.
         fields = QgsVectorLayer(points, "fields", "ogr").fields()
+        if fields.indexFromName(f"{_FIELD_PREFIX}_orig_id") >= 0:
+            points = self._run_alg_safe("collect", "native", INPUT=points,
+                                        FIELD=[f"{_FIELD_PREFIX}_orig_id"])
         if fields.indexFromName("fid") >= 0:
             points = self._run_alg_safe("deletecolumn", "native", INPUT=points, COLUMN=["fid"])
         return points

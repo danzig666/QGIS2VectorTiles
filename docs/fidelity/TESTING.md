@@ -85,6 +85,8 @@ meeting at tile corners — written to GeoPackage when an export needs to re-ope
 single 25 km² polygon with a 10 m pattern, and prints the timings. Reference (this
 container, one worker): 26 s for 640 000 pattern features; 7 s for 251 000 markers of
 the 25 km² polygon (previously: 34 s, and 0 markers for the large polygon).
+A random fill of one point per 10 m² on the 16 polygons (458 000 points) takes 5.5 s
+(previously 25 s): random points are kept as one multipoint per polygon.
 
 Patterns above `SymbolMaterializer.MAX_PATTERN_ELEMENTS` (2 000 000 features per rule,
 estimated from the layer's area or length) are drawn as textures at every zoom and

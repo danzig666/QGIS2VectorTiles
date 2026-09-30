@@ -40,7 +40,7 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Map-unit custom dashes are exported as their dashes from the zoom where the pattern is
   6 px long, so markers drawn in the gaps stay in the gaps.
 * Random marker fills draw the QGIS number of markers (positions differ: QGIS draws them
-  in screen space); map-unit font markers on points are exported as glyph outlines;
+  in screen space) as one multipoint per polygon; map-unit font markers on points are exported as glyph outlines;
   font markers with characters beyond U+FFFF are sprites.
 * Point-pattern fills clipped to the shape are drawn by QGIS through a texture whose cell
   is truncated to whole pixels (`int(2 × spacing)`): at a given scale its rows drift up to

@@ -110,6 +110,7 @@ now has a regression test.
 | 52 | Patterns of very large polygons silently missing | a per-feature cap (200 000 grid cells) returned nothing: a 25 km² polygon with a 10 m pattern lost it | polygons cut into pieces (anchored to the whole feature) before the grid is built; `test_very_large_polygon_keeps_its_pattern` |
 | 53 | Clipped pattern line work empty on detailed polygons | one GEOS intersection of a whole feature's line work returned mixed collections or failed | clipped per piece (at most 100 x 100 cells, 256 vertices), only lines/polygons kept; `test_pattern_pieces_give_the_whole_feature_pattern` |
 | 54 | Random fills slow on detailed polygons (6-8 s per 0.8 km²) | point-in-polygon test per candidate without a prepared geometry | QGIS's native random points in polygons; `test_large_detailed_layer_patterns_scale` |
+| 55 | Dense random fills slow (25 s for 458 000 points) | every point went through the per-feature steps (fields, geometry expression, cleaning, single-part split) | points collected into one multipoint per polygon and kept as multipoints in the tiles: 5.5 s; `test_large_detailed_layer_patterns_scale` |
 
 ### Resolved suspicions
 
