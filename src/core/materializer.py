@@ -58,6 +58,14 @@ def _to_mm(value: float, unit) -> Optional[float]:
     return value * factor / physical_factor(MM)
 
 
+def _ring_filter(layer) -> int:
+    """QgsLineSymbolLayer ring filter: 0 all rings, 1 exterior, 2 interior."""
+    try:
+        return int(getattr(layer.ringFilter(), "value", layer.ringFilter()))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def svg_fill_draws(layer) -> bool:
     """Whether QGIS paints an SVG fill: like ``QgsSVGFillSymbolLayer::
     storeViewBox`` the SVG data must parse (an empty path has no data; a
@@ -108,7 +116,7 @@ class SymbolMaterializer:
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
         if kind in ("SimpleLine", "MarkerLine", "HashLine") and flat_rule.get_attr("g") == 2 \
-                and abs(layer.offset()) > 1e-9:
+                and (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
             outline = self._polygon_outline_offset(flat_rule, layer)
             if outline is not None:
                 return outline
@@ -165,12 +173,15 @@ class SymbolMaterializer:
         crs = self.project_crs or flat_rule.layer.crs().authid()
         rule = flat_rule.derive()
         clone = rule.rule.symbol().symbolLayer(0)
-        if normalize_unit(layer.offsetUnit()) == "map":
-            rule.recipe = mat.Recipe("polygon_offset", params=(
-                ("offset", float(layer.offset())), ("crs", crs)))
+        params = [("ring_filter", _ring_filter(layer)), ("crs", crs)]
+        if abs(layer.offset()) <= 1e-9:
+            clone.setOffset(0.0)
+        elif normalize_unit(layer.offsetUnit()) == "map":
+            params.append(("offset", float(layer.offset())))
             clone.setOffset(0.0)
         else:
-            rule.recipe = mat.Recipe("polygon_ccw")
+            params.append(("ccw", True))
+        rule.recipe = mat.Recipe("polygon_offset", params=tuple(params))
         rule.set_attr("m", 1)
         if layer.layerType() == "HashLine":
             converted = self._hash_as_marker_line(clone, rule)
@@ -182,14 +193,39 @@ class SymbolMaterializer:
     # (identical look, a fraction of the features).
     GRID_MIN_SPACING_PX = 8.0
 
-    def _dense_split(self, flat_rule: FlattenedRule, spacing: float, materialize):
+    @staticmethod
+    def _average_angle_length(layer, rule: FlattenedRule) -> float:
+        """``averageAngleLength`` in map units. A screen length shrinks in map
+        units as the map zooms in, while one point dataset serves a range of
+        zooms: it is converted at the middle of the first three zooms."""
+        try:
+            length, unit = float(layer.averageAngleLength()), layer.averageAngleUnit()
+        except AttributeError:
+            return 0.0
+        if length <= 0:
+            return 0.0
+        if normalize_unit(unit) == "map":
+            return length
+        mm = _to_mm(length, unit)
+        if mm is None:
+            return 0.0
+        low = rule.get_attr("o")
+        span = max(0, min(rule.get_attr("i"), low + 3) - low) + 1
+        scale = (ZoomLevels.zoom_to_scale(low) or 0.0) / 2 ** (span / 2.0)
+        return mm / 1000.0 * scale  # ground metres; map units are metres here
+
+    # Interval markers along a line are few per tile even when close together.
+    INTERVAL_MIN_SPACING_PX = 2.0
+
+    def _dense_split(self, flat_rule: FlattenedRule, spacing: float, materialize,
+                     min_px: Optional[float] = None):
         """Texture for the zooms where a map-unit grid is dense, materialized
         points for the zooms where its spacing is large on screen."""
         low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
         switch = None
         for zoom in range(low, high + 1):
             px = spacing * 96.0 / (0.0254 * ZoomLevels.zoom_to_scale(zoom))
-            if px >= self.GRID_MIN_SPACING_PX:
+            if px >= (self.GRID_MIN_SPACING_PX if min_px is None else min_px):
                 switch = zoom
                 break
         if switch == low:
@@ -370,8 +406,11 @@ class SymbolMaterializer:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Offset along the line is not applied to vertex/centre markers.",
                              flat_rule)
-            rules.append(self._with_symbol(flat_rule, symbol, 0, 1,
-                                           mat.marker_points(points, offset=line_offset, crs=crs)))
+            recipe = mat.marker_points(points, offset=line_offset, crs=crs)
+            if _ring_filter(layer):
+                recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
+                    ("ring_filter", _ring_filter(layer)), ("crs", crs)))
+            rules.append(self._with_symbol(flat_rule, symbol, 0, 1, recipe))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
@@ -380,9 +419,17 @@ class SymbolMaterializer:
             if exact_interval:
                 recipe = mat.interval_points(layer.interval(), float(layer.offsetAlongLine()),
                                              line_offset, crs)
-                split = self._dense_split(
-                    native, layer.interval(),
-                    lambda rule: [self._with_symbol(rule, symbol.clone(), 0, 2, recipe)])
+                if _ring_filter(layer):
+                    recipe = mat.Recipe(recipe.kind, recipe.placements,
+                                        recipe.params + (("ring_filter", _ring_filter(layer)),))
+                def exact(rule, recipe=recipe):
+                    average = self._average_angle_length(layer, rule)
+                    if average:
+                        recipe = mat.Recipe(recipe.kind, recipe.placements,
+                                            recipe.params + (("average", average),))
+                    return [self._with_symbol(rule, symbol.clone(), 0, 2, recipe)]
+                split = self._dense_split(native, layer.interval(), exact,
+                                          min_px=self.INTERVAL_MIN_SPACING_PX)
                 rules.extend(split if split is not None else [native])
             else:
                 rules.append(native)

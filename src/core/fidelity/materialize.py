@@ -69,7 +69,21 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
     """
     interval = float(recipe.param("interval"))
     along = float(recipe.param("along", 0.0))
+    average = float(recipe.param("average", 0.0) or 0.0)
     crs = recipe.param("crs") or export_crs
+
+    def angle(line):
+        """Marker azimuth: QGIS averages the direction over +-average along
+        the line (``averageAngleLength``), wrapping around closed rings."""
+        if average <= 0:
+            return f"line_interpolate_angle({line}, @q2vt_d)"
+
+        def at(distance):
+            return (f"line_interpolate_point({line}, if(is_closed({line}), "
+                    f"({distance} + @q2vt_len) % @q2vt_len, "
+                    f"max(0, min(@q2vt_len, {distance}))))")
+        return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {average!r}')}, "
+                f"{at(f'@q2vt_d + {average!r}')})), line_interpolate_angle({line}, @q2vt_d))")
 
     def body(line):
         return (
@@ -82,8 +96,7 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
             f"abs(@q2vt_off + @element * {interval!r} - @q2vt_len) < 1e-6)), "
             f"with_variable('q2vt_d', min(@q2vt_off + @element * {interval!r}, @q2vt_len), "
             f"with_variable('q2vt_p', line_interpolate_point({line}, @q2vt_d), "
-            f"make_point(x(@q2vt_p), y(@q2vt_p), "
-            f"line_interpolate_angle({line}, @q2vt_d)))))))))")
+            f"make_point(x(@q2vt_p), y(@q2vt_p), {angle(line)}))))))))")
     if crs == export_crs:
         return body("@geometry")
     # Positions and azimuths in the project CRS (QGIS draws in it); the small
@@ -343,19 +356,34 @@ def _ring_buffer(ring: str, distance: str) -> str:
 
 
 def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
-    """Offset polygon outlines like QGIS: positive offsets move every ring
-    towards the feature's interior (exterior buffered by ``-offset``, holes
-    by ``+offset``), independent of the ring orientation."""
-    offset = float(recipe.param("offset", 0.0))
+    """Polygon outlines as QGIS draws them with a line symbol layer
+    (``renderPolygonStroke``): the rings selected by ``ring_filter`` (0 all,
+    1 exterior only, 2 interior only). With an ``offset`` every ring is
+    buffered as its own polygon, so positive offsets move exterior and holes
+    towards the feature's interior (``QgsSymbolLayerUtils::offsetLine``);
+    ``ccw`` orients rings so MapLibre's right-hand offsets point inside."""
+    offset = float(recipe.param("offset", 0.0) or 0.0)
+    ring_filter = int(recipe.param("ring_filter", 0) or 0)
+    ccw = bool(recipe.param("ccw", False))
     crs = recipe.param("crs") or export_crs
 
+    def ring(ring_expr: str, exterior: bool) -> str:
+        if offset:
+            return _ring_buffer(ring_expr, repr(-offset if exterior else offset))
+        if ccw:  # exterior counter-clockwise, holes clockwise (map y up)
+            polygon = f"make_polygon({ring_expr})"
+            oriented = f"force_polygon_ccw({polygon})" if exterior else \
+                f"force_polygon_cw({polygon})"
+            return f"exterior_ring({oriented})"
+        return ring_expr
+
     def rings(part):
-        ring_lines = (
-            f"array_cat(array({_ring_buffer(f'exterior_ring({part})', repr(-offset))}), "
-            f"if(num_interior_rings({part}) > 0, array_foreach(generate_series(1, "
-            f"num_interior_rings({part})), "
-            f"{_ring_buffer(f'interior_ring_n({part}, @element)', repr(offset))}), array()))")
-        return (f"collect_geometries(array_filter({ring_lines}, "
+        exterior = (f"array({ring(f'exterior_ring({part})', True)})"
+                    if ring_filter in (0, 1) else "array()")
+        interior = (f"if(num_interior_rings({part}) > 0, array_foreach(generate_series(1, "
+                    f"num_interior_rings({part})), {ring(f'interior_ring_n({part}, @element)', False)}), "
+                    f"array())" if ring_filter in (0, 2) else "array()")
+        return (f"collect_geometries(array_filter(array_cat({exterior}, {interior}), "
                 f"@element IS NOT NULL AND NOT is_empty(@element)))")
 
     def body(geom):
@@ -364,15 +392,12 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
                 f"num_geometries({geom})), with_variable('q2vt_part', if(is_multipart({geom}), "
                 f"geometry_n({geom}, @element), {geom}), "
                 f"{rings('@q2vt_part')})), @element IS NOT NULL AND NOT is_empty(@element)))")
-    if crs == export_crs:
+    if crs == export_crs or not offset:
         return body("@geometry")
     return (f"transform(with_variable('q2vt_poly', transform(@geometry, '{export_crs}', '{crs}'), "
             f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
 
 
-# Polygon outlines whose rings must run counter-clockwise (map y up) so that
-# MapLibre's right-hand line/icon offsets point inside, as QGIS offsets do.
-CCW_OUTLINE_EXPRESSION = "boundary(force_polygon_ccw(@geometry))"
 
 
 def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:

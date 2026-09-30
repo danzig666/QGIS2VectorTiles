@@ -376,3 +376,31 @@ def test_nested_geometry_generators_match_qgis(plugin, tmp_path):
             rule.rule.symbol().symbolLayer(0).subSymbol().clone()))
     ours = ink_mask(render(outputs, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("ring_filter", [1, 2])
+@pytest.mark.parametrize("kind", ["line", "markers"])
+def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):
+    from qgis.core import QgsLineSymbolLayer, QgsSimpleLineSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83),"
+                               "(-40 -40, 10 -40, 10 10, -40 10, -40 -40))"],
+                   str(tmp_path / "rf.gpkg"))
+    if kind == "line":
+        stroke = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+    else:
+        stroke = QgsMarkerLineSymbolLayer(True, 12)
+        stroke.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+        stroke.setSubSymbol(_marker(Qgis.MarkerShape.Square, 6))
+    stroke.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([stroke])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    for output, rule in exact:
+        if rule.rule.symbol().type() == Qgis.SymbolType.Fill:  # as the styler does
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol(
+                [rule.rule.symbol().symbolLayer(0).clone()])))
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    # Markers: QGIS averages corner angles over a screen length (4 mm), which a
+    # multi-zoom point dataset reproduces at one zoom only.
+    assert mask_difference(reference, ours) < (0.06 if kind == "line" else 0.1)
