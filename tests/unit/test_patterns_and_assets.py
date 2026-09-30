@@ -106,3 +106,15 @@ def test_dense_point_pattern_keeps_its_density():
     assert len(positions) / (width * height) == pytest.approx(1 / 0.26 ** 2, rel=0.05)
     width, height, positions, error = point_pattern_cell(7.3, 7.3, 3.65, 0)
     assert error <= 0.02 and len({round(y, 3) for _, y in positions}) % 2 == 0
+
+
+def test_atlas_stays_roughly_square():
+    """A browser rejects a sprite sheet taller than its GPU texture size and
+    then draws no icon at all: many images must not stack into a column."""
+    entries = [AtlasEntry(f"m{i:03d}", {1: (Image.new("RGBA", (300, 300)), 1),
+                                        2: (Image.new("RGBA", (600, 600)), 2)})
+               for i in range(400)]
+    atlas = pack(entries)
+    width, height = atlas.sheets[1].size
+    assert max(width, height) < 1.5 * min(width, height)
+    assert max(atlas.sheets[2].size) <= 16384

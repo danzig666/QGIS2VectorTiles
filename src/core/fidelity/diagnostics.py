@@ -99,6 +99,9 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_FONT_UNRESOLVED": CodeInfo(
         Severity.ERROR, "Label font is not installed; labels would render without glyphs",
         "Install the font or choose an installed font for the label."),
+    "Q2VT_SPRITE_SHEET_TOO_LARGE": CodeInfo(
+        Severity.ERROR, "Sprite sheet exceeds the GPU texture size of common browsers",
+        "Reduce the number or size of map-unit markers, or the export's zoom range."),
     "Q2VT_FONT_MARKER_SPRITE": CodeInfo(
         Severity.INFO, "Font marker exported as images instead of browser text",
         "Characters beyond U+FFFF or missing from the font (QGIS draws a fallback font) "

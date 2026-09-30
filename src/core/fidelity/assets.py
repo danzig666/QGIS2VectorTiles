@@ -37,8 +37,6 @@ def pack(entries: List[AtlasEntry], ratios=(1, 2), gutter: int = 2,
     """Pack entries into one sheet per ratio with shared slot layout."""
     from PIL import Image  # pylint: disable=import-outside-toplevel
 
-    ordered = sorted(entries, key=lambda e: e.name)
-
     def slot(entry: AtlasEntry) -> Tuple[int, int]:
         width = height = 1
         for ratio in ratios:
@@ -47,12 +45,21 @@ def pack(entries: List[AtlasEntry], ratios=(1, 2), gutter: int = 2,
             height = max(height, math.ceil(img.height / ratio))
         return width, height
 
+    # Shelf packing, tallest first, into a roughly square sheet: browsers
+    # reject a sprite sheet larger than the GPU's texture size (16384 px,
+    # 4096 on some phones), and then draw no icon or pattern at all.
+    slots = {entry.name: slot(entry) for entry in entries}
+    ordered = sorted(entries, key=lambda e: (-slots[e.name][1], e.name))
+    area = sum((w + gutter) * (h + gutter) for w, h in slots.values())
+    widest = max((w for w, _ in slots.values()), default=1) + 2 * gutter
+    max_row_width = max(max_row_width, widest, int(math.ceil(math.sqrt(area) * 1.1)))
+
     positions: Dict[str, Tuple[int, int]] = {}
     x = y = gutter
     row_height = 0
     sheet_w = sheet_h = 0
     for entry in ordered:
-        w, h = slot(entry)
+        w, h = slots[entry.name]
         if x > gutter and x + w + gutter > max_row_width:
             x = gutter
             y += row_height + gutter

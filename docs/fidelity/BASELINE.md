@@ -102,6 +102,7 @@ now has a regression test.
 | 44 | Sub-pixel lines too dark | MapLibre's line antialiasing inks a 0.2 px line with ~0.36 px, Qt with 0.2 px (measured, averaged over sub-pixel positions) | `line-opacity` compensates by width (zoom curve for map units); `test_thin_lines_get_the_ink_qgis_gives_them` (browser) |
 | 45 | Offset point patterns drawn unshifted in textures (zig-zags became crosses) | the texture cell ignored the pattern offset | offset applied in the cell; `test_point_pattern_texture_applies_the_offset` |
 | 46 | Random deviation of pattern markers ignored | markers stood on the exact grid | seeded uniform deviation per grid cell (QGIS's range, not its sequence); `test_point_pattern_random_deviation_stays_in_range` |
+| 47 | All icons and patterns missing when the sprite sheet is too tall | the atlas stacked images in a 1024 px wide column (85 000 px tall with per-zoom sprites; 12 500 px at @2x before), above the GPU texture size | square shelf packing, a per-marker image budget, and an error when a sheet exceeds 16384 px; `test_atlas_stays_roughly_square` |
 
 ### Resolved suspicions
 

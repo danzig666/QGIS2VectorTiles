@@ -138,7 +138,17 @@ def test_map_unit_sprites_are_drawn_per_zoom(exporter):
     layers = exporter._convert_symbol(symbol, "o", "src_layer", "src", 14, 24) or \
         exporter.style["layers"]
     assert (layers[-1]["minzoom"], layers[-1]["maxzoom"]) == (19, 24)
-    assert exporter.marker_symbols[layers[-1]["layout"]["icon-image"]].oversampling == 4.0
+    assert exporter.marker_symbols[layers[-1]["layout"]["icon-image"]].oversampling > 1.5
+    # A marker already large gets no further images (the sprite sheet must
+    # fit a GPU texture): the last one is scaled up.
+    symbol.symbolLayer(0).setSize(150.0)
+    exporter.style["layers"] = []
+    _ = exporter._convert_symbol(symbol, "big", "src_layer", "src", 14, 24)
+    layers = exporter.style["layers"]
+    assert layers[-1]["maxzoom"] == 24 and layers[-1]["minzoom"] <= 17
+    for layer in layers:
+        request = exporter.marker_symbols[layer["layout"]["icon-image"]]
+        assert 150.0 / request.map_units_per_pixel * request.oversampling <= 1.5 * 256
 
 
 def test_static_screen_sprites_are_drawn_one_to_one(exporter):

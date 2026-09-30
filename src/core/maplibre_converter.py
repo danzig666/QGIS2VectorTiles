@@ -802,7 +802,7 @@ class IconPropertyExtractor:
                            min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / reference_px))
         if context.sprite_oversampling:
             # Very large markers far into overzoom: a smaller image, scaled up.
-            oversampling = min(context.sprite_oversampling, 1024.0 / reference_px)
+            oversampling = min(context.sprite_oversampling, 256.0 / reference_px)
         px = PropertyExtractor.length(value, unit_name, None, symbol.sizeMapUnitScale())
         return ex.clamp(ex.mul(px, 1.0 / reference_px), 0, None), \
             map_units_per_pixel, oversampling
@@ -2414,6 +2414,9 @@ class QgisMapLibreStyleExporter:
     SPRITE_BAND_OVERSAMPLING = 1.5
     SPRITE_OVERZOOM_OVERSAMPLING = 4.0
     OVERZOOM_BANDS = 3
+    # Sprite budget: past this logical size a marker gets no further per-zoom
+    # images (the sheet must fit a GPU texture); the last one is scaled up.
+    MAX_BAND_SPRITE_PX = 128.0
 
     def _sprite_bands(self, min_zoom: float, max_zoom: float):
         """``[(low, high, oversampling)]`` zoom bands of a map-unit sprite."""
@@ -2448,11 +2451,20 @@ class QgisMapLibreStyleExporter:
         context = self.context
         saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
         try:
-            for low, high, quality in self._sprite_bands(min_zoom, max_zoom):
+            bands = self._sprite_bands(min_zoom, max_zoom)
+            map_size = normalize_unit(symbol.sizeUnit()) in ("map", "m")
+            for index, (low, high, quality) in enumerate(bands):
+                if map_size and index < len(bands) - 1 and PropertyExtractor.static_pixels(
+                        symbol.size(), "map", low) > self.MAX_BAND_SPRITE_PX:
+                    # Large already: one last image, scaled up from here on.
+                    high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
+                    bands = bands[:index + 1]
                 context.reference_zoom, context.reference_zoom_span = low, high - low
                 context.sprite_oversampling = quality
                 self._marker_layer(symbol_layer, symbol, f"{style_name}_z{int(low)}",
                                    source_layer_name, source_name, low, high)
+                if index == len(bands) - 1:
+                    break
         finally:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved

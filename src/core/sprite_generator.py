@@ -55,6 +55,8 @@ Img: TypeAlias = Image.Image
 
 _BASE_CANVAS_PX = 1000
 _MAX_CANVAS_PX = 4096
+# WebGL MAX_TEXTURE_SIZE on common desktop GPUs; many phones allow 4096.
+MAX_SHEET_PX = 16384
 _PX_PER_MM = 96.0 / 25.4
 
 
@@ -334,6 +336,13 @@ class SpriteGenerator:
         if not entries:
             return None
         atlas = pack(entries, ratios=(1, self.lower_factor))
+        for ratio, sheet in atlas.sheets.items():
+            if max(sheet.size) > MAX_SHEET_PX:
+                self.diagnostics.add(
+                    "Q2VT_SPRITE_SHEET_TOO_LARGE",
+                    f"Sprite sheet @{ratio}x is {sheet.width}x{sheet.height} px; browsers whose "
+                    f"GPU textures are smaller than {max(sheet.size)} px draw no icons or "
+                    "patterns.", component="sprite")
         self.index = atlas.index
         self.names = sorted(atlas.index[1])
 
