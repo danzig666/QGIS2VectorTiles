@@ -141,6 +141,28 @@ class GlyphGenerator:
                     return family, style
         return None
 
+    @staticmethod
+    def fontstack_name(family: str, style: str) -> str:
+        """Directory / ``text-font`` name used for a resolved family + style."""
+        style_name = "Regular" if not style or style.lower() in ("normal", "regular") else style
+        return f"{family} {style_name}".strip()
+
+    @classmethod
+    def resolve_fontstack(cls, family: str, style: str) -> Optional[str]:
+        """Canonical fontstack for a QGIS font, or ``None`` if not installed.
+
+        The style's ``text-font`` must equal the glyph directory written by
+        :meth:`generate`; both are derived from this single function. (The
+        legacy style used ``"{family} {styleName}"`` verbatim, e.g.
+        ``"Arial "`` for an empty style name, while glyphs were written to
+        ``"Arial Regular"``, so the browser found no glyphs.)
+        """
+        key = f"{family} {style or ''}".strip()
+        resolved = cls._resolve_font_key(key, list(qfontdb.families()))
+        if not resolved:
+            return None
+        return cls.fontstack_name(*resolved)
+
     # ------------------------------------------------------------------
     # Character discovery via GDAL/OGR
     # ------------------------------------------------------------------
@@ -239,8 +261,7 @@ class GlyphGenerator:
                 f"across {len(dataset_paths)} dataset(s)."
             )
 
-            style_name = "Regular" if style.lower() in ("normal", "regular") or not style else style
-            fontstack_name = f"{family} {style_name}".strip()
+            fontstack_name = self.fontstack_name(family, style)
             fontstack_dir = self.output_dir / fontstack_name
             fontstack_dir.mkdir(exist_ok=True)
 

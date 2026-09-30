@@ -6,9 +6,12 @@ tree and collects all active data-defined properties, returning
 (field_type, expression, field_name) triples for use as calculated fields.
 """
 
+import re
+
 from qgis.core import QgsProperty, QgsPropertyDefinition, QgsExpression
 
 from ..utils.config import QVariant
+from .fidelity.qgis_expr import with_map_scale
 
 
 def _to_color_hex_expr(inner_expr: str) -> str:
@@ -40,11 +43,13 @@ class DataDefinedPropertiesFetcher:
 
     FIELD_PREFIX = "q2vt"
 
-    def __init__(self, qgis_object, min_scale, suffix=0):
+    def __init__(self, qgis_object, min_scale, suffix=0, diagnostics=None, context=None):
         self._root = qgis_object
-        self._min_scale = str(min_scale)
+        self._min_scale = float(min_scale)
         self._suffix = f"_{suffix:02d}"
         self._results: list = []
+        self._diagnostics = diagnostics
+        self._context = context or {}
 
     def fetch(self) -> list:
         """Return [[field_type, expression, field_name], ...] for all active DDPs."""
@@ -114,10 +119,11 @@ class DataDefinedPropertiesFetcher:
                 continue
 
             prop_def = prop_defs.get(key)
-            data_type = prop_def.dataType() if prop_defs else None
+            if prop_def is None:
+                continue
+            data_type = prop_def.dataType()
             field_type = self._DATA_TYPE_MAP.get(data_type)
-            prop_name = '_' + prop_def.description().lower().replace(" ", "_") if prop_def.description() else ''
-            field_name = f"{self.FIELD_PREFIX}_property_{prop_name}{self._suffix}"
+            field_name = self.field_name(prop_def, key, self._suffix)
 
             if data_type == QgsPropertyDefinition.DataType.DataTypeBoolean:
                 expression = self._process_boolean_prop(prop, props, key, field_name)
@@ -129,6 +135,17 @@ class DataDefinedPropertiesFetcher:
                     continue
 
             self._results.append([field_type, expression, field_name])
+
+    @classmethod
+    def field_name(cls, prop_def, key, suffix: str) -> str:
+        """Stable generated field name.
+
+        Built from the non-localized property name and numeric key; the
+        legacy name used ``description()``, which is translated in localized
+        QGIS builds.
+        """
+        name = re.sub(r"[^0-9a-z]+", "_", (prop_def.name() or "").lower()).strip("_")
+        return f"{cls.FIELD_PREFIX}_property_{name or 'p'}_{int(key)}{suffix}"
 
     def _process_boolean_prop(self, prop, props_collection, key: int, field_name: str) -> str:
         """Replace boolean property with a field reference; return original expression."""
@@ -146,15 +163,17 @@ class DataDefinedPropertiesFetcher:
         Build the calculated-field expression for string/numeric DDPs.
         Returns None if the expression evaluates to a static value (no field needed).
         """
-        raw = prop.expressionString().replace("@map_scale", self._min_scale)
+        raw = with_map_scale(prop.asExpression(), self._min_scale)
         is_color = prop_def and "color" in prop_def.name().lower() and field_type == 10
 
         expression = _to_color_hex_expr(raw) if is_color else raw
 
-        qexpr = QgsExpression(expression)
-        static_value = qexpr.evaluate()
-        if static_value:
-            prop.setExpressionString(f"'{str(static_value)}'")
+        if self._is_static(raw):
+            # Feature-independent: keep the (typed) expression on the
+            # property itself and do not create a field. The legacy code
+            # tested truthiness, so 0/False/'' became per-feature fields, and
+            # stored the value as a quoted string (turning 3 into '3').
+            prop.setExpressionString(raw)
             return None
 
         field_ref = f'"{field_name}"'
@@ -168,3 +187,33 @@ class DataDefinedPropertiesFetcher:
 
         prop.setExpressionString(field_ref)
         return expression
+
+    # Functions/variables whose value depends on the feature, the render
+    # viewport or time. Expressions using them are never folded to constants.
+    _FEATURE_FUNCTIONS = frozenset({
+        "$id", "$area", "$length", "$perimeter", "$x", "$y", "$geometry",
+        "$currentfeature", "attribute", "attributes", "get_feature", "get_feature_by_id",
+        "aggregate", "relation_aggregate", "rand", "randf", "uuid", "now",
+        "represent_value", "is_selected", "num_selected",
+    })
+    _FEATURE_VARIABLES = frozenset({
+        "feature", "id", "geometry", "geometry_part_num", "geometry_part_count",
+        "geometry_point_num", "geometry_point_count", "map_extent", "map_extent_center",
+        "map_rotation", "canvas_cursor_point", "symbol_color", "symbol_angle",
+    })
+
+    @classmethod
+    def _is_static(cls, expression: str) -> bool:
+        """True if ``expression`` has the same value for every feature."""
+        qexpr = QgsExpression(expression)
+        if qexpr.hasParserError():
+            return False
+        if qexpr.referencedColumns() or qexpr.needsGeometry():
+            return False
+        functions = {name.lower() for name in qexpr.referencedFunctions()}
+        if functions & cls._FEATURE_FUNCTIONS:
+            return False
+        if set(qexpr.referencedVariables()) & cls._FEATURE_VARIABLES:
+            return False
+        qexpr.evaluate()
+        return not qexpr.hasEvalError()

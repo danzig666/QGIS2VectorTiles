@@ -11,6 +11,8 @@ from typing import Optional, Union
 
 from qgis.core import QgsRuleBasedRenderer, QgsRuleBasedLabeling, QgsVectorLayer
 
+from ..core.fidelity.model import ZoomInterval
+
 
 @dataclass
 class FlattenedRule:
@@ -19,6 +21,24 @@ class FlattenedRule:
     rule: Union[QgsRuleBasedLabeling.Rule, QgsRuleBasedRenderer.Rule]
     layer: QgsVectorLayer
     output_dataset: Optional[str] = ""
+    # Exact browser visibility interval [min_zoom, max_zoom). The integer
+    # "o"/"i" attributes only describe which tile zooms carry the data.
+    visibility: Optional[ZoomInterval] = None
+
+    def derive(self, rule=None) -> "FlattenedRule":
+        """Copy of this flat rule (optionally with another rule object)."""
+        return FlattenedRule(
+            rule if rule is not None else self.rule.clone(),
+            self.layer, self.output_dataset, self.visibility,
+        )
+
+    @property
+    def rule_id(self) -> str:
+        """Stable identifier: layer id + rule key (for diagnostics)."""
+        try:
+            return self.rule.ruleKey()
+        except AttributeError:
+            return ""
 
     def get_attr(self, char: str) -> Optional[int]:
         """Extract rule attribute from description by character prefix."""

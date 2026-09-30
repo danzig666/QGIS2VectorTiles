@@ -21,3 +21,22 @@
 </div>
 
 <br>
+
+## Export fidelity (this fork)
+
+Every export now writes `fidelity_report.json` and `fidelity_report.html` next to the
+tiles. Each entry names a stable code (`Q2VT_*`), the layer/rule/symbol layer, the export
+strategy used and a suggested fix, so missing hatches or unsupported symbols are visible
+without reading the log.
+
+The Processing dialog has two new options:
+
+- **Fidelity Mode**: *Vector-first* (default) exports what it can and reports
+  approximations; *Strict* fails before anything is published if any component is
+  unsupported or approximated.
+- **Beyond Maximum Zoom**: keep showing the last generated tiles (overzoom) or hide all
+  layers above the export's maximum zoom.
+
+Developer documentation: [`docs/fidelity/`](docs/fidelity/) — baseline and confirmed
+defects, how to run the three test levels, the generated symbol compatibility table, and
+the status of each item of the fidelity plan.

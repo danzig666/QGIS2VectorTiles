@@ -34,6 +34,11 @@ from ..utils.config import Qt
 from ..utils.config import QDomDocument
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
+from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.model import ZoomInterval
+from .fidelity import zoom as fidelity_zoom
+from .fidelity.qgis_expr import with_map_scale
+
 
 
 class RulesFlattener:
@@ -41,13 +46,19 @@ class RulesFlattener:
 
     RULE_TYPES = {0: "renderer", 1: "labeling"}
 
-    def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback):
+    def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
+                 diagnostics: Optional[DiagnosticCollector] = None):
         self.min_zoom = min_zoom
         self.max_zoom = max_zoom
         self.utils_dir = utils_dir
         self.layer_tree_root = QgsProject.instance().layerTreeRoot()
         self.flattened_rules: List[FlattenedRule] = []
         self.feedback = feedback
+        self.diagnostics = diagnostics or DiagnosticCollector()
+        # Converted/cloned rule systems are kept alive here instead of being
+        # assigned to the project layers: exporting must never modify the
+        # user's project (renderer, labeling, ELSE rules, scale visibility).
+        self._rule_systems: list = []
         # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
         # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
         self._unique_counter = 0
@@ -119,7 +130,7 @@ class RulesFlattener:
             rule_system = self._get_or_convert_rule_system(layer, rule_type)
             if not rule_system:
                 continue
-            getattr(layer, f"set{type_name.capitalize()}")(rule_system)
+            self._rule_systems.append(rule_system)
             root_rule = self._prepare_root_rule(rule_system, layer)
             if root_rule:
                 # Reset per (layer, rule_type) pass; values must stay < 100
@@ -175,7 +186,7 @@ class RulesFlattener:
         if isinstance(system, QgsRuleBasedLabeling):
             return system
 
-        rule = QgsRuleBasedLabeling.Rule(system.settings())
+        rule = QgsRuleBasedLabeling.Rule(QgsPalLayerSettings(system.settings()))
         root = QgsRuleBasedLabeling.Rule(QgsPalLayerSettings())
         root.appendChild(rule)
         return QgsRuleBasedLabeling(root)
@@ -203,6 +214,7 @@ class RulesFlattener:
         flat_rule.set_attr("r", rule_idx)
         flat_rule.set_attr("g", flat_rule.layer.geometryType())
         flat_rule.set_attr("c", flat_rule.layer.geometryType())
+        flat_rule.visibility = self._rule_visibility(flat_rule.rule)
         flat_rule.set_attr("o", self._rule_min_zoom(flat_rule.rule))
         flat_rule.set_attr("i", self._rule_max_zoom(flat_rule.rule))
         # "s" = symbol layer index for renderer; "f" = renderer index for labeling
@@ -213,6 +225,19 @@ class RulesFlattener:
 
     def _rule_max_zoom(self, rule) -> int:
         return int(ZoomLevels.scale_to_zoom(rule.maximumScale(), "i"))
+
+    def _rule_visibility(self, rule) -> ZoomInterval:
+        """Exact browser interval of an (inherited) rule's scale range.
+
+        Inheritance replaces "unbounded" by the extreme zoom-0/zoom-22 scales;
+        an upper bound at the last tile zoom is therefore treated as open, so
+        the overzoom policy (not an accidental constant) decides what happens
+        beyond the archive's maxzoom.
+        """
+        interval = fidelity_zoom.interval_from_scales(rule.minimumScale(), rule.maximumScale())
+        if interval.max_zoom is not None and interval.max_zoom >= fidelity_zoom.MAX_TILE_ZOOM - 1e-6:
+            interval = ZoomInterval(interval.min_zoom, None)
+        return interval.intersect(ZoomInterval(float(self.min_zoom), None))
 
     def _flatten_rule(
         self,
@@ -228,7 +253,7 @@ class RulesFlattener:
         # Children of an unprocessed node (the root) inherit from the node itself;
         # children of a processed node inherit from its accumulated (flattened) state.
         parent_for_children = rule
-        if rule.parent():
+        if rule.parent() or rule_level > 0:  # split ELSE variants are parentless clones
             inheritance_source = self._process_rule(
                 layer, layer_idx, rule, rule_type, rule_level, rule_idx, inherited_parent
             )
@@ -237,12 +262,94 @@ class RulesFlattener:
         for child_idx, child in enumerate(rule.children()):
             if not child.active():
                 continue
-            if child.filterExpression() == "ELSE":
-                self._convert_else_filter(child, rule)
-            self._flatten_rule(
-                layer, layer_idx, child, rule_type, rule_level + 1, child_idx,
-                parent_for_children,
+            variants = [child]
+            if self._is_else_rule(child):
+                variants = self._split_else_rule(child, rule, layer)
+            for variant in variants:
+                self._flatten_rule(
+                    layer, layer_idx, variant, rule_type, rule_level + 1, child_idx,
+                    parent_for_children,
+                )
+
+    @staticmethod
+    def _rule_key(rule) -> str:
+        try:
+            return rule.ruleKey()
+        except AttributeError:
+            return ""
+
+    @staticmethod
+    def _is_else_rule(rule) -> bool:
+        try:
+            return bool(rule.isElse())
+        except AttributeError:
+            return rule.filterExpression() == "ELSE"
+
+    @staticmethod
+    def _scale_interval(rule) -> ZoomInterval:
+        return fidelity_zoom.interval_from_scales(rule.minimumScale(), rule.maximumScale())
+
+    def _split_else_rule(self, else_rule, parent_rule, layer) -> list:
+        """Replace an ELSE rule by explicit, scale-aware exclusion rules.
+
+        QGIS applies an ELSE rule to features that no *active sibling rendered
+        at the current scale*. A sibling limited to a scale range therefore
+        only excludes features inside that range. The ELSE rule is split at
+        every sibling scale breakpoint; each piece excludes exactly the
+        siblings visible in its interval. Disabled siblings never exclude.
+        """
+        siblings = [
+            sibling for sibling in parent_rule.children()
+            if sibling is not else_rule and sibling.active() and not self._is_else_rule(sibling)
+        ]
+        if any(sibling.children() or not self._rule_has_payload(sibling) for sibling in siblings):
+            self.diagnostics.add(
+                "Q2VT_ELSE_NESTED_SIBLINGS",
+                f"ELSE rule of layer '{layer.name()}': sibling rules with nested children "
+                "are treated as matching whenever their own filter matches.",
+                layer_id=layer.id(), rule_id=self._rule_key(else_rule),
             )
+        own = self._scale_interval(else_rule)
+        breakpoints = {own.min_zoom}
+        for sibling in siblings:
+            interval = self._scale_interval(sibling)
+            for value in (interval.min_zoom, interval.max_zoom):
+                if value is not None and own.contains(value):
+                    breakpoints.add(value)
+        edges = sorted(breakpoints) + [own.max_zoom]
+        variants = []
+        for low, high in zip(edges[:-1], edges[1:]):
+            segment = ZoomInterval(low, high)
+            if segment.is_empty:
+                continue
+            probe = segment.min_zoom + (1e-3 if segment.max_zoom is None
+                                        else (segment.max_zoom - segment.min_zoom) / 2)
+            filters = [
+                sibling.filterExpression() for sibling in siblings
+                if self._scale_interval(sibling).contains(probe)
+            ]
+            variant = else_rule.clone()
+            variant.setMinimumScale(fidelity_zoom.zoom_to_scale(segment.min_zoom)
+                                    if segment.min_zoom > 0 else else_rule.minimumScale())
+            variant.setMaximumScale(fidelity_zoom.zoom_to_scale(segment.max_zoom)
+                                    if segment.max_zoom is not None else 0)
+            if any(not f for f in filters):
+                # A visible sibling without a filter matches every feature.
+                variant.setFilterExpression("FALSE")
+            elif filters:
+                variant.setFilterExpression(
+                    f'NOT ({" OR ".join(f"({f})" for f in filters)}) IS 1'
+                )
+            else:
+                variant.setFilterExpression("")
+            variants.append(variant)
+        return variants
+
+    @staticmethod
+    def _rule_has_payload(rule) -> bool:
+        if hasattr(rule, "symbol"):
+            return rule.symbol() is not None
+        return rule.settings() is not None
 
     def _process_rule(
         self,
@@ -271,6 +378,16 @@ class RulesFlattener:
         flat_rule = FlattenedRule(inherited_rule, layer)
         flat_rule.rule.setDescription("")
         self._set_rule_attributes(flat_rule, layer_idx, rule_type, rule_level, rule_idx)
+
+        if flat_rule.visibility.is_empty:
+            self.diagnostics.add(
+                "Q2VT_ZOOM_EMPTY_INTERVAL",
+                f"Rule '{rule.description() or rule.filterExpression() or rule_idx}' of layer "
+                f"'{layer.name()}' is never visible (scale range {rule.minimumScale():g} – "
+                f"{rule.maximumScale():g}).",
+                layer_id=layer.id(), rule_id=self._rule_key(rule),
+            )
+            return inheritance_source
 
         if not self._is_within_zoom_range(flat_rule):
             return inheritance_source
@@ -366,20 +483,6 @@ class RulesFlattener:
             return self._split_by_symbol_layers(flat_rule)
         return self._split_by_matching_renderers(flat_rule)
 
-    def _convert_else_filter(self, else_rule, parent_rule):
-        """Replace ELSE filter with an explicit exclusion of sibling conditions."""
-        sibling_filters = [
-            sibling.filterExpression()
-            for sibling in parent_rule.children()
-            if sibling.active() and sibling.filterExpression() not in ("ELSE", "")
-        ]
-        if sibling_filters:
-            else_rule.setFilterExpression(
-                f'NOT ({" OR ".join(f"({f})" for f in sibling_filters)}) IS 1'
-            )
-        else:
-            else_rule.setFilterExpression("")
-
     def _is_within_zoom_range(self, flat_rule: FlattenedRule) -> bool:
         """Return True if the rule's zoom range overlaps with the requested range."""
         return self._ranges_overlap(
@@ -419,7 +522,7 @@ class RulesFlattener:
             else:
                 symbol_type = symbol_layer.type()
 
-            rule_clone = FlattenedRule(flat_rule.rule.clone(), flat_rule.layer)
+            rule_clone = flat_rule.derive()
             rule_clone.set_attr("c", symbol_type)
             rule_clone.set_attr("s", layer_idx, geom_generator)
 
@@ -432,7 +535,7 @@ class RulesFlattener:
             clone_symbol_layer = clone_symbol.symbolLayers()[0]
             if rule_clone and layer_type == "SimpleFill":
                 if clone_symbol_layer.strokeStyle() != Qt.PenStyle.NoPen:
-                    outline_rule = FlattenedRule(rule_clone.rule.clone(), flat_rule.layer)
+                    outline_rule = rule_clone.derive()
                     outline_rule.set_attr("c", 1)
                     fill_symbol = outline_rule.rule.symbol()
                     outline_symbol = self._convert_fill_outline_to_line_symbol(fill_symbol)
@@ -481,7 +584,7 @@ class RulesFlattener:
         ]
 
         for key in property_keys:
-            prop = fill_layer.dataDefinedProperties().property(key.value)
+            prop = fill_layer.dataDefinedProperties().property(key)
             if prop is not None and prop.isActive():
                 line_layer.setDataDefinedProperty(key, QgsProperty(prop))
 
@@ -501,7 +604,7 @@ class RulesFlattener:
                 continue
             if renderer_rule.get_attr("t") == 1:
                 continue
-            filter_id = f'{renderer_rule.get_attr('r')}{renderer_rule.get_attr('d')}'
+            filter_id = f'{renderer_rule.get_attr("r")}{renderer_rule.get_attr("d")}'
             if filter_id in seen_datasets:
                 continue
             matched = self._match_label_to_renderer(label_rule, renderer_rule, renderer_idx)
@@ -525,7 +628,7 @@ class RulesFlattener:
         if not self._ranges_overlap(label_min, label_max, renderer_min, renderer_max):
             return None
 
-        rule_clone = FlattenedRule(label_rule.rule.clone(), label_rule.layer)
+        rule_clone = label_rule.derive()
         label_filter = rule_clone.rule.filterExpression()
         renderer_filter = renderer_rule.rule.filterExpression()
 
@@ -539,6 +642,10 @@ class RulesFlattener:
             rule_clone.set_attr("o", renderer_min)
         if label_max > renderer_max:
             rule_clone.set_attr("i", renderer_max)
+        if label_rule.visibility is not None and renderer_rule.visibility is not None:
+            rule_clone.visibility = label_rule.visibility.intersect(renderer_rule.visibility)
+            if rule_clone.visibility.is_empty:
+                return None
 
         rule_clone.set_attr("f", renderer_idx)
         return rule_clone
@@ -554,8 +661,10 @@ class RulesFlattener:
         if not self._has_scale_dependencies(flat_rule):
             return [flat_rule]
 
+        # One clone per tile zoom the rule occupies (the legacy loop also
+        # produced a clone one zoom beyond the rule's own range).
         min_zoom = flat_rule.get_attr("o")
-        max_zoom = min(self.max_zoom, flat_rule.get_attr("i") + 1)
+        max_zoom = min(self.max_zoom, flat_rule.get_attr("i"))
         split_rules = []
         for zoom in range(min_zoom, max_zoom + 1):
             clone = self._create_zoom_specific_rule(flat_rule, zoom)
@@ -569,12 +678,16 @@ class RulesFlattener:
         if not symbol:
             return True
         symbol_layer = symbol.symbolLayers()[0]
-        vis_prop = symbol_layer.dataDefinedProperties().property(44)
+        vis_prop = symbol_layer.dataDefinedProperties().property(
+            QgsSymbolLayer.Property.PropertyLayerEnabled
+        )
         if vis_prop and vis_prop.isActive():
-            min_scale = str(ZoomLevels.zoom_to_scale(flat_rule.get_attr("o")))
-            zoom_expr = vis_prop.expressionString().replace("@map_scale", min_scale)
-            evaluation = QgsExpression(zoom_expr).evaluate()
-            if evaluation is not None and not evaluation:
+            min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            expression = QgsExpression(with_map_scale(vis_prop.expressionString(), min_scale))
+            if expression.referencedColumns() or expression.needsGeometry():
+                return True  # feature dependent: decided per feature at export
+            evaluation = expression.evaluate()
+            if not expression.hasEvalError() and evaluation is not None and not evaluation:
                 return False
         return True
 
@@ -598,18 +711,25 @@ class RulesFlattener:
 
     def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, zoom: int) -> FlattenedRule:
         """Clone a rule with @map_scale replaced by the exact scale for the given zoom."""
-        rule_clone = FlattenedRule(flat_rule.rule.clone(), flat_rule.layer)
-        scale = str(ZoomLevels.zoom_to_scale(zoom))
+        rule_clone = flat_rule.derive()
+        scale = ZoomLevels.zoom_to_scale(zoom)
 
         filter_exp = flat_rule.rule.filterExpression()
         if "@map_scale" in filter_exp:
-            rule_clone.rule.setFilterExpression(filter_exp.replace("@map_scale", scale))
+            rule_clone.rule.setFilterExpression(with_map_scale(filter_exp, scale))
 
         if flat_rule.get_attr("t") == 1 and flat_rule.rule.settings():
-            label_exp = flat_rule.rule.settings().getLabelExpression().expression()
+            settings = flat_rule.rule.settings()
+            label_exp = settings.getLabelExpression().expression()
             if label_exp and "@map_scale" in label_exp:
-                rule_clone.rule.settings().fieldName = label_exp.replace("@map_scale", scale)
+                clone_settings = rule_clone.rule.settings()
+                clone_settings.fieldName = with_map_scale(label_exp, scale)
+                clone_settings.isExpression = True
 
         rule_clone.set_attr("o", zoom)
         rule_clone.set_attr("i", zoom)
+        if flat_rule.visibility is not None:
+            rule_clone.visibility = flat_rule.visibility.intersect(
+                ZoomInterval(float(zoom), float(zoom + 1))
+            )
         return rule_clone

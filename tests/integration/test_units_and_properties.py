@@ -1,0 +1,164 @@
+"""PR-02 regressions for property evaluation, units and enums (PyQGIS)."""
+
+import pytest
+from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsLineSymbol, QgsMapRendererSequentialJob,
+                       QgsMapSettings, QgsMarkerLineSymbolLayer, QgsProperty, QgsRectangle,
+                       QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
+                       QgsSingleSymbolRenderer, QgsSymbolLayer, QgsVectorLayer)
+from qgis.PyQt.QtCore import QSize
+from qgis.PyQt.QtGui import QColor
+
+from fidelity import expressions as ex
+
+
+@pytest.fixture
+def mc(plugin):
+    from q2vt_plugin.src.core import maplibre_converter  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    maplibre_converter.PropertyExtractor.context = maplibre_converter.ConversionContext(
+        DiagnosticCollector())
+    return maplibre_converter
+
+
+@pytest.mark.parametrize("expression,expected", [("0", 0.0), ("0.0", 0.0), ("3", 3.0)])
+def test_falsy_numeric_literals_are_preserved(mc, expression, expected):
+    prop = QgsProperty.fromExpression(expression)
+    assert mc.PropertyExtractor.get_value_or_expression(5, prop) == expected
+
+
+def test_false_and_empty_string_are_preserved(mc):
+    assert mc.PropertyExtractor.get_value_or_expression(
+        True, QgsProperty.fromExpression("false")) is False
+    assert mc.PropertyExtractor.get_value_or_expression(
+        "x", QgsProperty.fromExpression("''")) == ""
+
+
+def test_null_uses_static_value_and_eval_error_is_reported(mc):
+    ctx = mc.PropertyExtractor.context
+    assert mc.PropertyExtractor.get_value_or_expression(5, QgsProperty.fromExpression("NULL")) == 5
+    assert not ctx.diagnostics.items
+    assert mc.PropertyExtractor.get_value_or_expression(
+        5, QgsProperty.fromExpression("to_int('abc') + array(1)")) == 5
+    assert ctx.diagnostics.by_code("Q2VT_DDP_EVAL_ERROR")
+
+
+def test_quoted_static_number_becomes_a_number(mc):
+    # Legacy: ddp_fetcher stored static values as "'3'", yielding the string '3'.
+    assert mc.PropertyExtractor.get_value_or_expression(
+        1, QgsProperty.fromExpression("'3'")) == 3.0
+
+
+def test_field_and_expression_reference_are_equivalent(mc):
+    field = "q2vt_property_size_5_00"
+    by_field = mc.PropertyExtractor.get_value_or_expression(2, QgsProperty.fromField(field))
+    by_expr = mc.PropertyExtractor.get_value_or_expression(
+        2, QgsProperty.fromExpression(f'"{field}"'))
+    assert by_field == by_expr == ["to-number", ["get", field], 2]
+
+
+def test_color_field_reference_is_typed(mc):
+    field = "q2vt_property_fill_color_3_00"
+    prop = QgsProperty.fromExpression(
+        f"with_variable('color', \"{field}\", '#' || substr(@color,8,2) || substr(@color,2,6))")
+    out = mc.PropertyExtractor.get_value_or_expression("rgba(0, 0, 0, 1)", prop, "color")
+    assert out == ["to-color", ["get", field], "rgba(0, 0, 0, 1)"]
+
+
+def test_data_defined_icon_size_is_a_valid_expression(mc):
+    layer = QgsSimpleMarkerSymbolLayer()
+    layer.setSize(4)
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertySize,
+                                 QgsProperty.fromField("q2vt_property_size_5_00"))
+    size = mc.IconPropertyExtractor.get_icon_size(layer, 1.0)
+    assert isinstance(size, list)
+    ex.validate_zoom_usage(size)
+    # Static size 4 at feature value 8 => twice the base scale 1/Q.
+    assert "q2vt_property_size_5_00" in ex.referenced_fields(size)
+
+
+def test_line_width_units(mc):
+    layer = QgsSimpleLineSymbolLayer()
+    layer.setWidth(1.0)
+    layer.setWidthUnit(Qgis.RenderUnit.Millimeters)
+    assert mc.LinePropertyExtractor.get_line_width(layer) == pytest.approx(96 / 25.4)
+    layer.setWidthUnit(Qgis.RenderUnit.Points)
+    assert mc.LinePropertyExtractor.get_line_width(layer) == pytest.approx(96 / 72)
+    layer.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    curve = mc.LinePropertyExtractor.get_line_width(layer)
+    assert ex.is_zoom_curve(curve)  # legacy: treated as millimetres (3.78)
+
+
+def test_data_defined_width_is_converted_from_its_unit(mc):
+    layer = QgsSimpleLineSymbolLayer()
+    layer.setWidth(0.5)
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
+                                 QgsProperty.fromField("q2vt_property_stroke_width_1_00"))
+    width = mc.LinePropertyExtractor.get_line_width(layer)
+    assert width[0] == "*" and width[2] == pytest.approx(96 / 25.4)
+
+
+def test_data_defined_opacity_is_percent(mc):
+    layer = QgsSimpleLineSymbolLayer()
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOpacity,
+                                 QgsProperty.fromField("q2vt_property_opacity_35_00"))
+    out = mc.LinePropertyExtractor.get_line_opacity(layer, QgsLineSymbol())
+    assert ex.referenced_fields(out) == {"q2vt_property_opacity_35_00"}
+    assert "0.01" in str(out)  # divided by 100
+
+
+@pytest.mark.parametrize("placement,expected", [
+    (Qgis.MarkerLinePlacement.Interval, "line"),
+    (Qgis.MarkerLinePlacement.CentralPoint, "line-center"),
+    (Qgis.MarkerLinePlacement.LastVertex, "line"),
+])
+def test_marker_line_placement_uses_named_flags(mc, placement, expected):
+    layer = QgsMarkerLineSymbolLayer()
+    layer.setPlacements(placement)
+    assert mc.LinePropertyExtractor.get_marker_line_symbol_placement(layer) == expected
+    approx = mc.PropertyExtractor.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    assert bool(approx) == (placement == Qgis.MarkerLinePlacement.LastVertex)
+
+
+def test_unknown_unit_is_reported_not_millimetres(mc):
+    out = mc.PropertyExtractor.length(2.0, Qgis.RenderUnit.Unknown)
+    assert out == 2.0
+    assert mc.PropertyExtractor.context.diagnostics.by_code("Q2VT_UNIT_UNKNOWN")
+
+
+def test_round_numeric_values_keeps_strings(mc, tmp_path):
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    data = {"a": ["get", "2020"], "b": 0.000012345, "c": 1.23456789, "d": True, "e": "07"}
+    out = exporter.round_numeric_values(data)
+    assert out == {"a": ["get", "2020"], "b": 1.234e-05, "c": 1.2346, "d": True, "e": "07"}
+
+
+def _render_offset_rows(offset_px):
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "l", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(-50 0, 50 0)"))
+    layer.dataProvider().addFeatures([feature])
+    line = QgsSimpleLineSymbolLayer(QColor("red"), 2)
+    line.setWidthUnit(Qgis.RenderUnit.Pixels)
+    line.setOffset(offset_px)
+    line.setOffsetUnit(Qgis.RenderUnit.Pixels)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    settings = QgsMapSettings()
+    settings.setLayers([layer])
+    settings.setDestinationCrs(layer.crs())
+    settings.setExtent(QgsRectangle(-100, -100, 100, 100))
+    settings.setOutputSize(QSize(200, 200))
+    settings.setBackgroundColor(QColor("white"))
+    job = QgsMapRendererSequentialJob(settings)
+    job.start()
+    job.waitForFinished()
+    img = job.renderedImage()
+    return sorted({y for y in range(img.height()) if QColor(img.pixel(100, y)).green() < 200})
+
+
+def test_positive_line_offset_is_right_of_direction_like_maplibre(mc):
+    rows = _render_offset_rows(10)
+    assert rows and min(rows) > 100  # image y down: below an eastward line = its right side
+    layer = QgsSimpleLineSymbolLayer()
+    layer.setOffset(10)
+    layer.setOffsetUnit(Qgis.RenderUnit.Pixels)
+    assert mc.LinePropertyExtractor.get_line_offset(layer) == 10

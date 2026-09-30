@@ -1,0 +1,96 @@
+"""Sprite rendering: input types, failures, transparency, anchors, 1x/2x."""
+
+import json
+
+import pytest
+from qgis.core import (QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsMarkerSymbol,
+                       QgsSimpleMarkerSymbolLayer)
+from qgis.PyQt.QtGui import QColor
+
+from fidelity.diagnostics import DiagnosticCollector
+
+
+@pytest.fixture
+def sg(plugin):
+    from q2vt_plugin.src.core import sprite_generator  # pylint: disable=import-error
+    return sprite_generator
+
+
+def _marker(color="red", size=4.0, angle=0.0, offset=None):
+    layer = QgsSimpleMarkerSymbolLayer()
+    layer.setColor(QColor(color))
+    layer.setStrokeColor(QColor(color))
+    layer.setSize(size)
+    layer.setAngle(angle)
+    if offset:
+        from qgis.PyQt.QtCore import QPointF
+        layer.setOffset(QPointF(*offset))
+    return QgsMarkerSymbol([layer])
+
+
+def test_symbol_layer_is_rejected_with_actionable_error(sg):
+    with pytest.raises(sg.SpriteInputError, match="QgsSymbol"):
+        sg.SymbolImage(QgsLinePatternFillSymbolLayer(), "p")
+
+
+def test_generator_reports_wrong_input_instead_of_transparent_image(sg, tmp_path):
+    diags = DiagnosticCollector()
+    gen = sg.SpriteGenerator({"bad": QgsLinePatternFillSymbolLayer(), "ok": _marker()},
+                             str(tmp_path), 3, diagnostics=diags)
+    assert gen.generate()
+    assert "bad" in gen.failed and gen.names == ["ok"]
+    assert diags.by_code("Q2VT_SPRITE_WRONG_INPUT")
+    index = json.loads((tmp_path / "sprite" / "sprite.json").read_text())
+    assert set(index) == {"ok"}
+
+
+def test_render_exception_is_not_replaced_by_transparent_image(sg, tmp_path):
+    class Broken(QgsMarkerSymbol):
+        def clone(self):
+            raise RuntimeError("renderer exploded")
+
+    diags = DiagnosticCollector()
+    gen = sg.SpriteGenerator({"broken": Broken()}, str(tmp_path), 3, diagnostics=diags)
+    assert gen.generate() is None
+    assert diags.by_code("Q2VT_SPRITE_RENDER_FAILED")
+    assert not diags.by_code("Q2VT_SPRITE_TRANSPARENT")
+
+
+def test_transparent_marker_is_by_design_not_failure(sg, tmp_path):
+    diags = DiagnosticCollector()
+    gen = sg.SpriteGenerator({"clear": _marker(QColor(0, 0, 0, 0))}, str(tmp_path), 3,
+                             diagnostics=diags)
+    assert gen.generate()
+    assert not gen.failed
+    assert diags.by_code("Q2VT_SPRITE_TRANSPARENT")
+
+
+def test_wrapped_pattern_layer_renders_non_transparent(sg):
+    fill = QgsFillSymbol()
+    fill.changeSymbolLayer(0, QgsLinePatternFillSymbolLayer())
+    img = sg.SymbolImage(fill, "pattern")
+    assert img.img.getbbox() is not None
+
+
+def test_offset_marker_keeps_origin_at_image_centre(sg):
+    # A marker drawn 3 mm right of its origin: the tight crop would move the
+    # anchor; the symmetric crop keeps the origin in the centre.
+    img = sg.SymbolImage(_marker(offset=(3, 0)), "m", 3).img
+    bbox = img.getbbox()
+    assert bbox[0] > img.width / 2  # ink entirely right of centre
+
+
+def test_rotation_is_not_baked_when_style_rotates(sg):
+    rotated = sg.SymbolImage(_marker(size=6, angle=45).clone(), "a", 3, bake_rotation=False)
+    upright = sg.SymbolImage(_marker(size=6, angle=0), "b", 3, bake_rotation=False)
+    assert rotated.img.size == upright.img.size
+    assert list(rotated.img.getdata()) == list(upright.img.getdata())
+
+
+def test_2x_sheet_is_rendered_at_double_resolution(sg, tmp_path):
+    gen = sg.SpriteGenerator({"m": _marker()}, str(tmp_path), 3)
+    gen.generate()
+    one = gen.index[1]["m"]
+    two = gen.index[2]["m"]
+    assert two["pixelRatio"] == 2 and one["pixelRatio"] == 1
+    assert abs(two["width"] / 2 - one["width"]) <= 2

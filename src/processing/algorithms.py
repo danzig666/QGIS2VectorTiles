@@ -36,6 +36,8 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
     POLYGONS_LABELS_BASE = "POLYGONS_LABELS_BASE"
     VIEWER = "VIEWER"
     BACKGROUND_TYPE = "BACKGROUND_TYPE"
+    FIDELITY_MODE = "FIDELITY_MODE"
+    OVERZOOM = "OVERZOOM"
 
     def __init__(self):
         """Initialize the algorithm"""
@@ -182,6 +184,30 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.FIDELITY_MODE,
+                self.tr("Fidelity Mode"),
+                options=[
+                    "Vector-first: approximate where declared and report (Recommended)",
+                    "Strict: fail if any component is unsupported or approximated",
+                    "Hybrid: allow raster fallback for non-text cartography (not yet available)",
+                ],
+                defaultValue=0,
+                optional=False,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.OVERZOOM,
+                self.tr("Beyond Maximum Zoom"),
+                options=["Keep showing the last generated tiles (overzoom)", "Hide all layers"],
+                defaultValue=0,
+                optional=False,
+            )
+        )
+
         # Output directory parameter
         self.addParameter(
             QgsProcessingParameterFolderDestination(
@@ -233,6 +259,8 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         polygon_labels_base = self.parameterAsInt(parameters, self.POLYGONS_LABELS_BASE, context)
         background_type = self.parameterAsInt(parameters, self.BACKGROUND_TYPE, context)
         viewer = self.parameterAsInt(parameters, self.VIEWER, context)
+        fidelity_mode = self.parameterAsInt(parameters, self.FIDELITY_MODE, context)
+        overzoom = self.parameterAsInt(parameters, self.OVERZOOM, context)
         try:
             # Your existing vector tile generator class would be called here
             tiles_generator = QGIS2VectorTiles(
@@ -246,11 +274,14 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
                 background_type=background_type,
                 viewer=viewer,
                 feedback=feedback,
+                fidelity_mode=fidelity_mode,
+                overzoom=overzoom,
             )
 
             # Run the generation process
-            tiles_generator.convert_project_to_vector_tiles()
-            feedback.pushInfo(". Vector tiles package generation completed successfully")
+            output_path = tiles_generator.convert_project_to_vector_tiles()
+            if output_path:
+                feedback.pushInfo(". Vector tiles package generation completed successfully")
 
         except (NameError, ValueError, AttributeError, TypeError) as e:
             feedback.reportError(f"Error during Vector tiles package generation: {str(e)}")

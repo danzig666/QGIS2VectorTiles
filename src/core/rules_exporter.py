@@ -102,6 +102,8 @@ from ..utils.config import _DATA_SIMPLIFICATION_TOLERANCE, _EPSG_CRS, _FIELD_PRE
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
+from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.qgis_expr import bind_geometry, with_map_scale
 
 
 # ============================================================================
@@ -199,6 +201,7 @@ class RulesExporter:
         cent_source: int,
         feedback: QgsProcessingFeedback,
         cpu_percent: int = 100,
+        diagnostics: Optional[DiagnosticCollector] = None,
     ):
         self.flattened_rules = flattened_rules
         # QgsRectangle is a value type — safe to share across threads.
@@ -209,6 +212,7 @@ class RulesExporter:
         self.utils_dir = utils_dir
         self.feedback = feedback
         self.cpu_percent = cpu_percent
+        self.diagnostics = diagnostics or DiagnosticCollector()
 
         self.processed_layers: List[QgsVectorLayer] = []
 
@@ -774,19 +778,16 @@ class RulesExporter:
         """
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
-            zoom_scale = str(ZoomLevels.zoom_to_scale(flat_rule.get_attr("o")))
+            zoom_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
             if rule_type == 1 and flat_rule.rule.settings():
                 settings = flat_rule.rule.settings()
                 label_exp = settings.getLabelExpression().expression()
-                if label_exp:
-                    settings.fieldName = label_exp.replace(
-                        "@map_scale", zoom_scale
-                    )
+                if label_exp and "map_scale" in label_exp:
+                    settings.fieldName = with_map_scale(label_exp, zoom_scale)
+                    settings.isExpression = True
                 if settings.geometryGeneratorEnabled:
-                    settings.geometryGenerator = (
-                        settings.geometryGenerator.replace(
-                            "@map_scale", zoom_scale
-                        )
+                    settings.geometryGenerator = with_map_scale(
+                        settings.geometryGenerator, zoom_scale
                     )
             else:
                 symbol = flat_rule.rule.symbol()
@@ -795,9 +796,7 @@ class RulesExporter:
                 for layer in symbol.symbolLayers():
                     if layer.layerType() == "GeometryGenerator":
                         layer.setGeometryExpression(
-                            layer.geometryExpression().replace(
-                                "@map_scale", zoom_scale
-                            )
+                            with_map_scale(layer.geometryExpression(), zoom_scale)
                         )
 
     def _create_expression_fields(
@@ -808,9 +807,9 @@ class RulesExporter:
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
             suffix = flat_rule.get_attr("s") if rule_type == 0 else flat_rule.get_attr("f")
-            min_scale = str(ZoomLevels.zoom_to_scale(flat_rule.get_attr("o")))
+            min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
             rule_fields = DataDefinedPropertiesFetcher(
-                flat_rule.rule, min_scale, suffix
+                flat_rule.rule, min_scale, suffix, diagnostics=self.diagnostics
             ).fetch()
             if rule_fields:
                 # Normalise to tuples of primitives so the snapshot is
@@ -867,10 +866,8 @@ class RulesExporter:
         if settings and settings.geometryGeneratorEnabled:
             target_geom = settings.geometryGeneratorType
            
-            generator_exp = settings.geometryGenerator
-            layer_crs = flat_rule.layer.crs().authid()
-            generator_exp = generator_exp.replace('@geometry', f"transform(@geometry, 'EPSG:3857', '{layer_crs}')")
-            transform_expr =  f"transform({generator_exp}, '{layer_crs}',  'EPSG:3857')"
+            transform_expr = self._generator_in_layer_crs(
+                settings.geometryGenerator, flat_rule)
             settings.geometryGeneratorEnabled = False
             flat_rule.set_attr("c", target_geom)
         elif target_geom == 2:
@@ -888,10 +885,8 @@ class RulesExporter:
         transform_expr = "@geometry"
         if symbol_layer.layerType() == "GeometryGenerator":
             target_geom = symbol_layer.subSymbol().type()
-            generator_exp = symbol_layer.geometryExpression()
-            layer_crs = flat_rule.layer.crs().authid()
-            generator_exp = generator_exp.replace('@geometry', f"transform(@geometry, 'EPSG:3857', '{layer_crs}')")
-            transform_expr =  f"transform({generator_exp}, '{layer_crs}',  'EPSG:3857')"
+            transform_expr = self._generator_in_layer_crs(
+                symbol_layer.geometryExpression(), flat_rule)
         else:
             target_geom = flat_rule.get_attr("c")
             source_geom = flat_rule.get_attr("g")
@@ -901,6 +896,24 @@ class RulesExporter:
                 elif target_geom == 1:
                     transform_expr = "boundary(@geometry)"
         return [target_geom, transform_expr]
+
+    @staticmethod
+    def _generator_in_layer_crs(generator_exp: str, flat_rule: FlattenedRule) -> str:
+        """Evaluate a geometry generator in the source layer CRS.
+
+        Base layers are already in EPSG:3857 when rules are exported, but
+        generator distances (buffers, offsets, ...) are written for the layer
+        CRS. ``@geometry`` and ``$geometry`` are both rebound to the geometry
+        transformed back to the layer CRS, and the result is transformed to
+        the export CRS again.
+        """
+        layer_crs = flat_rule.layer.crs().authid()
+        if not layer_crs or layer_crs == f"EPSG:{_EPSG_CRS}":
+            return generator_exp
+        bound = bind_geometry(
+            generator_exp, f"transform(@geometry, 'EPSG:{_EPSG_CRS}', '{layer_crs}')"
+        )
+        return f"transform({bound}, '{layer_crs}', 'EPSG:{_EPSG_CRS}')"
 
     def _get_polygon_centroids_expression(self) -> str:
         if self.cent_source == 1:

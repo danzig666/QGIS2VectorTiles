@@ -29,6 +29,7 @@ else:
     from PyQt6.QtGui import QImage
 
 from ..utils.config import _RESOURCES, _PORT, _EPSG_CRS, _SERVER, _MAPLIBRE_LABELS_FACTOR
+from .fidelity import expressions as ex
 
 class ServerInitializer:
     """Copy server utilities and launch the local tile server."""
@@ -69,8 +70,8 @@ Set WshShell = Nothing
         self.output_dir = output_dir
         self.port = _PORT  # use different port for each viewer to allow running both simultaneously
 
-    def serve_tiles(self):
-        """Copy server utilities and launch the local tile server."""
+    def serve_tiles(self, launch: bool = True):
+        """Copy server utilities and (optionally) launch the local tile server."""
         utils_dir = join(self.output_dir, "utils")
         makedirs(utils_dir, exist_ok=True)
         dest_activator, dest_wrapper = self._write_server_files(
@@ -82,7 +83,8 @@ Set WshShell = Nothing
             self.output_dir, utils_dir, dest_activator, dest_wrapper, center, python_exe
         )
         self._save_as_local_qlr()
-        self._launch_server(self.output_dir, dest_activator, dest_wrapper)
+        if launch:
+            self._launch_server(self.output_dir, dest_activator, dest_wrapper)
 
     def _save_as_local_qlr(self):
         """ Save vector tiles as ocal styled QgsVectorLayer"""
@@ -110,14 +112,13 @@ Set WshShell = Nothing
                 for style_layer in style_data['layers']:
                     paint = style_layer.get('paint')
                     layout = style_layer.get('layout')                
-                    if paint:
-                        halo = paint.get('text-halo-width')
-                        if halo:
-                            paint['text-halo-width'] = paint['text-halo-width']*_MAPLIBRE_LABELS_FACTOR
-                    if layout:
-                        size = layout.get('text-size')
-                        if size:
-                            layout['text-size'] = size*_MAPLIBRE_LABELS_FACTOR
+                    # Typed multiplication: sizes may be expressions or zoom
+                    # curves, where Python `list * float` raises TypeError.
+                    if paint and paint.get('text-halo-width'):
+                        paint['text-halo-width'] = ex.mul(
+                            paint['text-halo-width'], _MAPLIBRE_LABELS_FACTOR)
+                    if layout and layout.get('text-size'):
+                        layout['text-size'] = ex.mul(layout['text-size'], _MAPLIBRE_LABELS_FACTOR)
                         
             json_string = json.dumps(style_data)
             converter = QgsMapBoxGlStyleConverter()

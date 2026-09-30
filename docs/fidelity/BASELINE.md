@@ -1,0 +1,85 @@
+# Baseline record (PR-01)
+
+## Commits
+
+| | Commit | Date |
+|---|---|---|
+| Upstream baseline (plan) | `GallPeters/QGIS2VectorTiles@637e960d1217b8753e0ccabeb662209f442a223e` | 2026-08-06 |
+| This fork before the fidelity work | `637e960d1217b8753e0ccabeb662209f442a223e` (identical to the baseline) | 2026-08-06 |
+
+The fork had no changes relative to the upstream baseline, so no reconciliation was needed.
+
+## Environment used for the recorded results
+
+| Component | Version |
+|---|---|
+| OS | Ubuntu 24.04.4 LTS (container), locale C.UTF-8 |
+| QGIS | 3.34.4-Prizren (Ubuntu `python3-qgis`), Qt 5.15.13, Python 3.12 |
+| GDAL | 3.8.4 (MVT + MBTiles drivers) |
+| Pillow / NumPy / SciPy | 10.2.0 / 1.26.4 / 1.11.4 |
+| Browser | Chromium build 1194 (Playwright 1.56.1), SwiftShader WebGL, device-pixel ratio 1 |
+| MapLibre GL JS | 5.11.0 — the build bundled in `resources/ml_viewer/maplibre-gl.js` |
+| Style validator | `@maplibre/maplibre-gl-style-spec` 24.3.1 (the dependency floor of maplibre-gl 5.11.0) |
+| Node | 22.22.2 |
+| Fonts | System DejaVu/Free fonts (fontconfig); the default QGIS label font resolves to *DejaVu Sans Book* |
+
+**QGIS version caveat.** `metadata.txt` declares QGIS 3.44 as the minimum, but only
+QGIS 3.34 was available in the recording environment (the qgis.org package repositories
+were not reachable). All PyQGIS results below were produced on 3.34; the code uses
+version adapters for the API differences found (enum `.value`, `QgsSymbol` property
+names, marker-line placement flags). The suite must be re-run on 3.44 and on the QGIS 4.x
+build intended for the fork before those versions are advertised — see
+[TESTING.md](TESTING.md).
+
+## Confirmed defects (reproduced on the unchanged baseline)
+
+Each item was reproduced with PyQGIS against the baseline code before it was changed and
+now has a regression test.
+
+| # | Defect | Reproduction on the baseline | Regression test |
+|---|---|---|---|
+| 1 | Falsy data-defined values dropped | `QgsProperty.fromExpression('0')` → static fallback `5` returned instead of `0` (`if evaluation:`) | `test_units_and_properties.py::test_falsy_numeric_literals_are_preserved` |
+| 2 | Data-defined icon size crashes | `get_icon_size` → `TypeError: unsupported operand type(s) for /: 'list' and 'int'` | `test_data_defined_icon_size_is_a_valid_expression` |
+| 3 | Pattern fills exported as transparent 10×10 images | `SymbolImage(QgsLinePatternFillSymbolLayer())` → `AttributeError` swallowed, transparent image | `test_sprites.py::test_symbol_layer_is_rejected_with_actionable_error`, `test_generator_reports_wrong_input_instead_of_transparent_image`, `test_end_to_end.py::test_vector_first_export` |
+| 4 | Rendering exceptions hidden | any `RuntimeError`/`AttributeError` in `SymbolImage` replaced by a transparent image | `test_render_exception_is_not_replaced_by_transparent_image` |
+| 5 | Marker-line placement misread | `placement()` returns flag values: *LastVertex* (4) became `line-center`, *CentralPoint* (16) became repeated `line` | `test_marker_line_placement_uses_named_flags` |
+| 6 | Data-defined opacity ignored | `QgsSymbolLayer.Property.Property.PropertyOpacity` raises, caught → static opacity; values are also 0–100, not 0–1 | `test_data_defined_opacity_is_percent` |
+| 7 | Data-defined widths not unit-converted | DDP stroke width in mm emitted as raw `["get", field]` pixels | `test_data_defined_width_is_converted_from_its_unit` |
+| 8 | Map units treated as millimetres | `convert_length_to_pixels(10, MapUnits)` → `37.8` | `test_line_width_units`, `tests/unit/test_units.py` |
+| 9 | Static DDP stored as a quoted string | `'3'` → icon size string, then `str / int` crash | `test_quoted_static_number_becomes_a_number` |
+| 10 | Rule between two integer zooms never visible | scale range 1:z3.2–1:z3.8 → `o=4`, `i=3` (inverted) | `tests/unit/test_zoom.py::test_fractional_single_zoom_rule_is_nonempty`, `test_flattener.py::test_single_zoom_rule_has_nonempty_interval` |
+| 11 | Export modifies the user's project | after flattening, a categorized layer's renderer was `QgsRuleBasedRenderer` and its ELSE rule read `NOT (("zone"='K1')) IS 1` in the user's project (`layer.setRenderer(rule_system)`) | `test_flattener.py::test_flattening_does_not_mutate_project` |
+| 12 | ELSE ignores sibling scale ranges | ELSE excluded a sibling's features even at scales where the sibling is hidden | `test_else_respects_sibling_scale_ranges_and_disabled_siblings` |
+| 13 | Per-layer zoom cap of 16 | VRT wrote `MAXZOOM=min(max_zoom, 16)` | `test_end_to_end.py::test_zooms_above_16_are_generated` (archive inspected) |
+| 14 | Unsupported fills drawn black | gradient/shapeburst produced a `fill` layer with no paint (MapLibre default black) | `test_unsupported_fill_is_reported_not_drawn_black` |
+| 15 | Label glyphs missing | `text-font` = `"{family} {styleName}"` (e.g. `"DejaVu LGC Sans "`) never matched the glyph directory (`"… Regular"`/resolved family) | `test_vector_first_export` (glyph files for the exact `text-font`, incl. `ő`/`ű`) |
+| 16 | `round_numeric_values` converted numeric strings | `["get", "2020"]` → `["get", 2020]`; small factors rounded to 0 | `test_round_numeric_values_keeps_strings` |
+| 17 | Geometry generators: `$geometry` not handled | only `@geometry` was rewritten; the rewrite also touched string literals | `test_geometry_generator_uses_layer_crs_for_both_geometry_spellings` |
+| 18 | QGIS < 3.44 crash in outline split | `key.value` on sip enums (`AttributeError`) | covered by all flattener tests on 3.34 |
+| 19 | Python < 3.12 syntax error | PEP 701 nested quotes in an f-string in `rules_flattener.py` | `pyflakes` under Python 3.11 |
+| 20 | Sprite anchors / rotation | tight cropping moved `icon-anchor: center` off the symbol origin; marker angle was baked into the sprite *and* emitted as `icon-rotate` | `test_offset_marker_keeps_origin_at_image_centre`, `test_rotation_is_not_baked_when_style_rotates` |
+| 21 | @2x sprites upscaled | the @2x sheet was a LANCZOS upscale of the 1x sheet | `test_2x_sheet_is_rendered_at_double_resolution` |
+
+### Verified non-defects
+
+* **Overzoom above the archive.** The legacy style declared no source zoom range, so
+  MapLibre requested tiles above the archive maximum (answered with HTTP 204). MapLibre
+  5.11 still rendered the parent tiles at zoom 15.5 over a zoom-14 archive (checked in the
+  browser), so this was *not* a visible defect. The source now declares its range anyway,
+  which avoids those requests and makes the overzoom policy explicit.
+
+* **Line offset sign.** QGIS and MapLibre both offset positive values to the right of the
+  line direction (checked by rendering in QGIS; `test_positive_line_offset_is_right_of_direction_like_maplibre`).
+* **ELSE with NULL values.** The `NOT (…) IS 1` form correctly matches features whose
+  sibling filters evaluate to NULL.
+
+### Untested suspicions (not yet reproduced)
+
+* Label `yOffset` sign relative to MapLibre `text-offset` (kept unchanged).
+* The empirical `_MAPLIBRE_LABELS_FACTOR` (1.4) text-size/halo calibration — kept until
+  glyph metrics are calibrated against QGIS renders (plan §8.1).
+* `TilesStyler.get_label_priority` uses a numeric property key (87) that may differ
+  between QGIS versions.
+* The zoom ↔ scale convention (`_TOP_SCALE = 419311712`) was kept as-is; it does not
+  match the 96-DPI MapLibre resolution exactly (≈1.4×), which is consistent with the label
+  factor above and needs a calibration fixture before it is changed.
