@@ -483,8 +483,7 @@ class SymbolMaterializer:
         inset = 0.0
         clip = int(layer.clipMode()) if hasattr(layer, "clipMode") else 1
         strokes = self._stroke_marker(marker)
-        if strokes is not None and not (layer.maximumRandomDeviationX()
-                                        or layer.maximumRandomDeviationY() or layer.angle()):
+        if strokes is not None and not layer.angle():
             return self._stroke_grid(flat_rule, layer, marker, strokes, clip)
         if clip == int(Qgis.MarkerClipMode.CompletelyWithin):
             if normalize_unit(marker.sizeUnit()) == "map":
@@ -496,9 +495,6 @@ class SymbolMaterializer:
             self._report("Q2VT_PATTERN_APPROXIMATE",
                          "Pattern markers crossing the polygon edge are drawn whole when their "
                          "centre is inside (QGIS clips them to the shape).", flat_rule)
-        if layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY():
-            self._report("Q2VT_PATTERN_APPROXIMATE",
-                         "Random deviation of pattern markers is not reproduced.", flat_rule)
         if layer.angle():
             self._report("Q2VT_PATTERN_APPROXIMATE", "Rotated point patterns are exported "
                          "unrotated.", flat_rule)
@@ -509,8 +505,24 @@ class SymbolMaterializer:
             self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
             self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
             self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
-            inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape))
+            inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape),
+            deviation=self._deviation(layer, flat_rule), seed=layer.seed())
         return [self._with_symbol(flat_rule, marker.clone(), 0, 1, recipe)]
+
+    def _deviation(self, layer, flat_rule):
+        """Maximum random deviation (map units) of point-pattern markers."""
+        values = []
+        for value, unit in ((layer.maximumRandomDeviationX(), layer.randomDeviationXUnit()),
+                            (layer.maximumRandomDeviationY(), layer.randomDeviationYUnit())):
+            if value and normalize_unit(unit) != "map":
+                self._report("Q2VT_PATTERN_APPROXIMATE", "Random deviation of pattern markers "
+                             "in screen units is not reproduced.", flat_rule)
+                value = 0.0
+            values.append(float(value or 0.0))
+        if values[0] or values[1]:
+            self._report("Q2VT_PATTERN_APPROXIMATE", "Randomly deviated pattern markers: the "
+                         "deviations follow QGIS's range but not its random sequence.", flat_rule)
+        return tuple(values)
 
     @staticmethod
     def _stroke_marker(marker):
@@ -567,7 +579,8 @@ class SymbolMaterializer:
                 int(Qgis.MarkerClipMode.Shape): "shape",
                 int(Qgis.MarkerClipMode.CentroidWithin): "centroid",
                 int(Qgis.MarkerClipMode.CompletelyWithin): "within",
-                int(Qgis.MarkerClipMode.NoClipping): "none"}.get(clip, "shape"))
+                int(Qgis.MarkerClipMode.NoClipping): "none"}.get(clip, "shape"),
+            deviation=self._deviation(layer, flat_rule), seed=layer.seed())
         return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
 
     def _svg_grid(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:

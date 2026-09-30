@@ -2178,11 +2178,17 @@ class QgisMapLibreStyleExporter:
             return None
         disp_x = self._pattern_px(layer.displacementX(), layer.displacementXUnit(), "displacement")
         disp_y = self._pattern_px(layer.displacementY(), layer.displacementYUnit(), "displacement")
+        # QgsPointPatternFillSymbolLayer::applyPattern shifts the markers in
+        # the cell by the offset (x right, y down; percentages of the cell).
+        off_x, off_y = (self._pattern_offset_px(layer.offsetX(), layer.offsetXUnit(), 2 * dx),
+                        self._pattern_offset_px(layer.offsetY(), layer.offsetYUnit(), 2 * dy))
         one, two = self._marker_images(marker)
         cells = []
         for ratio, image in ((1, one), (2, two)):
             width, height, positions, error = point_pattern_cell(
                 dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio)
+            positions = [((x + off_x * ratio) % width, (y + off_y * ratio) % height)
+                         for x, y in positions]
             cells.append(tile_markers(image, width, height, positions))
         _, _, _, error = point_pattern_cell(dx, dy, disp_x, disp_y)
         return self._textures(cells[0], cells[1], error, "Point pattern")
@@ -2213,6 +2219,14 @@ class QgisMapLibreStyleExporter:
                  tile_markers(two, 2 * cell, 2 * cell, [(2 * x, 2 * y) for x, y in positions])]
         error = abs(count - per_px * cell * cell) / (per_px * cell * cell)
         return self._textures(cells[0], cells[1], error, "Random marker fill")
+
+    def _pattern_offset_px(self, value, unit, cell_px: float) -> float:
+        if not value:
+            return 0.0
+        if normalize_unit(unit) in ("percentage", "percent", "%") or \
+                _enum_int(unit) == _enum_int(Qgis.RenderUnit.Percentage):
+            return cell_px * value / 200.0
+        return self._pattern_px(value, unit, "offset")
 
     def _register_svg_pattern(self, layer) -> Optional[str]:
         """Seamless texture for an SVG fill: one SVG per cell, as QGIS tiles it."""

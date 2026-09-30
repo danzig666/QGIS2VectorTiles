@@ -223,13 +223,16 @@ MAX_GRID_POINTS = 200000
 def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float,
                 off_y: float, construction_crs: str, anchor: str, inset: float = 0.0,
                 rows_from_top: bool = False, segments=(), clip_shape: bool = False,
-                clip_mode: str = "") -> Recipe:
+                clip_mode: str = "", deviation=(0.0, 0.0), seed: int = 0) -> Recipe:
     """Point-pattern grid in map units (see :func:`grid_expression`)."""
     params = [
         ("dx", float(dx)), ("dy", float(dy)), ("disp_x", float(disp_x)),
         ("disp_y", float(disp_y)), ("off_x", float(off_x)), ("off_y", float(off_y)),
         ("crs", construction_crs), ("anchor", anchor), ("inset", float(inset)),
         ("top", bool(rows_from_top))]
+    if deviation[0] or deviation[1]:
+        params += [("dev_x", float(deviation[0])), ("dev_y", float(deviation[1])),
+                   ("seed", int(seed))]
     if segments:
         params += [("segments", tuple(segments)), ("clip_shape", bool(clip_shape))]
         if clip_mode:
@@ -352,6 +355,7 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     # Markers whose centre lies outside the polygon can still reach into it.
     reach = max((max(math.hypot(ax, ay), math.hypot(bx, by)) for ax, ay, bx, by in segments),
                 default=0.0)
+    reach += max(abs(p("dev_x") or 0.0), abs(p("dev_y") or 0.0))  # deviated markers
     margin_i = int(math.ceil(reach / dx)) + 1
     margin_j = int(math.ceil(reach / dy)) + 1
     # QGIS parses deeply nested expressions very slowly (depth 16 costs
@@ -367,6 +371,14 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     i, j = "@q2vt_ij[0]", "@q2vt_ij[1]"
     point_x = f"{x0} + {i} * {dx!r} + if(abs({j} % 2) = 1, {ddx!r}, 0)"
     point_y = f"{y0} + {sy!r} * {j} * {dy!r} + if(abs({i} % 2) = {col_parity}, {ddy!r}, 0)"
+    dev_x, dev_y = p("dev_x") or 0.0, p("dev_y") or 0.0
+    if dev_x or dev_y:
+        # Random deviation (QgsPointPatternFillSymbolLayer::renderPolygon):
+        # each marker moves by a uniform ±max; QGIS draws from one seeded
+        # sequence in screen order, here the draw is seeded per grid cell.
+        cell = f"(abs({i} * 100003 + {j} * 7919 + {int(p('seed') or 0) % 1000003}) * 2)"
+        point_x = f"({point_x}) + (2 * randf(0, 1, {cell}) - 1) * {dev_x!r}"
+        point_y = f"({point_y}) + (2 * randf(0, 1, {cell} + 1) - 1) * {dev_y!r}"
     per_point = max(1, len(segments))
     if segments:
         def pick(values):

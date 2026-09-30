@@ -100,6 +100,8 @@ now has a regression test.
 | 42 | Sprites aliased (thin outlines as dots, ragged circles) | sprites were drawn 3x (screen size) or up to 24x (map units) larger than displayed; the sprite atlas has no mipmaps | static screen-size sprites 1:1; map-unit sprites one image per zoom (1.5x); mixed markers keep their screen size; `test_map_unit_sprites_are_drawn_per_zoom`, `test_static_screen_sprites_are_drawn_one_to_one` |
 | 43 | Font marker text too high; DejaVu drawn bold | text box centred instead of the QGIS baseline (half the ascent below the point); the default style of a family without a "Regular" face was the first style alphabetically | baseline offset; fonts resolved to the face Qt draws; `test_font_marker_text_sits_where_qgis_draws_it` |
 | 44 | Sub-pixel lines too dark | MapLibre's line antialiasing inks a 0.2 px line with ~0.36 px, Qt with 0.2 px (measured, averaged over sub-pixel positions) | `line-opacity` compensates by width (zoom curve for map units); `test_thin_lines_get_the_ink_qgis_gives_them` (browser) |
+| 45 | Offset point patterns drawn unshifted in textures (zig-zags became crosses) | the texture cell ignored the pattern offset | offset applied in the cell; `test_point_pattern_texture_applies_the_offset` |
+| 46 | Random deviation of pattern markers ignored | markers stood on the exact grid | seeded uniform deviation per grid cell (QGIS's range, not its sequence); `test_point_pattern_random_deviation_stays_in_range` |
 
 ### Resolved suspicions
 

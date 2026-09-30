@@ -571,3 +571,26 @@ def test_map_unit_font_markers_become_their_glyphs(plugin, tmp_path, text, angle
     assert len(glyphs) == 1 and rules[-1].recipe.kind == "glyph"
     ours = ink_mask(render(glyphs, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+def test_point_pattern_random_deviation_stays_in_range(plugin):
+    """QGIS moves every pattern marker by a uniform ±max deviation (its own
+    random sequence): the exported markers deviate within the same range."""
+    from qgis.core import QgsExpression, QgsExpressionContext
+    from fidelity import materialize as mat
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 200 0, 200 200, 0 200, 0 0))"))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    recipe = mat.grid_recipe(10, 10, 0, 0, 0, 0, "EPSG:3857", "feature", deviation=(3.0, 2.0),
+                             seed=42)
+    expression = mat.grid_expression(recipe)
+    first = QgsExpression(expression).evaluate(context)
+    assert QgsExpression(expression).evaluate(context).asWkt() == first.asWkt()
+    shifts = [(p.x() - round(p.x() / 10) * 10, p.y() - round(p.y() / 10) * 10)
+              for p in (part for part in first.constGet())]
+    assert len(shifts) > 300
+    assert max(abs(x) for x, _ in shifts) <= 3.0 and max(abs(y) for _, y in shifts) <= 2.0
+    assert max(abs(x) for x, _ in shifts) > 2.5 and max(abs(y) for _, y in shifts) > 1.6
+    mean_x = sum(x for x, _ in shifts) / len(shifts)
+    assert abs(mean_x) < 0.5  # uniform around the grid node

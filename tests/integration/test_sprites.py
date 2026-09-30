@@ -147,3 +147,29 @@ def test_data_defined_font_marker_text_fits_the_sprite(sg):
                           attributes={"v": "BCDEFGH"})
     # Eight letters: sized from the static "A" the canvas would cut them off.
     assert wide.img.width > 5 * static.img.width
+
+
+def test_point_pattern_texture_applies_the_offset(plugin):
+    """QGIS shifts the markers inside the pattern cell by the offset; two
+    patterns offset against each other (e.g. "\\" and "/" forming zig-zags)
+    must not collapse onto the same place."""
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from qgis.core import QgsPointPatternFillSymbolLayer, Qgis
+    from PIL import ImageChops
+    exporter = QgisMapLibreStyleExporter.__new__(QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_counter = {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context = exporter.context
+    cells = []
+    for offset in (0.0, 4.0):
+        layer = QgsPointPatternFillSymbolLayer()
+        layer.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer()]))
+        for name, value in (("DistanceX", 16.0), ("DistanceY", 16.0), ("OffsetX", offset)):
+            getattr(layer, f"set{name}")(value)
+            getattr(layer, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+        cells.append(exporter.pattern_images[exporter._register_point_pattern(layer)].img_1x)
+    rolled = ImageChops.offset(cells[0], 4, 0)  # 4 px to the right
+    assert ImageChops.difference(rolled, cells[1]).getbbox() is None
+    assert ImageChops.difference(cells[0], cells[1]).getbbox() is not None
