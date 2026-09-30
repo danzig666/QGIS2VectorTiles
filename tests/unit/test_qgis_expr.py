@@ -24,3 +24,21 @@ def test_geometry_prefix_names_are_not_replaced():
 def test_bind_geometry():
     out = bind_geometry("centroid($geometry)", "transform(@geometry, 'A', 'B')")
     assert out == "centroid((transform(@geometry, 'A', 'B')))"
+
+
+def test_in_layer_crs_rebinds_geometry_and_measures():
+    from fidelity.qgis_expr import in_layer_crs
+    out = in_layer_crs("round($area) || ' m2' || '$area'", "EPSG:3857", "EPSG:23700", True)
+    assert out == ("round(area(transform(@geometry, 'EPSG:3857', 'EPSG:23700'))) "
+                   "|| ' m2' || '$area'")
+    kept = in_layer_crs("$area", "EPSG:3857", "EPSG:23700", False)
+    assert kept == "$area"
+    assert in_layer_crs("$x", "EPSG:3857", "EPSG:23700", False) == \
+        "x(transform(@geometry, 'EPSG:3857', 'EPSG:23700'))"
+    assert in_layer_crs("$area", "EPSG:3857", "EPSG:3857", True) == "$area"
+
+
+def test_enabled_condition_and_filters():
+    from fidelity.qgis_expr import and_filters, enabled_condition
+    assert and_filters("a", "", None, "b") == "(a) AND (b)"
+    assert "IS NULL" in enabled_condition("x = 1")

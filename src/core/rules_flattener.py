@@ -37,7 +37,8 @@ from ..utils.zoom_levels import ZoomLevels
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ZoomInterval
 from .fidelity import zoom as fidelity_zoom
-from .fidelity.qgis_expr import with_map_scale
+from .fidelity.qgis_expr import and_filters, enabled_condition, with_map_scale
+from .materializer import SymbolMaterializer
 
 
 
@@ -59,6 +60,7 @@ class RulesFlattener:
         # assigned to the project layers: exporting must never modify the
         # user's project (renderer, labeling, ELSE rules, scale visibility).
         self._rule_systems: list = []
+        self.materializer = SymbolMaterializer(self.diagnostics)
         # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
         # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
         self._unique_counter = 0
@@ -346,6 +348,43 @@ class RulesFlattener:
         return variants
 
     @staticmethod
+    def _is_feature_dependent(expression: str) -> bool:
+        parsed = QgsExpression(expression)
+        return bool(parsed.referencedColumns()) or parsed.needsGeometry() or \
+            bool({"feature", "id", "geometry"} & set(parsed.referencedVariables()))
+
+    def _fold_enabled_property(self, flat_rule: FlattenedRule, symbol_layer):
+        """Turn a feature-dependent data-defined *enabled* into a rule filter.
+
+        The legacy export ignored it, drawing the component on every feature.
+        Scale-only expressions keep the per-zoom handling.
+        """
+        props = symbol_layer.dataDefinedProperties()
+        prop = props.property(QgsSymbolLayer.Property.PropertyLayerEnabled)
+        if not prop or not prop.isActive() or not self._is_feature_dependent(prop.asExpression()):
+            return
+        flat_rule.rule.setFilterExpression(and_filters(
+            flat_rule.rule.filterExpression(), enabled_condition(prop.asExpression())))
+        prop.setActive(False)
+        props.setProperty(QgsSymbolLayer.Property.PropertyLayerEnabled, prop)
+
+    def _fold_show_property(self, rule):
+        """Turn a data-defined label *Show* into part of the rule filter."""
+        settings = rule.settings()
+        if settings is None:
+            return
+        props = settings.dataDefinedProperties()
+        key = QgsPalLayerSettings.Property.Show
+        prop = props.property(key)
+        if not prop or not prop.isActive():
+            return
+        rule.setFilterExpression(and_filters(rule.filterExpression(),
+                                             enabled_condition(prop.asExpression())))
+        prop.setActive(False)
+        props.setProperty(key, prop)
+        settings.setDataDefinedProperties(props)
+
+    @staticmethod
     def _rule_has_payload(rule) -> bool:
         if hasattr(rule, "symbol"):
             return rule.symbol() is not None
@@ -373,6 +412,10 @@ class RulesFlattener:
         # symbols) BEFORE applying NOT-children — descendants must not see the
         # output-only exclusion (otherwise C inherits "... AND NOT C" from B*).
         inheritance_source = inherited_rule.clone()
+        if rule_type == 1:
+            # After the snapshot: a label's Show condition must not restrict
+            # the labels of child rules.
+            self._fold_show_property(inherited_rule)
         # self._exclude_children_from_filter(inherited_rule, rule)
 
         flat_rule = FlattenedRule(inherited_rule, layer)
@@ -533,6 +576,11 @@ class RulesFlattener:
 
 
             clone_symbol_layer = clone_symbol.symbolLayers()[0]
+            self._fold_enabled_property(rule_clone, clone_symbol_layer)
+            materialized = self.materializer.materialize(rule_clone, clone_symbol_layer)
+            if materialized is not None:
+                split_rules.extend(materialized)
+                continue
             if rule_clone and layer_type == "SimpleFill":
                 if clone_symbol_layer.strokeStyle() != Qt.PenStyle.NoPen:
                     outline_rule = rule_clone.derive()

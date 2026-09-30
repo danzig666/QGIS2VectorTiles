@@ -228,3 +228,27 @@ def evaluate_zoom_curve(curve: Expression, zoom: float) -> float:
                 t = (base ** (zoom - z0) - 1) / (base ** (z1 - z0) - 1)
             return o0 + t * (o1 - o0)
     return stops[-1][1]
+
+
+def ratio(numerator: Expression, denominator: Expression,
+          zooms=tuple(range(0, 25))) -> Expression:
+    """``numerator / denominator`` for camera-only values.
+
+    Two exponential curves that scale identically (map-unit offsets over
+    map-unit icon sizes) have a constant ratio; otherwise the ratio is
+    sampled at integer zooms into a ``step`` curve.
+    """
+    if is_number(numerator) and is_number(denominator):
+        return 0 if denominator == 0 else finite(numerator / denominator)
+    values = []
+    for zoom in zooms:
+        num = evaluate_zoom_curve(numerator, zoom)
+        den = evaluate_zoom_curve(denominator, zoom)
+        values.append((zoom, 0.0 if den == 0 else num / den))
+    distinct = {round(v, 9) for _, v in values}
+    if len(distinct) == 1:
+        return finite(values[0][1])
+    expr: List = ["step", ["zoom"], finite(values[0][1])]
+    for zoom, value in values[1:]:
+        expr.extend([zoom, finite(value)])
+    return expr

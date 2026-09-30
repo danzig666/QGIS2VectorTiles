@@ -103,7 +103,9 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from .fidelity.diagnostics import DiagnosticCollector
-from .fidelity.qgis_expr import bind_geometry, with_map_scale
+from .fidelity.qgis_expr import bind_geometry, in_layer_crs, with_map_scale
+from .fidelity import materialize as mat
+from .fidelity.materialize import Recipe
 
 
 # ============================================================================
@@ -164,9 +166,23 @@ class _RuleGroupSnapshot:
     expression_fields: List[Tuple[int, str, str]]
     description: str
     include_required_fields_only: int
+    # Geometry recipe (fidelity.materialize.Recipe) — immutable plain data.
+    recipe: Optional[Recipe]
+    # Source geometry type of the layer (0 point, 1 line, 2 polygon).
+    source_geometry: int
     # Kept ONLY to drive the success/failure return value of export(); workers
     # MUST NOT read any live state from these.
     flat_rules: List[FlattenedRule]
+
+
+_RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
+# 1 when the (first) exterior ring is clockwise; is_polygon_clockwise() is
+# not available before QGIS 3.36.
+_RING_CLOCKWISE_EXPRESSION = (
+    "with_variable('q2vt_p', if(is_multipart(@geometry), geometry_n(@geometry, 1), @geometry), "
+    "if(geom_to_wkt(exterior_ring(force_polygon_cw(@q2vt_p))) = "
+    "geom_to_wkt(exterior_ring(@q2vt_p)), 1, 0))"
+)
 
 
 class _Cancelled(Exception):
@@ -213,6 +229,14 @@ class RulesExporter:
         self.feedback = feedback
         self.cpu_percent = cpu_percent
         self.diagnostics = diagnostics or DiagnosticCollector()
+        # Measurement settings of the project (caller thread snapshot): QGIS
+        # measures $area/$length ellipsoidally when an ellipsoid is set and
+        # planimetrically in the layer CRS otherwise.
+        project = QgsProject.instance()
+        self._ellipsoid = project.ellipsoid()
+        self._planar = not self._ellipsoid or self._ellipsoid.upper() == "NONE"
+        self._distance_unit = project.distanceUnits()
+        self._area_unit = project.areaUnits()
 
         self.processed_layers: List[QgsVectorLayer] = []
 
@@ -322,6 +346,15 @@ class RulesExporter:
                     primary, expr_fields
                 )
 
+            # Evaluate scalar expressions on layer-CRS geometry, as QGIS does.
+            layer_crs = primary.layer.crs().authid()
+            expr_fields = [
+                (ftype, in_layer_crs(expr, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar), name)
+                for ftype, expr, name in expr_fields
+            ]
+            filter_expression = in_layer_crs(
+                primary.rule.filterExpression(), f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
+
             # Compute geometry transformation tuple.
             transformation = self._get_geometry_transformation(primary)
             if transformation is None:
@@ -333,12 +366,14 @@ class RulesExporter:
                 output_dataset=primary.output_dataset,
                 layer_id=primary.layer.id(),
                 rule_type=primary.get_attr("t"),
-                filter_expression=primary.rule.filterExpression() or None,
+                filter_expression=filter_expression or None,
                 geometry_target=geom_target,
                 geometry_expression=geom_expr,
                 expression_fields=expr_fields,
                 description=primary.get_description(),
                 include_required_fields_only=self.include_required_fields_only,
+                recipe=primary.recipe,
+                source_geometry=primary.get_attr("g"),
                 flat_rules=flat_rules,
             ))
 
@@ -468,6 +503,15 @@ class RulesExporter:
             INPUT=src_path, EXTENT=transform_extent, CLIP=False,
         )
         self._check_cancel()
+        is_polygon = QgsVectorLayer(clipped, "check", "ogr").geometryType() == 2
+        if is_polygon:
+            # fixgeometries(METHOD=1) rewinds rings to a fixed orientation,
+            # but QGIS draws directional outline symbols (marker lines,
+            # arrows, offsets) along the *source* ring direction. Record the
+            # exterior orientation here and restore it after the fix.
+            clipped = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=clipped, FIELD_NAME=_RING_FIELD,
+                FIELD_TYPE=1, FORMULA=_RING_CLOCKWISE_EXPRESSION)
         # METHOD=1 (structure) — finishes the geometry fix started in Phase 1.
         fixed_struct = self._run_alg_safe(
             "fixgeometries", "native", INPUT=clipped, METHOD=1
@@ -478,6 +522,13 @@ class RulesExporter:
             INPUT=fixed_struct,
             TARGET_CRS=QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
         )
+        if is_polygon:
+            restored = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=reprojected, OUTPUT_GEOMETRY=0,
+                EXPRESSION=f'if("{_RING_FIELD}" = 1, force_polygon_cw(@geometry), '
+                           f'if("{_RING_FIELD}" = 0, force_polygon_ccw(@geometry), @geometry))')
+            reprojected = self._run_alg_safe(
+                "deletecolumn", "native", INPUT=restored, COLUMN=[_RING_FIELD])
         orig_id = self._run_alg_safe(
             "fieldcalculator", "native",
             INPUT=reprojected,
@@ -597,6 +648,16 @@ class RulesExporter:
                 return None
             current_input = filt
 
+        # Materialized marker positions: derive point features (with the
+        # line azimuth) from the complete original lines before any field
+        # expressions or tiling.
+        if grp.recipe is not None and grp.recipe.kind == "marker_points":
+            current_input = self._materialize_marker_points(
+                current_input, grp.recipe, grp.source_geometry)
+            check = QgsVectorLayer(current_input, "check", "ogr")
+            if not check.isValid() or check.featureCount() <= 0:
+                return None
+
         # Field mapping.
         field_mapping = self._build_field_mapping(grp, current_input)
 
@@ -661,6 +722,45 @@ class RulesExporter:
             INPUT=cleaned,
             OUTPUT=output_path,
         )
+
+    def _materialize_marker_points(self, source: str, recipe: Recipe, source_geometry: int) -> str:
+        """Worker: exact marker-line positions as points with ``ANGLE_FIELD``."""
+        lines = source
+        if source_geometry == 2:  # marker line on a polygon outline
+            lines = self._run_alg_safe("polygonstolines", "native", INPUT=source)
+        if recipe.param("offset"):
+            lines = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
+                EXPRESSION=mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+        lines = self._run_alg_safe(
+            "fieldcalculator", "native", INPUT=lines, FIELD_NAME=mat.COUNT_FIELD,
+            FIELD_TYPE=1, FORMULA="num_points(@geometry)")
+        outputs = []
+        vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
+        if vertex_placements:
+            vertices = self._run_alg_safe("extractvertices", "native", INPUT=lines)
+            expression = " OR ".join(f"({mat.vertex_filter(p)})" for p in vertex_placements)
+            selected = self._run_alg_safe("extractbyexpression", "native",
+                                          INPUT=vertices, EXPRESSION=expression)
+            outputs.append(self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=selected, FIELD_NAME=mat.ANGLE_FIELD,
+                FIELD_TYPE=0, FORMULA='"angle"'))
+        for placement in ("CentralPoint", "SegmentCenter"):
+            if placement not in recipe.placements:
+                continue
+            base = lines
+            if placement == "SegmentCenter":
+                base = self._run_alg_safe("explodelines", "native", INPUT=lines)
+            angled = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=base, FIELD_NAME=mat.ANGLE_FIELD,
+                FIELD_TYPE=0, FORMULA="line_interpolate_angle(@geometry, length(@geometry) / 2)")
+            # geometrybyexpression: OUTPUT_GEOMETRY 2 = point
+            outputs.append(self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=angled, OUTPUT_GEOMETRY=2,
+                EXPRESSION="line_interpolate_point(@geometry, length(@geometry) / 2)"))
+        if len(outputs) == 1:
+            return outputs[0]
+        return self._run_alg_safe("mergevectorlayers", "native", LAYERS=outputs)
 
     def _build_field_mapping(
         self, grp: _RuleGroupSnapshot, current_input: str
@@ -737,6 +837,10 @@ class RulesExporter:
         self._check_cancel()
         context = QgsProcessingContext()
         context.setExpressionContext(QgsProject.instance().createExpressionContext())
+        if not self._planar:
+            context.setEllipsoid(self._ellipsoid)
+        context.setDistanceUnit(self._distance_unit)
+        context.setAreaUnit(self._area_unit)
         context.setInvalidGeometryCheck(QgsFeatureRequest.InvalidGeometryCheck.GeometryNoCheck)
         feedback = QgsProcessingFeedback()
 
@@ -883,6 +987,13 @@ class RulesExporter:
         symbol_layer = symbol.symbolLayers()[0]
         target_geom = flat_rule.get_attr("g")
         transform_expr = "@geometry"
+        recipe = flat_rule.recipe
+        if recipe is not None and recipe.kind == "marker_points":
+            return [0, "@geometry"]  # points already materialized
+        if recipe is not None and recipe.kind == "hatch_lines":
+            return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "grid_points":
+            return [0, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if symbol_layer.layerType() == "GeometryGenerator":
             target_geom = symbol_layer.subSymbol().type()
             transform_expr = self._generator_in_layer_crs(

@@ -11,6 +11,7 @@ from typing import Optional, Union
 
 from qgis.core import QgsRuleBasedRenderer, QgsRuleBasedLabeling, QgsVectorLayer
 
+from ..core.fidelity.materialize import Recipe
 from ..core.fidelity.model import ZoomInterval
 
 
@@ -24,12 +25,17 @@ class FlattenedRule:
     # Exact browser visibility interval [min_zoom, max_zoom). The integer
     # "o"/"i" attributes only describe which tile zooms carry the data.
     visibility: Optional[ZoomInterval] = None
+    # Geometry recipe for materialized components (exact marker positions,
+    # map-unit hatches, ...); None exports the source geometry.
+    recipe: Optional[Recipe] = None
+    # Draw order key assigned by the flattener (see fidelity.render_order).
+    order: tuple = ()
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
         return FlattenedRule(
             rule if rule is not None else self.rule.clone(),
-            self.layer, self.output_dataset, self.visibility,
+            self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
         )
 
     @property

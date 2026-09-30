@@ -166,6 +166,29 @@ class GlyphGenerator:
     # ------------------------------------------------------------------
     # Character discovery via GDAL/OGR
     # ------------------------------------------------------------------
+    def _needed_chars(self, entries) -> Set[str]:
+        """Characters to generate for one font.
+
+        Entries are dataset paths (scanned in ``self.field_name``),
+        ``(path, field)`` tuples (another attribute, e.g. a font-marker
+        character field) or ``(None, text)`` literal strings (static
+        font-marker characters).
+        """
+        chars: Set[str] = set()
+        by_field: Dict[str, List[str]] = {}
+        for entry in entries:
+            if isinstance(entry, tuple):
+                path, value = entry
+                if path is None:
+                    chars |= set(value or "")
+                else:
+                    by_field.setdefault(value, []).append(path)
+            else:
+                by_field.setdefault(self.field_name, []).append(entry)
+        for field, paths in by_field.items():
+            chars |= self._extract_unique_chars(sorted(set(paths)), field)
+        return chars
+
     @staticmethod
     def _extract_unique_chars(dataset_paths: List[str], field_name: str) -> Set[str]:
         """
@@ -250,7 +273,7 @@ class GlyphGenerator:
             family, style = resolved
             logger.info(f"Processing font '{font_key}' -> family='{family}', style='{style}'")
 
-            needed_chars = self._extract_unique_chars(dataset_paths, self.field_name)
+            needed_chars = self._needed_chars(dataset_paths)
             if not needed_chars:
                 logger.warning(f"No characters found in field '{self.field_name}' for font '{font_key}'. Skipping.")
                 continue

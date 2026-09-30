@@ -22,7 +22,8 @@ DDP_EMITTERS: Dict[str, frozenset] = {
     "line": frozenset({"StrokeColor", "StrokeWidth", "Opacity", "Offset", "Color"}),
     "fill": frozenset({"FillColor", "Opacity", "StrokeColor", "Color"}),
     "marker": frozenset({"Size", "Angle", "Opacity"}),
-    "marker_line": frozenset({"Opacity"}),
+    "marker_line": frozenset({"Opacity", "Interval"}),
+    "font_marker": frozenset({"Char", "Size", "Angle", "Opacity", "FillColor", "Color"}),
     "pattern": frozenset(),
 }
 
@@ -59,7 +60,10 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Rendered by QGIS to a sprite at 1x and 2x.",
                ("Data-defined SVG parameters are frozen at the static value.",)),
     Capability("RasterMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
-    Capability("FontMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
+    Capability("FontMarker", "font_marker", Strategy.NATIVE,
+               "Exported as browser text (glyphs generated for the font); data-defined "
+               "characters, size, colour and angle are kept. Inside marker lines it is a sprite.",
+               ("Vertical position uses the text box centre (QGIS: half the font ascent).",)),
     Capability("EllipseMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("MarkerLine", "marker_line", Strategy.APPROXIMATE,

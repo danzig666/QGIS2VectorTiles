@@ -120,3 +120,49 @@ def render_line_pattern(spec: LinePatternSpec, cell: PeriodicCell,
             if hits:
                 pixels[i, j] = (red, green, blue, round(alpha * hits / samples))
     return img
+
+
+def tile_markers(marker, cell_w: int, cell_h: int, positions):
+    """Paint ``marker`` (RGBA, centred on its origin) at ``positions`` in a
+    ``cell_w × cell_h`` repeat cell, wrapping across edges so the cell tiles
+    seamlessly."""
+    from PIL import Image  # pylint: disable=import-outside-toplevel
+
+    cell = Image.new("RGBA", (max(1, cell_w), max(1, cell_h)), (0, 0, 0, 0))
+    half_w, half_h = marker.width / 2.0, marker.height / 2.0
+    for x, y in positions:
+        for wx in (-cell_w, 0, cell_w):
+            for wy in (-cell_h, 0, cell_h):
+                left = int(round(x + wx - half_w))
+                top = int(round(y + wy - half_h))
+                if left >= cell_w or top >= cell_h or left + marker.width <= 0 \
+                        or top + marker.height <= 0:
+                    continue
+                layer = Image.new("RGBA", cell.size, (0, 0, 0, 0))
+                layer.paste(marker, (left, top))
+                cell = Image.alpha_composite(cell, layer)
+    return cell
+
+
+def point_pattern_cell(dx: float, dy: float, disp_x: float, disp_y: float):
+    """Repeat cell size and marker positions (CSS px) of a point pattern.
+
+    Displacement of alternate rows/columns doubles the cell in that
+    direction. Returns ``(width, height, positions, max_relative_error)``
+    with integer cell sizes; the error measures the spacing change caused by
+    rounding to whole pixels.
+    """
+    rows = 2 if disp_x else 1
+    cols = 2 if disp_y else 1
+    width = max(1, round(dx * cols))
+    height = max(1, round(dy * rows))
+    real_dx, real_dy = width / cols, height / rows
+    error = max(abs(real_dx - dx) / dx, abs(real_dy - dy) / dy)
+    positions = []
+    for j in range(rows):
+        for i in range(cols):
+            x = i * real_dx + (disp_x if j % 2 else 0.0)
+            # Image y points down; QGIS displacement Y moves columns up.
+            y = height - (j * real_dy + (disp_y if i % 2 else 0.0))
+            positions.append((x % width, y % height))
+    return width, height, positions, error

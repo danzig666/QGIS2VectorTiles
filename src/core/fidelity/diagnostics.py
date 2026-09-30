@@ -51,6 +51,9 @@ CODES: Dict[str, CodeInfo] = {
         Severity.INFO, "Map-unit size converted with a reference-latitude scale factor",
         "Project CRS is not Web Mercator; sizes are exact only near the reference latitude.",
         fidelity_loss=False),
+    "Q2VT_MIXED_UNITS": CodeInfo(
+        Severity.WARNING, "Symbol mixes map units with screen units",
+        "Screen-unit parts (e.g. millimetre outlines) scale with the map in the browser."),
     "Q2VT_ZOOM_EMPTY_INTERVAL": CodeInfo(
         Severity.WARNING, "Rule has an empty visibility interval and was skipped",
         "Check the rule's minimum and maximum scale."),

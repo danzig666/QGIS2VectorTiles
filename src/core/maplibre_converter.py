@@ -5,7 +5,7 @@ import os
 from os.path import join
 from typing import Any, Dict, List, Optional, Union
 
-from qgis.PyQt.QtGui import QColor, QFontInfo
+from qgis.PyQt.QtGui import QColor, QFont, QFontInfo
 from ..utils.config import Qt
 from qgis.core import (
     QgsVectorTileLayer,
@@ -482,16 +482,27 @@ class LinePropertyExtractor:
         return "line"
 
     @staticmethod
-    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer) -> float:
-        """Return ``symbol-spacing`` in CSS px from the marker-line interval."""
+    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer) -> Union[float, List]:
+        """Return ``symbol-spacing`` in CSS px from the marker-line interval.
+
+        Map-unit intervals become zoom curves; a data-defined interval that
+        depends only on ``@map_scale`` has been resolved per zoom band.
+        """
         placements = LinePropertyExtractor.marker_line_placements(symbol_layer)
         try:
             interval = float(symbol_layer.interval())
         except (AttributeError, RuntimeError, TypeError, ValueError):
             interval = 0.0
-
-        if "Interval" in placements and interval > 0:
-            return max(1.0, PropertyExtractor.static_pixels(interval, symbol_layer.intervalUnit()))
+        prop = symbol_layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyInterval)
+        if "Interval" in placements and (interval > 0 or (prop and prop.isActive())):
+            spacing = PropertyExtractor.length(interval, symbol_layer.intervalUnit(), prop,
+                                               symbol_layer.intervalMapUnitScale())
+            if isinstance(spacing, list) and not ex.is_zoom_curve(spacing):
+                PropertyExtractor.context.report(
+                    "Q2VT_DDP_NO_EMITTER",
+                    "Feature-dependent marker-line interval is not supported; static value used.")
+                spacing = PropertyExtractor.length(interval, symbol_layer.intervalUnit())
+            return ex.clamp(spacing, 1.0, None)
 
         # Vertex-type placements have no MapLibre equivalent; a small spacing
         # approximates dense per-vertex markers (reported by the placement).
@@ -512,15 +523,16 @@ class LinePropertyExtractor:
             return True
 
     @staticmethod
-    def get_marker_line_offset(symbol_layer: QgsSymbolLayer) -> float:
-        """Return the marker-line's perpendicular offset from the line, in CSS px."""
+    def get_marker_line_offset(symbol_layer: QgsSymbolLayer) -> Union[float, List]:
+        """Return the marker-line's perpendicular offset in CSS px (curve for map units)."""
         try:
             offset = float(symbol_layer.offset())
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return 0.0
         if offset == 0:
             return 0.0
-        return PropertyExtractor.static_pixels(offset, symbol_layer.offsetUnit())
+        return PropertyExtractor.length(offset, symbol_layer.offsetUnit(), None,
+                                        symbol_layer.offsetMapUnitScale())
 
 
 class FillPropertyExtractor:
@@ -610,6 +622,46 @@ class IconPropertyExtractor:
     def get_icon_image(marker_name: str) -> str:
         """Return the registered sprite name for ``icon-image``."""
         return marker_name
+
+    @staticmethod
+    def marker_scale(symbol: QgsSymbol, symbol_layer: QgsSymbolLayer):
+        """``(icon-size, map_units_per_pixel)`` for a marker symbol.
+
+        Physical units: the sprite is rendered at ``_SPRITE_QUALITY``× its
+        size, so ``icon-size = 1 / Q`` (times ``v / s`` for a data-defined
+        size ``v`` over the static size ``s``).
+
+        Map units: the sprite is rendered at a reference resolution of ``r``
+        map units per pixel (the symbol spans ``32`` logical pixels, ``32·Q``
+        image pixels), and ``icon-size(z) = px(size, z) / (32·Q)`` follows the
+        map like QGIS, including ``QgsMapUnitScale`` limits.
+        """
+        try:
+            unit = normalize_unit(symbol.sizeUnit())
+            size = float(symbol.size())
+        except (AttributeError, TypeError):
+            unit, size = "unknown", 0.0
+        size_prop = symbol_layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertySize)
+        layer_units = {normalize_unit(symbol.symbolLayer(i).outputUnit())
+                       for i in range(symbol.symbolLayerCount())} if symbol else set()
+        uses_map = unit in ("map", "m") or bool(layer_units & {"map", "m"})
+        if not uses_map:
+            return IconPropertyExtractor.get_icon_size(symbol_layer, 1.0), 1.0
+        if unit not in ("map", "m") or (layer_units - {"map", "m"}):
+            PropertyExtractor.context.report(
+                "Q2VT_MIXED_UNITS",
+                "Marker mixes map units with screen units; the whole icon scales with the map.")
+        if size <= 0:
+            size = 1.0
+        reference_px = 32.0
+        map_units_per_pixel = size / reference_px
+        value = size
+        if size_prop and size_prop.isActive():
+            value = PropertyExtractor.get_value_or_expression(size, size_prop, "number")
+        px = PropertyExtractor.length(value, "map" if unit not in ("map", "m") else unit,
+                                      None, symbol.sizeMapUnitScale())
+        return ex.clamp(ex.mul(px, 1.0 / (reference_px * _SPRITE_QUALITY)), 0, None), \
+            map_units_per_pixel
 
     @staticmethod
     def get_icon_size(
@@ -1501,6 +1553,10 @@ class QgisMapLibreStyleExporter:
         if symbol_type == QgsSymbol.SymbolType.Marker:
             if self._classify(symbol_layer, 0) == Strategy.UNSUPPORTED:
                 return
+            if symbol.symbolLayerCount() == 1 and symbol_layer.layerType() == "FontMarker":
+                self._convert_font_marker(symbol_layer, symbol, style_name, source_layer_name,
+                                          source_name, min_zoom, max_zoom)
+                return
             self._convert_marker_symbol(
                 symbol_layer, symbol, style_name, source_layer_name,
                 source_name, min_zoom, max_zoom,
@@ -1612,6 +1668,187 @@ class QgisMapLibreStyleExporter:
             render_line_pattern(spec, cell, 1), render_line_pattern(spec, cell, 2))
         return name
 
+    def _convert_font_marker(self, symbol_layer, symbol, style_name, source_layer_name,
+                             source_name, min_zoom, max_zoom):
+        """Export a font marker as native browser text.
+
+        Font markers draw one or more characters of a font; as text they stay
+        crisp at every zoom, keep data-defined characters (e.g. zoning
+        parameters read from attributes) and need no sprite per value. QGIS
+        sets the font pixel size to the marker size and centres the string
+        horizontally and on half its ascent vertically.
+        """
+        props = symbol_layer.dataDefinedProperties()
+        layer_def = self._base_layer_def(
+            "symbol", style_name, source_layer_name, source_name, min_zoom, max_zoom)
+        char = PropertyExtractor.get_value_or_expression(
+            symbol_layer.character(), props.property(QgsSymbolLayer.Property.PropertyCharacter),
+            "string")
+        font = QFont(symbol_layer.fontFamily())
+        stack = GlyphGenerator.resolve_fontstack(symbol_layer.fontFamily(),
+                                                 symbol_layer.fontStyle() or "")
+        if stack is None:
+            info = QFontInfo(font)
+            stack = GlyphGenerator.resolve_fontstack(info.family(), info.styleName())
+        if stack is None:
+            self.context.report("Q2VT_FONT_UNRESOLVED",
+                                f"Font marker font '{symbol_layer.fontFamily()}' is not installed.")
+            stack = symbol_layer.fontFamily()
+        dataset = join(self.utils_dir, f"{source_layer_name}.gpkg")
+        fields = ex.referenced_fields(char)
+        entry = (dataset, sorted(fields)[0]) if fields else (None, str(char))
+        self.glyphs.setdefault(stack, []).append(entry)
+
+        size = PropertyExtractor.length(
+            symbol_layer.size(), symbol_layer.sizeUnit(),
+            props.property(QgsSymbolLayer.Property.PropertySize),
+            symbol_layer.sizeMapUnitScale())
+        layout = {
+            "text-field": char,
+            "text-font": [stack],
+            "text-size": size,
+            "text-anchor": "center",
+            "text-max-width": 999,
+            "text-padding": 0,
+            "text-allow-overlap": True,
+            "text-ignore-placement": True,
+            "text-rotation-alignment": "map",
+            "text-pitch-alignment": "viewport",
+            "text-rotate": IconPropertyExtractor.get_icon_rotate(symbol_layer=symbol_layer),
+            "symbol-placement": "point",
+            "visibility": "visible",
+        }
+        offset = symbol_layer.offset()
+        if offset.x() or offset.y():
+            static_size = size if not isinstance(size, list) or ex.is_zoom_curve(size) else \
+                PropertyExtractor.length(symbol_layer.size(), symbol_layer.sizeUnit())
+            dx = PropertyExtractor.length(offset.x(), symbol_layer.offsetUnit())
+            dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit())
+            ems = [ex.ratio(dx, static_size), ex.ratio(dy, static_size)]
+            if all(ex.is_number(v) for v in ems):
+                layout["text-offset"] = ems
+            else:
+                self.context.report("Q2VT_MIXED_UNITS",
+                                    "Font marker offset and size use different unit families.")
+        layer_def["layout"].update(layout)
+        paint = {
+            "text-color": PropertyExtractor.get_value_or_expression(
+                PropertyExtractor.convert_qcolor_to_maplibre(symbol_layer.color()),
+                props.property(QgsSymbolLayer.Property.PropertyFillColor), "color"),
+            "text-opacity": PropertyExtractor.opacity(symbol, symbol_layer),
+        }
+        stroke = symbol_layer.strokeColor()
+        if symbol_layer.strokeWidth() > 0 and stroke.alpha() > 0:
+            width = PropertyExtractor.length(symbol_layer.strokeWidth(),
+                                             symbol_layer.strokeWidthUnit())
+            paint["text-halo-color"] = PropertyExtractor.convert_qcolor_to_maplibre(stroke)
+            paint["text-halo-width"] = ex.mul(width, 0.5)  # stroke is centred on the outline
+        layer_def["paint"].update(paint)
+        self.style["layers"].append(layer_def)
+
+    # --- screen-unit pattern textures -------------------------------------------
+    def _reference_map_units_per_px(self) -> float:
+        """Map units per CSS px at the component's reference zoom."""
+        px_per_unit = PropertyExtractor.static_pixels(1.0, "map")
+        return 1.0 / px_per_unit if px_per_unit else 1.0
+
+    def _marker_images(self, marker: QgsSymbol):
+        """Marker rendered at 1x and 2x for pasting into a texture cell."""
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        reference = self._reference_map_units_per_px()
+        one = SymbolImage(marker, "pattern-marker", 1, True, reference).img
+        two = SymbolImage(marker, "pattern-marker", 2, True, reference).img
+        return one, two
+
+    def _pattern_px(self, value, unit, what: str) -> float:
+        if normalize_unit(unit) in ("map", "m") and value:
+            self.context.report(
+                "Q2VT_PATTERN_MAP_UNITS",
+                f"Pattern {what} in map units is frozen at zoom {self.context.reference_zoom:g}.",
+                strategy=Strategy.APPROXIMATE.value)
+        return PropertyExtractor.static_pixels(value, unit) if value else 0.0
+
+    def _textures(self, cell_1x, cell_2x, error: float, what: str) -> str:
+        if error > self.profile.tolerance_rel and error > 0:
+            self.context.report(
+                "Q2VT_PATTERN_NONPERIODIC",
+                f"{what}: spacing rounded to whole pixels changes it by {error:.1%}.",
+                strategy=Strategy.APPROXIMATE.value)
+        name = self._next_name("pattern")
+        self.pattern_images[name] = PatternImages(cell_1x, cell_2x)
+        return name
+
+    def _register_point_pattern(self, layer) -> Optional[str]:
+        """Seamless texture for a point pattern spaced in screen units."""
+        from .fidelity.patterns import point_pattern_cell, tile_markers  # pylint: disable=import-outside-toplevel
+        marker = layer.subSymbol()
+        if marker is None:
+            return None
+        if layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY() or layer.angle():
+            self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                "Random deviation or rotation of pattern markers is ignored.",
+                                strategy=Strategy.APPROXIMATE.value)
+        dx = self._pattern_px(layer.distanceX(), layer.distanceXUnit(), "spacing")
+        dy = self._pattern_px(layer.distanceY(), layer.distanceYUnit(), "spacing")
+        if dx <= 0 or dy <= 0:
+            return None
+        disp_x = self._pattern_px(layer.displacementX(), layer.displacementXUnit(), "displacement")
+        disp_y = self._pattern_px(layer.displacementY(), layer.displacementYUnit(), "displacement")
+        one, two = self._marker_images(marker)
+        cells = []
+        for ratio, image in ((1, one), (2, two)):
+            width, height, positions, error = point_pattern_cell(
+                dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio)
+            cells.append(tile_markers(image, width, height, positions))
+        _, _, _, error = point_pattern_cell(dx, dy, disp_x, disp_y)
+        return self._textures(cells[0], cells[1], error, "Point pattern")
+
+    def _register_svg_pattern(self, layer) -> Optional[str]:
+        """Seamless texture for an SVG fill: one SVG per cell, as QGIS tiles it."""
+        from qgis.core import QgsSvgMarkerSymbolLayer, QgsMarkerSymbol, QgsApplication  # pylint: disable=import-outside-toplevel
+        from .fidelity.patterns import tile_markers  # pylint: disable=import-outside-toplevel
+        width = self._pattern_px(layer.patternWidth(), layer.patternWidthUnit(), "width")
+        if width <= 0 or not layer.svgFilePath():
+            return None
+        box = QgsApplication.svgCache().svgViewboxSize(
+            layer.svgFilePath(), 100, layer.svgFillColor(), layer.svgStrokeColor(),
+            layer.svgStrokeWidth(), 1.0)
+        aspect = box.height() / box.width() if box.width() > 0 else 1.0
+        marker_layer = QgsSvgMarkerSymbolLayer(layer.svgFilePath(), layer.patternWidth(), layer.angle())
+        marker_layer.setSizeUnit(layer.patternWidthUnit())
+        marker_layer.setFillColor(layer.svgFillColor())
+        marker_layer.setStrokeColor(layer.svgStrokeColor())
+        marker_layer.setStrokeWidth(layer.svgStrokeWidth())
+        marker_layer.setStrokeWidthUnit(layer.svgStrokeWidthUnit())
+        one, two = self._marker_images(QgsMarkerSymbol([marker_layer]))
+        cells = []
+        for ratio, image in ((1, one), (2, two)):
+            cell_w = max(1, round(width * ratio))
+            cell_h = max(1, round(width * aspect * ratio))
+            cells.append(tile_markers(image, cell_w, cell_h, [(cell_w / 2.0, cell_h / 2.0)]))
+        error = abs(round(width) - width) / width
+        return self._textures(cells[0], cells[1], error, "SVG fill")
+
+    def _register_raster_pattern(self, layer) -> Optional[str]:
+        """Texture for a raster image fill (local file or embedded image)."""
+        from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QSize  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        path = layer.imageFilePath()
+        if not path:
+            return None
+        width = self._pattern_px(layer.width(), layer.widthUnit(), "width") if layer.width() else 0
+        cells = []
+        for ratio in (1, 2):
+            size = QSize(round(width * ratio), 0) if width else QSize(0, 0)
+            image, _ = QgsApplication.imageCache().pathAsImage(path, size, True, layer.opacity(), True)
+            if image.isNull():
+                self.context.report("Q2VT_SPRITE_RENDER_FAILED",
+                                    "Raster fill image could not be loaded.", detail=path)
+                return None
+            cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
+        return self._textures(cells[0], cells[1], 0.0, "Raster fill")
+
     def _convert_marker_symbol(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -1629,11 +1866,13 @@ class QgisMapLibreStyleExporter:
 
         marker_name = self._next_name("marker")
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
-        self.marker_symbols[marker_name] = SpriteRequest(symbol.clone(), bake_rotation=False)
+        icon_size, map_units_per_pixel = IconPropertyExtractor.marker_scale(symbol, symbol_layer)
+        self.marker_symbols[marker_name] = SpriteRequest(
+            symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel)
 
         layer_def["layout"].update({
             "icon-image": IconPropertyExtractor.get_icon_image(marker_name),
-            "icon-size": IconPropertyExtractor.get_icon_size(symbol_layer, 1.0),
+            "icon-size": icon_size,
             "icon-rotate": IconPropertyExtractor.get_icon_rotate(symbol_layer=symbol_layer),
             "icon-padding": IconPropertyExtractor.get_icon_padding(),
             "icon-rotation-alignment": IconPropertyExtractor.get_icon_rotation_alignment(),
@@ -1720,15 +1959,17 @@ class QgisMapLibreStyleExporter:
         )
 
         marker_name = self._next_name("marker")
-        self.marker_symbols[marker_name] = SpriteRequest(sub_symbol.clone(), bake_rotation=True)
-
         marker_sub_layer = sub_symbol.symbolLayer(0)
+        icon_size, map_units_per_pixel = IconPropertyExtractor.marker_scale(
+            sub_symbol, marker_sub_layer)
+        self.marker_symbols[marker_name] = SpriteRequest(
+            sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel)
         rotate_with_line = LinePropertyExtractor.get_marker_line_rotate_symbols(symbol_layer)
         offset_px = LinePropertyExtractor.get_marker_line_offset(symbol_layer)
 
         layer_def["layout"].update({
             "icon-image": IconPropertyExtractor.get_icon_image(marker_name),
-            "icon-size": IconPropertyExtractor.get_icon_size(marker_sub_layer, 1.0),
+            "icon-size": icon_size,
             "icon-rotate": 0,
             "icon-padding": IconPropertyExtractor.get_icon_padding(),
             # Following the line's bearing ("map") reproduces rotateSymbols()
@@ -1751,12 +1992,7 @@ class QgisMapLibreStyleExporter:
             "visibility": "visible",
         })
         if offset_px:
-            # icon-offset is scaled by icon-size, so divide by the static
-            # icon-size (a data-defined size uses the static base size).
-            icon_size_value = layer_def["layout"]["icon-size"]
-            scale = icon_size_value if ex.is_number(icon_size_value) and icon_size_value \
-                else 1.0 / _SPRITE_QUALITY
-            layer_def["layout"]["icon-offset"] = [0, offset_px / scale]
+            layer_def["layout"]["icon-offset"] = self._icon_offset(offset_px, icon_size)
 
         layer_def["paint"].update({
             "icon-opacity": IconPropertyExtractor.get_icon_opacity(),
@@ -1768,6 +2004,27 @@ class QgisMapLibreStyleExporter:
         })
 
         self.style["layers"].append(layer_def)
+
+    @staticmethod
+    def _icon_offset(offset_px, icon_size):
+        """``icon-offset`` ``[0, y]``: offsets are multiplied by icon-size.
+
+        Map-unit offsets over map-unit icons give a constant; otherwise the
+        ratio is sampled per zoom. A data-defined icon-size uses its static
+        base (MapLibre offsets cannot depend on features and zoom at once).
+        """
+        if isinstance(icon_size, list) and not ex.is_zoom_curve(icon_size):
+            icon_size = 1.0 / _SPRITE_QUALITY
+        elif ex.is_zoom_curve(icon_size) and any(
+                not ex.is_number(o) for o in icon_size[4::2]):
+            icon_size = 1.0 / _SPRITE_QUALITY
+        value = ex.ratio(offset_px, icon_size)
+        if ex.is_number(value):
+            return [0, value]
+        out = ["step", ["zoom"], ["literal", [0, value[2]]]]
+        for zoom, item in zip(value[3::2], value[4::2]):
+            out.extend([zoom, ["literal", [0, item]]])
+        return out
 
     def _convert_simple_or_pattern_line_symbol_layer(
         self,
@@ -1884,8 +2141,15 @@ class QgisMapLibreStyleExporter:
                 })
         elif FillPropertyExtractor.is_pattern_fill(symbol_layer):
             pattern_name = None
-            if symbol_layer.layerType() == "LinePatternFill":
+            kind = symbol_layer.layerType()
+            if kind == "LinePatternFill":
                 pattern_name = self._register_line_pattern(symbol_layer, symbol)
+            elif kind == "PointPatternFill":
+                pattern_name = self._register_point_pattern(symbol_layer)
+            elif kind == "SVGFill":
+                pattern_name = self._register_svg_pattern(symbol_layer)
+            elif kind == "RasterFill":
+                pattern_name = self._register_raster_pattern(symbol_layer)
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",

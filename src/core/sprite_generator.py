@@ -28,7 +28,9 @@ from typing import Dict, List, Optional, TypeAlias, Union
 
 
 from PIL import Image
-from qgis.core import QgsSymbol, QgsMarkerSymbol
+from qgis.core import (Qgis, QgsExpressionContext, QgsExpressionContextScope,
+                       QgsExpressionContextUtils, QgsFeature, QgsFields, QgsField,
+                       QgsMapToPixel, QgsMarkerSymbol, QgsRenderContext, QgsSymbol)
 from qgis.PyQt.QtCore import qVersion
 
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
@@ -36,17 +38,22 @@ from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
 if _QT_VERSION == 5:
-    from PyQt5.QtCore import QSize, QBuffer, QIODevice
-    from PyQt5.QtGui import QImage
+    from PyQt5.QtCore import QSize, QBuffer, QIODevice, QPointF
+    from PyQt5.QtGui import QImage, QPainter
     _IO_READ_WRITE = QIODevice.ReadWrite
+    _ARGB = QImage.Format_ARGB32_Premultiplied
+    _ANTIALIAS = QPainter.Antialiasing
 else:
-    from PyQt6.QtCore import QSize, QBuffer, QIODevice, QIODeviceBase as QIODevice
-    from PyQt6.QtGui import QImage
+    from PyQt6.QtCore import QSize, QBuffer, QIODevice, QIODeviceBase as QIODevice, QPointF
+    from PyQt6.QtGui import QImage, QPainter
     _IO_READ_WRITE = QIODevice.OpenModeFlag.ReadWrite
+    _ARGB = QImage.Format.Format_ARGB32_Premultiplied
+    _ANTIALIAS = QPainter.RenderHint.Antialiasing
 
 Img: TypeAlias = Image.Image
 
 _BASE_CANVAS_PX = 1000
+_PX_PER_MM = 96.0 / 25.4
 
 
 class SpriteInputError(TypeError):
@@ -68,6 +75,11 @@ class SpriteRequest:
 
     symbol: QgsSymbol
     bake_rotation: bool = True
+    # Map units per logical sprite pixel for symbols sized in map units; the
+    # style scales the icon with zoom (see maplibre_converter).
+    map_units_per_pixel: float = 1.0
+    # Attribute values used to evaluate data-defined properties (variants).
+    attributes: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -86,6 +98,8 @@ class SymbolImage:
     name: str
     scale_factor: float = 1
     bake_rotation: bool = True
+    map_units_per_pixel: float = 1.0
+    attributes: Optional[Dict[str, object]] = None
     img: Img = field(init=False)
     width: int = field(init=False)
     height: int = field(init=False)
@@ -119,17 +133,58 @@ class SymbolImage:
         if hasattr(marker, "bufferSettings") and marker.bufferSettings():
             marker.bufferSettings().setSize(marker.bufferSettings().size() * scale_factor)
 
+    def _render_marker(self, symbol: QgsMarkerSymbol, canvas: int) -> QImage:
+        """Draw a marker at the image centre with an explicit render context.
+
+        Physical units use ``scale_factor`` × 96 DPI; map units use
+        ``map_units_per_pixel`` / ``scale_factor``. (``asImage`` previews
+        render map units at an arbitrary fixed scale.)
+        """
+        image = QImage(canvas, canvas, _ARGB)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(_ANTIALIAS)
+        context = QgsRenderContext.fromQPainter(painter)
+        context.setScaleFactor(_PX_PER_MM * self.scale_factor)
+        context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
+        context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+        expression_context = QgsExpressionContext([QgsExpressionContextUtils.globalScope()])
+        feature = None
+        if self.attributes:
+            fields = QgsFields()
+            for name in self.attributes:
+                fields.append(QgsField(name))
+            feature = QgsFeature(fields)
+            for name, value in self.attributes.items():
+                feature.setAttribute(name, value)
+            scope = QgsExpressionContextScope()
+            scope.setFeature(feature)
+            scope.setFields(fields)
+            expression_context.appendScope(scope)
+        context.setExpressionContext(expression_context)
+        try:
+            symbol.startRender(context, feature.fields() if feature else QgsFields())
+            symbol.renderPoint(QPointF(canvas / 2.0, canvas / 2.0), feature, context)
+            symbol.stopRender(context)
+        finally:
+            painter.end()
+        return image
+
     def _render(self):
         """Render at the requested scale and crop symmetrically about the origin."""
         symbol = self.symbol.clone()
         if not self.bake_rotation and isinstance(symbol, QgsMarkerSymbol):
             symbol.setAngle(0)
-        markers = []
-        self._extract_markers(symbol, markers)
-        for marker in markers:
-            self._set_symbol_size(marker, self.scale_factor)
         canvas = int(_BASE_CANVAS_PX * max(1.0, self.scale_factor / 3.0))
-        qt_img = symbol.asImage(QSize(canvas, canvas))
+        if isinstance(symbol, QgsMarkerSymbol):
+            qt_img = self._render_marker(symbol, canvas)
+        else:
+            # Fill/line previews (pattern approximations): legacy size scaling.
+            markers = []
+            self._extract_markers(symbol, markers)
+            for marker in markers:
+                self._set_symbol_size(marker, self.scale_factor)
+            qt_img = symbol.asImage(QSize(canvas, canvas))
         if qt_img is None or qt_img.isNull():
             raise SpriteRenderError(f"QGIS returned an empty image for sprite '{self.name}'")
         pil_img = self._qt_to_pil(qt_img)
@@ -187,9 +242,11 @@ class SpriteGenerator:
         if not isinstance(request, SpriteRequest):
             request = SpriteRequest(request)
         try:
-            one = SymbolImage(request.symbol, name, self.scale_factor, request.bake_rotation)
+            one = SymbolImage(request.symbol, name, self.scale_factor, request.bake_rotation,
+                              request.map_units_per_pixel, request.attributes)
             two = SymbolImage(request.symbol, name, self.scale_factor * self.lower_factor,
-                              request.bake_rotation)
+                              request.bake_rotation, request.map_units_per_pixel,
+                              request.attributes)
         except SpriteInputError as err:
             self.failed[name] = str(err)
             self.diagnostics.add("Q2VT_SPRITE_WRONG_INPUT", str(err), component=name)

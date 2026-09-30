@@ -94,3 +94,27 @@ def test_2x_sheet_is_rendered_at_double_resolution(sg, tmp_path):
     two = gen.index[2]["m"]
     assert two["pixelRatio"] == 2 and one["pixelRatio"] == 1
     assert abs(two["width"] / 2 - one["width"]) <= 2
+
+
+def test_screen_unit_point_pattern_texture(plugin, tmp_path):
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter
+    from qgis.core import QgsPointPatternFillSymbolLayer, Qgis
+    # The constructor needs a vector tile layer; set the fields the pattern code uses.
+    exporter = QgisMapLibreStyleExporter.__new__(QgisMapLibreStyleExporter)
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    exporter.pattern_images, exporter.marker_counter = {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context = exporter.context
+    layer = QgsPointPatternFillSymbolLayer()
+    layer.setDistanceX(4)
+    layer.setDistanceY(3)
+    layer.setDisplacementX(2)
+    for unit in ("DistanceX", "DistanceY", "DisplacementX"):
+        getattr(layer, f"set{unit}Unit")(Qgis.RenderUnit.Millimeters)
+    name = exporter._register_point_pattern(layer)
+    cells = exporter.pattern_images[name]
+    mm = 96 / 25.4
+    assert cells.img_1x.size == (round(4 * mm), round(2 * 3 * mm))
+    assert cells.img_2x.size == (round(8 * mm), round(12 * mm))
+    assert cells.img_1x.getbbox() is not None

@@ -35,6 +35,14 @@ from ..utils.config import _REMOVE_DUPLICATES_DISTANCE
 from ..utils.flattened_rule import FlattenedRule
 
 
+def _symbol_type(symbol) -> int:
+    value = symbol.type()
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(getattr(value, "value", -1))
+
+
 class TilesStyler:
     """Apply FlattenedRule styling to a new QgsVectorTileLayer and export the style."""
 
@@ -119,7 +127,9 @@ class TilesStyler:
         source_geom = int(flat_rule.get_attr("g"))
         target_geom = int(flat_rule.get_attr("c"))
 
-        if source_geom != target_geom:
+        if source_geom != target_geom and _symbol_type(symbol) == target_geom:
+            new_symbol = symbol  # already converted (materialized component)
+        elif source_geom != target_geom:
             if sub_symbol and symbol_layer.layerType() in ("GeometryGenerator", "CentroidFill"):
                 self._copy_data_driven_properties(symbol, sub_symbol)
                 self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
