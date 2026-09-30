@@ -161,7 +161,9 @@ class SymbolMaterializer:
                 and normalize_unit(layer.distanceYUnit()) == "map" \
                 and not self._tiling_pattern(layer):
             return self._dense_split(flat_rule, min(layer.distanceX(), layer.distanceY()),
-                                     lambda rule: self._point_grid(rule, layer))
+                                     lambda rule: self._point_grid(rule, layer),
+                                     elements=self._grid_elements(flat_rule, layer),
+                                     what="Point pattern")
         return None
 
     _SCALE_FOLDED = (QgsSymbolLayer.Property.PropertyInterval,
@@ -245,6 +247,15 @@ class SymbolMaterializer:
         props.setProperty(key, prop)
         layer.setDataDefinedProperties(props)
 
+    def _grid_elements(self, flat_rule: FlattenedRule, layer) -> float:
+        """Estimated features of a point-pattern grid (line-work markers
+        count per segment)."""
+        cells = self._layer_totals(flat_rule.layer)[0] / max(
+            layer.distanceX() * layer.distanceY(), 1e-12)
+        marker = layer.subSymbol()
+        shape = self._stroke_marker(marker) if marker is not None else None
+        return cells * (len(mat.STROKE_MARKER_PATHS.get(shape, ((),))) if shape else 1)
+
     @classmethod
     def _tiling_pattern(cls, layer) -> bool:
         """A point pattern whose image markers fill their cells and are
@@ -273,8 +284,11 @@ class SymbolMaterializer:
         parts: List[FlattenedRule] = []
         if svg_fill_draws(layer):
             if normalize_unit(layer.patternWidthUnit()) == "map":
+                width = max(layer.patternWidth(), 1e-9)
                 split = self._dense_split(flat_rule, layer.patternWidth(),
-                                          lambda rule: self._svg_grid(rule, layer))
+                                          lambda rule: self._svg_grid(rule, layer),
+                                          elements=self._layer_totals(flat_rule.layer)[0] /
+                                          (width * width), what="SVG fill")
                 parts.extend(split if split is not None else [flat_rule.derive()])
             else:
                 parts.append(flat_rule.derive())
@@ -451,7 +465,10 @@ class SymbolMaterializer:
             derived.set_attr("m", 2)
             return [derived]
         period = sum(pattern) * (2 if len(pattern) % 2 else 1)
-        return self._dense_split(flat_rule, period, dashes, min_px=self.DASH_MIN_PERIOD_PX)
+        length = self._layer_totals(flat_rule.layer)[1]  # lines, or polygon perimeters
+        return self._dense_split(flat_rule, period, dashes, min_px=self.DASH_MIN_PERIOD_PX,
+                                 elements=length / period * max(1, len(pattern) // 2),
+                                 what="Dash pattern")
 
     # A map-unit grid becomes point features only from the zoom where its
     # spacing reaches this many CSS px; below that it is a per-zoom texture
@@ -482,10 +499,57 @@ class SymbolMaterializer:
     # Interval markers along a line are few per tile even when close together.
     INTERVAL_MIN_SPACING_PX = 2.0
 
+    # Budget of generated pattern features per rule (markers, dashes, line
+    # work): past it the pattern is a texture at every zoom (reported), so
+    # an export never stalls or drops a pattern silently on large layers.
+    MAX_PATTERN_ELEMENTS = 2_000_000
+
+    def _layer_totals(self, layer):
+        """``(area, length, features)`` of a source layer in project map units
+        (cached): the basis of pattern size estimates."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeatureRequest)
+        cache = self.__dict__.setdefault("_totals", {})
+        key = layer.id()
+        if key in cache:
+            return cache[key]
+        transform = None
+        if self.project_crs and layer.crs().authid() != self.project_crs:
+            transform = QgsCoordinateTransform(layer.crs(),
+                                               QgsCoordinateReferenceSystem(self.project_crs),
+                                               QgsProject.instance())
+        area = length = 0.0
+        count = 0
+        request = QgsFeatureRequest().setNoAttributes()
+        for feature in layer.getFeatures(request):
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+            if transform is not None:
+                geometry.transform(transform)
+            count += 1
+            area += geometry.area()
+            length += geometry.length()
+        cache[key] = (area, length, count)
+        return cache[key]
+
+    def _over_budget(self, flat_rule: FlattenedRule, elements: float, what: str) -> bool:
+        if elements <= self.MAX_PATTERN_ELEMENTS:
+            return False
+        self._report("Q2VT_PATTERN_BUDGET",
+                     f"{what} would need about {int(elements):,} features (budget "
+                     f"{self.MAX_PATTERN_ELEMENTS:,}); it is drawn as a texture at every "
+                     "zoom.", flat_rule)
+        return True
+
     def _dense_split(self, flat_rule: FlattenedRule, spacing: float, materialize,
-                     min_px: Optional[float] = None):
+                     min_px: Optional[float] = None, elements: float = 0.0,
+                     what: str = "Pattern"):
         """Texture for the zooms where a map-unit grid is dense, materialized
-        points for the zooms where its spacing is large on screen."""
+        points for the zooms where its spacing is large on screen. ``elements``
+        estimates the features the materialized part would create."""
+        if self._over_budget(flat_rule, elements, what):
+            return None
         low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
         switch = None
         for zoom in range(low, high + 1):
@@ -543,8 +607,13 @@ class SymbolMaterializer:
         def points(rule):
             return [self._with_symbol(rule, marker.clone(), 0, 1, recipe)]
         if not density:
+            if self._over_budget(flat_rule, count * self._layer_totals(flat_rule.layer)[2],
+                                 "Random marker fill"):
+                return None
             return points(flat_rule)
-        return self._dense_split(flat_rule, math.sqrt(density / count), points)
+        return self._dense_split(flat_rule, math.sqrt(density / count), points,
+                                 elements=count * self._layer_totals(flat_rule.layer)[0] / density,
+                                 what="Random marker fill")
 
     # -- pattern grids (map units) --------------------------------------------
     def _anchor(self, layer, flat_rule) -> str:
@@ -874,6 +943,9 @@ class SymbolMaterializer:
                                             recipe.params + (("average", average),))
                     return [self._with_symbol(rule, symbol.clone(), 0, 2, recipe)]
                 split = self._dense_split(native, layer.interval(), exact,
+                                          elements=self._layer_totals(flat_rule.layer)[1] /
+                                          max(layer.interval(), 1e-9),
+                                          what="Marker line",
                                           min_px=self.INTERVAL_MIN_SPACING_PX)
                 rules.extend(split if split is not None else [native])
             else:

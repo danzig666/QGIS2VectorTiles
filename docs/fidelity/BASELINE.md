@@ -107,6 +107,9 @@ now has a regression test.
 | 49 | Label frames kept their integer-zoom size | MapLibre reads a size curve only at the stops covering [tile zoom, +1], so the one sawtooth `icon-size` stayed at 0.5; the padding was read at the tile zoom while the text was shaped at zoom + 1 | one style layer per zoom with its own icon-size ramp; padding doubled; `test_label_frames_follow_map_unit_text_between_zooms` (browser) |
 | 50 | Scale-dependent marker intervals drawn by MapLibre | `CASE WHEN @map_scale > 3000 THEN 10 ELSE 3 END` intervals disabled exact placement | one rule per zoom with the value at its scale, placed exactly |
 | 51 | Shape-clipped pattern markers not cut at the polygon edge | sprites cannot be clipped | closed simple markers exported as clipped polygons and outlines; `test_shape_clipped_marker_patterns_are_cut_at_the_edge` |
+| 52 | Patterns of very large polygons silently missing | a per-feature cap (200 000 grid cells) returned nothing: a 25 km² polygon with a 10 m pattern lost it | polygons cut into pieces (anchored to the whole feature) before the grid is built; `test_very_large_polygon_keeps_its_pattern` |
+| 53 | Clipped pattern line work empty on detailed polygons | one GEOS intersection of a whole feature's line work returned mixed collections or failed | clipped per piece (at most 100 x 100 cells, 256 vertices), only lines/polygons kept; `test_pattern_pieces_give_the_whole_feature_pattern` |
+| 54 | Random fills slow on detailed polygons (6-8 s per 0.8 km²) | point-in-polygon test per candidate without a prepared geometry | QGIS's native random points in polygons; `test_large_detailed_layer_patterns_scale` |
 
 ### Resolved suspicions
 

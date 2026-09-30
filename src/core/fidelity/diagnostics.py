@@ -99,6 +99,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_FONT_UNRESOLVED": CodeInfo(
         Severity.ERROR, "Label font is not installed; labels would render without glyphs",
         "Install the font or choose an installed font for the label."),
+    "Q2VT_PATTERN_BUDGET": CodeInfo(
+        Severity.WARNING, "Pattern too large to export as features; drawn as a texture",
+        "Map-unit texture sizes are exact only at integer zooms; a coarser pattern or a "
+        "smaller layer keeps exact geometry."),
     "Q2VT_SPRITE_SHEET_TOO_LARGE": CodeInfo(
         Severity.ERROR, "Sprite sheet exceeds the GPU texture size of common browsers",
         "Reduce the number or size of map-unit markers, or the export's zoom range."),

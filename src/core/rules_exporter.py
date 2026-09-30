@@ -742,6 +742,16 @@ class RulesExporter:
             if not check.isValid() or check.featureCount() <= 0:
                 return None
 
+        # Patterns on large or detailed polygons: pieces, or native points.
+        if grp.recipe is not None and grp.recipe.kind == "grid_points" and \
+                grp.source_geometry == 2 and mat.grid_splittable(grp.recipe):
+            current_input = self._pattern_pieces(current_input, grp.recipe)
+        elif grp.recipe is not None and grp.recipe.kind == "random_points":
+            current_input = self._random_points(current_input, grp.recipe)
+            check = QgsVectorLayer(current_input, "check", "ogr")
+            if not check.isValid() or check.featureCount() <= 0:
+                return None
+
         # Field mapping.
         field_mapping = self._build_field_mapping(grp, current_input)
 
@@ -794,6 +804,11 @@ class RulesExporter:
         if not check.isValid() or check.featureCount() <= 0:
             self._report_empty_output(grp, transbase)
             return None
+        anchors = [name for name in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD)
+                   if check.fields().indexFromName(name) >= 0]
+        if anchors:  # only needed to build the pieces' grids
+            transformed = self._run_alg_safe("deletecolumn", "native", INPUT=transformed,
+                                             COLUMN=anchors)
 
         self._check_cancel()
         cleaned = self._run_alg_safe(
@@ -822,6 +837,54 @@ class RulesExporter:
                 f"expression produced no geometry.",
                 layer_id=grp.layer_id, component=grp.output_dataset,
                 detail=grp.geometry_expression)
+
+    def _pattern_pieces(self, source: str, recipe: Recipe) -> str:
+        """Worker: polygons cut into pieces for a pattern grid. Each keeps its
+        feature's grid anchor, so the grid is continuous across pieces; a
+        piece has at most ``mat.PIECE_CELLS`` cells per side and
+        ``mat.PIECE_MAX_NODES`` vertices, so clipping and point-in-polygon
+        tests stay cheap however large or detailed the polygon."""
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        anchor_x, anchor_y = mat.grid_anchor_expressions(recipe, export_crs)
+        out = source
+        for name, formula in ((mat.ANCHOR_X_FIELD, anchor_x), (mat.ANCHOR_Y_FIELD, anchor_y)):
+            out = self._run_alg_safe("fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
+                                     FIELD_TYPE=0, FIELD_LENGTH=24, FIELD_PRECISION=9,
+                                     FORMULA=formula)
+        out = self._run_alg_safe("geometrybyexpression", "native", INPUT=out,
+                                 OUTPUT_GEOMETRY=0,
+                                 EXPRESSION=mat.piece_cut_expression(recipe, export_crs))
+        out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
+        out = self._run_alg_safe("subdivide", "native", INPUT=out,
+                                 MAX_NODES=mat.PIECE_MAX_NODES)
+        return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
+
+    def _random_points(self, source: str, recipe: Recipe) -> str:
+        """Worker: random marker fill points with QGIS's native (prepared
+        geometry) random points in polygons: ``count`` per feature, or
+        ``ceil(count * area / densityArea)`` (area in the recipe CRS)."""
+        from qgis.core import QgsProperty  # pylint: disable=import-outside-toplevel
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        crs = recipe.param("crs") or export_crs
+        geom = "@geometry" if crs == export_crs else \
+            f"transform(@geometry, '{export_crs}', '{crs}')"
+        count, density = recipe.param("count"), recipe.param("density")
+        number = f"ceil({count} * area({geom}) / {density!r})" if density else str(count)
+        # Every point copies its polygon's attributes, "fid" included, which
+        # a GeoPackage rejects as a duplicate key: write FlatGeobuf, then
+        # drop it.
+        points = self._temp_path("rnd")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(points)
+        points = self._run_alg_safe(
+            "randompointsinpolygons", "native", INPUT=source,
+            POINTS_NUMBER=QgsProperty.fromExpression(number), MIN_DISTANCE=0,
+            MAX_TRIES_PER_POINT=50, SEED=max(1, int(recipe.param("seed") or 1)),
+            INCLUDE_POLYGON_ATTRIBUTES=True, OUTPUT=points)
+        fields = QgsVectorLayer(points, "fields", "ogr").fields()
+        if fields.indexFromName("fid") >= 0:
+            points = self._run_alg_safe("deletecolumn", "native", INPUT=points, COLUMN=["fid"])
+        return points
 
     def _materialize_marker_points(self, source: str, recipe: Recipe, source_geometry: int) -> str:
         """Worker: exact marker-line positions as points with ``ANGLE_FIELD``."""
@@ -911,6 +974,9 @@ class RulesExporter:
         source_fields = QgsVectorLayer(current_input, "fields", "ogr").fields()
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
+        for anchor in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD):
+            if source_fields.indexFromName(anchor) >= 0:
+                mapping.append((6, f'"{anchor}"', anchor))
         return [
             {"type": m[0], "expression": m[1], "name": m[2]} for m in mapping
         ]
@@ -1148,6 +1214,10 @@ class RulesExporter:
             # Stroke-only markers are exported as their (clipped) line work.
             kind = 2 if recipe.param("fill") else \
                 1 if recipe.param("segments") or recipe.param("paths") else 0
+            if mat.grid_splittable(recipe) and flat_rule.get_attr("g") == 2:
+                # Computed per piece of the polygon (_pattern_pieces).
+                recipe = mat.Recipe(recipe.kind, recipe.placements,
+                                    recipe.params + (("anchor_fields", True),))
             return [kind, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "glyph":
             return [2, mat.glyph_expression(recipe, f"EPSG:{_EPSG_CRS}")]
@@ -1161,7 +1231,7 @@ class RulesExporter:
                 lines = "@geometry"
             return [1, mat.dash_expression(recipe, lines, crs)]
         if recipe is not None and recipe.kind == "random_points":
-            return [0, mat.random_points_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            return [0, "@geometry"]  # points already materialized (_random_points)
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":

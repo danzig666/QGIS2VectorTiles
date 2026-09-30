@@ -629,3 +629,99 @@ def test_shape_clipped_marker_patterns_are_cut_at_the_edge(plugin, tmp_path, sha
     for output, _ in parts:
         for feature in output.getFeatures():
             assert polygon.buffer(0.01, 4).contains(feature.geometry())
+
+
+@pytest.mark.parametrize("mode", ["shape", "centroid", "points"])
+def test_pattern_pieces_give_the_whole_feature_pattern(plugin, tmp_path, monkeypatch, mode):
+    """Large or detailed polygons are cut into pieces (anchored to the whole
+    feature) before a pattern grid is built: the same export without pieces
+    must give the same pattern."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from fidelity import materialize as mat
+    ring = [(100 * (1 + 0.2 * math.sin(9 * a)) * math.cos(a), 100 * (1 + 0.2 * math.sin(9 * a))
+             * math.sin(a)) for a in (2 * math.pi * k / 400 for k in range(400))]
+    wkt = "POLYGON((" + ", ".join(f"{x:.3f} {y:.3f}" for x, y in ring + ring[:1]) + "))"
+
+    def export(folder, pieces):
+        folder.mkdir()
+        layer = _layer("Polygon", [wkt], str(folder / "big.gpkg"))
+        pp = QgsPointPatternFillSymbolLayer()
+        if mode == "points":
+            marker = _marker(Qgis.MarkerShape.Square, 0.6)
+            pp.setClipMode(Qgis.MarkerClipMode.CentroidWithin)
+        else:
+            marker = _marker(Qgis.MarkerShape.Cross, 1.2)
+            marker.symbolLayer(0).setStrokeWidth(0.1)
+            marker.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+            pp.setClipMode(Qgis.MarkerClipMode.Shape if mode == "shape"
+                           else Qgis.MarkerClipMode.CentroidWithin)
+        marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+        pp.setSubSymbol(marker)
+        spacing = 0.7 if mode == "points" else 2.0  # pieces of 100 cells: 70 / 200 m
+        for name in ("DistanceX", "DistanceY"):
+            getattr(pp, f"set{name}")(spacing)
+            getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+        with monkeypatch.context() as patch:
+            if not pieces:
+                patch.setattr(mat, "grid_splittable", lambda recipe: False)
+            outputs, rules, _ = _export(plugin, layer, folder)
+        exported = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+        assert len(exported) == 1
+        output = exported[0][0]
+        base = [o for o, r in zip(outputs, rules) if r.recipe is None]  # the texture zooms
+        polygon = next(base[0].getFeatures()).geometry() if base else None
+        return output.featureCount(), QgsGeometry.collectGeometry(
+            [f.geometry() for f in output.getFeatures()]), polygon
+
+    count, ours, exported_polygon = export(tmp_path / "pieces", True)
+    assert count > 4
+    if mode == "shape":
+        # Clip the unclipped grid of the exported polygon segment by segment.
+        from qgis.core import QgsExpression, QgsExpressionContext
+        polygon = exported_polygon
+        feature = QgsFeature()
+        feature.setGeometry(polygon)
+        context = QgsExpressionContext()
+        context.setFeature(feature)
+        recipe = mat.grid_recipe(2.0, 2.0, 0, 0, 0, 0, "EPSG:3857", "feature",
+                                 segments=mat.marker_segments("Cross", 1.2),
+                                 clip_mode="none")
+        grid = QgsExpression(mat.grid_expression(recipe)).evaluate(context)
+        clipped = [QgsGeometry(part.clone()).intersection(polygon)
+                   for part in grid.constGet()]
+        expected = QgsGeometry.unaryUnion([g for g in clipped if not g.isEmpty()]).length()
+        assert QgsGeometry.unaryUnion([ours]).length() == pytest.approx(expected, rel=2e-3)
+        return
+    _, whole, _ = export(tmp_path / "whole", False)
+    assert not whole.isEmpty()
+    if mode == "points":
+        assert {(round(p.x(), 6), round(p.y(), 6)) for p in ours.vertices()} == \
+            {(round(p.x(), 6), round(p.y(), 6)) for p in whole.vertices()}
+    else:
+        # Overlapping arms of neighbouring markers are dissolved per output
+        # feature: compare the drawn line work.
+        assert QgsGeometry.unaryUnion([ours]).length() == pytest.approx(
+            QgsGeometry.unaryUnion([whole]).length(), rel=1e-6)
+
+
+def test_patterns_over_the_budget_become_textures(plugin, tmp_path, monkeypatch):
+    """A pattern that would need more features than the budget is drawn as a
+    texture at every zoom and reported, instead of stalling the export or
+    being dropped."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import materializer as materializer_module
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 1000)
+    layer = _layer("Polygon", ["POLYGON((-100 -100, 100 -100, 100 100, -100 100, -100 -100))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Circle, 1)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):  # 400 m2 / 4 m2 = 10000 markers > 1000
+        getattr(pp, f"set{name}")(2)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not any(r.recipe for r in rules)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")

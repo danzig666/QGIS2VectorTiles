@@ -217,7 +217,9 @@ def recipe_to_dict(recipe: Optional[Recipe]) -> Optional[Dict]:
             "params": dict(recipe.params)}
 
 
-MAX_GRID_POINTS = 200000
+# Grid cells one feature (or piece) may generate; the materializer's pattern
+# budget keeps exports below it, so a grid is never silently dropped.
+MAX_GRID_POINTS = 2000000
 
 
 def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float,
@@ -365,6 +367,68 @@ def marker_segments(shape: str, size: float, angle: float = 0.0,
     return tuple(segments)
 
 
+# Grid anchor of the whole feature, kept when a polygon is cut into pieces.
+ANCHOR_X_FIELD = "q2vt_anchor_x"
+ANCHOR_Y_FIELD = "q2vt_anchor_y"
+# Pieces of at most this many pattern cells per side (and PIECE_MAX_NODES
+# vertices): clipping and point-in-polygon tests stay cheap and no feature
+# needs more than MAX_GRID_POINTS grid cells.
+PIECE_CELLS = 100
+PIECE_MAX_NODES = 256
+
+
+def grid_splittable(recipe: Recipe) -> bool:
+    """Whether a grid gives the same result computed piece by piece: markers
+    clipped to the shape, or kept when their centre is inside. (Kept when
+    completely inside / touching, or tested on a shrunken polygon, depends on
+    the whole polygon.)"""
+    if recipe.kind != "grid_points" or recipe.param("anchor") != "feature":
+        return False
+    if recipe.param("inset"):
+        return False
+    mode = recipe.param("clip_mode") or ("shape" if recipe.param("clip_shape") else "centroid")
+    return mode in ("shape", "centroid")
+
+
+def grid_anchor_expressions(recipe: Recipe, export_crs: str = "EPSG:3857"):
+    """``(x, y)`` expressions of a feature's grid anchor in the recipe CRS."""
+    crs = recipe.param("crs")
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    top = bool(recipe.param("top"))
+    return f"x_min({geom})", (f"y_max({geom})" if top else f"y_min({geom})")
+
+
+def piece_cut_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """The feature cut into square pieces of ``PIECE_CELLS`` pattern cells (in
+    the recipe CRS; the tile origin is offset by an irrational fraction so
+    no grid node falls on a cut)."""
+    crs = recipe.param("crs")
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    side = PIECE_CELLS * max(float(recipe.param("dx")), float(recipe.param("dy")))
+    shift = side * 0.3183098861837907  # 1/pi
+    tile = (f"make_rectangle_3points("
+            f"make_point({shift!r} + (@q2vt_t[0] + @element % @q2vt_t[2]) * {side!r}, "
+            f"{shift!r} + (@q2vt_t[1] + floor(@element / @q2vt_t[2])) * {side!r}), "
+            f"make_point({shift!r} + (@q2vt_t[0] + @element % @q2vt_t[2] + 1) * {side!r}, "
+            f"{shift!r} + (@q2vt_t[1] + floor(@element / @q2vt_t[2])) * {side!r}), "
+            f"make_point({shift!r} + (@q2vt_t[0] + @element % @q2vt_t[2] + 1) * {side!r}, "
+            f"{shift!r} + (@q2vt_t[1] + floor(@element / @q2vt_t[2]) + 1) * {side!r}))")
+    body = (
+        f"with_variable('q2vt_c', {geom}, "
+        f"with_variable('q2vt_t', array(floor((x_min(@q2vt_c) - {shift!r}) / {side!r}), "
+        f"floor((y_min(@q2vt_c) - {shift!r}) / {side!r}), "
+        f"floor((x_max(@q2vt_c) - {shift!r}) / {side!r}) - "
+        f"floor((x_min(@q2vt_c) - {shift!r}) / {side!r}) + 1, "
+        f"floor((y_max(@q2vt_c) - {shift!r}) / {side!r}) - "
+        f"floor((y_min(@q2vt_c) - {shift!r}) / {side!r}) + 1), "
+        f"if(@q2vt_t[2] * @q2vt_t[3] <= 1, @q2vt_c, "
+        f"collect_geometries(array_filter(array_foreach(generate_series(0, "
+        f"@q2vt_t[2] * @q2vt_t[3] - 1), intersection(@q2vt_c, {tile})), "
+        f"@element IS NOT NULL AND NOT is_empty(@element))))))"
+    )
+    return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
+
+
 def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     """Marker positions of a QGIS point-pattern fill, clipped to the polygon.
 
@@ -395,6 +459,10 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     top = bool(p("top")) and feature
     x0_expr = "x_min(@q2vt_g)" if feature else "0"
     y0_expr = ("y_max(@q2vt_g)" if top else "y_min(@q2vt_g)") if feature else "0"
+    if feature and p("anchor_fields"):
+        # A piece of a larger polygon: the grid stays anchored to the whole
+        # feature (see grid_anchor_expressions).
+        x0_expr, y0_expr = f'"{ANCHOR_X_FIELD}"', f'"{ANCHOR_Y_FIELD}"'
     sy = -1.0 if top else 1.0
     # Measured: with rows counted from the top, even columns are displaced.
     col_parity = 0 if top else 1
@@ -465,7 +533,12 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         mode = p("clip_mode") or ("shape" if p("clip_shape") else "centroid")
         final = "@q2vt_all"
         if mode == "shape":  # drawing clipped to the polygon
-            keep, final = "true", "intersection(@q2vt_g, @q2vt_all)"
+            # Only the clipped line work / shapes: an arm that merely touches
+            # the edge adds a point, which made GEOS results mixed collections.
+            wanted = "Polygon" if p("fill") else "Line"
+            keep, final = "true", (
+                f"collect_geometries(array_filter(geometries_to_array(intersection("
+                f"@q2vt_g, @q2vt_all)), geometry_type(@element) = '{wanted}'))")
         elif mode == "within":  # bounds completely inside
             keep = f"contains(@q2vt_g, {rect})"
         elif mode == "none":  # bounds touching the polygon, drawn whole
