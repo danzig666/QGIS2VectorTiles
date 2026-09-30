@@ -2738,9 +2738,9 @@ class QgisMapLibreStyleExporter:
     @classmethod
     def _line_label_zoom_split(cls, layer_def: dict) -> list:
         """A line label with a zoom-curve ``text-size`` as one style layer per
-        integer zoom below 18, each with the curve clamped to its own zoom
-        range (the sizes it renders are unchanged; the zoom-18 fit check then
-        uses the largest size the layer draws)."""
+        integer zoom below 18, each with its own two stops (the sizes it
+        draws are unchanged) and a stop at zoom 18 back at the tile-zoom size
+        for MapLibre's fit check."""
         layout = layer_def["layout"]
         size = layout.get("text-size")
         if layout.get("symbol-placement") not in ("line", "line-center") \
@@ -2761,8 +2761,15 @@ class QgisMapLibreStyleExporter:
             part["id"] = f"{layer_def['id']}_z{zoom}"
             part["minzoom"] = max(low, zoom)
             part["maxzoom"] = min(high, zoom + 1)
-            part["layout"]["text-size"] = ["interpolate", list(size[1]), ["zoom"],
-                                           zoom, values[zoom], zoom + 1, values[zoom + 1]]
+            curve = ["interpolate", list(size[1]), ["zoom"],
+                     zoom, values[zoom], zoom + 1, values[zoom + 1]]
+            if zoom + 1 < top:
+                # Drawing reads only the stops covering [tile zoom, +1]
+                # (symbol_size.ts); the zoom-18 fit check then sees the
+                # size drawn at the tile zoom, so a label that fits the
+                # (tile-clipped) line is kept.
+                curve += [top, values[zoom]]
+            part["layout"]["text-size"] = curve
             out.append(part)
         if high > top:
             rest = copy.deepcopy(layer_def)

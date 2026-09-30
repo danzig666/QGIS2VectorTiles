@@ -51,12 +51,12 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer, metric="near"):
+def _compare(tmp_path, layer, metric="near", center=CENTER):
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
-    extent = QgsRectangle(CENTER[0] - 2 * half, CENTER[1] - 2 * half,
-                          CENTER[0] + 2 * half, CENTER[1] + 2 * half)
+    extent = QgsRectangle(center[0] - 2 * half, center[1] - 2 * half,
+                          center[0] + 2 * half, center[1] + 2 * half)
     out = tmp_path / "out"
     out.mkdir()
     export_dir = QGIS2VectorTiles(min_zoom=15, max_zoom=17, extent=extent, output_dir=str(out),
@@ -64,12 +64,12 @@ def _compare(tmp_path, layer, metric="near"):
                                   background_type=2).convert_project_to_vector_tiles()
     to_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
                                     QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
-    point = to_wgs.transform(*CENTER)
+    point = to_wgs.transform(*center)
     views = tmp_path / "views.json"
     views.write_text(json.dumps([{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": ZOOM,
                                   "width": SIZE, "height": SIZE}]))
     qgis_png = str(tmp_path / "v_qgis.png")
-    gallery.qgis_render(layer, CENTER, ZOOM, SIZE, qgis_png)
+    gallery.qgis_render(layer, center, ZOOM, SIZE, qgis_png)
     server = _serve(export_dir)
     try:
         run = subprocess.run(["node", os.path.join(HERE, "gallery_capture.mjs"), export_dir,
@@ -150,16 +150,24 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
     assert _compare(tmp_path, layer, metric="shape") < 0.08
 
 
-@pytest.mark.parametrize("placement", ["Line", "Curved"])
-def test_map_unit_line_labels_are_drawn(tmp_path, placement):
+@pytest.mark.parametrize("placement,gallery_cell", [
+    ("Line", None), ("Curved", None), ("Curved", 209)])
+def test_map_unit_line_labels_are_drawn(tmp_path, placement, gallery_cell):
     from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
     from q2vt_fixtures import to_geopackage as save
     memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=name:string", "roads", "memory")
     feature = QgsFeature(memory.fields())
     feature.setAttribute("name", "1ő")
     points = [(-120, -80), (-40, 100), (30, -40), (120, 70)]
-    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(" + ", ".join(
-        f"{CENTER[0] + x} {CENTER[1] + y}" for x, y in points) + ")"))
+    center = CENTER
+    wkt = "LINESTRING(" + ", ".join(f"{center[0] + x} {center[1] + y}" for x, y in points) + ")"
+    if gallery_cell is not None:  # where tile edges clipped the style gallery's label
+        row, col = divmod(gallery_cell, gallery.COLUMNS)
+        x0 = gallery.ORIGIN[0] + col * (gallery.CELL + gallery.GAP)
+        y0 = gallery.ORIGIN[1] - row * (gallery.CELL + gallery.GAP)
+        wkt = gallery.feature_geometries("LineString", x0, y0, 1)[0]
+        center = (x0 + gallery.CELL / 2, y0 - gallery.CELL / 2)
+    feature.setGeometry(QgsGeometry.fromWkt(wkt))
     memory.dataProvider().addFeature(feature)
     layer = save(memory, str(tmp_path / "roads.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "200,200,200"})))
@@ -167,13 +175,13 @@ def test_map_unit_line_labels_are_drawn(tmp_path, placement):
     settings.fieldName = "name"
     settings.placement = getattr(Qgis.LabelPlacement, placement)
     fmt = QgsTextFormat()
-    fmt.setSize(40)
+    fmt.setSize(40 if gallery_cell is None else 80)
     fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
     settings.setFormat(fmt)
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
     # MapLibre fits line labels with the text size at zoom 18 (4x the z16
     # size here): without per-zoom sizes the label is dropped.
-    ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink")
+    ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink", center=center)
     line_only = 0.5 * ink_qgis
     assert ink_browser > line_only and ink_browser == pytest.approx(ink_qgis, rel=0.35)

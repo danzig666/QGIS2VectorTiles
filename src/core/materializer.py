@@ -159,7 +159,8 @@ class SymbolMaterializer:
         """A point pattern whose image markers fill their cells and are
         clipped to the polygon ("shape" clip mode) is a texture: exported as
         points, the edge markers would be drawn whole (sprites cannot be
-        clipped), so it stays a clipped browser pattern."""
+        clipped), so it stays a clipped browser pattern. Data-defined
+        markers stay points (a texture has one appearance)."""
         try:
             if int(layer.clipMode()) != int(Qgis.MarkerClipMode.Shape):
                 return False
@@ -169,7 +170,11 @@ class SymbolMaterializer:
         if marker is None or cls._stroke_marker(marker) is not None or \
                 normalize_unit(marker.sizeUnit()) != "map":
             return False
-        return marker.size() >= 0.5 * min(layer.distanceX(), layer.distanceY())
+        for index in range(marker.symbolLayerCount()):
+            props = marker.symbolLayer(index).dataDefinedProperties()
+            if any(props.isActive(key) for key in props.propertyKeys()):
+                return False
+        return marker.size() >= 0.9 * min(layer.distanceX(), layer.distanceY())
 
     def _svg_fill(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """``QgsSVGFillSymbolLayer::renderPolygon``: the SVG texture (only when

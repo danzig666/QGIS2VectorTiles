@@ -521,9 +521,11 @@ def test_map_unit_dashes_match_qgis(plugin, tmp_path, geometry, offset, ring_fil
     assert mask_difference(reference, ours) < 0.05
 
 
-@pytest.mark.parametrize("size,clip,textured", [
-    (15, "Shape", True), (4, "Shape", False), (15, "CentroidWithin", False)])
-def test_point_patterns_of_cell_sized_images_stay_textures(plugin, tmp_path, size, clip, textured):
+@pytest.mark.parametrize("size,clip,colour_ddp,textured", [
+    (15, "Shape", False, True), (7.5, "Shape", False, False), (15, "CentroidWithin", False, False),
+    (15, "Shape", True, False)])
+def test_point_patterns_of_cell_sized_images_stay_textures(plugin, tmp_path, size, clip,
+                                                           colour_ddp, textured):
     """Clipped to the shape, markers as large as their cells tile like a
     texture: points would draw the edge markers whole (sprites are not
     clipped), so the browser pattern (clipped) is kept."""
@@ -533,6 +535,10 @@ def test_point_patterns_of_cell_sized_images_stay_textures(plugin, tmp_path, siz
     pp = QgsPointPatternFillSymbolLayer()
     marker = _marker(Qgis.MarkerShape.Square, size)
     marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    if colour_ddp:  # one sprite per value: only points carry it
+        from qgis.core import QgsProperty, QgsSymbolLayer
+        marker.symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.Property.PropertyFillColor, QgsProperty.fromExpression("'red'"))
     pp.setSubSymbol(marker)
     for name in ("DistanceX", "DistanceY"):
         getattr(pp, f"set{name}")(15)
