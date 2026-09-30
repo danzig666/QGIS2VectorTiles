@@ -168,3 +168,44 @@ def test_positive_line_offset_is_right_of_direction_like_maplibre(mc):
     layer.setOffset(10)
     layer.setOffsetUnit(Qgis.RenderUnit.Pixels)
     assert mc.LinePropertyExtractor.get_line_offset(layer) == 10
+
+
+def _label_settings(buffer_size, buffer_unit, text_px=40):
+    from qgis.core import QgsPalLayerSettings, QgsTextBufferSettings, QgsTextFormat
+    settings = QgsPalLayerSettings()
+    text = QgsTextFormat()
+    text.setSize(text_px)
+    text.setSizeUnit(Qgis.RenderUnit.Pixels)
+    buffer = QgsTextBufferSettings()
+    buffer.setEnabled(True)
+    buffer.setSize(buffer_size)
+    buffer.setSizeUnit(buffer_unit)
+    text.setBuffer(buffer)
+    settings.setFormat(text)
+    return settings, text
+
+
+def test_label_halo_is_half_the_qgis_buffer(mc):
+    """QGIS strokes the glyph outline with a pen as wide as the buffer size
+    (measured: a 10 px buffer reaches 5 px beyond the glyphs); a MapLibre
+    halo reaches its full width. Percentages are of the text size."""
+    settings, text = _label_settings(10, Qgis.RenderUnit.Pixels)
+    assert mc.TextPropertyExtractor.get_text_halo_width(text, settings) == pytest.approx(5.0)
+    settings, text = _label_settings(10, Qgis.RenderUnit.Percentage)
+    assert mc.TextPropertyExtractor.get_text_halo_width(text, settings) == pytest.approx(2.0)
+
+
+def test_single_line_label_placement(mc):
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.Line
+    assert mc.IconPropertyExtractor.get_symbol_placement(settings) == "line-center"
+    settings.repeatDistance = 100
+    assert mc.IconPropertyExtractor.get_symbol_placement(settings) == "line"
+    line = settings.lineSettings()
+    line.setPlacementFlags(Qgis.LabelLinePlacementFlags(
+        Qgis.LabelLinePlacementFlag.AboveLine | Qgis.LabelLinePlacementFlag.MapOrientation))
+    settings.setLineSettings(line)
+    assert mc.TextPropertyExtractor.get_text_anchor(settings) == "bottom"
+    settings.multilineAlign = Qgis.LabelMultiLineAlignment.Left
+    assert mc.TextPropertyExtractor.get_text_justify(settings) == "left"

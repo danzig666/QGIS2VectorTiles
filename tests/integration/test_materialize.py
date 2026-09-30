@@ -377,9 +377,10 @@ def test_nested_geometry_generators_match_qgis(plugin, tmp_path):
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
     outputs, rules, diags = _export(plugin, layer, tmp_path)
     assert len(rules) == 1
-    for output, rule in zip(outputs, rules):  # the styler draws with the sub-symbol
-        output.setRenderer(QgsSingleSymbolRenderer(
-            rule.rule.symbol().symbolLayer(0).subSymbol().clone()))
+    for output, rule in zip(outputs, rules):
+        # Line generators are exported as line rules on the generated lines.
+        assert rule.pre_generator and rule.rule.symbol().symbolLayer(0).layerType() == "SimpleLine"
+        output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
     ours = ink_mask(render(outputs, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
 
@@ -805,3 +806,74 @@ def test_patterns_over_the_budget_become_textures(plugin, tmp_path, monkeypatch)
     _, rules, diags = _export(plugin, layer, tmp_path)
     assert not any(r.recipe for r in rules)
     assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_map_unit_line_offset_is_the_offset_line(plugin, tmp_path):
+    """Gyorsforgalmi út: +-15 m offsets of a 10 m line; MapLibre's
+    line-offset crossed itself at sharp corners, the offset line is exported."""
+    layer = _layer("LineString", LINES, str(tmp_path / "off.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 3.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setOffset(6.0)
+    line.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules if r.recipe is not None] == ["line_offset"]
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
+
+
+def test_wide_map_unit_pattern_strokes_are_cut_at_the_edge(plugin, tmp_path):
+    """Csíkozás: 20 m line markers with a 7 m stroke (and a data-defined
+    colour): the stroke is exported as polygons clipped to the shape."""
+    from qgis.core import QgsPointPatternFillSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -20 100, -97 71, -97 -83))"],
+                   str(tmp_path / "wide.gpkg"))
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 20)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setStrokeWidth(7)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    marker.setStrokeColor(QColor("black"))
+    marker.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeColor,
+                                  QgsProperty.fromExpression("'0,0,0,255'"))
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name, value in (("DistanceX", 15), ("DistanceY", 25)):
+        getattr(pattern, f"set{name}")(value)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    pattern.setClipMode(Qgis.MarkerClipMode.Shape)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    grids = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert grids and all(o.geometryType() == Qgis.GeometryType.Polygon for o, _ in grids)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+    ours = ink_mask(render([o for o, _ in grids], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
+
+
+def test_generator_marker_text_is_evaluated_per_generated_part(plugin, tmp_path):
+    """Polygon méretezés: a font marker whose character is
+    length(geometry_n($geometry, @geometry_part_num)) on segments_to_lines():
+    QGIS writes every segment's length; the source-feature value was NULL."""
+    from qgis.core import (QgsFontMarkerSymbolLayer, QgsGeometryGeneratorSymbolLayer,
+                           QgsProperty, QgsSymbolLayer)
+    layer = _layer("Polygon", ["POLYGON((-90 -80, 50 -80, 50 60, -90 -80))"],
+                   str(tmp_path / "dim.gpkg"))
+    font = QgsFontMarkerSymbolLayer("DejaVu Sans", "A", 4)
+    font.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyCharacter, QgsProperty.fromExpression(
+        "format_number(length(geometry_n($geometry, @geometry_part_num)), 1)"))
+    markers = QgsMarkerLineSymbolLayer(True, 3)
+    markers.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    markers.setSubSymbol(QgsMarkerSymbol([font]))
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "segments_to_lines($geometry)", "SymbolType": "Line"})
+    generator.setSubSymbol(QgsLineSymbol([markers]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    texts = set()
+    for output, rule in zip(outputs, rules):
+        names = [f.name() for f in output.fields() if f.name().startswith("q2vt_property_char")]
+        texts |= {feature[name] for feature in output.getFeatures() for name in names}
+    assert texts == {"140.0", "198.0"}  # two 140 m legs and the hypotenuse

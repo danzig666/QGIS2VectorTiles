@@ -654,6 +654,10 @@ class RulesFlattener:
             geom_generator = None
             sub_symbol = symbol_layer.subSymbol()
             layer_type = symbol_layer.layerType() if symbol_layer else None
+            if layer_type == "GeometryGenerator" and sub_symbol is not None and \
+                    int(getattr(sub_symbol.type(), "value", sub_symbol.type())) == 1:
+                split_rules.extend(self._generated_line_rules(flat_rule, symbol_layer, layer_idx))
+                continue
             if layer_type == "GeometryGenerator":
                 symbol_type = sub_symbol.type()
                 geom_generator = True
@@ -701,6 +705,46 @@ class RulesFlattener:
                 split_rules.append(rule_clone)
 
         return split_rules
+
+    def _generated_line_rules(self, flat_rule: FlattenedRule, generator, layer_idx: int):
+        """A geometry generator drawn with a line symbol, as line rules on the
+        generated geometry: one per sub-symbol layer, exported like the
+        layers of a line layer (exact marker positions, hash lines, offsets
+        ...). ``pre_generator`` makes the exporter generate the lines first
+        and evaluate geometry-dependent properties on every generated part,
+        as QGIS does (``length(geometry_n($geometry, @geometry_part_num))``
+        is one segment's length)."""
+        sub_symbol = generator.subSymbol()
+        rules = []
+        for inner_idx in reversed(range(sub_symbol.symbolLayerCount())):
+            inner = sub_symbol.symbolLayer(inner_idx)
+            if not inner.enabled():
+                continue
+            rule_clone = flat_rule.derive()
+            single = sub_symbol.clone()
+            for remove_idx in reversed(range(single.symbolLayerCount())):
+                if remove_idx != inner_idx:
+                    single.deleteSymbolLayer(remove_idx)
+            single.setOpacity(single.opacity() * flat_rule.rule.symbol().opacity())
+            rule_clone.rule.setSymbol(single)
+            rule_clone.set_attr("g", 1)
+            rule_clone.set_attr("c", 1)
+            # A distinct dataset per sub-symbol layer (their recipes differ).
+            rule_clone.set_attr("s", layer_idx * 100 + inner_idx)
+            rule_clone.pre_generator = generator.geometryExpression()
+            clone_layer = single.symbolLayers()[0]
+            self._fold_enabled_property(rule_clone, clone_layer)
+            draw_pass = generator.renderingPass() if self._honor_passes else 0
+            order = (-flat_rule.get_attr("l"), draw_pass, self._draw_seq, layer_idx, inner_idx)
+            rule_clone.order = order + (0,)
+            materialized = self.materializer.materialize(rule_clone, clone_layer)
+            if materialized is not None:
+                for part, component in enumerate(materialized):
+                    component.order = order + (part,)
+                rules.extend(materialized)
+            else:
+                rules.append(rule_clone)
+        return rules
 
     @staticmethod
     def _convert_fill_outline_to_line_symbol(fill_symbol: QgsFillSymbol) -> QgsFillSymbol | None:

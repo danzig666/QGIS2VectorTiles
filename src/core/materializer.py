@@ -138,6 +138,9 @@ class SymbolMaterializer:
             dashes = self._dash_segments(flat_rule, layer)
             if dashes is not None:
                 return dashes
+            if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
+                    and normalize_unit(layer.offsetUnit()) == "map":
+                return self._offset_line(flat_rule, layer)
         if kind in ("SimpleLine", "MarkerLine", "HashLine") and flat_rule.get_attr("g") == 2 \
                 and (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
             outline = self._polygon_outline_offset(flat_rule, layer)
@@ -341,6 +344,19 @@ class SymbolMaterializer:
         if layer.layerType() == "HashLine":
             converted = self._hash_as_marker_line(clone, rule)
             rule.rule.symbol().changeSymbolLayer(0, converted)
+        return [rule]
+
+    def _offset_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """A map-unit line offset as the offset line itself
+        (``QgsSymbolLayerUtils::offsetLine``: mitred offset curve): MapLibre's
+        ``line-offset`` crosses itself and bunches up at sharp corners
+        (Gyorsforgalmi út, +-15 m of a 10 m wide line)."""
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        rule = flat_rule.derive()
+        rule.rule.symbol().symbolLayer(0).setOffset(0.0)
+        rule.recipe = mat.Recipe("line_offset", params=(
+            ("offset", float(layer.offset())), ("crs", crs)))
+        rule.set_attr("m", 1)
         return [rule]
 
     # QgsFontMarkerSymbolLayer: pixel sizes above this are drawn scaled up.
@@ -719,7 +735,10 @@ class SymbolMaterializer:
             return None
         active = {k for k in layer.dataDefinedProperties().propertyKeys()
                   if layer.dataDefinedProperties().property(k).isActive()}
-        if active:
+        # A data-defined stroke colour carries over to the exported line work
+        # (the pieces keep their feature's attributes); anything else would
+        # change the geometry.
+        if active - {int(QgsSymbolLayer.Property.PropertyStrokeColor)}:
             return None
         return shape
 
@@ -797,13 +816,40 @@ class SymbolMaterializer:
         offset = simple.offset()
         segments = mat.marker_segments(shape, simple.size(), simple.angle(),
                                        offset.x(), offset.y())
-        stroke = QgsSimpleLineSymbolLayer(simple.strokeColor(), simple.strokeWidth())
-        stroke.setWidthUnit(simple.strokeWidthUnit())
-        stroke.setWidthMapUnitScale(simple.strokeWidthMapUnitScale())
-        stroke.setPenStyle(simple.strokeStyle())
-        stroke.setPenCapStyle(simple.penCapStyle())
-        stroke.setPenJoinStyle(simple.penJoinStyle())
-        symbol = QgsLineSymbol([stroke])
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        # A solid stroke in map units becomes polygons (its outline), so
+        # "Shape" clipping cuts it at the polygon edge exactly.
+        polygons = None
+        # Only wide strokes cut by the shape need it (a hairline's overshoot
+        # is invisible, and line work stays cheaper).
+        if normalize_unit(simple.strokeWidthUnit()) == "map" and simple.strokeWidth() > 0 \
+                and simple.strokeStyle() == Qt.PenStyle.SolidLine \
+                and clip == int(Qgis.MarkerClipMode.Shape) \
+                and simple.strokeWidth() >= 0.2 * min(layer.distanceX(), layer.distanceY()):
+            cap = {Qt.PenCapStyle.FlatCap: "flat", Qt.PenCapStyle.RoundCap: "round"}.get(
+                simple.penCapStyle(), "square")
+            join = {Qt.PenJoinStyle.BevelJoin: "bevel", Qt.PenJoinStyle.RoundJoin: "round"}.get(
+                simple.penJoinStyle(), "miter")
+            polygons = (simple.strokeWidth() / 2.0, cap, join)
+            fill = QgsSimpleFillSymbolLayer(simple.strokeColor(), Qt.BrushStyle.SolidPattern,
+                                            simple.strokeColor(), Qt.PenStyle.NoPen)
+            colour = simple.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyStrokeColor)
+            if colour and colour.isActive():
+                fill.dataDefinedProperties().setProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                                         QgsProperty(colour))
+            symbol = QgsFillSymbol([fill])
+        else:
+            stroke = QgsSimpleLineSymbolLayer(simple.strokeColor(), simple.strokeWidth())
+            stroke.setWidthUnit(simple.strokeWidthUnit())
+            stroke.setWidthMapUnitScale(simple.strokeWidthMapUnitScale())
+            stroke.setPenStyle(simple.strokeStyle())
+            stroke.setPenCapStyle(simple.penCapStyle())
+            stroke.setPenJoinStyle(simple.penJoinStyle())
+            colour = simple.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyStrokeColor)
+            if colour and colour.isActive():
+                stroke.dataDefinedProperties().setProperty(QgsSymbolLayer.Property.PropertyStrokeColor,
+                                                           QgsProperty(colour))
+            symbol = QgsLineSymbol([stroke])
         symbol.setOpacity(marker.opacity())
         recipe = mat.grid_recipe(
             layer.distanceX(), layer.distanceY(),
@@ -818,8 +864,8 @@ class SymbolMaterializer:
                 int(Qgis.MarkerClipMode.CentroidWithin): "centroid",
                 int(Qgis.MarkerClipMode.CompletelyWithin): "within",
                 int(Qgis.MarkerClipMode.NoClipping): "none"}.get(clip, "shape"),
-            deviation=self._deviation(layer, flat_rule), seed=layer.seed())
-        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
+            deviation=self._deviation(layer, flat_rule), seed=layer.seed(), stroke=polygons)
+        return [self._with_symbol(flat_rule, symbol, 2 if polygons else 1, 1, recipe)]
 
     def _svg_grid(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         from qgis.core import QgsApplication, QgsSvgMarkerSymbolLayer  # pylint: disable=import-outside-toplevel
@@ -999,13 +1045,31 @@ class SymbolMaterializer:
         if flat_rule.get_attr("g") == 2:
             needs_offset_line = points | ({"Interval"} if exact_interval else set())
         line_offset = 0.0
-        if offset and needs_offset_line:
+        # A screen-unit offset: placed on the offset line of every zoom
+        # (converted at the middle of the zoom), like the screen intervals.
+        zoom_offset_mm = None
+        # Offsetting the markers themselves is exact only at the ends of open
+        # lines, and only for unrotated markers: QGIS turns a marker's offset
+        # with the marker's own angle (dimension arrows at -90 degrees).
+        own_angle = any(getattr(sub.symbolLayer(i), "angle", lambda: 0)()
+                        for i in range(sub.symbolLayerCount()))
+        if offset and (points or exact_interval) and (needs_offset_line or own_angle):
             if normalize_unit(offset_unit) == "map":
-                line_offset, offset = offset, 0.0
-            else:
+                if needs_offset_line:
+                    line_offset, offset = offset, 0.0
+            elif _to_mm(offset, offset_unit) is not None and not \
+                    layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyOffset):
+                zoom_offset_mm, offset = _to_mm(offset, offset_unit), 0.0
+            elif needs_offset_line:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Screen-unit offset: markers are offset from the original line; "
                              "QGIS measures positions on the offset line.", flat_rule)
+
+        def zoom_offset(rule):
+            """The screen offset in map units at the middle of ``rule``'s zoom."""
+            return zoom_offset_mm / 1000.0 * \
+                ZoomLevels.zoom_to_scale(rule.get_attr("o")) / math.sqrt(2)
+
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, offset,
                                             offset_unit, flat_rule)
         rules = []
@@ -1018,11 +1082,16 @@ class SymbolMaterializer:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Offset along the line is not applied to vertex/centre markers.",
                              flat_rule)
-            recipe = mat.marker_points(points, offset=line_offset, crs=crs)
-            if _ring_filter(layer):
-                recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
-                    ("ring_filter", _ring_filter(layer)), ("crs", crs)))
-            rules.append(self._with_symbol(flat_rule, symbol, 0, 1, recipe))
+            def placed(rule, line_offset):
+                recipe = mat.marker_points(points, offset=line_offset, crs=crs)
+                if _ring_filter(layer):
+                    recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
+                        ("ring_filter", _ring_filter(layer)), ("crs", crs)))
+                return self._with_symbol(rule, symbol.clone(), 0, 1, recipe)
+            if zoom_offset_mm is None:
+                rules.append(placed(flat_rule, line_offset))
+            else:
+                rules.extend(placed(rule, zoom_offset(rule)) for rule in self._per_zoom(flat_rule))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
@@ -1036,12 +1105,18 @@ class SymbolMaterializer:
                                         recipe.params + (("ring_filter", _ring_filter(layer)),))
                 def exact(rule, recipe=recipe):
                     def one(rule):
+                        params = recipe.params
+                        if zoom_offset_mm is not None:
+                            params = tuple(p for p in params if p[0] != "offset") + (
+                                ("offset", zoom_offset(rule)),)
                         average = self._average_angle_length(layer, rule)
-                        averaged = recipe if not average else mat.Recipe(
-                            recipe.kind, recipe.placements, recipe.params + (("average", average),))
-                        return self._with_symbol(rule, symbol.clone(), 0, 2, averaged)
-                    if not self._average_angle_length(layer, rule) or \
-                            normalize_unit(layer.averageAngleUnit()) == "map":
+                        if average:
+                            params += (("average", average),)
+                        return self._with_symbol(rule, symbol.clone(), 0, 2, mat.Recipe(
+                            recipe.kind, recipe.placements, params))
+                    if zoom_offset_mm is None and (
+                            not self._average_angle_length(layer, rule)
+                            or normalize_unit(layer.averageAngleUnit()) == "map"):
                         return [one(rule)]
                     # A screen averaging length covers less of the line as the
                     # map zooms in: the same positions, one angle per zoom.

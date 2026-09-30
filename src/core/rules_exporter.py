@@ -74,17 +74,19 @@ QgsTask. This is intentional:
 """
 
 import os
+import re
 import threading
 import traceback
 import platform
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os.path import exists, join
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from uuid import uuid4
 from qgis.PyQt.QtCore import QVariant
 from processing import run as run_processing
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsExpressionContext,
     QgsExpression,
@@ -94,6 +96,7 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsField,
     QgsPalLayerSettings,
+    QgsProperty,
     QgsRectangle,
     QgsCoordinateTransform,
     QgsVectorLayer,
@@ -105,7 +108,8 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from .fidelity.diagnostics import DiagnosticCollector
-from .fidelity.qgis_expr import bind_geometry, in_layer_crs, with_map_scale
+from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
+from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .fidelity.materialize import Recipe
 
@@ -207,9 +211,16 @@ class _RuleGroupSnapshot:
     recipe: Optional[Recipe]
     # Source geometry type of the layer (0 point, 1 line, 2 polygon).
     source_geometry: int
+    # Fields re-evaluated on every exported part (geometry-dependent
+    # data-defined properties of a geometry generator's sub-symbol).
+    part_fields: List[Tuple[int, str, str]]
     # Kept ONLY to drive the success/failure return value of export(); workers
     # MUST NOT read any live state from these.
     flat_rules: List[FlattenedRule]
+    # Line generator applied first (see FlattenedRule.pre_generator) and the
+    # fields computed on each generated part right after it.
+    pre_generator: Optional[str] = None
+    generated_fields: List[Tuple[int, str, str]] = field(default_factory=list)
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -376,6 +387,8 @@ class RulesExporter:
         for output_dataset, flat_rules in rules_by_dataset.items():
             primary = flat_rules[0]
 
+            if primary.get_attr("t") == 1:
+                self._single_line_label_as_point(primary)
             # Compute expression fields (data-defined properties, optional
             # label field) — these read from the rule symbol/settings.
             expr_fields = self._create_expression_fields(flat_rules)
@@ -391,6 +404,16 @@ class RulesExporter:
 
             # Evaluate scalar expressions on layer-CRS geometry, as QGIS does.
             layer_crs = primary.layer.crs().authid()
+            part_fields = self._part_fields(primary, expr_fields, layer_crs)
+            pre_generator, generated_fields = None, []
+            if primary.pre_generator:
+                # Lines generated first: geometry-dependent properties are
+                # computed on each generated part, then carried along.
+                pre_generator = self._generator_in_layer_crs(primary.pre_generator, primary)
+                generated_fields = self._part_fields(primary, expr_fields, layer_crs, True)
+                carried = {name for _, _, name in generated_fields}
+                expr_fields = [(ftype, f'"{name}"' if name in carried else expr, name)
+                               for ftype, expr, name in expr_fields]
             expr_fields = [
                 (ftype, in_layer_crs(expr, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar), name)
                 for ftype, expr, name in expr_fields
@@ -417,10 +440,40 @@ class RulesExporter:
                 include_required_fields_only=self.include_required_fields_only,
                 recipe=primary.recipe,
                 source_geometry=primary.get_attr("g"),
+                part_fields=part_fields,
                 flat_rules=flat_rules,
+                pre_generator=pre_generator,
+                generated_fields=generated_fields,
             ))
 
         return sources, rule_groups
+
+    _GEOMETRY_REFERENCE = re.compile(
+        r"\$(geometry|length|area|perimeter|x|y)\b|@geometry\b|@geometry_part_(num|count)\b",
+        re.IGNORECASE)
+
+    def _part_fields(self, flat_rule: FlattenedRule, fields, layer_crs: str,
+                     generated: bool = False):
+        """Data-defined properties of a geometry generator's sub-symbol that
+        read the geometry: QGIS evaluates them on the generated geometry, for
+        each part it draws (``length(geometry_n($geometry,
+        @geometry_part_num))`` = the length of one generated segment), not on
+        the source feature. They are computed again on every exported part."""
+        symbol = flat_rule.rule.symbol() if flat_rule.get_attr("t") == 0 else None
+        if symbol is None or not symbol.symbolLayerCount() or (
+                not generated and symbol.symbolLayer(0).layerType() != "GeometryGenerator"):
+            return []
+        result = []
+        for ftype, expr, name in fields:
+            if not expr or not self._GEOMETRY_REFERENCE.search(expr):
+                continue
+            # $geometry: the part as a one-part collection, so geometry_n(..., 1)
+            # and the measures work; in the layer CRS like every expression.
+            per_part = in_layer_crs(substitute_geometry(expr, "collect_geometries(@geometry)"),
+                                    f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
+            result.append((ftype, "with_variable('geometry_part_num', 1, with_variable("
+                                  f"'geometry_part_count', 1, {per_part}))", name))
+        return result
 
     @staticmethod
     def _order_by(layer) -> Tuple[Tuple[str, bool, bool], ...]:
@@ -736,6 +789,11 @@ class RulesExporter:
                 return None
             current_input = filt
 
+        if grp.pre_generator:
+            current_input = self._generated_lines(current_input, grp)
+            if current_input is None:
+                return None
+
         # Materialized marker positions: derive point features (with the
         # line azimuth) from the complete original lines before any field
         # expressions or tiling.
@@ -836,11 +894,39 @@ class RulesExporter:
         if multipoints:
             return cleaned
         self._check_cancel()
-        return self._run_alg_safe(
-            "multiparttosingleparts", "native",
-            INPUT=cleaned,
-            OUTPUT=output_path,
-        )
+        if not grp.part_fields:
+            return self._run_alg_safe(
+                "multiparttosingleparts", "native",
+                INPUT=cleaned,
+                OUTPUT=output_path,
+            )
+        out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=cleaned)
+        for index, (ftype, expr, name) in enumerate(grp.part_fields):
+            last = index == len(grp.part_fields) - 1
+            out = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
+                FIELD_TYPE={6: 0, 2: 1, 4: 1}.get(ftype, 2), FIELD_LENGTH=0,
+                FIELD_PRECISION=0, FORMULA=expr, **({"OUTPUT": output_path} if last else {}))
+        return out
+
+    def _generated_lines(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
+        """Worker: the lines of a line-symbol geometry generator, one feature
+        per part (QGIS draws the sub-symbol on every part), with the
+        geometry-dependent properties evaluated on each part."""
+        # geometrybyexpression: OUTPUT_GEOMETRY 1 = line
+        out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
+                                 OUTPUT_GEOMETRY=1, EXPRESSION=grp.pre_generator)
+        out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
+        out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
+        for ftype, expr, name in grp.generated_fields:
+            out = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
+                FIELD_TYPE={6: 0, 2: 1, 4: 1}.get(ftype, 2), FIELD_LENGTH=0,
+                FIELD_PRECISION=0, FORMULA=expr)
+        check = QgsVectorLayer(out, "check", "ogr")
+        if not check.isValid() or check.featureCount() <= 0:
+            return None
+        return out
 
     def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
         matched = QgsVectorLayer(source, "matched", "ogr")
@@ -1146,14 +1232,27 @@ class RulesExporter:
         if not label_exp:
             return fields
         field_name = f"{_FIELD_PREFIX}_label"
+        settings = flat_rule.rule.settings()
         filter_exp = (
             f'"{label_exp}"'
-            if not flat_rule.rule.settings().isExpression
-            else label_exp
+            if not settings.isExpression
+            else f"({label_exp})"
         )
+        wrap = settings.wrapChar
+        if wrap:  # QGIS breaks the line at every wrap character
+            quoted = wrap.replace("'", "''")
+            filter_exp = f"replace({filter_exp}, '{quoted}', '\n')"
         fields.append((10, filter_exp, field_name))
-        flat_rule.rule.settings().isExpression = False
-        flat_rule.rule.settings().fieldName = field_name
+        if settings.format().allowHtmlFormatting():
+            # MapLibre has no markup: text sections with their own scale.
+            html_labels.register_expression_functions()
+            for index in range(html_labels.MAX_SECTIONS):
+                fields.append((10, f"q2vt_html_text({filter_exp}, {index})",
+                               html_labels.TEXT_FIELD.format(index)))
+                fields.append((6, f"q2vt_html_scale({filter_exp}, {index})",
+                               html_labels.SCALE_FIELD.format(index)))
+        settings.isExpression = False
+        settings.fieldName = field_name
         return fields
 
     def _get_geometry_transformation(
@@ -1185,10 +1284,62 @@ class RulesExporter:
             return point
         return f"transform({point}, '{layer_crs}', '{export_crs}')"
 
+    # Longest part of a (multi)line: where QGIS puts a single line label.
+    _LONGEST_PART = (
+        "if(coalesce(num_geometries(@geometry), 1) > 1, geometry_n(@geometry, "
+        "array_find(array_foreach(generate_series(1, num_geometries(@geometry)), "
+        "length(geometry_n(@geometry, @element))), array_max(array_foreach("
+        "generate_series(1, num_geometries(@geometry)), length(geometry_n(@geometry, "
+        "@element))))) + 1), @geometry)")
+
+    def _single_line_label_as_point(self, flat_rule: FlattenedRule) -> None:
+        """A line label drawn once per line (no repeat distance), as QGIS
+        draws it: at the middle of the line, along it.
+
+        MapLibre places line labels per tile piece of the line ("line-center"
+        centres the label on every piece), so the label is exported as the
+        line's midpoint instead: an over-point label rotated to the line
+        (kept upright), above/below/on the point as the placement flags say.
+        """
+        settings = flat_rule.rule.settings()
+        if settings is None or flat_rule.get_attr("g") != 1 or \
+                settings.geometryGeneratorEnabled or self._pinned_position(settings):
+            return
+        placement = getattr(settings.placement, "value", settings.placement)
+        if int(placement) not in (int(Qgis.LabelPlacement.Line),
+                                  int(Qgis.LabelPlacement.Curved)):
+            return
+        if float(settings.repeatDistance or 0) > 0:
+            return
+        try:
+            flags = int(settings.lineSettings().placementFlags())
+        except (AttributeError, TypeError):
+            flags = 1
+        side = "on" if flags & 1 or not flags & 6 else ("above" if flags & 2 else "below")
+        quadrant = {"on": Qgis.LabelQuadrantPosition.Over,
+                    "above": Qgis.LabelQuadrantPosition.Above,
+                    "below": Qgis.LabelQuadrantPosition.Below}[side]
+        rotation = (
+            f"with_variable('q2vt_l', {self._LONGEST_PART}, with_variable('q2vt_a', "
+            f"line_interpolate_angle(@q2vt_l, length(@q2vt_l) / 2) - 90, "
+            f"if(@q2vt_a > 90, @q2vt_a - 180, if(@q2vt_a <= -90, @q2vt_a + 180, @q2vt_a))))")
+        settings.placement = Qgis.LabelPlacement.OverPoint
+        settings.quadOffset = quadrant
+        settings.xOffset = 0.0
+        settings.yOffset = {"on": 0.0, "above": -1.0, "below": 1.0}[side] * float(settings.dist or 0)
+        settings.offsetUnits = settings.distUnits
+        settings.dataDefinedProperties().setProperty(
+            QgsPalLayerSettings.Property.LabelRotation, QgsProperty.fromExpression(rotation))
+        flat_rule.line_label_midpoint = True
+
     def _get_labeling_transformation(self, flat_rule: FlattenedRule):
         settings = flat_rule.rule.settings()
         target_geom = flat_rule.get_attr("g")
         transform_expr = "@geometry"
+        if getattr(flat_rule, "line_label_midpoint", False):
+            flat_rule.set_attr("c", 0)
+            return [0, f"with_variable('q2vt_l', {self._LONGEST_PART}, "
+                       f"line_interpolate_point(@q2vt_l, length(@q2vt_l) / 2))"]
         pinned = self._pinned_position(settings)
         if pinned is not None:
             # Data-defined label position (layer CRS), see
@@ -1233,7 +1384,7 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
-            kind = 2 if recipe.param("fill") else \
+            kind = 2 if recipe.param("fill") or recipe.param("stroke") else \
                 1 if recipe.param("segments") or recipe.param("paths") else 0
             if mat.grid_splittable(recipe) and flat_rule.get_attr("g") == 2:
                 # Computed per piece of the polygon (_pattern_pieces).
@@ -1255,6 +1406,8 @@ class RulesExporter:
             return [0, "@geometry"]  # points already materialized (_random_points)
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "line_offset":
+            return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":
             return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "callout":

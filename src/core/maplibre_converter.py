@@ -30,6 +30,7 @@ from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
 from .fidelity import expressions as ex
+from .fidelity import html_labels
 from .fidelity.capabilities import classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
@@ -1082,7 +1083,13 @@ class IconPropertyExtractor:
             return "point"
         placement = TextPropertyExtractor.placement_name(label_settings)
         if placement in ("Line", "Curved", "PerimeterCurved"):
-            return "line"
+            try:
+                repeat = float(label_settings.repeatDistance or 0)
+            except (AttributeError, TypeError, ValueError):
+                repeat = 0.0
+            # Without a repeat distance QGIS draws one label per line;
+            # MapLibre's "line" repeats it every symbol-spacing.
+            return "line" if repeat > 0 else "line-center"
         return "point"
 
     @staticmethod
@@ -1120,8 +1127,15 @@ class TextPropertyExtractor:
 
     @staticmethod
     def get_text_field(label_settings: QgsPalLayerSettings) -> Optional[List]:
-        """Return ``text-field`` as a MapLibre ``["get", field]`` expression."""
+        """Return ``text-field`` as a MapLibre ``["get", field]`` expression;
+        HTML labels as ``format`` sections (see ``fidelity.html_labels``)."""
         if label_settings.fieldName:
+            try:
+                html = label_settings.format().allowHtmlFormatting()
+            except AttributeError:
+                html = False
+            if html and label_settings.fieldName == f"{_FIELD_PREFIX}_label":
+                return html_labels.format_expression()
             return ["get", label_settings.fieldName]
         return None
 
@@ -1243,12 +1257,18 @@ class TextPropertyExtractor:
     ) -> Union[float, List]:
         """Return ``text-halo-width`` in pixels from the buffer size and unit.
 
-        QGIS buffers and MapLibre halos both extend the stated distance beyond
-        the glyph outline.
+        QGIS strokes the text outline with a pen as wide as the buffer size,
+        so the buffer reaches half its size beyond the glyphs (measured: a
+        10 px buffer adds 5 px); a MapLibre halo reaches its full width.
         """
         buffer = text_format.buffer()
         if not buffer.enabled():
             return 0
+        if _enum_int(buffer.sizeUnit()) == _enum_int(Qgis.RenderUnit.Percentage) \
+                and label_settings is not None:
+            # A percentage of the text size (a 10 % buffer was drawn 10 px wide).
+            text_size = TextPropertyExtractor.get_text_size(text_format, label_settings, viewer)
+            return ex.mul(text_size, buffer.size() / 200.0)
         size_prop = None
         if label_settings is not None:
             size_prop = label_settings.dataDefinedProperties().property(
@@ -1256,7 +1276,7 @@ class TextPropertyExtractor:
             )
         width = PropertyExtractor.length(buffer.size(), buffer.sizeUnit(), size_prop,
                                          buffer.sizeMapUnitScale())
-        return ex.div(width, _MAPLIBRE_LABELS_FACTOR)
+        return ex.div(width, 2.0 * _MAPLIBRE_LABELS_FACTOR)
 
     @staticmethod
     def get_text_halo_blur(
@@ -1273,7 +1293,12 @@ class TextPropertyExtractor:
         Only "over point" placement uses the quadrant; horizontal/free
         polygon labels are centred, line labels are centred on the line.
         """
-        if TextPropertyExtractor.placement_name(label_settings) != "OverPoint":
+        placement = TextPropertyExtractor.placement_name(label_settings)
+        if placement in ("Line", "Curved"):
+            # Above/below the line: the text box's bottom/top edge on the line.
+            return {"above": "bottom", "below": "top"}.get(
+                TextPropertyExtractor.line_side(label_settings), "center")
+        if placement != "OverPoint":
             return "center"
         anchor_map = {
             0: "bottom-right", 1: "bottom",  2: "bottom-left",
@@ -1281,6 +1306,34 @@ class TextPropertyExtractor:
             6: "top-right",    7: "top",     8: "top-left",
         }
         return anchor_map.get(_enum_int(label_settings.quadOffset), "center")
+
+    @staticmethod
+    def line_side(label_settings: QgsPalLayerSettings) -> str:
+        """"on", "above" or "below": where QGIS places a line label
+        (``QgsLabelLineSettings.placementFlags``; on-line wins when allowed)."""
+        try:
+            flags = _enum_int(label_settings.lineSettings().placementFlags(), 1)
+        except (AttributeError, TypeError):
+            return "on"
+        if flags & 1 or not flags & 6:
+            return "on"
+        return "above" if flags & 2 else "below"
+
+    @staticmethod
+    def get_line_text_offset(label_settings: QgsPalLayerSettings,
+                             text_size_px: Union[float, List] = 16.0) -> List[float]:
+        """``text-offset`` in ems moving an above/below line label by the
+        label distance away from the line."""
+        side = TextPropertyExtractor.line_side(label_settings)
+        size = text_size_px if ex.is_number(text_size_px) else 16.0
+        try:
+            distance = float(label_settings.dist or 0)
+        except (AttributeError, TypeError, ValueError):
+            distance = 0.0
+        if side == "on" or not distance or size <= 0:
+            return [0, 0]
+        em = PropertyExtractor.static_pixels(distance, label_settings.distUnits) / size
+        return [0, -em if side == "above" else em]
 
     @staticmethod
     def get_text_justify(label_settings: QgsPalLayerSettings) -> Union[str, List]:
@@ -1293,13 +1346,14 @@ class TextPropertyExtractor:
         not translated server-side.
         """
         try:
-            justification = label_settings.multiLineAlignment
+            justification = _enum_int(label_settings.multilineAlign, 0)
         except AttributeError:
             try:
                 justification = label_settings.alignment
             except AttributeError:
                 justification = 1
-        justify_map = {0: "left", 1: "center", 2: "right", 3: "center"}
+        # 3 = follow placement: MapLibre "auto" aligns by the chosen anchor.
+        justify_map = {0: "left", 1: "center", 2: "right", 3: "auto", 4: "left"}
         base_justify = justify_map.get(justification, "left")
         try:
             justify_prop = label_settings.dataDefinedProperties().property(
@@ -2938,6 +2992,10 @@ class QgisMapLibreStyleExporter:
                 TextPropertyExtractor.get_text_radial_offset(label_settings, em_size)
         elif placement == "OverPoint":
             offset = TextPropertyExtractor.get_text_offset(label_settings, em_size)
+            if offset != [0, 0]:
+                layer_def["layout"]["text-offset"] = offset
+        elif placement in ("Line", "Curved"):
+            offset = TextPropertyExtractor.get_line_text_offset(label_settings, em_size)
             if offset != [0, 0]:
                 layer_def["layout"]["text-offset"] = offset
 

@@ -228,7 +228,7 @@ def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float
                 off_y: float, construction_crs: str, anchor: str, inset: float = 0.0,
                 rows_from_top: bool = False, segments=(), clip_shape: bool = False,
                 clip_mode: str = "", deviation=(0.0, 0.0), seed: int = 0, paths=(),
-                fill: bool = False) -> Recipe:
+                fill: bool = False, stroke=None) -> Recipe:
     """Point-pattern grid in map units (see :func:`grid_expression`)."""
     params = [
         ("dx", float(dx)), ("dy", float(dy)), ("disp_x", float(disp_x)),
@@ -247,6 +247,8 @@ def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float
         params += [("segments", tuple(segments)), ("clip_shape", bool(clip_shape))]
         if clip_mode:
             params.append(("clip_mode", clip_mode))
+        if stroke:  # (half width, cap, join): the stroke as polygons
+            params.append(("stroke", (float(stroke[0]), str(stroke[1]), str(stroke[2]))))
     return Recipe("grid_points", (), tuple(params))
 
 
@@ -482,6 +484,7 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     reach = max((max(math.hypot(ax, ay), math.hypot(bx, by)) for ax, ay, bx, by in segments),
                 default=0.0)
     reach += max(abs(p("dev_x") or 0.0), abs(p("dev_y") or 0.0))  # deviated markers
+    reach += (p("stroke") or (0.0,))[0] * math.sqrt(2)  # a wide stroke's square cap
     margin_i = int(math.ceil(reach / dx)) + 1
     margin_j = int(math.ceil(reach / dy)) + 1
     # QGIS parses deeply nested expressions very slowly (depth 16 costs
@@ -521,12 +524,20 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
             element = (f"with_variable('q2vt_p', array({point_x}, {point_y}), "
                        f"make_line(make_point(@q2vt_p[0] + {ax}, @q2vt_p[1] + {ay}), "
                        f"make_point(@q2vt_p[0] + {bx}, @q2vt_p[1] + {by})))")
+        stroke = p("stroke")
+        if stroke:
+            # A wide map-unit stroke as its outline, so clipping cuts it
+            # exactly at the polygon edge like QGIS's clipped drawing (a
+            # clipped centre line drawn wide overshot the edge, Csíkozás).
+            element = (f"buffer({element}, {stroke[0]!r}, 8, cap:='{stroke[1]}', "
+                       f"join:='{stroke[2]}')")
         # QgsPointPatternFillSymbolLayer::renderPolygon, per clip mode, with
         # the marker bounds (envelope of its line work):
-        bx0 = min(min(seg[0], seg[2]) for seg in segments)
-        bx1 = max(max(seg[0], seg[2]) for seg in segments)
-        by0 = min(min(seg[1], seg[3]) for seg in segments)
-        by1 = max(max(seg[1], seg[3]) for seg in segments)
+        grow = stroke[0] if stroke else 0.0
+        bx0 = min(min(seg[0], seg[2]) for seg in segments) - grow
+        bx1 = max(max(seg[0], seg[2]) for seg in segments) + grow
+        by0 = min(min(seg[1], seg[3]) for seg in segments) - grow
+        by1 = max(max(seg[1], seg[3]) for seg in segments) + grow
         rect = (f"make_rectangle_3points(make_point({point_x} + {bx0!r}, {point_y} + {by0!r}), "
                 f"make_point({point_x} + {bx1!r}, {point_y} + {by0!r}), "
                 f"make_point({point_x} + {bx1!r}, {point_y} + {by1!r}))")
@@ -537,10 +548,17 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         if mode == "shape":  # drawing clipped to the polygon
             # Only the clipped line work / shapes: an arm that merely touches
             # the edge adds a point, which made GEOS results mixed collections.
-            wanted = "Polygon" if p("fill") else "Line"
+            wanted = "Polygon" if p("fill") or p("stroke") else "Line"
             keep, final = "true", (
                 f"collect_geometries(array_filter(geometries_to_array(intersection("
                 f"@q2vt_g, @q2vt_all)), geometry_type(@element) = '{wanted}'))")
+            if stroke:
+                # Wide strokes of neighbouring markers overlap: collected they
+                # make an invalid multipolygon (GEOS topology error), so they
+                # are merged (buffer 0) before the clip.
+                final = (
+                    "collect_geometries(array_filter(geometries_to_array(intersection("
+                    "@q2vt_g, buffer(@q2vt_all, 0))), geometry_type(@element) = 'Polygon'))")
         elif mode == "within":  # bounds completely inside
             keep = f"contains(@q2vt_g, {rect})"
         elif mode == "none":  # bounds touching the polygon, drawn whole

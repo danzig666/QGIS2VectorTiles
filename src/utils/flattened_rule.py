@@ -31,12 +31,16 @@ class FlattenedRule:
     recipe: Optional[Recipe] = None
     # Draw order key assigned by the flattener (see fidelity.render_order).
     order: tuple = ()
+    # Geometry generator (line output) applied to the source features before
+    # anything else: the rule is a sub-symbol layer drawn on generated lines.
+    pre_generator: Optional[str] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
         return FlattenedRule(
             rule if rule is not None else self.rule.clone(),
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
+            self.pre_generator,
         )
 
     @property
