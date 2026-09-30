@@ -412,8 +412,12 @@ class LinePropertyExtractor:
             }.get(_enum_int(symbol_layer.penStyle()))
             if pattern is None:
                 return None
-        # Qt and MapLibre both draw the line cap on every dash (checked in
-        # tests/browser/test_browser_parity.py), so lengths map one to one.
+        # Qt draws square and round caps on every dash (one line width longer,
+        # gaps one width shorter); MapLibre does so for round caps only
+        # (measured), so square-capped dashes are lengthened here.
+        if _enum_int(symbol_layer.penCapStyle()) == 0x10:  # Qt::SquareCap
+            pattern = [value + 1.0 if i % 2 == 0 else max(0.0, value - 1.0)
+                       for i, value in enumerate(pattern)]
         if len(pattern) % 2:
             pattern = pattern + pattern
         return [round(v, 4) for v in pattern]
