@@ -82,7 +82,8 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "generated for the font); data-defined characters, size, colour and angle are "
                "kept. Characters beyond U+FFFF or missing from the font, and markers inside "
                "marker lines, are sprites.",
-               ("Vertical position uses the text box centre (QGIS: half the font ascent).",)),
+               ("Browser text baselines are placed half the font's ascent below the point, "
+                "as QGIS does, to within one glyph pixel (1/24 em).",)),
     Capability("EllipseMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,

@@ -134,7 +134,8 @@ class GlyphGenerator:
             remainder = key[len(family):].strip()
             styles = qfontdb.styles(family)
             if remainder == "":
-                default_style = next((s for s in styles if s.lower() in ("regular", "normal")), None)
+                default_style = next((s for s in styles if s.lower() in
+                                      ("regular", "normal", "book", "roman", "medium")), None)
                 return family, default_style or (styles[0] if styles else "Regular")
             for style in styles:
                 if remainder.lower() == style.lower():
@@ -157,8 +158,27 @@ class GlyphGenerator:
         ``"Arial "`` for an empty style name, while glyphs were written to
         ``"Arial Regular"``, so the browser found no glyphs.)
         """
-        key = f"{family} {style or ''}".strip()
-        resolved = cls._resolve_font_key(key, list(qfontdb.families()))
+        families = list(qfontdb.families())
+        resolved = None
+        try:
+            # The face QGIS draws: its family substitutions and translated
+            # (e.g. localized "Normál") style names, then Qt's font matching.
+            from qgis.core import QgsApplication, QgsFontUtils  # pylint: disable=import-outside-toplevel
+            from qgis.PyQt.QtGui import QFontInfo  # pylint: disable=import-outside-toplevel
+            font = QgsFontUtils.createFont(
+                QgsApplication.fontManager().processFontFamilyName(family))
+            if style:
+                font.setStyleName(QgsFontUtils.translateNamedStyle(style))
+            info = QFontInfo(font)
+            # Only the style is taken from Qt: an uninstalled family stays
+            # unresolved (reported; callers choose the fallback).
+            if info.family().lower() == family.lower():
+                resolved = cls._resolve_font_key(f"{info.family()} {info.styleName()}".strip(),
+                                                 families)
+        except (ImportError, RuntimeError, AttributeError):
+            resolved = None
+        if not resolved:
+            resolved = cls._resolve_font_key(f"{family} {style or ''}".strip(), families)
         if not resolved:
             return None
         return cls.fontstack_name(*resolved)

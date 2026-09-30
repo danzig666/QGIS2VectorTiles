@@ -124,6 +124,9 @@ class ConversionContext:
         self.reference_zoom = 0.0
         # Zooms over which the current component is visible above reference_zoom.
         self.reference_zoom_span = 0.0
+        # Oversampling of map-unit sprites drawn for one zoom band (None:
+        # one sprite for the component's whole zoom range).
+        self.sprite_oversampling = None
 
     def report(self, code: str, message: str = "", **extra):
         extra.setdefault("component", self.component)
@@ -718,12 +721,24 @@ class IconPropertyExtractor:
         except (AttributeError, TypeError):
             unit, size = "unknown", 0.0
         size_prop = symbol_layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertySize)
+        uses_map = IconPropertyExtractor.uses_map_units(symbol)
+        if unit not in ("map", "m"):
+            # Screen size: the icon keeps its size; map-unit details (e.g. a
+            # map-unit outline) are drawn at the reference zoom's scale.
+            context = PropertyExtractor.context
+            icon_size = IconPropertyExtractor.get_icon_size(symbol_layer, 1.0)
+            if not uses_map:
+                # Drawn 1:1 like QGIS draws it: an oversampled image shrunk
+                # by the GPU (no mipmaps) breaks thin outlines into dots.
+                static = ex.is_number(icon_size) and not IconPropertyExtractor._rotated(symbol)
+                return icon_size, 1.0, (1.0 if static else None)
+            mupp = 1.0 / max(PropertyExtractor.static_pixels(1.0, "map", context.reference_zoom),
+                             1e-12)
+            return icon_size, mupp, context.sprite_oversampling or float(_SPRITE_QUALITY)
+        # (screen-size markers do not grow with the zoom)
         layer_units = {normalize_unit(symbol.symbolLayer(i).outputUnit())
                        for i in range(symbol.symbolLayerCount())} if symbol else set()
-        uses_map = unit in ("map", "m") or bool(layer_units & {"map", "m"})
-        if not uses_map:
-            return IconPropertyExtractor.get_icon_size(symbol_layer, 1.0), 1.0, None
-        if unit not in ("map", "m") or (layer_units - {"map", "m"}):
+        if layer_units - {"map", "m"}:
             PropertyExtractor.context.report(
                 "Q2VT_MIXED_UNITS",
                 "Marker mixes map units with screen units; the whole icon scales with the map.")
@@ -743,9 +758,39 @@ class IconPropertyExtractor:
         span = max(0.0, min(3.0, context.reference_zoom_span))
         oversampling = max(float(_SPRITE_QUALITY),
                            min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / reference_px))
+        if context.sprite_oversampling:
+            # Very large markers far into overzoom: a smaller image, scaled up.
+            oversampling = min(context.sprite_oversampling, 1024.0 / reference_px)
         px = PropertyExtractor.length(value, unit_name, None, symbol.sizeMapUnitScale())
         return ex.clamp(ex.mul(px, 1.0 / reference_px), 0, None), \
             map_units_per_pixel, oversampling
+
+    @staticmethod
+    def uses_map_units(symbol: QgsSymbol) -> bool:
+        """Whether any size, width or offset of the marker is in map units."""
+        if symbol is None:
+            return False
+        if normalize_unit(symbol.sizeUnit()) in ("map", "m"):
+            return True
+        for index in range(symbol.symbolLayerCount()):
+            layer = symbol.symbolLayer(index)
+            try:
+                if layer.usesMapUnits():
+                    return True
+            except AttributeError:
+                if normalize_unit(layer.outputUnit()) in ("map", "m"):
+                    return True
+        return False
+
+    @staticmethod
+    def _rotated(symbol: QgsSymbol) -> bool:
+        for index in range(symbol.symbolLayerCount()):
+            layer = symbol.symbolLayer(index)
+            props = layer.dataDefinedProperties()
+            if getattr(layer, "angle", lambda: 0)() or \
+                    props.isActive(QgsSymbolLayer.Property.PropertyAngle):
+                return True
+        return False
 
     @staticmethod
     def get_icon_size(
@@ -1808,6 +1853,19 @@ class QgisMapLibreStyleExporter:
             render_line_pattern(spec, cell, 1), render_line_pattern(spec, cell, 2))
         return name
 
+    @staticmethod
+    def _font_marker_baseline_em(symbol_layer) -> float:
+        """Half the ascent of the marker's font, in ems (``QgsFontMarkerSymbolLayer``
+        draws the text with its baseline this far below the point)."""
+        from qgis.core import QgsApplication, QgsFontUtils  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+        font = QgsFontUtils.createFont(
+            QgsApplication.fontManager().processFontFamilyName(symbol_layer.fontFamily()))
+        if symbol_layer.fontStyle():
+            font.setStyleName(QgsFontUtils.translateNamedStyle(symbol_layer.fontStyle()))
+        font.setPixelSize(240)
+        return QFontMetricsF(font).ascent() / 240.0 / 2.0
+
     def _font_marker_as_text(self, symbol_layer, source_layer_name: str) -> bool:
         """Whether browser text can draw the marker's characters: MapLibre
         glyph ranges stop at U+FFFF, and a character missing from the font
@@ -1887,6 +1945,10 @@ class QgisMapLibreStyleExporter:
             "symbol-placement": "point",
             "visibility": "visible",
         }
+        # QGIS puts the baseline half the font's ascent below the point;
+        # MapLibre (centred anchor, our glyph metrics) 7/24 em below it.
+        baseline = self._font_marker_baseline_em(symbol_layer) - 7.0 / 24.0
+        ems = [0.0, baseline]
         offset = symbol_layer.offset()
         if offset.x() or offset.y():
             static_size = size if not isinstance(size, list) or ex.is_zoom_curve(size) else \
@@ -1895,10 +1957,13 @@ class QgisMapLibreStyleExporter:
             dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit())
             ems = [ex.ratio(dx, static_size), ex.ratio(dy, static_size)]
             if all(ex.is_number(v) for v in ems):
-                layout["text-offset"] = ems
+                ems[1] += baseline
             else:
                 self.context.report("Q2VT_MIXED_UNITS",
                                     "Font marker offset and size use different unit families.")
+                ems = [0.0, baseline]
+        if abs(ems[0]) > 1e-6 or abs(ems[1]) > 1e-6:
+            layout["text-offset"] = [round(ems[0], 4), round(ems[1], 4)]
         layer_def["layout"].update(layout)
         paint = {
             "text-color": PropertyExtractor.get_value_or_expression(
@@ -2285,6 +2350,29 @@ class QgisMapLibreStyleExporter:
         self.style["layers"].append(layer_def)
         return True
 
+    # Map-unit sprites: one image per integer zoom, drawn at that zoom's size
+    # with this oversampling, so MapLibre scales it by 1/1.5 .. 2/1.5 (the
+    # atlas has no mipmaps: an image shrunk several times aliases, and thin
+    # outlines break into dots). Beyond max zoom + OVERZOOM_BANDS one image
+    # with SPRITE_OVERZOOM_OVERSAMPLING covers the rest.
+    SPRITE_BAND_OVERSAMPLING = 1.5
+    SPRITE_OVERZOOM_OVERSAMPLING = 4.0
+    OVERZOOM_BANDS = 3
+
+    def _sprite_bands(self, min_zoom: float, max_zoom: float):
+        """``[(low, high, oversampling)]`` zoom bands of a map-unit sprite."""
+        low = max(float(min_zoom), 0.0) if min_zoom is not None and min_zoom >= 0 else 0.0
+        high = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
+        top = min(high, float(self.maxzoom + self.OVERZOOM_BANDS))
+        bands, zoom = [], low
+        while zoom < top - 1e-9:
+            upper = min(math.floor(zoom) + 1.0, top)
+            bands.append((zoom, upper, self.SPRITE_BAND_OVERSAMPLING))
+            zoom = upper
+        if high > zoom + 1e-9:
+            bands.append((zoom, high, self.SPRITE_OVERZOOM_OVERSAMPLING))
+        return bands
+
     def _convert_marker_symbol(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -2295,7 +2383,35 @@ class QgisMapLibreStyleExporter:
         min_zoom: float = -1,
         max_zoom: float = -1,
     ):
-        """Convert a QGIS marker symbol into a MapLibre ``symbol`` layer."""
+        """Convert a QGIS marker symbol into MapLibre ``symbol`` layer(s):
+        one per zoom band for markers sized in map units."""
+        if not IconPropertyExtractor.uses_map_units(symbol):
+            self._marker_layer(symbol_layer, symbol, style_name, source_layer_name,
+                               source_name, min_zoom, max_zoom)
+            return
+        context = self.context
+        saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
+        try:
+            for low, high, quality in self._sprite_bands(min_zoom, max_zoom):
+                context.reference_zoom, context.reference_zoom_span = low, high - low
+                context.sprite_oversampling = quality
+                self._marker_layer(symbol_layer, symbol, f"{style_name}_z{int(low)}",
+                                   source_layer_name, source_name, low, high)
+        finally:
+            context.reference_zoom, context.reference_zoom_span, \
+                context.sprite_oversampling = saved
+
+    def _marker_layer(
+        self,
+        symbol_layer: QgsSymbolLayer,
+        symbol: QgsSymbol,
+        style_name: str,
+        source_layer_name: str,
+        source_name: str,
+        min_zoom: float = -1,
+        max_zoom: float = -1,
+    ):
+        """One MapLibre ``symbol`` layer (and its sprite) for a marker symbol."""
         layer_def = self._base_layer_def(
             "symbol", style_name, source_layer_name, source_name, min_zoom, max_zoom
         )
@@ -2402,6 +2518,8 @@ class QgisMapLibreStyleExporter:
         marker_sub_layer = sub_symbol.symbolLayer(0)
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             sub_symbol, marker_sub_layer)
+        if oversampling == 1.0:
+            oversampling = None  # rotated along the line: keep the oversampled image
         self.marker_symbols[marker_name] = SpriteRequest(
             sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
@@ -3001,13 +3119,18 @@ class QgisMapLibreStyleExporter:
         """Remove style layers whose sprite failed to render (already reported)."""
         if not failed:
             return
+        def names(value):
+            # Image names, also inside match/step/case expressions.
+            if isinstance(value, str):
+                return {value}
+            if isinstance(value, list):
+                return set().union(*(names(v) for v in value)) if value else set()
+            return set()
         kept = []
         for layer_def in self.style["layers"]:
-            images = {
-                (layer_def.get("layout") or {}).get("icon-image"),
-                (layer_def.get("paint") or {}).get("fill-pattern"),
-                (layer_def.get("paint") or {}).get("line-pattern"),
-            }
+            images = names([(layer_def.get("layout") or {}).get("icon-image"),
+                            (layer_def.get("paint") or {}).get("fill-pattern"),
+                            (layer_def.get("paint") or {}).get("line-pattern")])
             if images & set(failed):
                 self.diagnostics.add(
                     "Q2VT_SPRITE_RENDER_FAILED",

@@ -113,3 +113,36 @@ def test_font_markers_beyond_the_bmp_become_sprites(exporter, char, as_text):
     layers = _convert(exporter, QgsMarkerSymbol([layer]))
     assert ("text-field" in layers[0]["layout"]) == as_text
     assert ("icon-image" in layers[0]["layout"]) != as_text
+
+
+def test_map_unit_sprites_are_drawn_per_zoom(exporter):
+    """No GPU mipmaps for sprites: one image per zoom, drawn at that zoom's
+    size, keeps MapLibre's scaling within 0.67-1.33x (an image oversampled
+    24x aliased: thin outlines broke into dots)."""
+    exporter.maxzoom = 16
+    symbol = _circle(size=12.0, stroke=0.2)
+    symbol.symbolLayer(0).setShape(Qgis.MarkerShape.Square)
+    symbol.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    symbol.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    layers = _convert(exporter, symbol)
+    assert [(l["minzoom"], l["maxzoom"]) for l in layers] == \
+        [(10, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16)]
+    requests = [exporter.marker_symbols[l["layout"]["icon-image"]] for l in layers]
+    assert [r.oversampling for r in requests] == [1.5] * 6
+    # Each image is drawn for its own zoom: 2x the map units per pixel below
+    # (from z14, where the marker is over one pixel; smaller ones stay 1 px).
+    ratios = [a.map_units_per_pixel / b.map_units_per_pixel for a, b in zip(requests, requests[1:])]
+    assert ratios[-2:] == pytest.approx([2.0] * 2)
+    # Past the archive's zooms + 3, one image drawn with more oversampling.
+    exporter.style["layers"] = []
+    layers = exporter._convert_symbol(symbol, "o", "src_layer", "src", 14, 24) or \
+        exporter.style["layers"]
+    assert (layers[-1]["minzoom"], layers[-1]["maxzoom"]) == (19, 24)
+    assert exporter.marker_symbols[layers[-1]["layout"]["icon-image"]].oversampling == 4.0
+
+
+def test_static_screen_sprites_are_drawn_one_to_one(exporter):
+    symbol = _circle()
+    symbol.symbolLayer(0).setShape(Qgis.MarkerShape.Square)
+    layer = _convert(exporter, symbol)[0]
+    assert exporter.marker_symbols[layer["layout"]["icon-image"]].oversampling == 1.0

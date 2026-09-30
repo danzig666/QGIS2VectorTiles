@@ -185,3 +185,22 @@ def test_map_unit_line_labels_are_drawn(tmp_path, placement, gallery_cell):
     ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink", center=center)
     line_only = 0.5 * ink_qgis
     assert ink_browser > line_only and ink_browser == pytest.approx(ink_qgis, rel=0.35)
+
+
+@pytest.mark.parametrize("font", ["DejaVu Serif", "DejaVu Sans"])
+def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
+    """QGIS draws a font marker with its baseline half the font's ascent
+    below the point; browser text is offset to match."""
+    from qgis.core import QgsFontMarkerSymbolLayer
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Point?crs=EPSG:3857", "pts", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "pts.gpkg"))
+    marker = QgsFontMarkerSymbolLayer(font, "VH", 40)
+    marker.setSizeUnit(Qgis.RenderUnit.Points)
+    marker.setColor(QColor("black"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
+    # 0.16 em (8 px here) too high shifted most of the ink off its place.
+    assert _compare(tmp_path, layer, metric="shape") < 0.12
