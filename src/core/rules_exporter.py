@@ -1148,6 +1148,8 @@ class RulesExporter:
             # Stroke-only markers are exported as their (clipped) line work.
             return [1 if recipe.param("segments") else 0,
                     mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "glyph":
+            return [2, mat.glyph_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "dash_segments":
             crs = f"EPSG:{_EPSG_CRS}"
             if flat_rule.get_attr("g") == 2:

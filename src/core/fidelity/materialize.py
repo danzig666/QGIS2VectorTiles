@@ -476,6 +476,21 @@ def arrow_body_for(recipe: Recipe, export_crs: str = "EPSG:3857", cuts: bool = T
             f"{body('@q2vt_src')}), '{crs}', '{export_crs}')")
 
 
+def glyph_recipe(wkt: str, angle: str, construction_crs: str) -> Recipe:
+    """A font marker's glyph outlines (map units around its point)."""
+    return Recipe("glyph", (), (("wkt", wkt), ("angle", angle), ("crs", construction_crs)))
+
+
+def glyph_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """The glyph outlines rotated clockwise by the marker angle about the
+    point and moved to it (``QgsFontMarkerSymbolLayer::renderPoint``)."""
+    crs = recipe.param("crs") or export_crs
+    point = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    body = (f"with_variable('q2vt_p', {point}, translate(rotate(geom_from_wkt('{recipe.param('wkt')}'), "
+            f"{recipe.param('angle')}, make_point(0, 0)), x(@q2vt_p), y(@q2vt_p)))")
+    return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
+
+
 def dash_recipe(pattern, dash_offset: float, construction_crs: str, offset: float = 0.0,
                 ring_filter: int = 0) -> Recipe:
     """Map-unit dash pattern drawn as its dashes (see :func:`dash_expression`)."""

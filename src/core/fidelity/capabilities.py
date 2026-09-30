@@ -77,8 +77,11 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("tests/integration/test_sprites.py",)),
     Capability("RasterMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FontMarker", "font_marker", Strategy.NATIVE,
-               "Exported as browser text (glyphs generated for the font); data-defined "
-               "characters, size, colour and angle are kept. Inside marker lines it is a sprite.",
+               "Map-unit markers with a static character on point layers: the glyph outlines "
+               "QGIS draws, as polygons (exact at every zoom). Otherwise browser text (glyphs "
+               "generated for the font); data-defined characters, size, colour and angle are "
+               "kept. Characters beyond U+FFFF or missing from the font, and markers inside "
+               "marker lines, are sprites.",
                ("Vertical position uses the text box centre (QGIS: half the font ascent).",)),
     Capability("EllipseMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),

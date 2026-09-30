@@ -519,3 +519,49 @@ def test_map_unit_dashes_match_qgis(plugin, tmp_path, geometry, offset, ring_fil
             [rules[-1].rule.symbol().symbolLayer(0).clone()])))
     ours = ink_mask(render(dashed, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("size,clip,textured", [
+    (15, "Shape", True), (4, "Shape", False), (15, "CentroidWithin", False)])
+def test_point_patterns_of_cell_sized_images_stay_textures(plugin, tmp_path, size, clip, textured):
+    """Clipped to the shape, markers as large as their cells tile like a
+    texture: points would draw the edge markers whole (sprites are not
+    clipped), so the browser pattern (clipped) is kept."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, size)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(15)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    pp.setClipMode(getattr(Qgis.MarkerClipMode, clip))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert (not any(r.recipe for r in rules)) == textured
+
+
+@pytest.mark.parametrize("text,angle,offset,anchor", [
+    ("E", 0, (0, 0), 1), ("Bő", 30, (8, -12), 1), ("g", -50, (0, 5), 0)])
+def test_map_unit_font_markers_become_their_glyphs(plugin, tmp_path, text, angle, offset, anchor):
+    """A font marker in map units as its outlines (browser text is a 24 px
+    distance field, blobby when scaled up)."""
+    from qgis.core import QgsFontMarkerSymbolLayer
+    from qgis.PyQt.QtCore import QPointF
+    layer = _layer("Point", ["POINT(-30 -10)", "POINT(40 50)"], str(tmp_path / "fm.gpkg"))
+    marker = QgsFontMarkerSymbolLayer("DejaVu Sans", text, 60)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setAngle(angle)
+    marker.setOffset(QPointF(*offset))
+    marker.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    marker.setHorizontalAnchorPoint(QgsMarkerSymbol().symbolLayer(0).HorizontalAnchorPoint(anchor))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    glyphs = [o for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert len(glyphs) == 1 and rules[-1].recipe.kind == "glyph"
+    ours = ink_mask(render(glyphs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05

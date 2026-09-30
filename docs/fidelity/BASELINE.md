@@ -95,6 +95,8 @@ now has a regression test.
 | 37 | Font markers beyond U+FFFF drawn as boxes; data-defined text cut off in sprites | MapLibre glyph ranges end at U+FFFF; sprite canvas sized without the feature's attributes | such markers become sprites (per distinct value); `test_font_markers_beyond_the_bmp_become_sprites`, `test_data_defined_font_marker_text_fits_the_sprite` |
 | 38 | Dashes misplaced against markers drawn in their gaps | MapLibre restarts a dash array wherever a tile clips the line; Qt runs the pattern from each line or ring start | map-unit dashes exported as their dashes; `test_map_unit_dashes_match_qgis` |
 | 39 | Data-defined sprite variants intermittently drawn with the static value | symbol clones share each property's cached expression state (about 40 % of runs evaluated the character to NULL) | sprites render from an XML copy of the symbol |
+| 40 | Large map-unit font markers blobby | browser text is a 24 px signed distance field; an 80-280 m letter is drawn 3-12x larger | static map-unit font markers on points exported as their glyph outlines; `test_map_unit_font_markers_become_their_glyphs` |
+| 41 | Cell-sized image patterns spill over polygon edges | point-pattern markers clipped to the shape were exported as whole sprites | such patterns stay clipped textures; `test_point_patterns_of_cell_sized_images_stay_textures` |
 
 ### Resolved suspicions
 

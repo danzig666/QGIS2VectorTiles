@@ -122,6 +122,8 @@ class SymbolMaterializer:
         kind = layer.layerType()
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
+        if kind == "FontMarker":
+            return self._glyph_marker(flat_rule, layer)
         if kind == "SimpleLine":
             dashes = self._dash_segments(flat_rule, layer)
             if dashes is not None:
@@ -146,10 +148,28 @@ class SymbolMaterializer:
         if kind == "RandomMarkerFill":
             return self._random_fill(flat_rule, layer)
         if kind == "PointPatternFill" and normalize_unit(layer.distanceXUnit()) == "map" \
-                and normalize_unit(layer.distanceYUnit()) == "map":
+                and normalize_unit(layer.distanceYUnit()) == "map" \
+                and not self._tiling_pattern(layer):
             return self._dense_split(flat_rule, min(layer.distanceX(), layer.distanceY()),
                                      lambda rule: self._point_grid(rule, layer))
         return None
+
+    @classmethod
+    def _tiling_pattern(cls, layer) -> bool:
+        """A point pattern whose image markers fill their cells and are
+        clipped to the polygon ("shape" clip mode) is a texture: exported as
+        points, the edge markers would be drawn whole (sprites cannot be
+        clipped), so it stays a clipped browser pattern."""
+        try:
+            if int(layer.clipMode()) != int(Qgis.MarkerClipMode.Shape):
+                return False
+        except AttributeError:
+            return False
+        marker = layer.subSymbol()
+        if marker is None or cls._stroke_marker(marker) is not None or \
+                normalize_unit(marker.sizeUnit()) != "map":
+            return False
+        return marker.size() >= 0.5 * min(layer.distanceX(), layer.distanceY())
 
     def _svg_fill(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """``QgsSVGFillSymbolLayer::renderPolygon``: the SVG texture (only when
@@ -200,6 +220,86 @@ class SymbolMaterializer:
             converted = self._hash_as_marker_line(clone, rule)
             rule.rule.symbol().changeSymbolLayer(0, converted)
         return [rule]
+
+    # QgsFontMarkerSymbolLayer: pixel sizes above this are drawn scaled up.
+    GLYPH_PIXEL_SIZE = 500
+
+    def glyph_outline(self, layer) -> Optional[str]:
+        """WKT of a font marker's character outlines in map units around its
+        point (y up), with its offset and anchor: the path QGIS draws
+        (``QPainterPath::addText`` centred on the advance width, baseline
+        half the ascent below the point)."""
+        from qgis.core import QgsApplication, QgsFontUtils, QgsGeometry, QgsPointXY  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QFontMetricsF, QPainterPath  # pylint: disable=import-outside-toplevel
+        font = QgsFontUtils.createFont(
+            QgsApplication.fontManager().processFontFamilyName(layer.fontFamily()))
+        if layer.fontStyle():
+            font.setStyleName(QgsFontUtils.translateNamedStyle(layer.fontStyle()))
+        font.setPixelSize(self.GLYPH_PIXEL_SIZE)
+        metrics = QFontMetricsF(font)
+        text = layer.character()
+        path = QPainterPath()
+        path.addText(-metrics.horizontalAdvance(text) / 2.0, metrics.ascent() / 2.0, font, text)
+        size = layer.size()
+        scale = size / self.GLYPH_PIXEL_SIZE
+        # QgsMarkerSymbolLayer::markerOffset (painter axes, y down).
+        off_x, off_y = layer.offset().x(), layer.offset().y()
+        h_anchor = _enum_value(layer.horizontalAnchorPoint())
+        v_anchor = _enum_value(layer.verticalAnchorPoint())
+        off_x += {0: size / 2.0, 2: -size / 2.0}.get(h_anchor, 0.0)
+        off_y += {0: size / 2.0, 2: -size / 2.0}.get(v_anchor, 0.0)
+        shape = None
+        for polygon in path.toSubpathPolygons():
+            ring = [QgsPointXY(p.x() * scale + off_x, -(p.y() * scale + off_y)) for p in polygon]
+            if len(ring) < 4:
+                continue
+            part = QgsGeometry.fromPolygonXY([ring]).makeValid()
+            # Counters (holes) are drawn as the XOR of overlapping outlines.
+            shape = part if shape is None else shape.symDifference(part)
+        if shape is None or shape.isEmpty():
+            return None
+        return shape.simplify(size * 1e-4).asWkt(6)
+
+    def _glyph_marker(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """A font marker sized in map units on a point layer as its glyph
+        outlines: browser text is a 24 px distance field that turns blobby
+        when scaled up several times, while the outlines are exact at every
+        zoom."""
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        if flat_rule.get_attr("g") != 0 or normalize_unit(layer.sizeUnit()) != "map" or \
+                not layer.character():
+            return None
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        if any(props.isActive(k) for k in (
+                P.PropertyCharacter, P.PropertySize, P.PropertyFontFamily, P.PropertyFontStyle,
+                P.PropertyOffset, P.PropertyHorizontalAnchor, P.PropertyVerticalAnchor)):
+            return None
+        if (layer.offset().x() or layer.offset().y()) and \
+                normalize_unit(layer.offsetUnit()) != "map":
+            return None
+        wkt = self.glyph_outline(layer)
+        if wkt is None:
+            return None
+        angle = repr(float(layer.angle()))
+        if props.isActive(P.PropertyAngle):
+            angle = f"coalesce(({props.property(P.PropertyAngle).asExpression()}), {angle})"
+        fill = QgsSimpleFillSymbolLayer(layer.color())
+        if layer.strokeWidth() > 0:
+            fill.setStrokeColor(layer.strokeColor())
+            fill.setStrokeWidth(layer.strokeWidth())
+            fill.setStrokeWidthUnit(layer.strokeWidthUnit())
+            fill.setStrokeWidthMapUnitScale(layer.strokeWidthMapUnitScale())
+            fill.setPenJoinStyle(layer.penJoinStyle())
+        else:
+            fill.setStrokeStyle(Qt.PenStyle.NoPen)
+        for key in (P.PropertyFillColor, P.PropertyStrokeColor, P.PropertyStrokeWidth):
+            if props.isActive(key):
+                fill.setDataDefinedProperty(key, QgsProperty(props.property(key)))
+        symbol = QgsFillSymbol([fill])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        recipe = mat.glyph_recipe(wkt, angle, self.project_crs or flat_rule.layer.crs().authid())
+        return [self._with_symbol(flat_rule, symbol, 2, 3, recipe)]
 
     # Map-unit dashes become line features from the zoom where the pattern
     # period reaches this many CSS px (below that MapLibre dashes are used).
