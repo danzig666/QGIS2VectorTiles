@@ -384,6 +384,47 @@ def test_nested_geometry_generators_match_qgis(plugin, tmp_path):
     assert mask_difference(reference, ours) < 0.05
 
 
+@pytest.mark.parametrize("length,before,expected", [
+    (40, 10, 18.4), (40, 25, 0.0), (80, 30, 8.1), (80, 50, 0.0)])
+def test_interval_marker_angle_averages_like_qgis(plugin, length, before, expected):
+    """QGIS averages a marker's direction over ``averageAngleLength`` centred
+    on it (+-length / 2); the expected angles were measured on QGIS renders of
+    a marker ``before`` units ahead of a right-angle corner."""
+    from qgis.core import QgsExpression, QgsExpressionContext, QgsExpressionContextUtils
+    from fidelity import materialize as mat
+    recipe = mat.interval_points(1000, 200 - before)
+    recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (("average", length),))
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 0, 200 0, 200 -300)"))
+    context = QgsExpressionContext([QgsExpressionContextUtils.globalScope()])
+    context.setFeature(feature)
+    point = QgsExpression(mat.interval_points_expression(recipe)).evaluate(context)
+    azimuth = point.constGet().geometryN(0).z() if point.isMultipart() else point.constGet().z()
+    # Azimuth 90 runs along the first segment; the corner turns it to 180.
+    assert azimuth - 90 == pytest.approx(expected, abs=0.3)
+
+
+def test_screen_averaged_marker_angles_are_per_zoom(plugin, tmp_path):
+    """A 4 mm averaging length covers half as much line at every zoom in:
+    one dataset per zoom, each averaging over its own length (Műemléki
+    környezet: markers averaged at a far-out zoom tilted along straight
+    edges)."""
+    layer = _layer("LineString", LINES, str(tmp_path / "pz.gpkg"))
+    stroke = QgsMarkerLineSymbolLayer(True, 12)
+    stroke.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    stroke.setAverageAngleLength(4)
+    stroke.setAverageAngleUnit(Qgis.RenderUnit.Millimeters)
+    stroke.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    averages = {r.get_attr("o"): r.recipe.param("average") for r in rules
+                if r.recipe is not None and r.recipe.kind == "marker_points"}
+    assert len(averages) > 3 and all(r.get_attr("o") == r.get_attr("i") for r in rules
+                                     if r.recipe is not None and r.get_attr("i") < 22)
+    for zoom in sorted(averages)[1:]:
+        assert averages[zoom] == pytest.approx(averages[zoom - 1] / 2)
+
+
 @pytest.mark.parametrize("ring_filter", [1, 2])
 @pytest.mark.parametrize("kind", ["line", "markers"])
 def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):

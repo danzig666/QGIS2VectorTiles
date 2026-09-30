@@ -195,13 +195,8 @@ class SymbolMaterializer:
                                             ZoomLevels.zoom_to_scale(low))
             return None
         parts = []
-        for zoom in range(low, high + 1):
-            rule = flat_rule.derive()
-            rule.set_attr("o", zoom)
-            rule.set_attr("i", zoom)
-            if flat_rule.visibility is not None:
-                rule.visibility = flat_rule.visibility.intersect(
-                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+        for rule in self._per_zoom(flat_rule):
+            zoom = rule.get_attr("o")
             clone = rule.rule.symbol().symbolLayer(0)
             for key in scale_only:
                 self._fold_constant_ddp(clone, key, self._setter(clone, key),
@@ -209,6 +204,22 @@ class SymbolMaterializer:
             result = self.materialize(rule, clone)
             parts.extend(result if result is not None else [rule])
         return parts
+
+    def _per_zoom(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
+        """One rule per zoom of ``flat_rule``; the last keeps its overzoom."""
+        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        if low >= high:
+            return [flat_rule]
+        rules = []
+        for zoom in range(low, high + 1):
+            rule = flat_rule.derive()
+            rule.set_attr("o", zoom)
+            rule.set_attr("i", zoom)
+            if flat_rule.visibility is not None:
+                rule.visibility = flat_rule.visibility.intersect(
+                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+            rules.append(rule)
+        return rules
 
     @staticmethod
     def _setter(layer, key):
@@ -937,11 +948,17 @@ class SymbolMaterializer:
                     recipe = mat.Recipe(recipe.kind, recipe.placements,
                                         recipe.params + (("ring_filter", _ring_filter(layer)),))
                 def exact(rule, recipe=recipe):
-                    average = self._average_angle_length(layer, rule)
-                    if average:
-                        recipe = mat.Recipe(recipe.kind, recipe.placements,
-                                            recipe.params + (("average", average),))
-                    return [self._with_symbol(rule, symbol.clone(), 0, 2, recipe)]
+                    def one(rule):
+                        average = self._average_angle_length(layer, rule)
+                        averaged = recipe if not average else mat.Recipe(
+                            recipe.kind, recipe.placements, recipe.params + (("average", average),))
+                        return self._with_symbol(rule, symbol.clone(), 0, 2, averaged)
+                    if not self._average_angle_length(layer, rule) or \
+                            normalize_unit(layer.averageAngleUnit()) == "map":
+                        return [one(rule)]
+                    # A screen averaging length covers less of the line as the
+                    # map zooms in: the same positions, one angle per zoom.
+                    return [one(zoom_rule) for zoom_rule in self._per_zoom(rule)]
                 split = self._dense_split(native, layer.interval(), exact,
                                           elements=self._layer_totals(flat_rule.layer)[1] /
                                           max(layer.interval(), 1e-9),

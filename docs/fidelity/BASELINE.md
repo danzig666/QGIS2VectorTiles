@@ -111,6 +111,7 @@ now has a regression test.
 | 53 | Clipped pattern line work empty on detailed polygons | one GEOS intersection of a whole feature's line work returned mixed collections or failed | clipped per piece (at most 100 x 100 cells, 256 vertices), only lines/polygons kept; `test_pattern_pieces_give_the_whole_feature_pattern` |
 | 54 | Random fills slow on detailed polygons (6-8 s per 0.8 km²) | point-in-polygon test per candidate without a prepared geometry | QGIS's native random points in polygons; `test_large_detailed_layer_patterns_scale` |
 | 55 | Dense random fills slow (25 s for 458 000 points) | every point went through the per-feature steps (fields, geometry expression, cleaning, single-part split) | points collected into one multipoint per polygon and kept as multipoints in the tiles: 5.5 s; `test_large_detailed_layer_patterns_scale` |
+| 56 | Marker-line symbols tilted along straight edges (Műemléki környezet "MK") | the direction was averaged over +-`averageAngleLength` instead of +-half of it, and a 4 mm length was converted once for the whole zoom range (72 m instead of 15 m at z16) | averaged over the length centred on the marker, one dataset per zoom for screen lengths; `test_interval_marker_angle_averages_like_qgis`, `test_screen_averaged_marker_angles_are_per_zoom` |
 
 ### Resolved suspicions
 

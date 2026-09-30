@@ -74,17 +74,19 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
     crs = recipe.param("crs") or export_crs
 
     def angle(line):
-        """Marker azimuth: QGIS averages the direction over +-average along
-        the line (``averageAngleLength``), wrapping around closed rings."""
+        """Marker azimuth: QGIS averages the direction over ``average``
+        (``averageAngleLength``) centred on the marker, i.e. +-average / 2
+        along the line, wrapping around closed rings."""
         if average <= 0:
             return f"line_interpolate_angle({line}, @q2vt_d)"
+        half = average / 2.0
 
         def at(distance):
             return (f"line_interpolate_point({line}, if(is_closed({line}), "
                     f"({distance} + @q2vt_len) % @q2vt_len, "
                     f"max(0, min(@q2vt_len, {distance}))))")
-        return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {average!r}')}, "
-                f"{at(f'@q2vt_d + {average!r}')})), line_interpolate_angle({line}, @q2vt_d))")
+        return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {half!r}')}, "
+                f"{at(f'@q2vt_d + {half!r}')})), line_interpolate_angle({line}, @q2vt_d))")
 
     def body(line):
         return (
