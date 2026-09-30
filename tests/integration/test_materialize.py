@@ -425,6 +425,45 @@ def test_screen_averaged_marker_angles_are_per_zoom(plugin, tmp_path):
         assert averages[zoom] == pytest.approx(averages[zoom - 1] / 2)
 
 
+def test_marker_line_with_float_noise_offset_is_exported(plugin, tmp_path):
+    """Vasúti fővonal: an offset of 5.55e-17 map units (float noise saved in
+    the style) built a zero offset curve, which failed the whole dataset."""
+    layer = _layer("LineString", LINES, str(tmp_path / "fn.gpkg"))
+    stroke = QgsMarkerLineSymbolLayer(True, 12)
+    stroke.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    stroke.setOffset(5.55112e-17)
+    stroke.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    stroke.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert any(r.recipe is not None and r.recipe.kind == "marker_points" for r in rules)
+    assert not diags.by_code("Q2VT_RULE_EXPORT_FAILED")
+
+
+def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
+    """Tervezési terület / Tervezett fasor: a 4 mm interval halves in map
+    units at every zoom in; MapLibre's own line placement dropped markers
+    at tile edges and ring starts, so positions are materialized per zoom."""
+    layer = _layer("LineString", LINES, str(tmp_path / "si.gpkg"))
+    stroke = QgsMarkerLineSymbolLayer(True, 4)
+    stroke.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+    stroke.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    intervals = {r.get_attr("o"): r.recipe.param("interval") for r in rules
+                 if r.recipe is not None and r.recipe.kind == "marker_points"}
+    assert len(intervals) > 3
+    for zoom in sorted(intervals)[1:]:
+        assert intervals[zoom] == pytest.approx(intervals[zoom - 1] / 2)
+    top = max(intervals)
+    # z+0.5: 4 mm at 96 dpi on the Web Mercator grid.
+    from fidelity.zoom import zoom_to_scale
+    assert intervals[top] == pytest.approx(0.004 * zoom_to_scale(top + 0.5), rel=1e-6)
+    # Beyond the last tile zoom, the native placement keeps the screen spacing.
+    assert any(r.recipe is None and r.visibility is not None
+               and r.visibility.min_zoom == top + 1 for r in rules)
+
+
 @pytest.mark.parametrize("ring_filter", [1, 2])
 @pytest.mark.parametrize("kind", ["line", "markers"])
 def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):

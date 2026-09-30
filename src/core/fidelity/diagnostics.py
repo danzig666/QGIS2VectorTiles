@@ -136,6 +136,9 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_RULE_OUTPUT_EMPTY": CodeInfo(
         Severity.WARNING, "A rule matched features but its geometry step produced none",
         "Check the geometry generator / conversion of this rule; it is missing from the map."),
+    "Q2VT_RULE_EXPORT_FAILED": CodeInfo(
+        Severity.ERROR, "A rule could not be exported",
+        "It is missing from the map. Report this as a converter bug with the diagnostic detail."),
     "Q2VT_EXPORT_EMPTY": CodeInfo(
         Severity.ERROR, "No visible features in the export extent",
         "Check the extent, layer visibility and scale ranges."),

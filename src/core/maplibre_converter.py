@@ -1905,7 +1905,7 @@ class QgisMapLibreStyleExporter:
                     "Q2VT_PATTERN_MAP_UNITS",
                     f"Hatch {what} in map units is frozen at zoom "
                     f"{self.context.reference_zoom:g}.", strategy=Strategy.APPROXIMATE.value)
-            return PropertyExtractor.static_pixels(value, unit)
+            return self._texture_px(value, unit)
 
         color = QColor(line.color())
         color.setAlphaF(color.alphaF() * sub.opacity())
@@ -2118,9 +2118,12 @@ class QgisMapLibreStyleExporter:
     def _marker_images(self, marker: QgsSymbol):
         """Marker rendered at 1x and 2x for pasting into a texture cell."""
         from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
-        reference = self._reference_map_units_per_px()
-        one = SymbolImage(marker, "pattern-marker", 1, True, reference).img
-        two = SymbolImage(marker, "pattern-marker", 2, True, reference).img
+        # Screen-unit parts are drawn at TEXTURE_SCREEN_SCALE, map-unit parts
+        # at the reference zoom (scaling both factors keeps map pixels).
+        scale = self.TEXTURE_SCREEN_SCALE
+        reference = self._reference_map_units_per_px() * scale
+        one = SymbolImage(marker, "pattern-marker", scale, True, reference).img
+        two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference).img
         return one, two
 
     @staticmethod
@@ -2141,9 +2144,11 @@ class QgisMapLibreStyleExporter:
     def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float):
         """One texture per integer zoom for a pattern sized in map units.
 
-        MapLibre textures keep their screen size, so each zoom band gets a
-        texture rendered at the middle of the band (sizes stay within about
-        ±41 % of QGIS inside the band); ``fill-pattern`` steps between them.
+        MapLibre draws ``fill-pattern`` in the pixels of the tile's integer
+        zoom, so a texture grows with the map until the next zoom, exactly
+        like map-unit sizes in QGIS: each zoom's texture is rendered at that
+        integer zoom (screen-unit parts, see ``TEXTURE_SCREEN_SCALE``, stay
+        within about ±41 %); ``fill-pattern`` steps between them.
         """
         low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
@@ -2155,7 +2160,7 @@ class QgisMapLibreStyleExporter:
             zoom = low
             while zoom < top - 1e-9:
                 upper = min(math.floor(zoom) + 1.0, top)
-                self.context.reference_zoom = (zoom + upper) / 2.0
+                self.context.reference_zoom = zoom
                 name = register()
                 if name is None:
                     return None
@@ -2168,8 +2173,9 @@ class QgisMapLibreStyleExporter:
             return None
         self.context.report(
             "Q2VT_PATTERN_MAP_UNITS",
-            "Pattern in map units drawn with one texture per zoom level (sizes within "
-            "about ±41 % of QGIS between integer zooms).", strategy=Strategy.APPROXIMATE.value)
+            "Pattern in map units drawn with one texture per zoom level (screen-unit "
+            "parts within about ±41 % of QGIS between integer zooms).",
+            strategy=Strategy.APPROXIMATE.value)
         if len(stops) == 1:
             return stops[0][1]
         expr: List[Any] = ["step", ["zoom"], stops[0][1]]
@@ -2179,13 +2185,23 @@ class QgisMapLibreStyleExporter:
 
     _pattern_zoom_bands = False
 
+    # MapLibre draws fill-pattern in the pixels of the tile's integer zoom: a
+    # texture grows 2x with the map until the next zoom, while QGIS keeps
+    # screen-unit sizes. Drawn at 1/sqrt(2), they stay within 0.71x-1.41x of
+    # QGIS (instead of 1x-2x), exact in the middle of every zoom.
+    TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
+
+    def _texture_px(self, value, unit) -> float:
+        px = PropertyExtractor.static_pixels(value, unit)
+        return px if normalize_unit(unit) in ("map", "m") else px * self.TEXTURE_SCREEN_SCALE
+
     def _pattern_px(self, value, unit, what: str) -> float:
         if normalize_unit(unit) in ("map", "m") and value and not self._pattern_zoom_bands:
             self.context.report(
                 "Q2VT_PATTERN_MAP_UNITS",
                 f"Pattern {what} in map units is frozen at zoom {self.context.reference_zoom:g}.",
                 strategy=Strategy.APPROXIMATE.value)
-        return PropertyExtractor.static_pixels(value, unit) if value else 0.0
+        return self._texture_px(value, unit) if value else 0.0
 
     def _textures(self, cell_1x, cell_2x, error: float, what: str) -> str:
         if error > self.profile.tolerance_rel and error > 0:

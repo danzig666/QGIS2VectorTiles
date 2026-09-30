@@ -670,11 +670,15 @@ class RulesExporter:
                     for pending_fut, pending_grp in futures.items():
                         outputs.setdefault(pending_grp.output_dataset, None)
                     return outputs
-                except Exception:  # noqa: BLE001
+                except Exception as error:  # noqa: BLE001
                     self.feedback.reportError(
                         f"Rule export failed for '{grp.output_dataset}':\n"
                         f"{traceback.format_exc()}"
                     )
+                    self.diagnostics.add(
+                        "Q2VT_RULE_EXPORT_FAILED", f"{grp.description}: {error}",
+                        layer_id=grp.layer_id, component=grp.output_dataset,
+                        detail=traceback.format_exc(limit=-3))
                     outputs[grp.output_dataset] = None
         return outputs
 

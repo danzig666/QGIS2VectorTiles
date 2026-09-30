@@ -298,3 +298,41 @@ def test_label_frames_follow_map_unit_text_between_zooms(tmp_path, monkeypatch, 
                           for n in ("qgis", "browser"))
     for a, b in zip(qf, bf):  # frame edges within 2 px
         assert abs(a - b) <= 2, (qf, bf)
+
+
+def _period(png, axis=0):
+    """Dominant repeat distance (px) of a pattern's ink along ``axis``."""
+    import numpy as np
+    from PIL import Image
+    ink = np.asarray(Image.open(png).convert("L")) < 200
+    ink = ink[SIZE // 4:3 * SIZE // 4, SIZE // 4:3 * SIZE // 4]
+    profile = ink.sum(axis=axis).astype(float)
+    spectrum = np.abs(np.fft.rfft(profile - profile.mean()))
+    k = int(spectrum[3:].argmax()) + 3
+    return len(profile) / k
+
+
+@pytest.mark.parametrize("unit", ["map", "mm"])
+@pytest.mark.parametrize("zoom", [16.25, 16.75])
+def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypatch, unit, zoom):
+    """MapLibre draws fill-pattern in the pixels of the tile's integer zoom,
+    so a texture grows with the map until the next zoom (Kis szaggatott: a
+    texture laid out for the middle of the zoom was 1.4x too sparse)."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 2 if unit == "map" else 0.6)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits if unit == "map" else Qgis.RenderUnit.Millimeters)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    spacing = 5.0 if unit == "map" else 1.6
+    pattern_unit = Qgis.RenderUnit.MapUnits if unit == "map" else Qgis.RenderUnit.Millimeters
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(spacing)
+        getattr(pattern, f"set{name}Unit")(pattern_unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape")
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.3), (qgis, browser)

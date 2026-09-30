@@ -48,7 +48,7 @@ class Recipe:
 def marker_points(placements, offset: float = 0.0, crs: str = "") -> Recipe:
     """Marker positions; ``offset`` (map units, right of the line) offsets the
     line in ``crs`` before positions are computed, as QGIS does."""
-    params = (("offset", float(offset)), ("crs", crs)) if offset else ()
+    params = (("offset", float(offset)), ("crs", crs)) if abs(offset) > 1e-9 else ()
     return Recipe("marker_points", tuple(sorted(set(placements) & POINT_PLACEMENTS)), params)
 
 
@@ -57,7 +57,7 @@ def interval_points(interval: float, along: float = 0.0, offset: float = 0.0,
     """Interval marker positions (map units): ``along + k * interval`` from the
     start of every (offset) line, like ``renderPolylineInterval``."""
     params = [("interval", float(interval)), ("along", float(along)), ("crs", crs)]
-    if offset:
+    if abs(offset) > 1e-9:
         params.append(("offset", float(offset)))
     return Recipe("marker_points", ("Interval",), tuple(params))
 
