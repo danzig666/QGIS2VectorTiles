@@ -6,11 +6,17 @@
 
 # QGIS2VectorTiles
 
-[![🐞 Issues](https://img.shields.io/badge/Issues-🐞-98b023?style=for-the-badge)](https://github.com/GallPeters/QGIS2VectorTiles/issues)
+[![🐞 Issues](https://img.shields.io/badge/Issues-🐞-98b023?style=for-the-badge)](https://github.com/danzig666/QGIS2VectorTiles/issues)
+[![📦 Releases](https://img.shields.io/badge/Releases-📦-black?style=for-the-badge)](https://github.com/danzig666/QGIS2VectorTiles/releases)
 [![🌐 Website](https://img.shields.io/badge/Website-🌐-black?style=for-the-badge)](https://gallpeters.github.io/QGIS2VectorTiles/)
 [![📜 License](https://img.shields.io/badge/License-📜-98b023?style=for-the-badge)](https://www.gnu.org/licenses/old-licenses/gpl-2.0-standalone.html)
 
 **Turn QGIS projects into fast, lightweight, client-rendered web maps in a single run.**
+
+> **This is a fork** of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles)
+> by Jossef Kanter, focused on making the web map match the QGIS styling. Download fork builds
+> from [Releases](https://github.com/danzig666/QGIS2VectorTiles/releases) and report fork issues
+> [here](https://github.com/danzig666/QGIS2VectorTiles/issues).
 
   _- No internet connection or third-party installation required -_
 

@@ -1,0 +1,39 @@
+# Publishes a GitHub Release from the plugin zip committed in releases/.
+# Run it from the Actions tab (or the API) with the version, e.g. 4.0: it tags
+# the selected commit v<version> and attaches releases/QGIS2VectorTiles-<version>.zip
+# with releases/RELEASE_NOTES_<version>.md as the release notes.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version (e.g. 4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version, zip and notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          grep -qx "version=${VERSION}" metadata.txt
+          test -f "releases/QGIS2VectorTiles-${VERSION}.zip"
+          test -f "releases/RELEASE_NOTES_${VERSION}.md"
+          unzip -p "releases/QGIS2VectorTiles-${VERSION}.zip" QGIS2VectorTiles/metadata.txt \
+            | grep -qx "version=${VERSION}"
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v${VERSION}" "releases/QGIS2VectorTiles-${VERSION}.zip" \
+            --target "${GITHUB_SHA}" \
+            --title "QGIS2VectorTiles ${VERSION} (fork)" \
+            --notes-file "releases/RELEASE_NOTES_${VERSION}.md"
