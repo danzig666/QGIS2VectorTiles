@@ -144,16 +144,36 @@ def tile_markers(marker, cell_w: int, cell_h: int, positions):
     return cell
 
 
+def _repeats(period: float, tolerance: float = 0.02, limit: int = 64,
+             max_px: float = 256.0) -> int:
+    """Smallest number of periods whose total length is (nearly) a whole
+    number of pixels, so dense or fractional spacings keep their density."""
+    best_error, best = float("inf"), 1
+    for count in range(1, limit + 1):
+        size = period * count
+        if count > 1 and size > max_px:
+            break
+        error = abs(max(1, round(size)) - size) / size
+        if error < best_error - 1e-12:
+            best_error, best = error, count
+        if error <= tolerance:
+            return count
+    return best
+
+
 def point_pattern_cell(dx: float, dy: float, disp_x: float, disp_y: float):
     """Repeat cell size and marker positions (CSS px) of a point pattern.
 
     Displacement of alternate rows/columns doubles the cell in that
-    direction. Returns ``(width, height, positions, max_relative_error)``
-    with integer cell sizes; the error measures the spacing change caused by
-    rounding to whole pixels.
+    direction; spacings that are not close to whole pixels (or smaller than
+    one) repeat several times inside the cell. Returns ``(width, height,
+    positions, max_relative_error)`` with integer cell sizes; the error
+    measures the spacing change caused by rounding to whole pixels.
     """
     rows = 2 if disp_x else 1
     cols = 2 if disp_y else 1
+    cols *= _repeats(dx * cols)
+    rows *= _repeats(dy * rows)
     width = max(1, round(dx * cols))
     height = max(1, round(dy * rows))
     real_dx, real_dy = width / cols, height / rows

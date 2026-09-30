@@ -20,8 +20,11 @@ window.map = new maplibregl.Map({ container: "map", style: "http://localhost:${p
 map.on("error", (e) => window.q2vt.errors.push(String(e.error && e.error.message || e)));
 map.on("styleimagemissing", (e) => window.q2vt.missing.push(e.id));
 window.q2vtGo = (v) => new Promise((resolve) => {
+  // Never wait forever: a view whose tiles or images never settle is
+  // captured as is after 20 s and reported.
+  const timer = setTimeout(() => { window.q2vt.timeouts = (window.q2vt.timeouts || []).concat([v.id]); resolve(false); }, 20000);
+  map.once("idle", () => { clearTimeout(timer); resolve(true); });
   map.jumpTo({ center: [v.lon, v.lat], zoom: v.zoom });
-  map.once("idle", () => resolve(true));
   map.triggerRepaint();
 });
 </script></body></html>`;

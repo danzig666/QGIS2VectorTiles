@@ -1,6 +1,7 @@
 """Convert QGIS Vector Tile Layer styles to MapLibre GL JSON style format."""
 
 import json
+import math
 import os
 from os.path import join
 from typing import Any, Dict, List, Optional, Union
@@ -56,6 +57,45 @@ def _argb_hex(value) -> str:
     if len(text) == 9 and text.startswith("#"):
         return "#" + text[7:9] + text[1:7]
     return text
+
+
+def hairline(width):
+    """QGIS draws a zero stroke width as a one-pixel (cosmetic) hairline."""
+    if ex.is_number(width):
+        return 1.0 if width == 0 else width
+    if ex.is_zoom_curve(width):
+        return ex._map_outputs(width, hairline)  # pylint: disable=protected-access
+    return ["case", ["==", width, 0], 1, width]
+
+
+_PROPERTY_NAMES: Dict[type, Dict[int, str]] = {}
+
+
+def _property_name(obj, key: int) -> str:
+    """Enum member name without prefix (``StrokeWidth``) of a property key of
+    ``obj`` (a symbol or symbol layer), for PyQGIS with and without scoped enums."""
+    owner = QgsSymbol if isinstance(obj, QgsSymbol) else QgsSymbolLayer
+    names = _PROPERTY_NAMES.get(owner)
+    if names is None:
+        names = {}
+        enum = owner.Property
+        for attr in dir(enum):
+            if attr[:1].isupper():
+                value = getattr(enum, attr)
+                try:
+                    names[int(getattr(value, "value", value))] = (
+                        attr[8:] if attr.startswith("Property") else attr)
+                except (TypeError, ValueError):
+                    continue
+        for attr in dir(owner):
+            if attr.startswith("Property") and attr != "Property":
+                value = getattr(owner, attr)
+                try:
+                    names.setdefault(int(getattr(value, "value", value)), attr[8:])
+                except (TypeError, ValueError):
+                    continue
+        _PROPERTY_NAMES[owner] = names
+    return names.get(int(key), str(key))
 
 
 def _enum_name(value) -> str:
@@ -299,10 +339,10 @@ class LinePropertyExtractor:
         width_prop = symbol_layer.dataDefinedProperties().property(
             QgsSymbolLayer.Property.PropertyStrokeWidth
         )
-        return PropertyExtractor.length(
+        return hairline(PropertyExtractor.length(
             symbol_layer.width(), symbol_layer.widthUnit(), width_prop,
             symbol_layer.widthMapUnitScale(),
-        )
+        ))
 
     @staticmethod
     def get_line_opacity(
@@ -1322,6 +1362,7 @@ class QgisMapLibreStyleExporter:
         profile: Optional[ExportProfile] = None,
         visibility: Optional[Dict[str, ZoomInterval]] = None,
         lengths: Optional[LengthConverter] = None,
+        ordered_styles: Optional[set] = None,
     ):
         """Initialise the exporter.
 
@@ -1341,6 +1382,8 @@ class QgisMapLibreStyleExporter:
                              description); falls back to the integer zoom
                              range stored on the vector tile style.
             lengths:         Unit converter (map-unit context of the project).
+            ordered_styles:  Style names whose features carry a QGIS
+                             drawing rank (renderer order-by) to sort by.
         """
         self.output_dir = output_dir
         self.utils_dir = utils_dir
@@ -1354,6 +1397,7 @@ class QgisMapLibreStyleExporter:
         self.diagnostics = diagnostics or DiagnosticCollector()
         self.profile = profile or ExportProfile()
         self.visibility = visibility or {}
+        self.ordered_styles = ordered_styles or set()
         self.context = ConversionContext(self.diagnostics, lengths, self.profile)
         PropertyExtractor.context = self.context
         self.sprite_names: List[str] = []
@@ -1496,10 +1540,28 @@ class QgisMapLibreStyleExporter:
             return
         self.context.component = style.styleName()
         self.context.source_layer = style.layerName()
+        first = len(self.style["layers"])
         self._convert_symbol(
             style.symbol(), style.styleName(), style.layerName(),
             self.source_name, bounds[0], bounds[1],
         )
+        if style.styleName() in self.ordered_styles:
+            self._apply_draw_order(self.style["layers"][first:])
+
+    _SORT_KEYS = {"fill": "fill-sort-key", "line": "line-sort-key",
+                  "circle": "circle-sort-key", "symbol": "symbol-sort-key"}
+
+    def _apply_draw_order(self, layer_defs) -> None:
+        """Sort a layer's features like QGIS' "Control feature rendering order".
+
+        The ordering holds within each style layer; features of different
+        symbol layers are not interleaved per feature as in QGIS.
+        """
+        from .rules_exporter import ORDER_FIELD
+        for layer_def in layer_defs:
+            key = self._SORT_KEYS.get(layer_def["type"])
+            if key and "text-field" not in layer_def.get("layout", {}):
+                layer_def["layout"][key] = ["to-number", ["get", ORDER_FIELD], 0]
 
     def _convert_labeling_style(self, style):
         """Convert a single ``QgsVectorTileBasicLabelingStyle`` into a MapLibre symbol layer."""
@@ -1518,25 +1580,36 @@ class QgisMapLibreStyleExporter:
     # --- classification -----------------------------------------------------
     @staticmethod
     def _active_ddp_names(obj) -> List[str]:
-        """Names of the active data-defined properties of a symbol/symbol layer."""
+        """Enum names (``StrokeWidth``, ``Opacity``...) of the active
+        data-defined properties of a symbol or symbol layer.
+
+        The property *definitions* use legacy names (``outlineWidth``,
+        ``alpha``), so the enum member names are used instead.
+        """
         names = []
         try:
             props = obj.dataDefinedProperties()
-            definitions = obj.propertyDefinitions()
         except (AttributeError, RuntimeError):
             return names
         for key in props.propertyKeys():
             prop = props.property(key)
             if prop and prop.isActive():
-                definition = definitions.get(key)
-                name = definition.name() if definition else str(key)
-                names.append(name[:1].upper() + name[1:])
+                names.append(_property_name(obj, key))
         return names
+
+    _STROKE_DDP = frozenset({"StrokeColor", "StrokeWidth", "StrokeStyle", "JoinStyle"})
 
     def _classify(self, symbol_layer: QgsSymbolLayer, index: int) -> Strategy:
         """Classify a symbol layer and report unsupported data-defined properties."""
         layer_type = symbol_layer.layerType()
-        result = classify(layer_type, self._active_ddp_names(symbol_layer))
+        names = self._active_ddp_names(symbol_layer)
+        try:
+            if layer_type == "SimpleFill" and symbol_layer.strokeStyle() == Qt.PenStyle.NoPen:
+                # The outline was split into its own line layer.
+                names = [n for n in names if n not in self._STROKE_DDP]
+        except (AttributeError, RuntimeError):
+            pass
+        result = classify(layer_type, names)
         for name in result.unsupported_properties:
             self.context.report(
                 "Q2VT_DDP_NO_EMITTER",
@@ -1589,6 +1662,9 @@ class QgisMapLibreStyleExporter:
                 self._convert_font_marker(symbol_layer, symbol, style_name, source_layer_name,
                                           source_name, min_zoom, max_zoom)
                 return
+            if self._native_circle(symbol, style_name, source_layer_name, source_name,
+                                   min_zoom, max_zoom):
+                return
             self._convert_marker_symbol(
                 symbol_layer, symbol, style_name, source_layer_name,
                 source_name, min_zoom, max_zoom,
@@ -1598,11 +1674,15 @@ class QgisMapLibreStyleExporter:
                 symbol, style_name, source_layer_name, source_name, min_zoom, max_zoom
             )
         elif symbol_type == QgsSymbol.SymbolType.Fill:
-            if self._classify(symbol_layer, 0) == Strategy.UNSUPPORTED:
-                return
-            self._convert_fill_symbol(
-                symbol_layer, symbol, style_name, source_layer_name, source_name, min_zoom, max_zoom
-            )
+            # Normally one layer (the flattener splits symbols); generator
+            # sub-symbols can carry several, drawn bottom-to-top.
+            for index in range(symbol.symbolLayerCount()):
+                fill_layer = symbol.symbolLayer(index)
+                if self._classify(fill_layer, index) == Strategy.UNSUPPORTED:
+                    continue
+                self._convert_fill_symbol(
+                    fill_layer, symbol, style_name if index == 0 else f"{style_name}_layer{index}",
+                    source_layer_name, source_name, min_zoom, max_zoom)
 
     def _base_layer_def(
         self,
@@ -1820,14 +1900,11 @@ class QgisMapLibreStyleExporter:
         fields = set()
         try:
             props = obj.dataDefinedProperties()
-            definitions = obj.propertyDefinitions()
         except (AttributeError, RuntimeError):
             return []
         for key in props.propertyKeys():
             prop = props.property(key)
-            definition = definitions.get(key)
-            name = definition.name() if definition else ""
-            if not prop or not prop.isActive() or name.lower() in excluded:
+            if not prop or not prop.isActive() or _property_name(obj, key).lower() in excluded:
                 continue
             fields |= {c for c in QgsExpression(prop.asExpression()).referencedColumns()
                        if c.startswith(f"{_FIELD_PREFIX}_")}
@@ -1847,8 +1924,63 @@ class QgisMapLibreStyleExporter:
         two = SymbolImage(marker, "pattern-marker", 2, True, reference).img
         return one, two
 
+    @staticmethod
+    def _pattern_uses_map_units(layer) -> bool:
+        units = []
+        for getter in ("distanceXUnit", "distanceYUnit", "patternWidthUnit", "widthUnit"):
+            if hasattr(layer, getter):
+                units.append(getattr(layer, getter)())
+        sub = layer.subSymbol()
+        if sub is not None:
+            units += [sub.symbolLayer(i).outputUnit() for i in range(sub.symbolLayerCount())]
+        return any(normalize_unit(unit) in ("map", "m") for unit in units)
+
+    # Upper bound on per-zoom textures of one map-unit pattern.
+    MAX_PATTERN_ZOOMS = 12
+
+    def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float):
+        """One texture per integer zoom for a pattern sized in map units.
+
+        MapLibre textures keep their screen size, so each zoom band gets a
+        texture rendered at the middle of the band (sizes stay within about
+        ±41 % of QGIS inside the band); ``fill-pattern`` steps between them.
+        """
+        low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
+        top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
+        top = min(top, float(self.maxzoom) + 3.0, low + self.MAX_PATTERN_ZOOMS)
+        saved = self.context.reference_zoom
+        self._pattern_zoom_bands = True
+        stops = []
+        try:
+            zoom = low
+            while zoom < top - 1e-9:
+                upper = min(math.floor(zoom) + 1.0, top)
+                self.context.reference_zoom = (zoom + upper) / 2.0
+                name = register()
+                if name is None:
+                    return None
+                stops.append((zoom, name))
+                zoom = upper
+        finally:
+            self.context.reference_zoom = saved
+            self._pattern_zoom_bands = False
+        if not stops:
+            return None
+        self.context.report(
+            "Q2VT_PATTERN_MAP_UNITS",
+            "Pattern in map units drawn with one texture per zoom level (sizes within "
+            "about ±41 % of QGIS between integer zooms).", strategy=Strategy.APPROXIMATE.value)
+        if len(stops) == 1:
+            return stops[0][1]
+        expr: List[Any] = ["step", ["zoom"], stops[0][1]]
+        for zoom, name in stops[1:]:
+            expr += [zoom, name]
+        return expr
+
+    _pattern_zoom_bands = False
+
     def _pattern_px(self, value, unit, what: str) -> float:
-        if normalize_unit(unit) in ("map", "m") and value:
+        if normalize_unit(unit) in ("map", "m") and value and not self._pattern_zoom_bands:
             self.context.report(
                 "Q2VT_PATTERN_MAP_UNITS",
                 f"Pattern {what} in map units is frozen at zoom {self.context.reference_zoom:g}.",
@@ -1936,7 +2068,7 @@ class QgisMapLibreStyleExporter:
             cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
         return self._textures(cells[0], cells[1], 0.0, "Raster fill")
 
-    _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "enabled", "layerenabled"})
+    _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "layerenabled"})
 
     def _marker_variants(self, symbol, marker_name, source_layer, map_units_per_pixel,
                          oversampling):
@@ -1972,6 +2104,101 @@ class QgisMapLibreStyleExporter:
         if not cases:
             return marker_name
         return ["match", key] + cases + [marker_name]
+
+    # Data-defined properties a native circle reproduces exactly.
+    _CIRCLE_DDP = frozenset({"Size", "Angle", "Opacity", "FillColor", "Color", "StrokeColor",
+                             "StrokeWidth", "LayerEnabled"})
+
+    def _native_circle(self, symbol, style_name, source_layer_name, source_name,
+                       min_zoom, max_zoom) -> bool:
+        """Emit a ``circle`` layer for a plain circular simple marker.
+
+        Eligible: one ``SimpleMarker`` layer of shape circle, solid or no
+        stroke, no offset or paint effect, and only data-defined size,
+        colours, stroke width and opacity. QGIS centres the stroke on the
+        circle's edge while MapLibre draws it outside ``circle-radius``, so
+        the radius is ``(size - stroke) / 2``. A translucent stroke over a
+        visible fill would show the fill under the inner half of the QGIS
+        stroke, so that case stays a sprite. Returns False when the symbol
+        is not eligible (it is then rendered as a sprite).
+        """
+        if symbol.symbolLayerCount() != 1:
+            return False
+        layer = symbol.symbolLayer(0)
+        if layer.layerType() != "SimpleMarker":
+            return False
+        try:
+            if layer.shape() != Qgis.MarkerShape.Circle:
+                return False
+            offset = layer.offset()
+            if offset.x() or offset.y():
+                return False
+            pen = layer.strokeStyle()
+        except (AttributeError, RuntimeError):
+            return False
+        if pen not in (Qt.PenStyle.SolidLine, Qt.PenStyle.NoPen):
+            return False
+        effect = layer.paintEffect()
+        if effect is not None and effect.enabled() and type(effect).__name__ != "QgsDefaultPaintEffect":
+            stack = getattr(effect, "effectList", lambda: [])()
+            if not (type(effect).__name__ == "QgsEffectStack" and all(
+                    type(e).__name__ == "QgsDrawSourceEffect" for e in stack)):
+                return False
+        names = set(self._active_ddp_names(layer))
+        if names - self._CIRCLE_DDP or self._active_ddp_names(symbol) not in ([], ["Opacity"]):
+            return False
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        stroke_color = layer.strokeColor()
+        has_stroke = pen != Qt.PenStyle.NoPen and (
+            stroke_color.alpha() > 0 or props.property(P.PropertyStrokeColor).isActive())
+        opacity = PropertyExtractor.opacity(symbol, layer)
+        if has_stroke and layer.color().alpha() > 0 and (
+                stroke_color.alpha() < 255 or not ex.is_number(opacity) or opacity < 1
+                or props.property(P.PropertyStrokeColor).isActive()):
+            return False
+
+        lengths = PropertyExtractor.length
+        size = lengths(layer.size(), layer.sizeUnit(), props.property(P.PropertySize),
+                       layer.sizeMapUnitScale())
+        stroke = 0.0
+        if has_stroke:
+            width = layer.strokeWidth()
+            width_prop = props.property(P.PropertyStrokeWidth)
+            if width > 0 or width_prop.isActive():
+                stroke = lengths(width, layer.strokeWidthUnit(), width_prop,
+                                 layer.strokeWidthMapUnitScale())
+            else:
+                stroke = 1.0  # QGIS draws a zero width as a one-pixel hairline
+        try:
+            radius = ex.clamp(ex.mul(ex.add(size, ex.mul(stroke, -1.0)), 0.5), 0, None)
+        except ex.ExpressionError:
+            return False
+
+        fill_color = PropertyExtractor.get_value_or_expression(
+            PropertyExtractor.convert_qcolor_to_maplibre(layer.color()),
+            props.property(P.PropertyFillColor), "color")
+        layer_def = self._base_layer_def("circle", style_name, source_layer_name, source_name,
+                                         min_zoom, max_zoom)
+        layer_def["layout"]["visibility"] = "visible"
+        paint = layer_def["paint"]
+        paint.update({
+            "circle-radius": radius,
+            "circle-color": fill_color,
+            "circle-opacity": opacity,
+            "circle-pitch-alignment": "map",
+            "circle-pitch-scale": "map",
+        })
+        if has_stroke:
+            paint.update({
+                "circle-stroke-width": stroke,
+                "circle-stroke-color": PropertyExtractor.get_value_or_expression(
+                    PropertyExtractor.convert_qcolor_to_maplibre(stroke_color),
+                    props.property(P.PropertyStrokeColor), "color"),
+                "circle-stroke-opacity": opacity,
+            })
+        self.style["layers"].append(layer_def)
+        return True
 
     def _convert_marker_symbol(
         self,
@@ -2269,16 +2496,22 @@ class QgisMapLibreStyleExporter:
                     "visibility": "visible",
                 })
         elif FillPropertyExtractor.is_pattern_fill(symbol_layer):
-            pattern_name = None
             kind = symbol_layer.layerType()
-            if kind == "LinePatternFill":
-                pattern_name = self._register_line_pattern(symbol_layer, symbol)
-            elif kind == "PointPatternFill":
-                pattern_name = self._register_point_pattern(symbol_layer)
-            elif kind == "SVGFill":
-                pattern_name = self._register_svg_pattern(symbol_layer)
-            elif kind == "RasterFill":
-                pattern_name = self._register_raster_pattern(symbol_layer)
+
+            def register():
+                if kind == "LinePatternFill":
+                    return self._register_line_pattern(symbol_layer, symbol)
+                if kind == "PointPatternFill":
+                    return self._register_point_pattern(symbol_layer)
+                if kind == "SVGFill":
+                    return self._register_svg_pattern(symbol_layer)
+                if kind == "RasterFill":
+                    return self._register_raster_pattern(symbol_layer)
+                return None
+            if kind != "LinePatternFill" and self._pattern_uses_map_units(symbol_layer):
+                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
+            else:
+                pattern_name = register()
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",
@@ -2363,7 +2596,17 @@ class QgisMapLibreStyleExporter:
         # Emit only the placement properties that apply to this placement
         # mode; MapLibre lets some of them override each other.
         variable_anchor = TextPropertyExtractor.get_text_variable_anchor(label_settings)
-        if variable_anchor:
+        pinned = self._is_pinned(label_settings)
+        if pinned:
+            # Data-defined position: the label's alignment point sits on the
+            # exported point; offsets and candidate positions do not apply.
+            # Always shown, so a callout leader never outlives its label.
+            layer_def["layout"].update({
+                "symbol-placement": "point",
+                "text-anchor": self._pinned_anchor(label_settings),
+                "text-allow-overlap": True,
+            })
+        elif variable_anchor:
             layer_def["layout"]["text-variable-anchor"] = variable_anchor
             layer_def["layout"]["text-radial-offset"] = \
                 TextPropertyExtractor.get_text_radial_offset(label_settings, em_size)
@@ -2398,6 +2641,43 @@ class QgisMapLibreStyleExporter:
             self._apply_default_icon_props(layer_def)
 
         self.style["layers"].append(layer_def)
+
+    @staticmethod
+    def _is_pinned(label_settings) -> bool:
+        props = label_settings.dataDefinedProperties()
+        P = QgsPalLayerSettings.Property
+        x_prop, y_prop = props.property(P.PositionX), props.property(P.PositionY)
+        return bool(x_prop and y_prop and x_prop.isActive() and y_prop.isActive())
+
+    _HALI = {"left": "left", "center": "", "right": "right"}
+    _VALI = {"bottom": "bottom", "base": "bottom", "half": "", "cap": "top", "top": "top"}
+
+    @classmethod
+    def _anchor_name(cls, hali: str, vali: str) -> str:
+        vertical = cls._VALI.get(str(vali).lower(), "bottom")
+        horizontal = cls._HALI.get(str(hali).lower(), "left")
+        return "-".join(p for p in (vertical, horizontal) if p) or "center"
+
+    def _pinned_anchor(self, label_settings):
+        """``text-anchor`` from the data-defined alignment (QGIS default: the
+        bottom-left corner of the label at the position)."""
+        props = label_settings.dataDefinedProperties()
+        P = QgsPalLayerSettings.Property
+        parts = []
+        for key, default in ((P.Hali, "Left"), (P.Vali, "Bottom")):
+            prop = props.property(key)
+            value = PropertyExtractor.get_value_or_expression(default, prop, "string") \
+                if prop and prop.isActive() else default
+            parts.append(value)
+        if all(isinstance(p, str) for p in parts):
+            return self._anchor_name(*parts)
+        cases = []
+        for hali in ("Left", "Center", "Right"):
+            for vali in ("Bottom", "Base", "Half", "Cap", "Top"):
+                cases += [f"{hali}|{vali}", self._anchor_name(hali, vali)]
+        key = ["concat"] + [p if isinstance(p, str) else ["to-string", p] for p in
+                            (parts[0], "|", parts[1])]
+        return ["match", key] + cases + ["bottom-left"]
 
     def _background_image(self, background) -> Optional[str]:
         """Sprite for a label background shape (rectangle/ellipse/SVG/marker)."""

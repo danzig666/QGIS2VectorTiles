@@ -83,6 +83,9 @@ def test_line_width_units(mc):
     assert mc.LinePropertyExtractor.get_line_width(layer) == pytest.approx(96 / 25.4)
     layer.setWidthUnit(Qgis.RenderUnit.Points)
     assert mc.LinePropertyExtractor.get_line_width(layer) == pytest.approx(96 / 72)
+    layer.setWidth(0)
+    assert mc.LinePropertyExtractor.get_line_width(layer) == 1.0  # QGIS hairline
+    layer.setWidth(1)
     layer.setWidthUnit(Qgis.RenderUnit.MapUnits)
     curve = mc.LinePropertyExtractor.get_line_width(layer)
     assert ex.is_zoom_curve(curve)  # legacy: treated as millimetres (3.78)
@@ -94,7 +97,10 @@ def test_data_defined_width_is_converted_from_its_unit(mc):
     layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
                                  QgsProperty.fromField("q2vt_property_stroke_width_1_00"))
     width = mc.LinePropertyExtractor.get_line_width(layer)
-    assert width[0] == "*" and width[2] == pytest.approx(96 / 25.4)
+    # ["case", [== w 0], 1 (hairline), w] with w = value * px-per-mm
+    assert width[0] == "case" and width[2] == 1
+    scaled = width[3]
+    assert scaled[0] == "*" and scaled[2] == pytest.approx(96 / 25.4)
 
 
 def test_data_defined_opacity_is_percent(mc):

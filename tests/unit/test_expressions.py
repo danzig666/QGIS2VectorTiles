@@ -66,3 +66,18 @@ def test_camera_only_detection():
     curve = ex.exponential_zoom_curve([(0, 1.0), (10, 2.0)])
     assert ex.is_camera_only(curve) and ex.is_camera_only(3)
     assert not ex.is_camera_only(ex.mul(curve, ex.get("w")))
+
+
+def test_add_folds_constants_and_zoom_curves():
+    assert ex.add(1, 2) == 3
+    assert ex.add(0, ["get", "a"]) == ["get", "a"]
+    a = ex.exponential_zoom_curve([(0, 1), (24, 2 ** 24)])
+    b = ex.exponential_zoom_curve([(0, 2), (24, 2 ** 25)])
+    total = ex.add(a, b)
+    assert ex.evaluate_zoom_curve(total, 10) == pytest.approx(3 * 2 ** 10)
+    c = ex.exponential_zoom_curve([(0, 1), (12, 2 ** 12), (24, 2 ** 12)])
+    mixed = ex.add(a, c)
+    assert ex.evaluate_zoom_curve(mixed, 16) == pytest.approx(2 ** 16 + 2 ** 12)
+    assert ex.add(a, ["get", "w"])[4] == ["+", 1, ["get", "w"]]
+    with pytest.raises(ex.ExpressionError):
+        ex.add(["step", ["zoom"], 0, 5, 1], a)

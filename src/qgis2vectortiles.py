@@ -39,6 +39,9 @@ from qgis.core import (
     QgsProcessingFeedback,
     QgsProcessingUtils,
     QgsProcessingException,
+    QgsMapToPixel,
+    QgsRectangle,
+    QgsRenderContext,
 )
 from qgis.PyQt.QtXml import QDomDocument
 
@@ -53,6 +56,7 @@ from .core.tiles_styler import TilesStyler
 from .core.maplibre_converter import QgisMapLibreStyleExporter
 from .core.server_initializer import ServerInitializer
 from .core.fidelity import FIDELITY_SCHEMA_VERSION
+from .core.fidelity.bindings import bindings_report
 from .core.fidelity.diagnostics import (
     DiagnosticCollector, StrictModeError, render_html_report)
 from .core.fidelity.model import ExportProfile, FidelityMode, OverzoomPolicy, ZoomInterval
@@ -154,6 +158,8 @@ class QGIS2VectorTiles:
                 self._log(f". Successfully generated tiles "
                           f"({self._elapsed_minutes(export_time)} minutes).")
                 archive = self._validate_tiles(temp_dir, style, exporter.sprite_names)
+            else:
+                self.diagnostics.add("Q2VT_EXPORT_EMPTY")
 
             if self._project_style_fingerprint() != fingerprint_before:
                 self.diagnostics.add("Q2VT_PROJECT_MUTATED")
@@ -222,11 +228,14 @@ class QGIS2VectorTiles:
         path = join(temp_dir, "tiles.mbtiles")
         if not exists(path):
             return None
-        archive = inspect_mbtiles(path)
+        wanted = {layer["source-layer"] for layer in style.get("layers", [])
+                  if layer.get("source-layer")}
+        archive = inspect_mbtiles(path, wanted)
         validate_archive(archive, self.diagnostics, self._expected_zooms[0],
                          self._expected_zooms[1])
         validate_style(style, self.diagnostics, sprite_names=None,
-                       tile_layers=tile_layer_fields(archive))
+                       tile_layers=tile_layer_fields(archive),
+                       complete=archive.get("complete", True))
         return archive
 
     def _project_style_fingerprint(self) -> Dict[str, str]:
@@ -252,6 +261,7 @@ class QGIS2VectorTiles:
             "environment": self._environment(),
             "style_layers": len(style.get("layers", [])),
             "rules": len(rules),
+            "bindings": bindings_report(style),
         }
         if archive:
             self.report["archive"] = {
@@ -321,9 +331,62 @@ class QGIS2VectorTiles:
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics
         ).flatten_all_rules()
 
+    # Largest symbol reach considered for the extent buffer (CSS px).
+    _MAX_REACH_PX = 256.0
+
+    @staticmethod
+    def _symbol_reach_px(symbol, context) -> float:
+        """How far (px) a symbol can draw beyond its feature's geometry."""
+        reach = 0.0
+        try:
+            if symbol.type() == Qgis.SymbolType.Marker:
+                # Half the diagonal of the marker box plus its offset
+                # (QgsSymbol.bounds needs a started render and can crash).
+                for layer in symbol.symbolLayers():
+                    size = context.convertToPainterUnits(layer.size(), layer.sizeUnit(),
+                                                         layer.sizeMapUnitScale())
+                    offset = layer.offset()
+                    shift = context.convertToPainterUnits(
+                        max(abs(offset.x()), abs(offset.y())), layer.offsetUnit(),
+                        layer.offsetMapUnitScale())
+                    reach = max(reach, size * 0.7072 + shift)
+            for layer in symbol.symbolLayers():
+                reach = max(reach, float(layer.estimateMaxBleed(context)))
+                sub = layer.subSymbol()
+                if sub is not None and layer.layerType() not in ("GeometryGenerator",):
+                    reach = max(reach, QGIS2VectorTiles._symbol_reach_px(sub, context))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return reach
+
+    def _extent_with_symbol_reach(self, rules: List[FlattenedRule]) -> QgsRectangle:
+        """Export extent grown by the widest symbol reach at the minimum zoom.
+
+        Features just outside the extent whose markers, strokes or offsets
+        reach into it are kept, so edge tiles look like QGIS.
+        """
+        scale = fidelity_zoom.zoom_to_scale(self.min_zoom)
+        context = QgsRenderContext()
+        context.setScaleFactor(96.0 / 25.4)
+        context.setRendererScale(scale)
+        metres_per_px = scale * 0.0254 / 96.0 / self.lengths.map_context.mercator_per_map_unit
+        context.setMapToPixel(QgsMapToPixel(metres_per_px))
+        reach = 0.0
+        for rule in rules:
+            symbol = rule.rule.symbol() if rule.get_attr("t") == 0 else None
+            if symbol is not None:
+                reach = max(reach, self._symbol_reach_px(symbol, context))
+        # Mercator metres per CSS px at the minimum zoom (512 px tiles).
+        buffer = min(reach, self._MAX_REACH_PX) * 40075016.68557849 / (512.0 * 2 ** self.min_zoom)
+        buffer = min(buffer, 0.25 * max(self.extent.width(), self.extent.height()))
+        extent = QgsRectangle(self.extent)
+        if buffer > 0:
+            extent.grow(buffer)
+        return extent
+
     def _export_rules(self, rules: List[FlattenedRule]):
         return RulesExporter(
-            rules, self.extent, self.include_required_fields_only,
+            rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             diagnostics=self.diagnostics,
         ).export()
@@ -373,6 +436,8 @@ class QGIS2VectorTiles:
             diagnostics=self.diagnostics, profile=self.profile,
             visibility=self._visibility_by_style(rules or []),
             lengths=self.lengths,
+            ordered_styles={rule.rule.description() for rule in rules or []
+                            if RulesExporter._order_by(rule.layer)},
         )
         exporter.export()
         return exporter

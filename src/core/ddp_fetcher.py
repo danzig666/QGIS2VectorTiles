@@ -48,6 +48,9 @@ class DataDefinedPropertiesFetcher:
         self._min_scale = float(min_scale)
         self._suffix = f"_{suffix:02d}"
         self._results: list = []
+        # Nested symbol layers (e.g. two font markers inside one marker)
+        # share property keys: each collected object gets its own name part.
+        self._objects = 0
         self._diagnostics = diagnostics
         self._context = context or {}
 
@@ -109,6 +112,8 @@ class DataDefinedPropertiesFetcher:
     def _collect_from(self, obj, prop_defs):
         """Extract active DDP entries from obj and append to results."""
         props = obj.dataDefinedProperties()
+        suffix = self._suffix if self._objects == 0 else f"{self._suffix}_{self._objects}"
+        self._objects += 1
         for key in props.propertyKeys():
             prop = props.property(key)
             if not prop or not prop.isActive():
@@ -121,9 +126,12 @@ class DataDefinedPropertiesFetcher:
             prop_def = prop_defs.get(key)
             if prop_def is None:
                 continue
+            columns = QgsExpression(prop.asExpression()).referencedColumns()
+            if columns and all(c.startswith(f"{self.FIELD_PREFIX}_property_") for c in columns):
+                continue  # already replaced by a generated field
             data_type = prop_def.dataType()
             field_type = self._DATA_TYPE_MAP.get(data_type)
-            field_name = self.field_name(prop_def, key, self._suffix)
+            field_name = self.field_name(prop_def, key, suffix)
 
             if data_type == QgsPropertyDefinition.DataType.DataTypeBoolean:
                 expression = self._process_boolean_prop(prop, props, key, field_name)

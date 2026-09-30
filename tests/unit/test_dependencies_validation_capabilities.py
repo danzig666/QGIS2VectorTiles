@@ -49,3 +49,45 @@ def test_capability_doc_mentions_every_type():
     doc = capabilities_markdown()
     for name in ("SimpleFill", "LinePatternFill", "ShapeburstFill"):
         assert f"`{name}`" in doc
+
+
+def _pbf(number, payload: bytes) -> bytes:
+    size, out = len(payload), b""
+    while True:
+        byte = size & 0x7F
+        size >>= 7
+        out += bytes([byte | (0x80 if size else 0)])
+        if not size:
+            break
+    return bytes([(number << 3) | 2]) + out + payload
+
+
+def test_tile_layers_reads_names_and_keys_from_tiles():
+    import gzip
+    from fidelity.validation import tile_layers
+    layer = _pbf(1, b"roads") + _pbf(3, b"q2vt_orig_id") + _pbf(3, b"name")
+    tile = _pbf(3, layer) + _pbf(3, _pbf(1, b"water"))
+    assert tile_layers(tile) == {"roads": {"q2vt_orig_id", "name"}, "water": set()}
+    assert tile_layers(gzip.compress(tile)) == tile_layers(tile)
+
+
+def test_truncated_metadata_is_completed_from_tiles(tmp_path):
+    import json
+    import sqlite3
+    from fidelity.validation import inspect_mbtiles, tile_layer_fields
+    path = str(tmp_path / "t.mbtiles")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE metadata (name text, value text)")
+    conn.execute("CREATE TABLE tiles (zoom_level int, tile_column int, tile_row int, "
+                 "tile_data blob)")
+    listed = [{"id": f"l{i}", "fields": {}} for i in range(100)]  # GDAL's cap
+    conn.execute("INSERT INTO metadata VALUES ('json', ?)",
+                 (json.dumps({"vector_layers": listed}),))
+    conn.execute("INSERT INTO tiles VALUES (14, 0, 0, ?)",
+                 (_pbf(3, _pbf(1, b"l150") + _pbf(3, b"k")),))
+    conn.commit()
+    conn.close()
+    archive = inspect_mbtiles(path, {"l0", "l150", "l151"})
+    fields = tile_layer_fields(archive)
+    assert fields["l150"] == {"k"} and "l151" not in fields
+    assert archive["complete"]

@@ -17,7 +17,11 @@ format.
   user cancels.
 """
 
+import json
+import math
 import os
+import re
+import sqlite3
 import shutil
 import subprocess
 import time
@@ -69,7 +73,10 @@ class GDALTilesGenerator:
         max_zoom = self._get_global_max_zoom()
 
         self._build_vrt(vrt_path)
-        self._run_ogr2ogr(vrt_path, output, min_zoom, max_zoom)
+        conf_path = join(QgsProcessingUtils.tempFolder(), "layers_conf.json")
+        self._write_layer_conf(conf_path)
+        self._run_ogr2ogr(vrt_path, output, min_zoom, max_zoom, conf_path)
+        self._prune_tiles_outside_extent(output)
 
         return uri, min_zoom
 
@@ -108,9 +115,20 @@ class GDALTilesGenerator:
             ET.SubElement(node, "SrcDataSource").text = layer.source().split("|layername=")[0]
             ET.SubElement(node, "LayerSRS").text = f"EPSG:{_EPSG_CRS}"
             ET.SubElement(node, "GeometryType").text = "wkbUnknown"
-            ET.SubElement(node, "LayerCreationOption", name="MINZOOM", value=str(min_zoom))
-            ET.SubElement(node, "LayerCreationOption", name="MAXZOOM", value=str(max_zoom))
         ET.ElementTree(root).write(vrt_path, encoding="utf-8", xml_declaration=True)
+
+    def _write_layer_conf(self, conf_path: str):
+        """Per-layer zoom ranges for the MVT writer (``-dsco CONF``).
+
+        OGR VRT has no layer-creation options, so zoom ranges put there are
+        ignored and every dataset would be written at every zoom level.
+        """
+        conf = {}
+        for layer in self.layers:
+            min_zoom, max_zoom = self._layer_zoom_range(layer)
+            conf[self._layer_name(layer)] = {"minzoom": int(min_zoom), "maxzoom": int(max_zoom)}
+        with open(conf_path, "w", encoding="utf-8") as handle:
+            json.dump(conf, handle)
 
     # --- ogr2ogr execution ---
 
@@ -119,7 +137,8 @@ class GDALTilesGenerator:
         """ogr2ogr from the QGIS/GDAL environment (PATH as set up by QGIS)."""
         return shutil.which("ogr2ogr") or "ogr2ogr"
 
-    def _run_ogr2ogr(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int):
+    def _run_ogr2ogr(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
+                     conf_path: Optional[str] = None):
         """Execute ogr2ogr to convert the VRT to MBTiles."""
         cpu_num = str(max(1, int((cpu_count() or 1) * self.cpu_percent / 100)))
         env = os.environ.copy()
@@ -135,6 +154,8 @@ class GDALTilesGenerator:
             "-dsco", f"SIMPLIFICATION={_SIMPLIFICATION}",
             "-dsco", f"SIMPLIFICATION_MAX_ZOOM={_SIMPLIFICATION_MAX_ZOOM}",
         ]
+        if conf_path:
+            cmd += ["-dsco", f"CONF={conf_path}"]
 
         startupinfo = None
         creationflags = 0
@@ -166,6 +187,37 @@ class GDALTilesGenerator:
                     self.feedback.reportError(error_msg)
                 raise RuntimeError(error_msg)
 
+    def _prune_tiles_outside_extent(self, output: str):
+        """Drop tiles that do not intersect the requested extent.
+
+        Source features are selected with a symbol-reach buffer so symbols
+        of features just outside the extent still reach into it; the tiles
+        created only for that buffer ring are removed again.
+        """
+        extent = self.extent
+        if extent is None or extent.isEmpty() or not os.path.exists(output):
+            return
+        half = 20037508.342789244
+        with sqlite3.connect(output) as conn:
+            zooms = [row[0] for row in conn.execute("SELECT DISTINCT zoom_level FROM tiles")]
+            for zoom in zooms:
+                n = 2 ** zoom
+                size = 2 * half / n
+
+                def column(x):
+                    return min(n - 1, max(0, int(math.floor((x + half) / size))))
+                x0, x1 = column(extent.xMinimum()), column(extent.xMaximum())
+                # XYZ rows grow southwards; MBTiles stores TMS rows (from the south).
+                tms = sorted((n - 1 - column(-extent.yMinimum()),
+                              n - 1 - column(-extent.yMaximum())))
+                conn.execute(
+                    "DELETE FROM tiles WHERE zoom_level = ? AND (tile_column < ? OR "
+                    "tile_column > ? OR tile_row < ? OR tile_row > ?)",
+                    (zoom, x0, x1, tms[0], tms[1]))
+            conn.commit()
+        with sqlite3.connect(output) as conn:
+            conn.execute("VACUUM")
+
     # --- Helpers ---
 
     def _prepare_output_paths(self) -> Tuple[str, str]:
@@ -183,8 +235,8 @@ class GDALTilesGenerator:
 
     def _parse_layer_zoom(self, layer: QgsVectorLayer, marker: str) -> int:
         """Legacy fallback: zoom level encoded in the dataset filename."""
-        name = self._layer_name(layer)
-        return int(name.split(marker)[1][:2])
+        match = re.search(f"{marker}(\\d+)", self._layer_name(layer))
+        return int(match.group(1)) if match else 0
 
     def _get_global_min_zoom(self) -> int:
         return min((self._layer_zoom_range(layer)[0] for layer in self.layers), default=0)

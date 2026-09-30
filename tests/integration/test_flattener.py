@@ -95,3 +95,56 @@ def test_else_respects_sibling_scale_ranges_and_disabled_siblings(flattener):
     # Project ELSE rule untouched.
     project_else = layer.renderer().rootRule().children()[2]
     assert project_else.filterExpression() == "ELSE"
+
+
+def _draw_colors(rules):
+    """Fill colours of the renderer styles, bottom first, as the styler emits them."""
+    from q2vt_plugin.src.core.tiles_styler import TilesStyler  # pylint: disable=import-error
+    ordered = TilesStyler.draw_order(TilesStyler.__new__(TilesStyler), rules)
+    return [r.rule.symbol().color().name() for r in ordered
+            if r.get_attr("t") == 0 and r.get_attr("c") == 2]
+
+
+def test_later_rules_draw_on_top(flattener):
+    # QGIS draws a feature's rules in tree order: the last rule ends on top.
+    layer = rule_based(zoning_layer(), [
+        ("first", "", 0, 0, True, "255,0,0"), ("second", "", 0, 0, True, "0,0,255")])
+    reset_project(layer)
+    rules, _ = flattener()
+    assert _draw_colors(rules) == ["#ff0000", "#0000ff"]
+
+
+def test_rendering_pass_orders_symbol_layers(flattener):
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtGui import QColor
+    layer = rule_based(zoning_layer(), [
+        ("first", "", 0, 0, True, "255,0,0"), ("second", "", 0, 0, True, "0,0,255")])
+    # Rule-based renderers honour passes even without symbol levels.
+    layer.renderer().rootRule().children()[0].symbol().symbolLayer(0).setRenderingPass(1)
+    reset_project(layer)
+    rules, _ = flattener()
+    assert _draw_colors(rules) == ["#0000ff", "#ff0000"]
+
+    from qgis.core import QgsFillSymbol, QgsSingleSymbolRenderer
+    symbol = QgsFillSymbol.createSimple({"color": "255,0,0"})
+    symbol.appendSymbolLayer(QgsSimpleFillSymbolLayer(QColor(0, 128, 0)))
+    symbol.symbolLayer(0).setRenderingPass(1)
+    renderer = QgsSingleSymbolRenderer(symbol)
+    single = zoning_layer()
+    single.setRenderer(renderer)
+    reset_project(single)
+    assert _draw_colors(flattener()[0]) == ["#ff0000", "#008000"]  # levels off
+    renderer.setUsingSymbolLevels(True)
+    assert _draw_colors(flattener()[0]) == ["#008000", "#ff0000"]
+
+
+def test_upper_layer_draws_above_lower_layer(flattener):
+    top = rule_based(zoning_layer("top"), [("t", "", 0, 0, True, "0,0,255")])
+    bottom = rule_based(zoning_layer("bottom"), [("b", "", 0, 0, True, "255,0,0")])
+    reset_project(top, bottom)
+    root = __import__("qgis.core", fromlist=["QgsProject"]).QgsProject.instance().layerTreeRoot()
+    names = [n.layer().name() for n in root.findLayers()]
+    rules, _ = flattener()
+    colors = _draw_colors(rules)
+    expected = {"top": "#0000ff", "bottom": "#ff0000"}
+    assert colors == [expected[n] for n in reversed(names)]

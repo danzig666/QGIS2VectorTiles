@@ -126,6 +126,49 @@ def div(a: Expression, b: Expression, fallback: float = 0) -> Expression:
     return ["case", ["==", b, 0], finite(fallback), ["/", a, b]]
 
 
+def _curve_stops(curve: List) -> List:
+    body = curve[3:]
+    return [(body[i], body[i + 1]) for i in range(0, len(body), 2)]
+
+
+def add(a: Expression, b: Expression) -> Expression:
+    """Add two values, folding constants and respecting zoom curves.
+
+    Two zoom curves are added stop by stop when they share their stops; other
+    numeric curves are resampled on the union of their stops plus every
+    integer zoom.
+    """
+    if is_number(a) and is_number(b):
+        return finite(a + b)
+    if is_number(a) and a == 0:
+        return b
+    if is_number(b) and b == 0:
+        return a
+    a_curve, b_curve = is_zoom_curve(a), is_zoom_curve(b)
+    if a_curve and b_curve:
+        if a[0] != "interpolate" or b[0] != "interpolate":
+            raise ExpressionError("Cannot add step zoom curves")
+        a_stops, b_stops = _curve_stops(a), _curve_stops(b)
+        if a[:3] == b[:3] and [z for z, _ in a_stops] == [z for z, _ in b_stops]:
+            out = list(a[:3])
+            for (zoom, x), (_, y) in zip(a_stops, b_stops):
+                out.extend([zoom, add(x, y)])
+            return out
+        if not all(is_number(v) for _, v in a_stops + b_stops):
+            raise ExpressionError("Cannot add data-dependent zoom curves with different stops")
+        zooms = sorted({z for z, _ in a_stops + b_stops}
+                       | {float(z) for z in range(0, 25)})
+        return exponential_zoom_curve(
+            (z, evaluate_zoom_curve(a, z) + evaluate_zoom_curve(b, z)) for z in zooms)
+    if a_curve:
+        return _map_outputs(a, lambda out: add(out, b))
+    if b_curve:
+        return _map_outputs(b, lambda out: add(a, out))
+    if contains_zoom(a) or contains_zoom(b):
+        raise ExpressionError("Zoom expression nested inside arithmetic")
+    return ["+", a, b]
+
+
 def clamp(expr: Expression, low: Optional[float] = None,
           high: Optional[float] = None) -> Expression:
     if is_number(expr):

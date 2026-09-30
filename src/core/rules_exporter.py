@@ -92,6 +92,8 @@ from qgis.core import (
     QgsProcessingContext,
     QgsProcessingFeedback,
     QgsFeatureRequest,
+    QgsField,
+    QgsPalLayerSettings,
     QgsRectangle,
     QgsCoordinateTransform,
     QgsVectorLayer,
@@ -106,6 +108,34 @@ from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, with_map_scale
 from .fidelity import materialize as mat
 from .fidelity.materialize import Recipe
+
+# Drawing rank of each feature under the renderer's order-by clauses.
+ORDER_FIELD = f"{_FIELD_PREFIX}_draw_order"
+# Data-defined label position of a callout leader (layer CRS).
+CALLOUT_X_FIELD = f"{_FIELD_PREFIX}_callout_x"
+CALLOUT_Y_FIELD = f"{_FIELD_PREFIX}_callout_y"
+
+
+def callout_leader_expression(label_point: str, source_geometry: int, anchor: int) -> str:
+    """Straight leader from the feature's callout anchor to the label point.
+
+    ``anchor`` is QgsCallout.AnchorPoint: 0 pole of inaccessibility,
+    1 point on exterior, 2 point on surface, 3 centroid. Lines use the point
+    closest to the label and points the point itself, as QGIS does.
+    """
+    if source_geometry == 0:
+        origin = "@geometry"
+    elif source_geometry == 1:
+        origin = "closest_point(@geometry, @q2vt_label)"
+    else:
+        origin = {
+            0: "pole_of_inaccessibility(@geometry, 0.5)",
+            1: "closest_point(boundary(@geometry), @q2vt_label)",
+            2: "point_on_surface(@geometry)",
+            3: "centroid(@geometry)",
+        }.get(anchor, "pole_of_inaccessibility(@geometry, 0.5)")
+    return (f"with_variable('q2vt_label', {label_point}, "
+            f"make_line({origin}, @q2vt_label))")
 
 
 # ============================================================================
@@ -144,6 +174,9 @@ class _SourceSnapshot:
     name: str
     source_uri: str
     provider: str
+    # Renderer feature order ("Control feature rendering order"):
+    # ((expression, ascending, nulls_first), ...); empty when disabled.
+    order_by: Tuple[Tuple[str, bool, bool], ...] = ()
 
     @property
     def needs_serial_read(self) -> bool:
@@ -331,6 +364,7 @@ class RulesExporter:
                 name=r.layer.name(),
                 source_uri=r.layer.source(),
                 provider=r.layer.providerType(),
+                order_by=self._order_by(r.layer),
             )
 
         # Snapshot rule groups.
@@ -341,6 +375,11 @@ class RulesExporter:
             # Compute expression fields (data-defined properties, optional
             # label field) — these read from the rule symbol/settings.
             expr_fields = self._create_expression_fields(flat_rules)
+            if primary.recipe is not None and primary.recipe.kind == "callout":
+                # Label position read in the layer CRS, like QGIS.
+                expr_fields = list(expr_fields) + [
+                    (6, primary.recipe.param("x"), CALLOUT_X_FIELD),
+                    (6, primary.recipe.param("y"), CALLOUT_Y_FIELD)]
             if primary.get_attr("t") == 1:
                 expr_fields = self._add_label_expression_field(
                     primary, expr_fields
@@ -378,6 +417,39 @@ class RulesExporter:
             ))
 
         return sources, rule_groups
+
+    @staticmethod
+    def _order_by(layer) -> Tuple[Tuple[str, bool, bool], ...]:
+        renderer = layer.renderer()
+        try:
+            if renderer is None or not renderer.orderByEnabled():
+                return ()
+            return tuple((clause.expression().expression(), bool(clause.ascending()),
+                          bool(clause.nullsFirst())) for clause in renderer.orderBy().list())
+        except (AttributeError, RuntimeError):
+            return ()
+
+    @staticmethod
+    def _add_order_field(path: str, order_by) -> None:
+        """Store each feature's QGIS drawing rank in ``ORDER_FIELD``.
+
+        The rank comes from iterating the (source-CRS) copy with the
+        renderer's order-by clauses, exactly as QGIS requests features; the
+        style uses it as the sort key of the layer's style layers.
+        """
+        layer = QgsVectorLayer(path, "order", "ogr")
+        if not layer.isValid():
+            return
+        clauses = [QgsFeatureRequest.OrderByClause(expr, asc, nulls)
+                   for expr, asc, nulls in order_by]
+        request = QgsFeatureRequest().setOrderBy(QgsFeatureRequest.OrderBy(clauses))
+        request.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+        ranks = [feature.id() for feature in layer.getFeatures(request)]
+        provider = layer.dataProvider()
+        provider.addAttributes([QgsField(ORDER_FIELD, QVariant.Int)])
+        layer.updateFields()
+        index = layer.fields().indexFromName(ORDER_FIELD)
+        provider.changeAttributeValues({fid: {index: rank} for rank, fid in enumerate(ranks)})
 
     # -------------------------------------------------------------------
     # Phase 1 — serial source materialisation
@@ -427,6 +499,8 @@ class RulesExporter:
                         "fixgeometries", "native",
                         INPUT=layer, METHOD=0, OUTPUT=out_path,
                     )
+                if src.order_by:
+                    self._add_order_field(out_path, src.order_by)
                 materialized[src.layer_id] = out_path
             except _Cancelled:
                 raise
@@ -614,6 +688,9 @@ class RulesExporter:
 
         if expr.hasParserError():
             self.feedback.pushWarning(f"{warning_msg} is not valid.")
+            self.diagnostics.add(
+                "Q2VT_EXPR_INVALID", f"{warning_msg} is not valid: {expr.parserErrorString()}",
+                layer_id=grp.layer_id, component=grp.output_dataset, detail=expr_str)
             return None
 
         return expr_str
@@ -708,6 +785,7 @@ class RulesExporter:
         )
         check = QgsVectorLayer(transformed, "check", "ogr")
         if not check.isValid() or check.featureCount() <= 0:
+            self._report_empty_output(grp, transbase)
             return None
 
         self._check_cancel()
@@ -716,12 +794,27 @@ class RulesExporter:
             INPUT=transformed,
             REMOVE_EMPTY=True,
         )
+        check = QgsVectorLayer(cleaned, "check", "ogr")
+        if not check.isValid() or check.featureCount() <= 0:
+            self._report_empty_output(grp, transbase)
+            return None
         self._check_cancel()
         return self._run_alg_safe(
             "multiparttosingleparts", "native",
             INPUT=cleaned,
             OUTPUT=output_path,
         )
+
+    def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
+        matched = QgsVectorLayer(source, "matched", "ogr")
+        count = matched.featureCount() if matched.isValid() else 0
+        if count > 0:
+            self.diagnostics.add(
+                "Q2VT_RULE_OUTPUT_EMPTY",
+                f"{grp.description}: {count} matching feature(s) but the geometry "
+                f"expression produced no geometry.",
+                layer_id=grp.layer_id, component=grp.output_dataset,
+                detail=grp.geometry_expression)
 
     def _materialize_marker_points(self, source: str, recipe: Recipe, source_geometry: int) -> str:
         """Worker: exact marker-line positions as points with ``ANGLE_FIELD``."""
@@ -732,6 +825,12 @@ class RulesExporter:
             lines = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
                 EXPRESSION=mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+        if recipe.param("arrow_curved") is not None:
+            # Arrow heads sit at the ends of every (curved / per-segment) arrow.
+            lines = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
+                EXPRESSION=mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}", cuts=False))
+            lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
         lines = self._run_alg_safe(
             "fieldcalculator", "native", INPUT=lines, FIELD_NAME=mat.COUNT_FIELD,
             FIELD_TYPE=1, FORMULA="num_points(@geometry)")
@@ -780,10 +879,13 @@ class RulesExporter:
                     if 'ogc_fid' not in f.name().lower():
                         mapping.append((f.type(), f'"{f.name()}"', f.name()))
 
-       
+
         mapping.append(
             (6, f'"{_FIELD_PREFIX}_orig_id"', f"{_FIELD_PREFIX}_orig_id")
         )
+        source_fields = QgsVectorLayer(current_input, "fields", "ogr").fields()
+        if source_fields.indexFromName(ORDER_FIELD) >= 0:
+            mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
         return [
             {"type": m[0], "expression": m[1], "name": m[2]} for m in mapping
         ]
@@ -963,10 +1065,24 @@ class RulesExporter:
         transformation[1] = clipped
         return tuple(transformation)
 
+    @staticmethod
+    def _layer_point_expression(x: str, y: str, layer_crs: str) -> str:
+        point = f"make_point({x}, {y})"
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        if not layer_crs or layer_crs == export_crs:
+            return point
+        return f"transform({point}, '{layer_crs}', '{export_crs}')"
+
     def _get_labeling_transformation(self, flat_rule: FlattenedRule):
         settings = flat_rule.rule.settings()
         target_geom = flat_rule.get_attr("g")
         transform_expr = "@geometry"
+        pinned = self._pinned_position(settings)
+        if pinned is not None:
+            # Data-defined label position (layer CRS), see
+            # RulesFlattener._split_pinned_labels.
+            flat_rule.set_attr("c", 0)
+            return [0, self._layer_point_expression(*pinned, flat_rule.layer.crs().authid())]
         if settings and settings.geometryGeneratorEnabled:
             target_geom = settings.geometryGeneratorType
            
@@ -979,6 +1095,17 @@ class RulesExporter:
             target_geom = 0
             transform_expr = self._get_polygon_centroids_expression()
         return [target_geom, transform_expr]
+
+    @staticmethod
+    def _pinned_position(settings) -> Optional[Tuple[str, str]]:
+        if settings is None:
+            return None
+        props = settings.dataDefinedProperties()
+        P = QgsPalLayerSettings.Property
+        x_prop, y_prop = props.property(P.PositionX), props.property(P.PositionY)
+        if x_prop and y_prop and x_prop.isActive() and y_prop.isActive():
+            return x_prop.asExpression(), y_prop.asExpression()
+        return None
 
     def _get_renderer_transformation(self, flat_rule: FlattenedRule):
         symbol = flat_rule.rule.symbol()
@@ -994,6 +1121,13 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
             return [0, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "arrow_body":
+            return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "callout":
+            label = self._layer_point_expression(
+                f'"{CALLOUT_X_FIELD}"', f'"{CALLOUT_Y_FIELD}"', recipe.param("crs"))
+            return [1, callout_leader_expression(label, flat_rule.get_attr("g"),
+                                                 recipe.param("anchor", 0))]
         if symbol_layer.layerType() == "GeometryGenerator":
             target_geom = symbol_layer.subSymbol().type()
             transform_expr = self._generator_in_layer_crs(

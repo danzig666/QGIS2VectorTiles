@@ -35,6 +35,7 @@ GAP = 200.0
 ORIGIN = (2110000.0, 6030000.0)
 COLUMNS = 16
 EARTH = 40075016.68557849
+_APP = None
 
 
 def init_qgis():
@@ -353,7 +354,8 @@ def main():
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
-    app = init_qgis()  # noqa: F841 - keep a reference: QGIS must outlive the export
+    global _APP
+    _APP = init_qgis()  # keep a reference: QGIS must outlive the export
     from qgis.core import (QgsCoordinateReferenceSystem, QgsProcessingFeedback, QgsProject,
                            QgsRectangle)
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles
@@ -438,7 +440,7 @@ def main():
     cards = []
     for item, layer in zip(items, layers):
         index = tree_index[layer.id()]
-        prefix = f"l{index:02d}"
+        prefix = f"l{index:02d}t"
 
         def belongs(d):
             owner = image_owner.get(d.component or "", d.component or "")

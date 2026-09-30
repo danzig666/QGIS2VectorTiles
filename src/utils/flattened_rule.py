@@ -7,6 +7,7 @@ Imported by RulesFlattener, RulesExporter, and TilesStyler.
 """
 
 from dataclasses import dataclass
+import re
 from typing import Optional, Union
 
 from qgis.core import QgsRuleBasedRenderer, QgsRuleBasedLabeling, QgsVectorLayer
@@ -48,31 +49,21 @@ class FlattenedRule:
 
     def get_attr(self, char: str) -> Optional[int]:
         """Extract rule attribute from description by character prefix."""
-        desc = self.rule.description()
-        start = desc.find(char) + 1
-        if start == 0:
-            return None
-        return int(desc[start : start + 2])
+        match = re.search(f"{char}(\\d+)", self.rule.description())
+        return int(match.group(1)) if match else None
 
     def set_attr(self, char: str, value: int, geom_generator=None):
-        """Set rule attribute in description."""
-        value = int(value)
-        new_attr = f"{char}{value:02d}"
-        current = self.get_attr(char)
-
+        """Set rule attribute in description (two digits, more when needed)."""
+        new_attr = f"{char}{int(value):02d}"
         desc = self.rule.description()
-        if current is not None:
-            old_attr = f"{char}{current:02d}"
-            desc = desc.replace(old_attr, new_attr)
-        else:
+        desc, replaced = re.subn(f"{char}\\d+", new_attr, desc, count=1)
+        if not replaced:
             desc = f"{desc}{new_attr}"
 
         self.rule.setDescription(desc)
         self.output_dataset = desc
-
-        i = desc.find("s")
-        if i >= 0 and geom_generator:
-            self.output_dataset = self.output_dataset.replace(desc[i : i + 3], "s00")
+        if geom_generator:
+            self.output_dataset = re.sub(r"s\d+", "s00", desc, count=1)
 
     def get_description(self):
         """Construct rule description for labeling or renderer rule."""

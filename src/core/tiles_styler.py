@@ -66,12 +66,28 @@ class TilesStyler:
 
     def apply_styling(self) -> QgsVectorTileLayer:
         """Apply all rule styles to the tiles layer and save the QLR definition."""
-        sorted_rules = reversed(sorted(self.flattened_rules, key=lambda x:self.get_label_priority(x)))
-        for rule in sorted_rules:
+        for rule in self.draw_order(self.flattened_rules):
             self._create_style_from_rule(rule)
         self._apply_styles_to_layer()
         # self._save_style()
         return self.tiles_layer
+
+    def draw_order(self, flat_rules: List[FlattenedRule]) -> List[FlattenedRule]:
+        """Renderer rules bottom-first by their QGIS draw order, then labels
+        from the lowest to the highest priority (MapLibre places the last
+        symbol layer first)."""
+        renderer = [r for r in flat_rules if r.get_attr("t") == 0]
+        labels = [r for r in flat_rules if r.get_attr("t") != 0]
+        position = {id(r): i for i, r in enumerate(flat_rules)}
+        # Rules without an explicit order keep the legacy reverse-list order.
+        renderer.sort(key=lambda r: (r.order or (), -position[id(r)]))
+
+        def label_key(rule):
+            priority = self.get_label_priority(rule)
+            # Data-defined priorities are sorted as the default priority (5).
+            return (-(priority if isinstance(priority, (int, float)) else 6), -position[id(rule)])
+        labels.sort(key=label_key)
+        return renderer + labels
 
     def get_label_priority(self, flat_rule: FlattenedRule):
         """Get the label priority value which being expressed in the rendering process"""
@@ -129,6 +145,12 @@ class TilesStyler:
 
         if source_geom != target_geom and _symbol_type(symbol) == target_geom:
             new_symbol = symbol  # already converted (materialized component)
+        elif sub_symbol and symbol_layer.layerType() == "GeometryGenerator":
+            # The exported geometry is the generator's output (whatever its
+            # type); it is drawn with the generator's sub-symbol.
+            self._copy_data_driven_properties(symbol, sub_symbol)
+            self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
+            new_symbol = sub_symbol
         elif source_geom != target_geom:
             if sub_symbol and symbol_layer.layerType() in ("GeometryGenerator", "CentroidFill"):
                 self._copy_data_driven_properties(symbol, sub_symbol)

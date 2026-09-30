@@ -85,11 +85,24 @@ def test_symmetric_crop_keeps_origin_centred():
 
 def test_point_pattern_cell_is_seamless_and_reports_rounding():
     from fidelity.patterns import point_pattern_cell, tile_markers
+    # 10.4 px rounds badly (3.8 %): two columns make a 21 px cell (1 %).
     width, height, positions, error = point_pattern_cell(10.4, 8.0, 5.0, 0.0)
-    assert (width, height) == (10, 16) and len(positions) == 2
-    assert error == pytest.approx(0.4 / 10.4)
+    assert (width, height) == (21, 16) and len(positions) == 4
+    assert error == pytest.approx(0.2 / 20.8)
+    # Beyond the repeat budget the rounding error is reported.
+    _, _, _, error = point_pattern_cell(300.4, 8.0, 0.0, 0.0)
+    assert error == pytest.approx(0.4 / 300.4)
     marker = Image.new("RGBA", (5, 5), (0, 0, 0, 255))
     cell = tile_markers(marker, width, height, [(0, 0)])
     # A marker centred on the corner is split over all four corners.
     for corner in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
         assert cell.getpixel(corner)[3] == 255
+
+
+def test_dense_point_pattern_keeps_its_density():
+    from fidelity.patterns import point_pattern_cell
+    width, height, positions, error = point_pattern_cell(0.26, 0.26, 0, 0)
+    assert error <= 0.02
+    assert len(positions) / (width * height) == pytest.approx(1 / 0.26 ** 2, rel=0.05)
+    width, height, positions, error = point_pattern_cell(7.3, 7.3, 3.65, 0)
+    assert error <= 0.02 and len({round(y, 3) for _, y in positions}) % 2 == 0

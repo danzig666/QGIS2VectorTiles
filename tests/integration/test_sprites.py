@@ -119,3 +119,16 @@ def test_screen_unit_point_pattern_texture(plugin, tmp_path):
     assert cells.img_1x.size == (round(4 * mm), round(2 * 3 * mm))
     assert cells.img_2x.size == (round(8 * mm), round(12 * mm))
     assert cells.img_1x.getbbox() is not None
+
+
+def test_sprite_png_has_straight_alpha(sg, tmp_path):
+    # MapLibre premultiplies sprite pixels itself: a half-transparent red
+    # marker must be stored as (255, 0, 0, ~128), not premultiplied (128, 0, 0).
+    from PIL import Image
+    gen = sg.SpriteGenerator({"m": _marker(QColor(255, 0, 0, 128), size=6)}, str(tmp_path), 3)
+    gen.generate()
+    entry = gen.index[1]["m"]
+    sheet = Image.open(tmp_path / "sprite" / "sprite.png").convert("RGBA")
+    centre = sheet.getpixel((entry["x"] + entry["width"] // 2, entry["y"] + entry["height"] // 2))
+    assert centre[3] == pytest.approx(128, abs=3)
+    assert centre[0] >= 250 and centre[1] <= 3 and centre[2] <= 3

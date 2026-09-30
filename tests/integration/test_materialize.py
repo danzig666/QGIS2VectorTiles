@@ -187,7 +187,92 @@ def test_map_unit_point_pattern_matches_qgis(plugin, tmp_path, disp_x, disp_y, o
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
     outputs, rules, diags = _export(plugin, layer, tmp_path)
-    assert rules[0].recipe.kind == "grid_points"
+    # Dense at low zooms (texture), points from the zoom where the 10 m
+    # spacing reaches 12 px on screen.
+    kinds = [r.recipe.kind if r.recipe else None for r in rules]
+    assert kinds == [None, "grid_points"]
+    assert rules[1].get_attr("o") == rules[0].get_attr("i") + 1
     assert not diags.by_code("Q2VT_PATTERN_APPROXIMATE")
-    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    ours = ink_mask(render(outputs[1:], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 0.5)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(1.25)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reset_project(layer)
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    rules = RulesFlattener(14, 17, str(tmp_path), QgsProcessingFeedback(),
+                           DiagnosticCollector()).flatten_all_rules()
+    # 1.25 m is below 12 px up to zoom 17: no point features at all.
+    assert [r.recipe for r in rules] == [None]
+
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 17
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 14
+    exporter._convert_symbol(rules[0].rule.symbol(), "s", "src", "q2vt", 14, 24)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [15, 16, 17, 18, 19]
+    cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
+    assert all(cell.getbbox() is not None for cell in cells)
+
+
+@pytest.mark.parametrize("curved,repeated,head_type", [
+    (False, False, 0), (True, False, 0), (True, True, 2), (False, True, 2), (True, False, 1)])
+def test_map_unit_arrows_match_qgis(plugin, tmp_path, curved, repeated, head_type):
+    from qgis.core import QgsArrowSymbolLayer
+    layer = _layer("LineString", ["LINESTRING(-100 -80, -20 60, 20 -40, 100 60)"],
+                   str(tmp_path / "arrow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowWidth", 6), ("ArrowStartWidth", 6), ("HeadLength", 18),
+                        ("HeadThickness", 7)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    arrow.setIsCurved(curved)
+    arrow.setIsRepeated(repeated)
+    arrow.setHeadType(QgsArrowSymbolLayer.HeadType(head_type))
+    arrow.subSymbol().symbolLayer(0).setColor(QColor("black"))
+    arrow.subSymbol().symbolLayer(0).setStrokeStyle(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules][0] == "arrow_body"
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.06
+
+
+@pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])
+def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -80 100, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.HalfSquare, 4)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeStyle(0)
+    pp.setSubSymbol(marker)
+    for name, value in (("DistanceX", 15), ("DistanceY", 12)):
+        getattr(pp, f"set{name}")(value)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    pp.setClipMode(getattr(Qgis.MarkerClipMode, clip))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    grid = [o for o, r in zip(outputs, rules) if r.recipe]
+    ours = ink_mask(render(grid, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.15

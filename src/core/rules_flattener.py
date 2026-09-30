@@ -60,10 +60,15 @@ class RulesFlattener:
         # assigned to the project layers: exporting must never modify the
         # user's project (renderer, labeling, ELSE rules, scale visibility).
         self._rule_systems: list = []
-        self.materializer = SymbolMaterializer(self.diagnostics)
+        self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom)
         # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
         # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
         self._unique_counter = 0
+        # Draw order: rule sequence within a layer (QGIS draws a feature's
+        # rules in tree pre-order, later rules on top) and whether the layer's
+        # renderer honours symbol-layer rendering passes.
+        self._draw_seq = 0
+        self._honor_passes = False
 
     def flatten_all_rules(self) -> List[FlattenedRule]:
         """Extract and flatten all rules from visible vector layers."""
@@ -134,11 +139,27 @@ class RulesFlattener:
                 continue
             self._rule_systems.append(rule_system)
             root_rule = self._prepare_root_rule(rule_system, layer)
+            if rule_type == 0:
+                self._draw_seq = 0
+                self._honor_passes = self._renderer_honors_passes(layer.renderer())
             if root_rule:
                 # Reset per (layer, rule_type) pass; values must stay < 100
                 # because FlattenedRule.set_attr formats as 2 digits.
                 self._unique_counter = 0
                 self._flatten_rule(layer, layer_idx, root_rule, rule_type, 0, 0)
+
+    @staticmethod
+    def _renderer_honors_passes(renderer) -> bool:
+        """QGIS orders symbol layers by rendering pass for rule-based renderers
+        always, for other renderers only with symbol levels enabled."""
+        if renderer is None:
+            return False
+        if isinstance(renderer, QgsRuleBasedRenderer):
+            return True
+        try:
+            return bool(renderer.usingSymbolLevels())
+        except (AttributeError, RuntimeError):
+            return False
 
     def _get_or_convert_rule_system(self, layer: QgsVectorLayer, rule_type: int):
         """Return the layer's rule system, converting from single/graduated/categorized if needed."""
@@ -435,8 +456,14 @@ class RulesFlattener:
         if not self._is_within_zoom_range(flat_rule):
             return inheritance_source
 
+        if rule_type == 0:
+            self._draw_seq += 1
         split_rules = self._split_rule(flat_rule, rule_type)
+        if rule_type == 1:
+            split_rules = [part for rule in split_rules for part in self._split_pinned_labels(rule)]
         self._clip_rules_to_zoom_range(split_rules)
+        # Components split by zoom (e.g. dense patterns) may fall outside the export.
+        split_rules = [r for r in split_rules if r.get_attr("o") <= r.get_attr("i")]
         for split_rule in split_rules:
             self.flattened_rules.extend(self._split_by_scale_expressions(split_rule))
         return inheritance_source
@@ -577,8 +604,14 @@ class RulesFlattener:
 
             clone_symbol_layer = clone_symbol.symbolLayers()[0]
             self._fold_enabled_property(rule_clone, clone_symbol_layer)
+            draw_pass = clone_symbol_layer.renderingPass() if self._honor_passes else 0
+            # Bottom first: lower layer tree position, pass, rule, symbol layer, part.
+            order = (-flat_rule.get_attr("l"), draw_pass, self._draw_seq, layer_idx)
+            rule_clone.order = order + (0,)
             materialized = self.materializer.materialize(rule_clone, clone_symbol_layer)
             if materialized is not None:
+                for part, component in enumerate(materialized):
+                    component.order = order + (part,)
                 split_rules.extend(materialized)
                 continue
             if rule_clone and layer_type == "SimpleFill":
@@ -588,6 +621,7 @@ class RulesFlattener:
                     fill_symbol = outline_rule.rule.symbol()
                     outline_symbol = self._convert_fill_outline_to_line_symbol(fill_symbol)
                     if outline_symbol:
+                        outline_rule.order = order + (1,)  # stroke above its fill
                         outline_rule.rule.setSymbol(outline_symbol)
                         split_rules.append(outline_rule)
                         clone_symbol_layer.setStrokeStyle(Qt.PenStyle.NoPen)
@@ -641,6 +675,89 @@ class RulesFlattener:
         return new_symbol
 
 
+    # Leaders are drawn with the labels, above every layer's features.
+    _CALLOUT_ORDER = (1 << 30, 0, 0, 0, 0)
+
+    def _split_pinned_labels(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
+        """Separate labels with a data-defined position ("pinned" labels).
+
+        QGIS places a label whose X and Y are both data-defined exactly at that
+        point (layer CRS); other features of the rule are placed normally. The
+        pinned features become their own point dataset, and a straight callout
+        leader (if callouts are enabled) becomes a line dataset drawn with the
+        callout's line symbol.
+        """
+        settings = label_rule.rule.settings()
+        if settings is None:
+            return [label_rule]
+        props = settings.dataDefinedProperties()
+        P = QgsPalLayerSettings.Property
+        x_prop, y_prop = props.property(P.PositionX), props.property(P.PositionY)
+        if not (x_prop and y_prop and x_prop.isActive() and y_prop.isActive()):
+            return [label_rule]
+        x, y = x_prop.asExpression(), y_prop.asExpression()
+        condition = f"({x}) IS NOT NULL AND ({y}) IS NOT NULL"
+        base_filter = label_rule.rule.filterExpression()
+
+        free = label_rule.derive()
+        free.rule.setFilterExpression(and_filters(base_filter, f"NOT ({condition})"))
+        free_settings = free.rule.settings()
+        free_props = free_settings.dataDefinedProperties()
+        for key in (P.PositionX, P.PositionY):
+            prop = free_props.property(key)
+            prop.setActive(False)
+            free_props.setProperty(key, prop)
+        free_settings.setDataDefinedProperties(free_props)
+
+        pinned = label_rule.derive()
+        pinned.rule.setFilterExpression(and_filters(base_filter, condition))
+        pinned.set_attr("p", 1)
+        pinned.set_attr("c", 0)
+        parts = [free, pinned]
+
+        callout = settings.callout()
+        if callout is not None and callout.enabled():
+            leader = self._callout_leader(pinned, callout, x, y)
+            if leader is not None:
+                parts.append(leader)
+        return parts
+
+    def _callout_leader(self, pinned: FlattenedRule, callout, x: str, y: str):
+        from .fidelity.materialize import Recipe  # pylint: disable=import-outside-toplevel
+        symbol = callout.lineSymbol() if hasattr(callout, "lineSymbol") else None
+        if symbol is None:
+            self.diagnostics.add(
+                "Q2VT_CALLOUT_APPROX", f"Callout type '{callout.type()}' is not exported.",
+                layer_id=pinned.layer.id())
+            return None
+        if callout.type() != "simple":
+            self.diagnostics.add(
+                "Q2VT_CALLOUT_APPROX",
+                f"'{callout.type()}' callouts are drawn as straight leaders.",
+                layer_id=pinned.layer.id())
+        self.diagnostics.add(
+            "Q2VT_CALLOUT_APPROX",
+            "Callout leaders end at the label's anchor point (QGIS: nearest point of "
+            "the label box); pinned labels are always shown so leaders never dangle.",
+            layer_id=pinned.layer.id())
+        rule = QgsRuleBasedRenderer.Rule(symbol.clone())
+        rule.setFilterExpression(pinned.rule.filterExpression())
+        rule.setMinimumScale(pinned.rule.minimumScale())
+        rule.setMaximumScale(pinned.rule.maximumScale())
+        rule.setDescription(pinned.rule.description())
+        try:
+            anchor = int(getattr(callout.anchorPoint(), "value", callout.anchorPoint()))
+        except (AttributeError, TypeError, ValueError):
+            anchor = 0
+        recipe = Recipe("callout", params=(("x", x), ("y", y), ("anchor", anchor),
+                                           ("crs", pinned.layer.crs().authid())))
+        leader = FlattenedRule(rule, pinned.layer, "", pinned.visibility, recipe,
+                               self._CALLOUT_ORDER)
+        leader.set_attr("t", 0)
+        leader.set_attr("c", 1)
+        leader.set_attr("s", 0)
+        return leader
+
     def _split_by_matching_renderers(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
         """Split a label rule by matching renderer rules with overlapping scale ranges."""
         split_rules = []
@@ -651,6 +768,8 @@ class RulesFlattener:
             if label_rule.layer.id() != renderer_rule.layer.id():
                 continue
             if renderer_rule.get_attr("t") == 1:
+                continue
+            if renderer_rule.recipe is not None and renderer_rule.recipe.kind == "callout":
                 continue
             filter_id = f'{renderer_rule.get_attr("r")}{renderer_rule.get_attr("d")}'
             if filter_id in seen_datasets:

@@ -102,7 +102,8 @@ Set WshShell = Nothing
         if exists(join(style_dir, 'sprite')):
             sprite_img = QImage(join(style_dir, 'sprite', 'sprite@2x.png'))
             sprite_json = join(style_dir, 'sprite', 'sprite@2x.json')
-            sprite_dict = json.load(open(sprite_json, 'r', encoding='utf-8'))
+            with open(sprite_json, 'r', encoding='utf-8') as handle:
+                sprite_dict = json.load(handle)
             context.setSprites(sprite_img,sprite_dict)
 
         with open(local_style, 'r', encoding='utf-8') as f:

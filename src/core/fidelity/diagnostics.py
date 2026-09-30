@@ -111,6 +111,8 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_ELSE_NESTED_SIBLINGS": CodeInfo(
         Severity.WARNING, "ELSE rule approximated: sibling rules have nested children",
         "The ELSE condition uses sibling filters only."),
+    "Q2VT_CALLOUT_APPROX": CodeInfo(
+        Severity.WARNING, "Label callout exported as an approximate straight leader"),
     "Q2VT_HYBRID_NOT_AVAILABLE": CodeInfo(
         Severity.WARNING, "Hybrid raster fallback is not implemented yet",
         "Unsupported components are reported instead of rasterized."),
@@ -120,6 +122,12 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_SOURCE_LAYER_MISSING": CodeInfo(
         Severity.WARNING, "Style references a source layer absent from the tile archive",
         "The rule matched no features in the export extent.", fidelity_loss=False),
+    "Q2VT_RULE_OUTPUT_EMPTY": CodeInfo(
+        Severity.WARNING, "A rule matched features but its geometry step produced none",
+        "Check the geometry generator / conversion of this rule; it is missing from the map."),
+    "Q2VT_EXPORT_EMPTY": CodeInfo(
+        Severity.ERROR, "No visible features in the export extent",
+        "Check the extent, layer visibility and scale ranges."),
     "Q2VT_FIELD_MISSING": CodeInfo(
         Severity.ERROR, "Style references an attribute absent from the tile layer"),
     "Q2VT_STRICT_FAILED": CodeInfo(
@@ -282,8 +290,17 @@ def render_html_report(payload: dict) -> str:
     summary = ", ".join(f"{esc(str(v))} {esc(k)}" for k, v in counts.items())
     meta_rows = "".join(
         f"<tr><th>{esc(str(k))}</th><td>{esc(json.dumps(v, ensure_ascii=False))}</td></tr>"
-        for k, v in payload.items() if k not in ("diagnostics", "counts")
+        for k, v in payload.items() if k not in ("diagnostics", "counts", "bindings")
     )
+    binding_rows = "".join(
+        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>".format(
+            esc(str(b.get("layer", ""))), esc(str(b.get("property", ""))),
+            esc(str(b.get("kind", ""))), esc(str(b.get("fields", ""))))
+        for b in payload.get("bindings", []))
+    bindings_html = (
+        "<h2>Data- and zoom-driven properties</h2><div class='wrap'><table><tr><th>Style layer"
+        "</th><th>Property</th><th>Driven by</th><th>Tile attributes</th></tr>"
+        f"{binding_rows}</table></div>" if binding_rows else "")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -305,6 +322,7 @@ tr.info td {{ background:var(--info); }} .muted {{ color:var(--muted); }}
 <p class="muted">{summary}</p>
 <div class="wrap"><table><tr><th>Severity</th><th>Code</th><th>Message</th>
 <th>Location</th><th>Strategy</th><th>Suggestion</th></tr>{''.join(rows)}</table></div>
+{bindings_html}
 <h2>Export metadata</h2><div class="wrap"><table>{meta_rows}</table></div>
 </body></html>
 """

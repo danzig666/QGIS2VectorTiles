@@ -21,11 +21,16 @@ from .model import Strategy
 DDP_EMITTERS: Dict[str, frozenset] = {
     "line": frozenset({"StrokeColor", "StrokeWidth", "Opacity", "Offset", "Color"}),
     "fill": frozenset({"FillColor", "Opacity", "StrokeColor", "Color"}),
-    "marker": frozenset({"Size", "Angle", "Opacity"}),
+    "marker": frozenset({"Size", "Angle", "Opacity", "any other (sprite variants)"}),
     "marker_line": frozenset({"Opacity", "Interval"}),
     "font_marker": frozenset({"Char", "Size", "Angle", "Opacity", "FillColor", "Color"}),
     "pattern": frozenset(),
 }
+
+# Families rendered to sprites by QGIS, where data-defined appearance is
+# reproduced with per-value sprite variants (bounded by a budget that is
+# reported separately as Q2VT_SPRITE_VARIANTS_BUDGET).
+SPRITE_FAMILIES = frozenset({"marker"})
 
 # Data-defined properties consumed during export rather than emitted to the
 # style (they never produce a warning).
@@ -53,12 +58,18 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                 "Dash lengths are scaled by MapLibre with the line width."),
                ("tests/integration/test_converter.py",)),
     Capability("SimpleMarker", "marker", Strategy.SPRITE,
-               "Rendered by QGIS to a sprite; size/angle/opacity may be data-defined.",
-               ("Data-defined color requires one sprite per color (not yet generated).",),
-               ("tests/integration/test_sprites.py",)),
+               "Plain circles (solid or no stroke, no offset/effect) become native circle "
+               "layers with data-defined size, colours and stroke width; other shapes are "
+               "rendered by QGIS to sprites.",
+               ("Data-defined appearance other than size/angle/opacity needs one sprite "
+                "variant per distinct value (budget: Q2VT_SPRITE_VARIANTS_BUDGET).",),
+               ("tests/integration/test_native_circles.py",
+                "tests/integration/test_sprites.py")),
     Capability("SvgMarker", "marker", Strategy.SPRITE,
-               "Rendered by QGIS to a sprite at 1x and 2x.",
-               ("Data-defined SVG parameters are frozen at the static value.",)),
+               "Rendered by QGIS to an oversampled sprite; data-defined SVG parameters "
+               "produce sprite variants.",
+               ("Data-defined appearance is bounded by the sprite variant budget.",),
+               ("tests/integration/test_sprites.py",)),
     Capability("RasterMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FontMarker", "font_marker", Strategy.NATIVE,
                "Exported as browser text (glyphs generated for the font); data-defined "
@@ -66,44 +77,66 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Vertical position uses the text box centre (QGIS: half the font ascent).",)),
     Capability("EllipseMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
-    Capability("MarkerLine", "marker_line", Strategy.APPROXIMATE,
-               "Sub-symbol sprite repeated along the line (interval / center placement).",
-               ("First/last/every-vertex placements are approximated until materialized "
-                "marker positions are implemented.",)),
+    Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,
+               "First/last/every vertex, inner vertices, central point and segment centres "
+               "are exported as point features with the QGIS line angle; interval placement "
+               "is a native repeated symbol.",
+               ("Interval placement starts where MapLibre's line layout does (not at the "
+                "line start) and does not reproduce QGIS offset-along-line exactly.",
+                "Perpendicular offsets in screen units are applied to materialized points "
+                "at the rule's reference zoom only."),
+               ("tests/integration/test_materialize.py",)),
+    Capability("HashLine", "line", Strategy.MATERIALIZED,
+               "Hash marks are exported as rotated line markers at the QGIS positions.",
+               ("Hash angle relative to a data-defined value is frozen.",),
+               ("tests/integration/test_materialize.py",)),
+    Capability("ArrowLine", "line", Strategy.MATERIALIZED,
+               "Straight arrows: body as a line of the arrow width, heads as rotated "
+               "markers at the line ends.",
+               ("Curved, per-segment, half or tapered arrows are approximated.",
+                "Heads sized in map units are omitted (reported)."),
+               ("tests/integration/test_materialize.py",)),
+    Capability("FilledLine", "line", Strategy.MATERIALIZED,
+               "Exported as a stroke of the fill width with the fill sub-symbol colour.",
+               ("Pattern/gradient fills inside the line are drawn with their base colour.",),
+               ("tests/integration/test_materialize.py",)),
     Capability("LinePatternFill", "pattern", Strategy.SPRITE,
-               "Periodic hatch texture with a verified repeat cell (angle and spacing "
-               "within tolerance).",
-               ("Screen-fixed: MapLibre fill patterns do not scale with zoom.",
-                "Pattern is anchored to the world origin, not to each feature.",
-                "Only a solid simple-line sub-symbol is rendered exactly."),
-               ("tests/unit/test_patterns.py",)),
-    Capability("PointPatternFill", "pattern", Strategy.APPROXIMATE,
-               "Rendered through a QGIS preview crop; repeat period not verified.",
-               ("Planned: verified repeat cell (PR-08).",)),
-    Capability("SVGFill", "pattern", Strategy.APPROXIMATE,
-               "Rendered through a QGIS preview crop; repeat period not verified."),
-    Capability("RasterFill", "pattern", Strategy.APPROXIMATE,
-               "Rendered through a QGIS preview crop; repeat period not verified."),
+               "Screen units: periodic hatch texture with a verified repeat cell (angle and "
+               "spacing within tolerance). Map units: hatch lines materialized as line "
+               "features clipped to each polygon, anchored like QGIS.",
+               ("Screen-unit textures are anchored to the world origin, not to each feature.",
+                "Only a solid simple-line sub-symbol is rendered exactly in textures."),
+               ("tests/unit/test_patterns_and_assets.py",
+                "tests/integration/test_materialize.py")),
+    Capability("PointPatternFill", "pattern", Strategy.SPRITE,
+               "Screen units: exact repeat cell (distance and displacement) rendered by QGIS. "
+               "Map units: marker grid materialized as point features with QGIS anchoring "
+               "and clip modes.",
+               ("Random offsets and rotated grids are approximated (reported).",
+                "Markers crossing the polygon edge are drawn whole when their centre is "
+                "inside."),
+               ("tests/integration/test_sprites.py", "tests/integration/test_materialize.py")),
+    Capability("SVGFill", "pattern", Strategy.SPRITE,
+               "Screen units: SVG repeat cell rendered by QGIS. Map units: grid of SVG "
+               "markers materialized as point features.",
+               ("Tiles crossing the polygon edge are drawn whole (QGIS clips the texture).",)),
+    Capability("RasterFill", "pattern", Strategy.SPRITE,
+               "Image tiled at its QGIS width (1x and 2x).",
+               ("Feature- and viewport-anchored image offsets are anchored to the map origin.",)),
     Capability("RandomMarkerFill", "pattern", Strategy.APPROXIMATE,
                "Random positions are not periodic; a preview texture is repeated."),
     Capability("CentroidFill", "marker", Strategy.MATERIALIZED,
                "Centroid points are materialized as point features."),
     Capability("GeometryGenerator", "other", Strategy.MATERIALIZED,
-               "Generated geometry is materialized in the export CRS workflow."),
+               "Generated geometry is materialized, evaluated in the layer CRS."),
     Capability("GradientFill", "fill", Strategy.UNSUPPORTED,
                "Feature-relative gradients need geometry bands or raster fallback."),
     Capability("ShapeburstFill", "fill", Strategy.UNSUPPORTED,
                "Boundary-distance shading needs feature-aware geometry or raster fallback."),
-    Capability("ArrowLine", "line", Strategy.UNSUPPORTED,
-               "Planned: materialized arrow geometry (PR-14)."),
-    Capability("HashLine", "line", Strategy.UNSUPPORTED,
-               "Planned: materialized hash marks (PR-14)."),
     Capability("InterpolatedLine", "line", Strategy.UNSUPPORTED, "Not supported."),
     Capability("RasterLine", "line", Strategy.APPROXIMATE,
                "Emitted as a line pattern from the image preview."),
     Capability("Lineburst", "line", Strategy.UNSUPPORTED, "Not supported."),
-    Capability("FilledLine", "line", Strategy.UNSUPPORTED,
-               "Planned: materialized buffered polygons (PR-14)."),
 ]}
 
 
@@ -128,6 +161,10 @@ def classify(qgis_type: str, data_defined: Iterable[str] = ()) -> Classification
     if cap is None:
         return Classification(Strategy.UNSUPPORTED, (),
                               f"Unknown or plugin symbol layer type '{qgis_type}'")
+    if cap.family in SPRITE_FAMILIES:
+        # Rendered by QGIS: every appearance property is baked into one
+        # sprite variant per distinct value combination.
+        return Classification(cap.strategy, (), cap.summary)
     emitters = DDP_EMITTERS.get(cap.family, frozenset())
     unsupported = tuple(sorted(
         name for name in data_defined
