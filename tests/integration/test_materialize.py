@@ -276,3 +276,19 @@ def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     grid = [o for o, r in zip(outputs, rules) if r.recipe]
     ours = ink_mask(render(grid, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.15
+
+
+def test_svg_fill_without_svg_draws_only_its_stroke(plugin, tmp_path):
+    from qgis.core import QgsSVGFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "svg.gpkg"))
+    # As loaded from a style with neither an SVG file nor embedded data.
+    fill = QgsSVGFillSymbolLayer.create({"svgFile": "", "data": "", "width": "20"})
+    fill.setSubSymbol(QgsLineSymbol.createSimple({"color": "black", "width": "0.5"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    assert reference  # QGIS draws only the fill's stroke sub-symbol
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.rule.symbol().type() for r in rules] == [Qgis.SymbolType.Line]
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05

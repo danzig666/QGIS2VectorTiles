@@ -58,6 +58,24 @@ def _to_mm(value: float, unit) -> Optional[float]:
     return value * factor / physical_factor(MM)
 
 
+def svg_fill_draws(layer) -> bool:
+    """Whether QGIS paints an SVG fill: like ``QgsSVGFillSymbolLayer::
+    storeViewBox`` the SVG data must parse (an empty path has no data; a
+    missing file yields QGIS' placeholder, which it does draw)."""
+    from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtSvg import QSvgRenderer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QByteArray  # pylint: disable=import-outside-toplevel
+    path = layer.svgFilePath()
+    try:
+        if path:
+            data = QgsApplication.svgCache().getImageData(path)
+        else:  # built from embedded data (QgsSVGFillSymbolLayer::create)
+            data = QByteArray.fromHex(str(layer.properties().get("data", "")).encode())
+    except (AttributeError, TypeError):
+        return True
+    return bool(data) and QSvgRenderer(data).isValid()
+
+
 class SymbolMaterializer:
     """Rewrite flattened rules into materialized or simplified components."""
 
@@ -87,6 +105,13 @@ class SymbolMaterializer:
         """Return replacement rules for ``flat_rule`` (whose symbol holds only
         ``layer``), or None when the component needs no rewrite."""
         kind = layer.layerType()
+        if kind == "SVGFill":
+            return self._svg_fill(flat_rule, layer)
+        if kind in ("SimpleLine", "MarkerLine", "HashLine") and flat_rule.get_attr("g") == 2 \
+                and layer.offset():
+            outline = self._polygon_outline_offset(flat_rule, layer)
+            if outline is not None:
+                return outline
         if kind == "HashLine":
             layer = self._hash_as_marker_line(layer, flat_rule)
             flat_rule.rule.symbol().changeSymbolLayer(0, layer)
@@ -103,10 +128,52 @@ class SymbolMaterializer:
                 and normalize_unit(layer.distanceYUnit()) == "map":
             return self._dense_split(flat_rule, min(layer.distanceX(), layer.distanceY()),
                                      lambda rule: self._point_grid(rule, layer))
-        if kind == "SVGFill" and normalize_unit(layer.patternWidthUnit()) == "map":
-            return self._dense_split(flat_rule, layer.patternWidth(),
-                                     lambda rule: self._svg_grid(rule, layer))
         return None
+
+    def _svg_fill(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """``QgsSVGFillSymbolLayer::renderPolygon``: the SVG texture (only when
+        the SVG data parses), then its stroke sub-symbol along every ring."""
+        parts: List[FlattenedRule] = []
+        if svg_fill_draws(layer):
+            if normalize_unit(layer.patternWidthUnit()) == "map":
+                split = self._dense_split(flat_rule, layer.patternWidth(),
+                                          lambda rule: self._svg_grid(rule, layer))
+                parts.extend(split if split is not None else [flat_rule.derive()])
+            else:
+                parts.append(flat_rule.derive())
+        stroke = layer.subSymbol()
+        if stroke is not None and stroke.symbolLayerCount():
+            outline = self._with_symbol(flat_rule, stroke.clone(), 1, 9)
+            outline.order = flat_rule.order + (1,) if flat_rule.order else ()
+            parts.append(outline)
+        return parts
+
+    def _polygon_outline_offset(self, flat_rule: FlattenedRule, layer):
+        """Offset polygon outlines like QGIS (``QgsSymbolLayerUtils::offsetLine``):
+        every ring is buffered as its own polygon, so a positive offset moves
+        exterior and holes towards the feature's interior whatever the ring
+        orientation. Map-unit offsets are materialized exactly; screen-unit
+        offsets keep a native offset on counter-clockwise rings, where
+        MapLibre's right-hand side is the interior. Placed markers (vertex,
+        centre...) are handled by the marker-line materialization."""
+        if layer.layerType() != "SimpleLine":
+            placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
+            if placements & mat.POINT_PLACEMENTS:
+                return None
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        rule = flat_rule.derive()
+        clone = rule.rule.symbol().symbolLayer(0)
+        if normalize_unit(layer.offsetUnit()) == "map":
+            rule.recipe = mat.Recipe("polygon_offset", params=(
+                ("offset", float(layer.offset())), ("crs", crs)))
+            clone.setOffset(0.0)
+        else:
+            rule.recipe = mat.Recipe("polygon_ccw")
+        rule.set_attr("m", 1)
+        if layer.layerType() == "HashLine":
+            converted = self._hash_as_marker_line(clone, rule)
+            rule.rule.symbol().changeSymbolLayer(0, converted)
+        return [rule]
 
     # A map-unit grid becomes point features only from the zoom where its
     # spacing reaches this many CSS px; below that it is a per-zoom texture
@@ -268,6 +335,8 @@ class SymbolMaterializer:
         offset, offset_unit = layer.offset(), layer.offsetUnit()
         recipe = mat.marker_points(points)
         corner_sensitive = points - {"FirstVertex", "LastVertex"}
+        if flat_rule.get_attr("g") == 2:
+            corner_sensitive = points  # QGIS offsets the whole ring (buffer) first
         if offset and corner_sensitive:
             if normalize_unit(offset_unit) == "map":
                 # QGIS places these markers on the offset line; offset the

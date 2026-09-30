@@ -552,6 +552,13 @@ class LinePropertyExtractor:
                     "Q2VT_DDP_NO_EMITTER",
                     "Feature-dependent marker-line interval is not supported; static value used.")
                 spacing = PropertyExtractor.length(interval, symbol_layer.intervalUnit())
+            if normalize_unit(symbol_layer.intervalUnit()) not in ("map", "m"):
+                # MapLibre lays line symbols out once per tile, at the tile's
+                # integer zoom, so a screen-size spacing grows up to 2x until
+                # the next zoom. Laying out at s/sqrt(2) centres that error
+                # (0.71x-1.41x of QGIS instead of 1x-2x). Map-unit spacings
+                # grow with the map like QGIS and need no correction.
+                spacing = ex.mul(spacing, 1.0 / math.sqrt(2.0))
             return ex.clamp(spacing, 1.0, None)
 
         # Vertex-type placements have no MapLibre equivalent; a small spacing

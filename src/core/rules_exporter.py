@@ -819,9 +819,15 @@ class RulesExporter:
     def _materialize_marker_points(self, source: str, recipe: Recipe, source_geometry: int) -> str:
         """Worker: exact marker-line positions as points with ``ANGLE_FIELD``."""
         lines = source
-        if source_geometry == 2:  # marker line on a polygon outline
+        if source_geometry == 2 and recipe.param("offset"):
+            # QGIS buffers each ring (positive = inwards), see polygon_offset_expression.
+            lines = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=source, OUTPUT_GEOMETRY=1,
+                EXPRESSION=mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+            lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
+        elif source_geometry == 2:  # marker line on a polygon outline
             lines = self._run_alg_safe("polygonstolines", "native", INPUT=source)
-        if recipe.param("offset"):
+        elif recipe.param("offset"):
             lines = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
                 EXPRESSION=mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}"))
@@ -1121,6 +1127,10 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
             return [0, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "polygon_offset":
+            return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "polygon_ccw":
+            return [1, mat.CCW_OUTLINE_EXPRESSION]
         if recipe is not None and recipe.kind == "arrow_body":
             return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "callout":
