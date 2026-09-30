@@ -10,6 +10,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsCoordinateReferenceSystem,
     QgsProcessingParameterEnum,
+    QgsProcessingParameterBoolean,
 )
 from qgis.utils import iface
 from ..qgis2vectortiles import QGIS2VectorTiles
@@ -38,6 +39,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
     BACKGROUND_TYPE = "BACKGROUND_TYPE"
     FIDELITY_MODE = "FIDELITY_MODE"
     OVERZOOM = "OVERZOOM"
+    STATIC_PACKAGE = "STATIC_PACKAGE"
 
     def __init__(self):
         """Initialize the algorithm"""
@@ -208,6 +210,14 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.STATIC_PACKAGE,
+                self.tr("Also write a static web package (XYZ tiles, relative URLs)"),
+                defaultValue=False,
+            )
+        )
+
         # Output directory parameter
         self.addParameter(
             QgsProcessingParameterFolderDestination(
@@ -261,6 +271,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         viewer = self.parameterAsInt(parameters, self.VIEWER, context)
         fidelity_mode = self.parameterAsInt(parameters, self.FIDELITY_MODE, context)
         overzoom = self.parameterAsInt(parameters, self.OVERZOOM, context)
+        static_package = self.parameterAsBool(parameters, self.STATIC_PACKAGE, context)
         try:
             # Your existing vector tile generator class would be called here
             tiles_generator = QGIS2VectorTiles(
@@ -276,6 +287,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
                 feedback=feedback,
                 fidelity_mode=fidelity_mode,
                 overzoom=overzoom,
+                static_package=static_package,
             )
 
             # Run the generation process

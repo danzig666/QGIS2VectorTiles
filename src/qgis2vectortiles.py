@@ -83,6 +83,7 @@ class QGIS2VectorTiles:
         fidelity_mode: int = 0,
         overzoom: int = 0,
         serve: bool = True,
+        static_package: bool = False,
     ):
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
@@ -96,6 +97,7 @@ class QGIS2VectorTiles:
         self.viewer = viewer
         self.feedback = feedback or QgsProcessingFeedback()
         self.serve = serve
+        self.static_package = static_package
         self.diagnostics = DiagnosticCollector()
         self.profile = ExportProfile(
             mode=FidelityMode.from_index(fidelity_mode),
@@ -163,6 +165,8 @@ class QGIS2VectorTiles:
 
             if self._project_style_fingerprint() != fingerprint_before:
                 self.diagnostics.add("Q2VT_PROJECT_MUTATED")
+            if archive is not None and self.static_package:
+                self._write_static_package(temp_dir, style, exporter.source_name)
             self._write_report(temp_dir, style, archive, rules)
             self._enforce_strict(temp_dir)
             self._log(f". Process completed successfully "
@@ -451,6 +455,19 @@ class QGIS2VectorTiles:
     def _elapsed_minutes(self, start: float) -> str:
         """Return elapsed time in minutes since start, rounded to 2 decimal places."""
         return f"{round((perf_counter() - start) / 60, 2)}"
+
+    def _write_static_package(self, temp_dir: str, style: dict, source_name: str) -> None:
+        """``web/``: static XYZ tiles + relative-URL style + viewer (any web server)."""
+        from os.path import dirname, abspath  # pylint: disable=import-outside-toplevel
+        from .core.publisher import write_static_package  # pylint: disable=import-outside-toplevel
+        viewer_dir = join(dirname(dirname(abspath(__file__))), "resources", "ml_viewer")
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
+            QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance().transformContext())
+        center = transform.transform(self.extent.center())
+        path = write_static_package(temp_dir, style, source_name, viewer_dir,
+                                    (center.x(), center.y()), self.min_zoom + self.viewer)
+        self._log(f". Static web package: {path}")
 
     def serve_tiles(self, temp_dir: str):
         """Serve the generated tiles via a local HTTP server."""
