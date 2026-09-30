@@ -126,7 +126,12 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Image tiled at its QGIS width (1x and 2x).",
                ("Feature- and viewport-anchored image offsets are anchored to the map origin.",)),
     Capability("RandomMarkerFill", "pattern", Strategy.APPROXIMATE,
-               "Random positions are not periodic; a preview texture is repeated."),
+               "Marker count as in QGIS (absolute per feature, or per map-unit density area) "
+               "as seeded random points; dense zooms and screen-unit densities use a "
+               "seamless texture at the QGIS density.",
+               ("QGIS draws random positions in screen coordinates (they move with the "
+                "view); positions differ, count and density match.",
+                "Markers crossing the polygon edge are not clipped.")),
     Capability("CentroidFill", "marker", Strategy.MATERIALIZED,
                "Marker points at the QGIS position (exterior-ring centroid, or GEOS "
                "point-on-surface when requested and needed).",

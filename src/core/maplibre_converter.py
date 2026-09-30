@@ -1954,7 +1954,8 @@ class QgisMapLibreStyleExporter:
     @staticmethod
     def _pattern_uses_map_units(layer) -> bool:
         units = []
-        for getter in ("distanceXUnit", "distanceYUnit", "patternWidthUnit", "widthUnit"):
+        for getter in ("distanceXUnit", "distanceYUnit", "patternWidthUnit", "widthUnit",
+                       "densityAreaUnit"):
             if hasattr(layer, getter):
                 units.append(getattr(layer, getter)())
         sub = layer.subSymbol()
@@ -2048,6 +2049,33 @@ class QgisMapLibreStyleExporter:
             cells.append(tile_markers(image, width, height, positions))
         _, _, _, error = point_pattern_cell(dx, dy, disp_x, disp_y)
         return self._textures(cells[0], cells[1], error, "Point pattern")
+
+    def _register_random_pattern(self, layer) -> Optional[str]:
+        """Seamless texture of a random marker fill at its QGIS density
+        (``count`` markers per ``densityArea``, in screen units as QGIS
+        counts them). Absolute counts depend on the feature: no texture."""
+        import random  # pylint: disable=import-outside-toplevel
+        from .fidelity.patterns import tile_markers  # pylint: disable=import-outside-toplevel
+        marker = layer.subSymbol()
+        if marker is None or _enum_int(layer.countMethod()) != \
+                _enum_int(Qgis.PointCountMethod.DensityBased):
+            return None
+        side = self._pattern_px(math.sqrt(max(layer.densityArea(), 0.0)),
+                                layer.densityAreaUnit(), "density area")
+        if side <= 0 or layer.pointCount() <= 0:
+            return None
+        per_px = layer.pointCount() / side ** 2
+        # Large enough that the repetition is not obvious: 128 px, or a few
+        # dozen markers for sparse fills (at most 512 px).
+        cell = int(min(512, max(128, math.ceil(math.sqrt(40 / per_px)))))
+        count = max(1, round(per_px * cell * cell))
+        rng = random.Random(int(layer.seed()) or 1)
+        positions = [(rng.uniform(0, cell), rng.uniform(0, cell)) for _ in range(count)]
+        one, two = self._marker_images(marker)
+        cells = [tile_markers(one, cell, cell, positions),
+                 tile_markers(two, 2 * cell, 2 * cell, [(2 * x, 2 * y) for x, y in positions])]
+        error = abs(count - per_px * cell * cell) / (per_px * cell * cell)
+        return self._textures(cells[0], cells[1], error, "Random marker fill")
 
     def _register_svg_pattern(self, layer) -> Optional[str]:
         """Seamless texture for an SVG fill: one SVG per cell, as QGIS tiles it."""
@@ -2534,6 +2562,8 @@ class QgisMapLibreStyleExporter:
                     return self._register_svg_pattern(symbol_layer)
                 if kind == "RasterFill":
                     return self._register_raster_pattern(symbol_layer)
+                if kind == "RandomMarkerFill":
+                    return self._register_random_pattern(symbol_layer)
                 return None
             if kind != "LinePatternFill" and self._pattern_uses_map_units(symbol_layer):
                 pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)

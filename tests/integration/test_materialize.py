@@ -4,6 +4,7 @@ Each test renders the original layer with QGIS and the exported dataset(s)
 with the converted symbol(s), also with QGIS, and compares inked pixels.
 """
 
+import math
 import pytest
 from qgis.core import (Qgis, QgsFeature, QgsField, QgsFillSymbol, QgsGeometry,
                        QgsHashedLineSymbolLayer, QgsLinePatternFillSymbolLayer, QgsLineSymbol,
@@ -438,3 +439,40 @@ def test_stroke_marker_patterns_match_qgis(plugin, tmp_path, shape, size, angle,
     assert lines and lines[0][1].rule.symbol().type() == Qgis.SymbolType.Line
     ours = ink_mask(render([o for o, _ in lines], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.06
+
+
+@pytest.mark.parametrize("density", [0.0, 50.0])
+def test_random_points_follow_the_qgis_count(plugin, density):
+    """``QgsRandomMarkerFillSymbolLayer::render``: ``count`` points, or
+    ``ceil(count * area / densityArea)``, inside the polygon (not in holes)."""
+    from qgis.core import QgsExpression, QgsExpressionContext
+    from fidelity import materialize as mat
+    polygon = QgsGeometry.fromWkt("POLYGON((0 0, 100 0, 100 60, 0 60, 0 0),"
+                                  "(20 20, 80 20, 80 40, 20 40, 20 20))")
+    feature = QgsFeature()
+    feature.setGeometry(polygon)
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    recipe = mat.random_points_recipe(7, density, 12345, "EPSG:3857")
+    result = QgsExpression(mat.random_points_expression(recipe)).evaluate(context)
+    points = [QgsGeometry(p.clone()) for p in result.constGet()]
+    expected = 7 if not density else math.ceil(7 * polygon.area() / density)
+    assert len(points) == expected
+    assert all(polygon.contains(p) for p in points)
+    again = QgsExpression(mat.random_points_expression(recipe)).evaluate(context)
+    assert again.asWkt() == result.asWkt()  # seeded: stable between exports
+
+
+def test_random_marker_fill_is_materialized(plugin, tmp_path):
+    from qgis.core import QgsRandomMarkerFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-100 -90, 100 -90, 100 90, -100 90, -100 -90))",
+                               "POLYGON((-50 -50, -10 -50, -10 -10, -50 -10, -50 -50))"],
+                   str(tmp_path / "rnd.gpkg"))
+    fill = QgsRandomMarkerFillSymbolLayer(9, Qgis.PointCountMethod.Absolute, 0, 77)
+    fill.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 3))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    points = [o for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert len(points) == 1
+    parts = sum(len(f.geometry().asGeometryCollection()) for f in points[0].getFeatures())
+    assert parts == 2 * 9  # QGIS draws the count per feature

@@ -237,6 +237,50 @@ def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float
     return Recipe("grid_points", (), tuple(params))
 
 
+def random_points_recipe(count: int, density_area: float, seed: int,
+                         construction_crs: str) -> Recipe:
+    """Random marker fill (see :func:`random_points_expression`);
+    ``density_area`` 0 means an absolute count per feature."""
+    return Recipe("random_points", (), (("count", int(count)), ("density", float(density_area)),
+                                        ("seed", int(seed)), ("crs", construction_crs)))
+
+
+def random_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Random points of a ``QgsRandomMarkerFillSymbolLayer``.
+
+    QGIS draws ``count`` points, or ``ceil(count * area / densityArea)`` with
+    a density-based count, uniformly in the polygon (holes excluded) from a
+    seeded generator in *screen* coordinates, so its exact positions change
+    with the view. Here the count follows QGIS and the positions are seeded
+    per feature (``randf`` with a seed is deterministic), drawn in the
+    bounding box and kept when inside (rejection sampling).
+    """
+    p = recipe.param
+    crs = p("crs")
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    count, density = p("count"), p("density")
+    n = f"ceil({count} * area(@q2vt_g) / {density!r})" if density else str(count)
+    # Enough draws from the bounding box to leave n points inside the polygon.
+    tries = (f"min({MAX_GRID_POINTS}, ceil(@q2vt_n * area(bounds(@q2vt_g)) / "
+             f"max(area(@q2vt_g), 1e-12) * 1.3) + 20)")
+    seed = f"{p('seed')} + abs(floor(x_min(@q2vt_g) * 7 + y_min(@q2vt_g) * 13)) % 1000003 * 4"
+    draw = "@q2vt_s[4] + 2 * @element"
+    body = (
+        f"with_variable('q2vt_g', {geom}, "
+        f"with_variable('q2vt_n', {n}, "
+        f"with_variable('q2vt_s', array(x_min(@q2vt_g), y_min(@q2vt_g), "
+        f"x_max(@q2vt_g) - x_min(@q2vt_g), y_max(@q2vt_g) - y_min(@q2vt_g), {seed}), "
+        f"if(@q2vt_n < 1, NULL, collect_geometries(array_slice(array_filter(array_foreach("
+        f"generate_series(0, {tries} - 1), "
+        f"make_point(@q2vt_s[0] + randf(0, @q2vt_s[2], {draw}), "
+        f"@q2vt_s[1] + randf(0, @q2vt_s[3], {draw} + 1))), "
+        f"intersects(@element, @q2vt_g)), 0, @q2vt_n - 1))))))"
+    )
+    if crs == export_crs:
+        return body
+    return f"transform({body}, '{crs}', '{export_crs}')"
+
+
 # Stroke-only simple marker shapes (QgsSimpleMarkerSymbolLayerBase::
 # prepareMarkerPath): unit-path segments, y pointing down, scaled by size / 2.
 STROKE_MARKER_PATHS = {

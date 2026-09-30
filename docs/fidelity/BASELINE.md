@@ -89,6 +89,7 @@ now has a regression test.
 | 31 | Stroke-only point patterns (Line, Cross, Cross2, ArrowHead markers) drawn as tiny sprites | QGIS renders a texture of stroked marker paths clipped per its clip mode | clipped line geometry on the pattern grid; `test_stroke_marker_patterns_match_qgis` |
 | 32 | Dash patterns wrong for pen styles and square caps | Qt pen presets (Dash 4/2, Dot 1/2, …) were not exported; Qt extends every dash by square caps, MapLibre only by round caps | Qt presets, square-cap dashes lengthened; `test_dash_patterns_follow_qt` (browser) |
 | 33 | Map-unit line labels missing | MapLibre checks that a line label fits along the line with the text size at zoom 18; map-unit text is 4x its z16 size there | one style layer per zoom below 18 with the size curve clamped to that zoom; labels that may overlap in QGIS (`displayAll`) allow overlap; `test_map_unit_line_labels_are_drawn` (browser) |
+| 34 | Random marker fill drawn as a solid block | the texture was a cropped symbol preview with the map-unit density evaluated at preview scale | QGIS count (`ceil(count * area / densityArea)` or absolute) as seeded points; seamless texture at the QGIS density where dense; `test_random_points_follow_the_qgis_count`, `test_random_marker_fill_is_materialized` |
 
 ### Resolved suspicions
 

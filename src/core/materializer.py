@@ -19,6 +19,7 @@ Each rewrite reports what is approximated. The flattened rule's ``m``
 attribute keeps output datasets of derived components apart.
 """
 
+import math
 from typing import List, Optional
 
 from qgis.core import (
@@ -57,6 +58,10 @@ def _to_mm(value: float, unit) -> Optional[float]:
     if factor is None:
         return None
     return value * factor / physical_factor(MM)
+
+
+def _enum_value(value) -> int:
+    return int(getattr(value, "value", value))
 
 
 def _ring_filter(layer) -> int:
@@ -133,6 +138,8 @@ class SymbolMaterializer:
             return self._filled_line(flat_rule, layer)
         if kind == "LinePatternFill" and normalize_unit(layer.distanceUnit()) in ("map", "m"):
             return self._hatch(flat_rule, layer)
+        if kind == "RandomMarkerFill":
+            return self._random_fill(flat_rule, layer)
         if kind == "PointPatternFill" and normalize_unit(layer.distanceXUnit()) == "map" \
                 and normalize_unit(layer.distanceYUnit()) == "map":
             return self._dense_split(flat_rule, min(layer.distanceX(), layer.distanceY()),
@@ -242,6 +249,45 @@ class SymbolMaterializer:
                 ZoomInterval(0.0, float(switch)))
             grid.visibility = flat_rule.visibility.intersect(ZoomInterval(float(switch), None))
         return [texture] + materialize(grid)
+
+    def _random_fill(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """``QgsRandomMarkerFillSymbolLayer::render``: an absolute count per
+        feature, or a density per map-unit area, becomes random points
+        (texture where they are dense on screen). A density per screen area
+        stays a texture: QGIS draws it at a constant screen density."""
+        marker = layer.subSymbol()
+        if marker is None:
+            return None
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        if any(props.isActive(k) for k in (P.PropertyPointCount, P.PropertyDensityArea,
+                                           P.PropertyRandomSeed, P.PropertyClipPoints)):
+            self._report("Q2VT_PATTERN_APPROXIMATE", "Data-defined count, density, seed or "
+                         "clipping of a random marker fill uses the static value.", flat_rule)
+        count = int(layer.pointCount())
+        density = 0.0
+        if _enum_value(layer.countMethod()) == _enum_value(Qgis.PointCountMethod.DensityBased):
+            if normalize_unit(layer.densityAreaUnit()) != "map":
+                return None
+            density = float(layer.densityArea())
+            if density <= 0:
+                return None
+        if count <= 0:
+            return []
+        if layer.clipPoints():
+            self._report("Q2VT_PATTERN_APPROXIMATE", "Random markers crossing the polygon "
+                         "edge are drawn whole (QGIS clips them to the shape).", flat_rule)
+        self._report("Q2VT_PATTERN_APPROXIMATE", "Random marker positions differ from QGIS "
+                     "(QGIS draws them in screen coordinates, so they change with the view); "
+                     "their number and density follow QGIS.", flat_rule)
+        recipe = mat.random_points_recipe(count, density, int(layer.seed()),
+                                          self.project_crs or flat_rule.layer.crs().authid())
+
+        def points(rule):
+            return [self._with_symbol(rule, marker.clone(), 0, 1, recipe)]
+        if not density:
+            return points(flat_rule)
+        return self._dense_split(flat_rule, math.sqrt(density / count), points)
 
     # -- pattern grids (map units) --------------------------------------------
     def _anchor(self, layer, flat_rule) -> str:

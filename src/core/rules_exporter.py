@@ -1143,6 +1143,8 @@ class RulesExporter:
             # Stroke-only markers are exported as their (clipped) line work.
             return [1 if recipe.param("segments") else 0,
                     mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "random_points":
+            return [0, mat.random_points_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":

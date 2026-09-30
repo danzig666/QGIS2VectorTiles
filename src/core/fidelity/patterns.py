@@ -138,9 +138,10 @@ def tile_markers(marker, cell_w: int, cell_h: int, positions):
                 if left >= cell_w or top >= cell_h or left + marker.width <= 0 \
                         or top + marker.height <= 0:
                     continue
-                layer = Image.new("RGBA", cell.size, (0, 0, 0, 0))
-                layer.paste(marker, (left, top))
-                cell = Image.alpha_composite(cell, layer)
+                # Composite the part of the marker that falls inside the cell.
+                crop = (max(0, -left), max(0, -top), min(marker.width, cell_w - left),
+                        min(marker.height, cell_h - top))
+                cell.alpha_composite(marker, dest=(max(0, left), max(0, top)), source=crop)
     return cell
 
 
