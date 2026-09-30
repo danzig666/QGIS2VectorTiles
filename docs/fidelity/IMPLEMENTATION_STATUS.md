@@ -34,6 +34,14 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Unsupported fills (gradient, shapeburst, …) are omitted and reported instead of being
   drawn black; failed sprites are omitted and reported instead of being transparent.
 * Data-defined widths, sizes and opacities are converted to the browser's units.
+* Valid polygons keep their rings exactly as stored (start vertex, hole orientation);
+  only invalid geometries are repaired. Marker intervals, dashes and offsets on polygon
+  outlines now start where QGIS starts them, on every ring.
+* Map-unit custom dashes are exported as their dashes from the zoom where the pattern is
+  6 px long, so markers drawn in the gaps stay in the gaps.
+* Random marker fills draw the QGIS number of markers (positions differ: QGIS draws them
+  in screen space); map-unit font markers on points are exported as glyph outlines;
+  font markers with characters beyond U+FFFF are sprites.
 * Line labels with map-unit text sizes are drawn (MapLibre dropped them below zoom 18);
   "show all labels" layers allow overlapping labels. A line label may still sit on a
   different stretch of the line than in QGIS (QGIS prefers the middle) and repeats every
