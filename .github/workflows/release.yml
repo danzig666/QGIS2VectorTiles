@@ -1,7 +1,9 @@
 # Publishes a GitHub Release from the plugin zip committed in releases/.
 # Run it from the Actions tab (or the API) with the version, e.g. 4.0: it tags
-# the selected commit v<version> and attaches releases/QGIS2VectorTiles-<version>.zip
-# with releases/RELEASE_NOTES_<version>.md as the release notes.
+# the selected commit v<version> and attaches releases/QGIS2VectorTilesFork-<version>.zip
+# (built with tools/build_release.py) with releases/RELEASE_NOTES_<version>.md
+# as the release notes. "replace" first deletes an existing release and tag
+# of that version.
 name: Release
 
 on:
@@ -10,6 +12,10 @@ on:
       version:
         description: "Plugin version (e.g. 4.0)"
         required: true
+      replace:
+        description: "Replace an existing release and tag of this version"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -24,16 +30,22 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           grep -qx "version=${VERSION}" metadata.txt
-          test -f "releases/QGIS2VectorTiles-${VERSION}.zip"
+          test -f "releases/QGIS2VectorTilesFork-${VERSION}.zip"
           test -f "releases/RELEASE_NOTES_${VERSION}.md"
-          unzip -p "releases/QGIS2VectorTiles-${VERSION}.zip" QGIS2VectorTiles/metadata.txt \
-            | grep -qx "version=${VERSION}"
+          unzip -p "releases/QGIS2VectorTilesFork-${VERSION}.zip" QGIS2VectorTilesFork/metadata.txt \
+            | cmp - metadata.txt
+      - name: Remove the previous release
+        if: ${{ inputs.replace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release delete "v${VERSION}" --cleanup-tag --yes || true
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
-          gh release create "v${VERSION}" "releases/QGIS2VectorTiles-${VERSION}.zip" \
+          gh release create "v${VERSION}" "releases/QGIS2VectorTilesFork-${VERSION}.zip" \
             --target "${GITHUB_SHA}" \
             --title "QGIS2VectorTiles ${VERSION} (fork)" \
             --notes-file "releases/RELEASE_NOTES_${VERSION}.md"

@@ -2,7 +2,7 @@
 
 This is a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles) by Jossef Kanter, not an official release of the original plugin. It is based on upstream v3.6. This fork focuses on making the web map look like the QGIS map.
 
-Install it in QGIS with *Plugins → Manage and Install Plugins → Install from ZIP* and choose `QGIS2VectorTiles-4.0.zip`. It replaces an installed QGIS2VectorTiles plugin, because both use the same plugin name.
+Install it in QGIS with *Plugins → Manage and Install Plugins → Install from ZIP* and choose `QGIS2VectorTilesFork-4.0.zip`. It installs as **QGIS2VectorTiles (fork)**, in its own `QGIS2VectorTilesFork` folder, with its own Processing provider. It sits next to the official QGIS2VectorTiles plugin and does not replace it.
 
 ### Changes since 3.6
 

@@ -16,7 +16,8 @@
 > **This is a fork** of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles)
 > by Jossef Kanter, focused on making the web map match the QGIS styling. Download fork builds
 > from [Releases](https://github.com/danzig666/QGIS2VectorTiles/releases) and report fork issues
-> [here](https://github.com/danzig666/QGIS2VectorTiles/issues).
+> [here](https://github.com/danzig666/QGIS2VectorTiles/issues). It installs as
+> **QGIS2VectorTiles (fork)** next to the official plugin.
 
   _- No internet connection or third-party installation required -_
 

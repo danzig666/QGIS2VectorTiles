@@ -1,5 +1,5 @@
 [general]
-name=QGIS2VectorTiles
+name=QGIS2VectorTiles (fork)
 qgisMinimumVersion=3.44
 qgisMaximumVersion=4.99
 description=Pack a QGIS project into a lightweight vector tile package with a matching web style and a ready-to-use web viewer. (Fork focused on QGIS-accurate styling.)

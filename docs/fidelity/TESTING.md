@@ -29,7 +29,7 @@ sudo apt-get install python3-qgis qgis-providers gdal-bin python3-pytest
 (cd tests/browser && npm install)
 # The plugin locates resources in the QGIS profile; link the checkout there once:
 mkdir -p ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins
-ln -s "$PWD" ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/QGIS2VectorTiles
+ln -s "$PWD" ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/QGIS2VectorTilesFork
 QT_QPA_PLATFORM=offscreen python3.12 -m pytest
 ```
 

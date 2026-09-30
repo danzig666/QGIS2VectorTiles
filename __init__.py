@@ -1,4 +1,4 @@
-"""QGIS2VectorTiles plugin for QGIS"""
+"""QGIS2VectorTiles (fork) plugin for QGIS"""
 
 from qgis.core import QgsApplication
 from .src.processing.provider import QGIS2VectorTilesPorvider

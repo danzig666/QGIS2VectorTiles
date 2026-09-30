@@ -13,12 +13,13 @@ class QGIS2VectorTilesPorvider(QgsProcessingProvider):
         super().__init__()
 
     def id(self):
-        """Returns the unique ID of the provider."""
-        return "QGIS2VectorTiles"
+        """Returns the unique ID of the provider (distinct from the official
+        QGIS2VectorTiles plugin, so both can be installed)."""
+        return "QGIS2VectorTilesFork"
 
     def name(self):
         """Returns the display name of the provider."""
-        return "QGIS2VectorTiles"
+        return "QGIS2VectorTiles (fork)"
 
     def icon(self):
         """Returns the provider icon."""

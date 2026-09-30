@@ -5,18 +5,18 @@ Global constants, configuration loading, and PyQt version-specific imports.
 All other modules import shared symbols from here to avoid duplication.
 """
 
-from os.path import join
+from os.path import abspath, dirname, join
 
 from qgis.PyQt.QtCore import qVersion
-from qgis.core import QgsApplication
 
 
 # =====================================================================
 # PLUGIN PATHS
-# Computed from the live QGIS install. Do not hardcode replacements —
-# these must stay derived from QgsApplication at import time.
+# The folder this plugin is installed in (src/utils/ is two levels down),
+# whatever its name: the fork installs as QGIS2VectorTilesFork next to the
+# official QGIS2VectorTiles, and a development checkout may be linked in.
 # =====================================================================
-_PLUGIN_DIR = join(QgsApplication.qgisSettingsDirPath(), "python", "plugins", "QGIS2VectorTiles")
+_PLUGIN_DIR = dirname(dirname(dirname(abspath(__file__))))
 _RESOURCES = join(_PLUGIN_DIR, "resources")
 _SERVER = join(_RESOURCES, "tiles_server.py")
 
