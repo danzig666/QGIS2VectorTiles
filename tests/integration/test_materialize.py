@@ -594,3 +594,38 @@ def test_point_pattern_random_deviation_stays_in_range(plugin):
     assert max(abs(x) for x, _ in shifts) > 2.5 and max(abs(y) for _, y in shifts) > 1.6
     mean_x = sum(x for x, _ in shifts) / len(shifts)
     assert abs(mean_x) < 0.5  # uniform around the grid node
+
+
+@pytest.mark.parametrize("shape,filled", [("Diamond", False), ("Triangle", True),
+                                          ("Circle", True)])
+def test_shape_clipped_marker_patterns_are_cut_at_the_edge(plugin, tmp_path, shape, filled):
+    """"Shape" clipping: QGIS cuts the pattern's markers at the polygon edge;
+    closed simple markers are exported as polygons and outlines, clipped."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 40, -20 71, -97 40, -97 -83),"
+                               "(-60 -40, -30 -40, -30 -10, -60 -10, -60 -40))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = QgsSimpleMarkerSymbolLayer(getattr(Qgis.MarkerShape, shape), 10)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor(84, 176, 74, 255 if filled else 0))
+    marker.setStrokeColor(QColor(112, 168, 0))
+    marker.setStrokeWidth(1.2)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(20)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    pp.setClipMode(Qgis.MarkerClipMode.Shape)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    parts = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert {r.recipe.param("fill") for _, r in parts} == ({True, False} if filled else {False})
+    ours = ink_mask(render([o for o, _ in parts], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.12
+    # Nothing is drawn outside the polygon (edge markers are cut).
+    polygon = QgsGeometry.fromWkt("POLYGON((-97 -83, 53 -83, 53 40, -20 71, -97 40, -97 -83))")
+    for output, _ in parts:
+        for feature in output.getFeatures():
+            assert polygon.buffer(0.01, 4).contains(feature.geometry())

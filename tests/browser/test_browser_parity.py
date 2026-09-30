@@ -238,3 +238,63 @@ def test_thin_lines_get_the_ink_qgis_gives_them(tmp_path):
     layer.setRenderer(QgsCategorizedSymbolRenderer("k", categories))
     qgis, browser = _compare(tmp_path, layer, metric="darkness")
     assert browser == pytest.approx(qgis, rel=0.12)
+
+
+def _red_and_blue_boxes(path):
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    boxes = []
+    for test in (lambda p: p[0] > 150 and p[1] < 150 and p[2] < 150,
+                 lambda p: p[2] > 150 and p[0] < 150):
+        points = [(x, y) for y in range(image.height) for x in range(image.width)
+                  if test(image.getpixel((x, y)))]
+        boxes.append((min(p[0] for p in points), min(p[1] for p in points),
+                      max(p[0] for p in points), max(p[1] for p in points)))
+    return boxes
+
+
+@pytest.mark.parametrize("zoom", [16.0, 16.5])
+def test_label_frames_follow_map_unit_text_between_zooms(tmp_path, monkeypatch, zoom):
+    """A frame fitted to map-unit text: MapLibre reads a size curve only at
+    the stops covering [tile zoom, +1], so each zoom has its own icon-size
+    ramp; with one curve the frame kept its integer-zoom size."""
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["1ő"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(17)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(3, 3))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(0.2)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png"))
+                          for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # frame edges within 2 px
+        assert abs(a - b) <= 2, (qf, bf)

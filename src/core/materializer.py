@@ -32,6 +32,7 @@ from qgis.core import (
     QgsProperty,
     QgsSimpleLineSymbolLayer,
     QgsSimpleMarkerSymbolLayer,
+    QgsSimpleMarkerSymbolLayerBase,
     QgsSymbolLayer,
 )
 from qgis.PyQt.QtCore import QPointF
@@ -120,6 +121,15 @@ class SymbolMaterializer:
         """Return replacement rules for ``flat_rule`` (whose symbol holds only
         ``layer``), or None when the component needs no rewrite."""
         kind = layer.layerType()
+        if kind in ("MarkerLine", "HashLine"):
+            per_zoom = self._split_scale_dependent(flat_rule, layer)
+            if per_zoom is not None:
+                return per_zoom
+            # Constant expressions (no field, no variable) become static.
+            self._fold_constant_ddp(layer, QgsSymbolLayer.Property.PropertyInterval,
+                                    layer.setInterval)
+            self._fold_constant_ddp(layer, QgsSymbolLayer.Property.PropertyOffsetAlongLine,
+                                    layer.setOffsetAlongLine)
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
         if kind == "FontMarker":
@@ -153,6 +163,87 @@ class SymbolMaterializer:
             return self._dense_split(flat_rule, min(layer.distanceX(), layer.distanceY()),
                                      lambda rule: self._point_grid(rule, layer))
         return None
+
+    _SCALE_FOLDED = (QgsSymbolLayer.Property.PropertyInterval,
+                     QgsSymbolLayer.Property.PropertyOffsetAlongLine)
+
+    def _split_scale_dependent(self, flat_rule: FlattenedRule, layer):
+        """Marker-line interval / offset along the line that depend on the
+        map scale only (``CASE WHEN @map_scale > 3000 THEN 10 ELSE 3 END``):
+        one rule per zoom, with the value at that zoom's scale, so the
+        markers can still be placed exactly. None when not applicable."""
+        from qgis.core import QgsExpression  # pylint: disable=import-outside-toplevel
+        props = layer.dataDefinedProperties()
+        scale_only = []
+        for key in self._SCALE_FOLDED:
+            prop = props.property(key)
+            if prop is None or not prop.isActive():
+                continue
+            expression = QgsExpression(prop.asExpression())
+            if expression.referencedColumns() - {""} or \
+                    set(expression.referencedVariables()) - {"map_scale"}:
+                return None  # feature-dependent: not placed exactly
+            if "map_scale" in expression.referencedVariables():
+                scale_only.append(key)
+        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        if not scale_only or low >= high:
+            if scale_only:
+                for key in scale_only:
+                    self._fold_constant_ddp(layer, key, self._setter(layer, key),
+                                            ZoomLevels.zoom_to_scale(low))
+            return None
+        parts = []
+        for zoom in range(low, high + 1):
+            rule = flat_rule.derive()
+            rule.set_attr("o", zoom)
+            rule.set_attr("i", zoom)
+            if flat_rule.visibility is not None:
+                rule.visibility = flat_rule.visibility.intersect(
+                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+            clone = rule.rule.symbol().symbolLayer(0)
+            for key in scale_only:
+                self._fold_constant_ddp(clone, key, self._setter(clone, key),
+                                        ZoomLevels.zoom_to_scale(zoom))
+            result = self.materialize(rule, clone)
+            parts.extend(result if result is not None else [rule])
+        return parts
+
+    @staticmethod
+    def _setter(layer, key):
+        return layer.setInterval if key == QgsSymbolLayer.Property.PropertyInterval \
+            else layer.setOffsetAlongLine
+
+    @staticmethod
+    def _fold_constant_ddp(layer, key, setter, scale=None) -> None:
+        """Replace an active data-defined property whose expression reads no
+        field or variable (``@map_scale`` taken as ``scale`` for a one-zoom
+        rule) by its value."""
+        from qgis.core import QgsExpression, QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+        from .fidelity.qgis_expr import with_map_scale  # pylint: disable=import-outside-toplevel
+        props = layer.dataDefinedProperties()
+        prop = props.property(key)
+        if prop is None or not prop.isActive():
+            return
+        text = prop.asExpression()
+        original = QgsExpression(text)
+        allowed = {"map_scale"} if scale is not None else set()
+        if original.hasParserError() or original.referencedColumns() - {""} or \
+                set(original.referencedVariables()) - allowed:
+            return
+        if scale is not None and "@map_scale" in text:
+            text = with_map_scale(text, scale)
+        expression = QgsExpression(text)
+        value = expression.evaluate(QgsExpressionContext([QgsExpressionContextUtils.globalScope()]))
+        if expression.hasEvalError():
+            return
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        setter(number)
+        prop.setActive(False)
+        props.setProperty(key, prop)
+        layer.setDataDefinedProperties(props)
 
     @classmethod
     def _tiling_pattern(cls, layer) -> bool:
@@ -485,6 +576,9 @@ class SymbolMaterializer:
         strokes = self._stroke_marker(marker)
         if strokes is not None and not layer.angle():
             return self._stroke_grid(flat_rule, layer, marker, strokes, clip)
+        closed = self._closed_marker(marker)
+        if closed is not None and not layer.angle() and clip == int(Qgis.MarkerClipMode.Shape):
+            return self._shape_grid(flat_rule, layer, marker, closed)
         if clip == int(Qgis.MarkerClipMode.CompletelyWithin):
             if normalize_unit(marker.sizeUnit()) == "map":
                 inset = marker.size() / 2.0
@@ -547,6 +641,69 @@ class SymbolMaterializer:
         if active:
             return None
         return shape
+
+    @staticmethod
+    def _closed_marker(marker):
+        """Shape name of a single closed simple marker (square, diamond,
+        triangle, circle...) sized in map units without data-defined
+        properties; None otherwise."""
+        if marker.symbolLayerCount() != 1:
+            return None
+        layer = marker.symbolLayer(0)
+        if layer.layerType() != "SimpleMarker" or normalize_unit(layer.sizeUnit()) != "map":
+            return None
+        props = layer.dataDefinedProperties()
+        if any(props.isActive(key) for key in props.propertyKeys()):
+            return None
+        if (layer.offset().x() or layer.offset().y()) and \
+                normalize_unit(layer.offsetUnit()) != "map":
+            return None
+        name = getattr(layer.shape(), "name", None) or \
+            QgsSimpleMarkerSymbolLayerBase.encodeShape(layer.shape())
+        return name if name in mat.MARKER_SHAPE_POLYGONS else None
+
+    def _shape_grid(self, flat_rule, layer, marker, shape) -> List[FlattenedRule]:
+        """Point pattern of closed simple markers clipped to the polygon
+        ("Shape" clip mode): QGIS draws the pattern clipped to the feature,
+        so edge markers are cut; sprites cannot be, so the markers' fill
+        (polygons) and outline (closed lines) are exported as geometry,
+        clipped to the polygon."""
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        simple = marker.symbolLayer(0)
+        offset = simple.offset()
+        paths = mat.marker_paths((mat.MARKER_SHAPE_POLYGONS[shape],), simple.size(),
+                                 simple.angle(), offset.x(), offset.y())
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+
+        def recipe(fill):
+            return mat.grid_recipe(
+                layer.distanceX(), layer.distanceY(),
+                self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
+                self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement", flat_rule),
+                self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
+                self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
+                crs, self._anchor(layer, flat_rule), 0.0, rows_from_top=False,
+                clip_shape=True, clip_mode="shape", deviation=self._deviation(layer, flat_rule),
+                seed=layer.seed(), paths=paths, fill=fill)
+        parts = []
+        if simple.color().alpha() > 0:
+            fill = QgsSimpleFillSymbolLayer(simple.color())
+            fill.setStrokeStyle(Qt.PenStyle.NoPen)
+            symbol = QgsFillSymbol([fill])
+            symbol.setOpacity(marker.opacity())
+            parts.append(self._with_symbol(flat_rule, symbol, 2, 1, recipe(True)))
+        if simple.strokeStyle() != Qt.PenStyle.NoPen and simple.strokeColor().alpha() > 0:
+            stroke = QgsSimpleLineSymbolLayer(simple.strokeColor(), simple.strokeWidth())
+            stroke.setWidthUnit(simple.strokeWidthUnit())
+            stroke.setWidthMapUnitScale(simple.strokeWidthMapUnitScale())
+            stroke.setPenStyle(simple.strokeStyle())
+            stroke.setPenJoinStyle(simple.penJoinStyle())
+            symbol = QgsLineSymbol([stroke])
+            symbol.setOpacity(marker.opacity())
+            outline = self._with_symbol(flat_rule, symbol, 1, 3, recipe(False))
+            outline.order = flat_rule.order + (1,) if flat_rule.order else ()
+            parts.append(outline)
+        return parts
 
     def _stroke_grid(self, flat_rule, layer, marker, shape, clip) -> List[FlattenedRule]:
         """Point pattern of stroke-only markers (lines, crosses...) sized in map

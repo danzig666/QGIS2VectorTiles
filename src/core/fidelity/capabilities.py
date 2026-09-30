@@ -123,9 +123,11 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Screen units: exact repeat cell (distance and displacement) rendered by QGIS. "
                "Map units: marker grid materialized as point features with QGIS anchoring "
                "and clip modes.",
-               ("Random offsets and rotated grids are approximated (reported).",
-                "Markers crossing the polygon edge are drawn whole when their centre is "
-                "inside."),
+               ("Random offsets follow QGIS's range, not its sequence; rotated grids are "
+                "approximated (reported).",
+                "\"Shape\" clipping: line, cross and closed simple markers are exported as "
+                "clipped geometry (cut at the edge like QGIS); other markers are drawn whole "
+                "when their centre is inside."),
                ("tests/integration/test_sprites.py", "tests/integration/test_materialize.py")),
     Capability("SVGFill", "pattern", Strategy.SPRITE,
                "Screen units: SVG repeat cell rendered by QGIS. Map units: grid of SVG "

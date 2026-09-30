@@ -104,6 +104,9 @@ now has a regression test.
 | 46 | Random deviation of pattern markers ignored | markers stood on the exact grid | seeded uniform deviation per grid cell (QGIS's range, not its sequence); `test_point_pattern_random_deviation_stays_in_range` |
 | 47 | All icons and patterns missing when the sprite sheet is too tall | the atlas stacked images in a 1024 px wide column (85 000 px tall with per-zoom sprites; 12 500 px at @2x before), above the GPU texture size | square shelf packing, a per-marker image budget, and an error when a sheet exceeds 16384 px; `test_atlas_stays_roughly_square` |
 | 48 | Markers sized by map-unit extents drawn at a fixed screen size | an ellipse's width/height in map units with a nominal size in mm was classified by its size unit | the marker's scaling is measured (bounds at two map scales); `test_marker_sized_by_map_unit_extents_grows_with_the_map` |
+| 49 | Label frames kept their integer-zoom size | MapLibre reads a size curve only at the stops covering [tile zoom, +1], so the one sawtooth `icon-size` stayed at 0.5; the padding was read at the tile zoom while the text was shaped at zoom + 1 | one style layer per zoom with its own icon-size ramp; padding doubled; `test_label_frames_follow_map_unit_text_between_zooms` (browser) |
+| 50 | Scale-dependent marker intervals drawn by MapLibre | `CASE WHEN @map_scale > 3000 THEN 10 ELSE 3 END` intervals disabled exact placement | one rule per zoom with the value at its scale, placed exactly |
+| 51 | Shape-clipped pattern markers not cut at the polygon edge | sprites cannot be clipped | closed simple markers exported as clipped polygons and outlines; `test_shape_clipped_marker_patterns_are_cut_at_the_edge` |
 
 ### Resolved suspicions
 

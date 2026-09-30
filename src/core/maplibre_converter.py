@@ -2958,16 +2958,26 @@ class QgisMapLibreStyleExporter:
     # fit are dropped.
     LINE_LABEL_FIT_ZOOM = 18
 
-    @classmethod
-    def _line_label_zoom_split(cls, layer_def: dict) -> list:
-        """A line label with a zoom-curve ``text-size`` as one style layer per
-        integer zoom below 18, each with its own two stops (the sizes it
-        draws are unchanged) and a stop at zoom 18 back at the tile-zoom size
-        for MapLibre's fit check."""
+    def _line_label_zoom_split(self, layer_def: dict) -> list:
+        """A label with a zoom-curve ``text-size`` as one style layer per
+        integer zoom where MapLibre needs it (the sizes it draws are
+        unchanged):
+
+        * line placement below zoom 18: the curve gets a stop at zoom 18 back
+          at the tile-zoom size, for MapLibre's line fit check;
+        * a text-fitted frame: ``icon-size`` 0.5 -> 1 over the layer's zoom
+          (MapLibre fits the frame to text shaped at tile zoom + 1, and reads
+          a size curve only at the stops covering [tile zoom, +1], so one
+          sawtooth curve for all zooms stays at 0.5 and the frame did not
+          grow between integer zooms).
+        """
         layout = layer_def["layout"]
         size = layout.get("text-size")
-        if layout.get("symbol-placement") not in ("line", "line-center") \
-                or not ex.is_zoom_curve(size) or size[0] != "interpolate":
+        if not ex.is_zoom_curve(size) or size[0] != "interpolate":
+            return [layer_def]
+        line = layout.get("symbol-placement") in ("line", "line-center")
+        framed = "icon-text-fit" in layout
+        if not line and not framed:
             return [layer_def]
         try:
             values = {z: ex.evaluate_zoom_curve(size, z) for z in range(0, 25)}
@@ -2975,7 +2985,8 @@ class QgisMapLibreStyleExporter:
             return [layer_def]
         low = layer_def.get("minzoom", 0)
         high = layer_def.get("maxzoom", 24)
-        top = cls.LINE_LABEL_FIT_ZOOM
+        fit = self.LINE_LABEL_FIT_ZOOM
+        top = fit if not framed else min(24, max(fit, int(self.maxzoom) + 4))
         if low >= top:
             return [layer_def]
         out = []
@@ -2984,15 +2995,19 @@ class QgisMapLibreStyleExporter:
             part["id"] = f"{layer_def['id']}_z{zoom}"
             part["minzoom"] = max(low, zoom)
             part["maxzoom"] = min(high, zoom + 1)
-            curve = ["interpolate", list(size[1]), ["zoom"],
-                     zoom, values[zoom], zoom + 1, values[zoom + 1]]
-            if zoom + 1 < top:
-                # Drawing reads only the stops covering [tile zoom, +1]
-                # (symbol_size.ts); the zoom-18 fit check then sees the
-                # size drawn at the tile zoom, so a label that fits the
-                # (tile-clipped) line is kept.
-                curve += [top, values[zoom]]
-            part["layout"]["text-size"] = curve
+            if line:
+                curve = ["interpolate", list(size[1]), ["zoom"],
+                         zoom, values[zoom], zoom + 1, values[zoom + 1]]
+                if zoom + 1 < fit:
+                    # Drawing reads only the stops covering [tile zoom, +1]
+                    # (symbol_size.ts); the zoom-18 fit check then sees the
+                    # size drawn at the tile zoom, so a label that fits the
+                    # (tile-clipped) line is kept.
+                    curve += [fit, values[zoom]]
+                part["layout"]["text-size"] = curve
+            if framed:
+                part["layout"]["icon-size"] = ["interpolate", ["exponential", 2], ["zoom"],
+                                               zoom, 0.5, zoom + 1, 1.0]
             out.append(part)
         if high > top:
             rest = copy.deepcopy(layer_def)
@@ -3134,6 +3149,20 @@ class QgisMapLibreStyleExporter:
         stops += [top, 0.5, 24, 2.0 ** (24 - top - 1)]
         return ["interpolate", ["exponential", 2], ["zoom"]] + stops
 
+    @staticmethod
+    def _scaled_padding(padding, factor: float):
+        """``icon-text-fit-padding`` (list or zoom curve of literals) × factor."""
+        if isinstance(padding, list) and padding and padding[0] == "literal":
+            return ["literal", [round(v * factor, 4) for v in padding[1]]]
+        if ex.is_zoom_curve(padding):
+            out = list(padding[:3])
+            for zoom, value in zip(padding[3::2], padding[4::2]):
+                out += [zoom, QgisMapLibreStyleExporter._scaled_padding(value, factor)]
+            return out
+        if isinstance(padding, list) and all(ex.is_number(v) for v in padding):
+            return [round(v * factor, 4) for v in padding]
+        return padding
+
     def _text_fit_padding_curve(self, background):
         """``icon-text-fit-padding`` as a zoom curve for map-unit buffers."""
         if _enum_int(background.sizeType(), 0) != 0 or \
@@ -3190,8 +3219,13 @@ class QgisMapLibreStyleExporter:
             if ex.is_zoom_curve(layer_def["layout"].get("text-size")):
                 layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
                 padding = self._text_fit_padding_curve(background)
+                if padding is None:
+                    padding = layer_def["layout"].get("icon-text-fit-padding")
                 if padding is not None:
-                    layer_def["layout"]["icon-text-fit-padding"] = padding
+                    # MapLibre fits the frame to the text shaped at tile
+                    # zoom + 1 but reads the padding at the tile zoom; the
+                    # frame is then halved by icon-size: double the padding.
+                    layer_def["layout"]["icon-text-fit-padding"] = self._scaled_padding(padding, 2.0)
         layer_def["paint"].update({
             "icon-opacity": IconPropertyExtractor.get_icon_opacity(background),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),

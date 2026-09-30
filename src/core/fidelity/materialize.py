@@ -223,7 +223,8 @@ MAX_GRID_POINTS = 200000
 def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float,
                 off_y: float, construction_crs: str, anchor: str, inset: float = 0.0,
                 rows_from_top: bool = False, segments=(), clip_shape: bool = False,
-                clip_mode: str = "", deviation=(0.0, 0.0), seed: int = 0) -> Recipe:
+                clip_mode: str = "", deviation=(0.0, 0.0), seed: int = 0, paths=(),
+                fill: bool = False) -> Recipe:
     """Point-pattern grid in map units (see :func:`grid_expression`)."""
     params = [
         ("dx", float(dx)), ("dy", float(dy)), ("disp_x", float(disp_x)),
@@ -233,7 +234,12 @@ def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float
     if deviation[0] or deviation[1]:
         params += [("dev_x", float(deviation[0])), ("dev_y", float(deviation[1])),
                    ("seed", int(seed))]
-    if segments:
+    if paths:
+        params += [("paths", tuple(tuple(float(v) for v in path) for path in paths)),
+                   ("fill", bool(fill)), ("clip_shape", bool(clip_shape))]
+        if clip_mode:
+            params.append(("clip_mode", clip_mode))
+    elif segments:
         params += [("segments", tuple(segments)), ("clip_shape", bool(clip_shape))]
         if clip_mode:
             params.append(("clip_mode", clip_mode))
@@ -294,6 +300,50 @@ STROKE_MARKER_PATHS = {
 }
 
 
+# Closed simple-marker shapes (QgsSimpleMarkerSymbolLayerBase::shapeToPolygon),
+# unit coordinates, y pointing down; the circle is QPainterPath::addEllipse.
+MARKER_SHAPE_POLYGONS = {
+    "Square": ((-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1)),
+    "Diamond": ((-1, 0), (0, 1), (1, 0), (0, -1), (-1, 0)),
+    "Triangle": ((-1, 1), (1, 1), (0, -1), (-1, 1)),
+    "EquilateralTriangle": ((-0.8660, 0.5), (0.8660, 0.5), (0, -1), (-0.8660, 0.5)),
+    "Pentagon": ((-0.9511, -0.3090), (-0.5878, 0.8090), (0.5878, 0.8090), (0.9511, -0.3090),
+                 (0, -1), (-0.9511, -0.3090)),
+    "Hexagon": ((-0.8660, -0.5), (-0.8660, 0.5), (0, 1), (0.8660, 0.5), (0.8660, -0.5),
+                (0, -1), (-0.8660, -0.5)),
+    "HalfSquare": ((-1, -1), (0, -1), (0, 1), (-1, 1), (-1, -1)),
+    "QuarterSquare": ((-1, -1), (0, -1), (0, 0), (-1, 0), (-1, -1)),
+    "DiagonalHalfSquare": ((-1, -1), (1, 1), (-1, 1), (-1, -1)),
+    "Circle": tuple((math.cos(2 * math.pi * k / 64), math.sin(2 * math.pi * k / 64))
+                    for k in range(65)),
+}
+_OCT = 1.0 / (1 + math.sqrt(2))
+MARKER_SHAPE_POLYGONS["Octagon"] = ((-_OCT, 1), (_OCT, 1), (1, _OCT), (1, -_OCT), (_OCT, -1),
+                                    (-_OCT, -1), (-1, -_OCT), (-1, _OCT), (-_OCT, 1))
+
+
+def marker_paths(unit_paths, size: float, angle: float = 0.0,
+                 offset_x: float = 0.0, offset_y: float = 0.0):
+    """Flat (x, y, ...) paths of a marker in map units around its point (map
+    y up): unit paths scaled by ``size / 2``, rotated clockwise on screen by
+    ``angle`` and offset like :func:`marker_segments`."""
+    radians = math.radians(angle)
+    cos, sin = math.cos(radians), math.sin(radians)
+
+    def screen(x, y):  # rotate on screen (y down), then flip to map y up
+        return x * cos - y * sin, -(x * sin + y * cos)
+    ox, oy = screen(offset_x, offset_y)
+    half = size / 2.0
+    out = []
+    for path in unit_paths:
+        flat = []
+        for ux, uy in path:
+            x, y = screen(ux * half, uy * half)
+            flat += [round(x + ox, 9), round(y + oy, 9)]
+        out.append(tuple(flat))
+    return tuple(out)
+
+
 def marker_segments(shape: str, size: float, angle: float = 0.0,
                     offset_x: float = 0.0, offset_y: float = 0.0):
     """Segments of a stroke-only marker in map units relative to its point
@@ -352,6 +402,12 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     oy = -p("off_y")
     clip = "@q2vt_g" if not p("inset") else f"buffer(@q2vt_g, {-p('inset')!r})"
     segments = p("segments") or ()
+    # Closed marker shapes: flat (x, y, x, y, ...) paths, drawn as outlines
+    # or (``fill``) as polygons.
+    paths = [list(zip(path[0::2], path[1::2])) for path in (p("paths") or ())]
+    if paths:
+        segments = [(min(x for x, _ in pts), min(y for _, y in pts),
+                     max(x for x, _ in pts), max(y for _, y in pts)) for pts in paths]
     # Markers whose centre lies outside the polygon can still reach into it.
     reach = max((max(math.hypot(ax, ay), math.hypot(bx, by)) for ax, ay, bx, by in segments),
                 default=0.0)
@@ -383,10 +439,18 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     if segments:
         def pick(values):
             return f"array({', '.join(repr(float(v)) for v in values)})[@q2vt_ij[2]]"
-        ax, ay, bx, by = (pick([seg[k] for seg in segments]) for k in range(4))
-        element = (f"with_variable('q2vt_p', array({point_x}, {point_y}), "
-                   f"make_line(make_point(@q2vt_p[0] + {ax}, @q2vt_p[1] + {ay}), "
-                   f"make_point(@q2vt_p[0] + {bx}, @q2vt_p[1] + {by})))")
+        if paths:
+            def shape(pts):
+                line = "make_line(" + ", ".join(
+                    f"make_point(@q2vt_p[0] + {x!r}, @q2vt_p[1] + {y!r})" for x, y in pts) + ")"
+                return f"make_polygon({line})" if p("fill") else line
+            element = (f"with_variable('q2vt_p', array({point_x}, {point_y}), "
+                       f"array({', '.join(shape(pts) for pts in paths)})[@q2vt_ij[2]])")
+        else:
+            ax, ay, bx, by = (pick([seg[k] for seg in segments]) for k in range(4))
+            element = (f"with_variable('q2vt_p', array({point_x}, {point_y}), "
+                       f"make_line(make_point(@q2vt_p[0] + {ax}, @q2vt_p[1] + {ay}), "
+                       f"make_point(@q2vt_p[0] + {bx}, @q2vt_p[1] + {by})))")
         # QgsPointPatternFillSymbolLayer::renderPolygon, per clip mode, with
         # the marker bounds (envelope of its line work):
         bx0 = min(min(seg[0], seg[2]) for seg in segments)

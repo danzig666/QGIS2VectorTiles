@@ -1146,8 +1146,9 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
-            return [1 if recipe.param("segments") else 0,
-                    mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            kind = 2 if recipe.param("fill") else \
+                1 if recipe.param("segments") or recipe.param("paths") else 0
+            return [kind, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "glyph":
             return [2, mat.glyph_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "dash_segments":
