@@ -1140,7 +1140,9 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "hatch_lines":
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
-            return [0, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            # Stroke-only markers are exported as their (clipped) line work.
+            return [1 if recipe.param("segments") else 0,
+                    mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":

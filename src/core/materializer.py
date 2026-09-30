@@ -34,6 +34,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QPointF
 
+from ..utils.config import Qt
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import ZoomInterval
@@ -269,6 +270,10 @@ class SymbolMaterializer:
             return []
         inset = 0.0
         clip = int(layer.clipMode()) if hasattr(layer, "clipMode") else 1
+        strokes = self._stroke_marker(marker)
+        if strokes is not None and not (layer.maximumRandomDeviationX()
+                                        or layer.maximumRandomDeviationY() or layer.angle()):
+            return self._stroke_grid(flat_rule, layer, marker, strokes, clip)
         if clip == int(Qgis.MarkerClipMode.CompletelyWithin):
             if normalize_unit(marker.sizeUnit()) == "map":
                 inset = marker.size() / 2.0
@@ -294,6 +299,64 @@ class SymbolMaterializer:
             self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
             inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape))
         return [self._with_symbol(flat_rule, marker.clone(), 0, 1, recipe)]
+
+    @staticmethod
+    def _stroke_marker(marker):
+        """Shape name of a single stroke-only simple marker sized in map units
+        (its drawing is pure line work), or None."""
+        if marker.symbolLayerCount() != 1:
+            return None
+        layer = marker.symbolLayer(0)
+        if layer.layerType() != "SimpleMarker" or layer.paintEffect() is not None and \
+                layer.paintEffect().enabled() and \
+                type(layer.paintEffect()).__name__ not in ("QgsEffectStack", "QgsDefaultPaintEffect"):
+            return None
+        names = {getattr(Qgis.MarkerShape, n): n for n in mat.STROKE_MARKER_PATHS}
+        shape = names.get(layer.shape())
+        if shape is None or normalize_unit(layer.sizeUnit()) != "map":
+            return None
+        offset = layer.offset()
+        if (offset.x() or offset.y()) and normalize_unit(layer.offsetUnit()) != "map":
+            return None
+        active = {k for k in layer.dataDefinedProperties().propertyKeys()
+                  if layer.dataDefinedProperties().property(k).isActive()}
+        if active:
+            return None
+        return shape
+
+    def _stroke_grid(self, flat_rule, layer, marker, shape, clip) -> List[FlattenedRule]:
+        """Point pattern of stroke-only markers (lines, crosses...) sized in map
+        units: the markers' line work is exported as line features, clipped to
+        the polygon for "Shape" clipping, and drawn with the marker's stroke
+        (width in its own unit, as QGIS draws it at every scale)."""
+        simple = marker.symbolLayer(0)
+        if simple.strokeStyle() == Qt.PenStyle.NoPen:
+            return []  # nothing is drawn
+        offset = simple.offset()
+        segments = mat.marker_segments(shape, simple.size(), simple.angle(),
+                                       offset.x(), offset.y())
+        stroke = QgsSimpleLineSymbolLayer(simple.strokeColor(), simple.strokeWidth())
+        stroke.setWidthUnit(simple.strokeWidthUnit())
+        stroke.setWidthMapUnitScale(simple.strokeWidthMapUnitScale())
+        stroke.setPenStyle(simple.strokeStyle())
+        stroke.setPenCapStyle(simple.penCapStyle())
+        stroke.setPenJoinStyle(simple.penJoinStyle())
+        symbol = QgsLineSymbol([stroke])
+        symbol.setOpacity(marker.opacity())
+        recipe = mat.grid_recipe(
+            layer.distanceX(), layer.distanceY(),
+            self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
+            self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement", flat_rule),
+            self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
+            self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
+            self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
+            0.0, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape), segments=segments,
+            clip_shape=clip == int(Qgis.MarkerClipMode.Shape), clip_mode={
+                int(Qgis.MarkerClipMode.Shape): "shape",
+                int(Qgis.MarkerClipMode.CentroidWithin): "centroid",
+                int(Qgis.MarkerClipMode.CompletelyWithin): "within",
+                int(Qgis.MarkerClipMode.NoClipping): "none"}.get(clip, "shape"))
+        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
 
     def _svg_grid(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         from qgis.core import QgsApplication, QgsSvgMarkerSymbolLayer  # pylint: disable=import-outside-toplevel

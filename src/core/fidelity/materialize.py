@@ -18,6 +18,7 @@ simplification.
   (holes and multiparts preserved by the intersection).
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
@@ -221,13 +222,50 @@ MAX_GRID_POINTS = 200000
 
 def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float,
                 off_y: float, construction_crs: str, anchor: str, inset: float = 0.0,
-                rows_from_top: bool = False) -> Recipe:
+                rows_from_top: bool = False, segments=(), clip_shape: bool = False,
+                clip_mode: str = "") -> Recipe:
     """Point-pattern grid in map units (see :func:`grid_expression`)."""
-    return Recipe("grid_points", (), (
+    params = [
         ("dx", float(dx)), ("dy", float(dy)), ("disp_x", float(disp_x)),
         ("disp_y", float(disp_y)), ("off_x", float(off_x)), ("off_y", float(off_y)),
         ("crs", construction_crs), ("anchor", anchor), ("inset", float(inset)),
-        ("top", bool(rows_from_top))))
+        ("top", bool(rows_from_top))]
+    if segments:
+        params += [("segments", tuple(segments)), ("clip_shape", bool(clip_shape))]
+        if clip_mode:
+            params.append(("clip_mode", clip_mode))
+    return Recipe("grid_points", (), tuple(params))
+
+
+# Stroke-only simple marker shapes (QgsSimpleMarkerSymbolLayerBase::
+# prepareMarkerPath): unit-path segments, y pointing down, scaled by size / 2.
+STROKE_MARKER_PATHS = {
+    "Line": (((0, -1), (0, 1)),),
+    "Cross": (((-1, 0), (1, 0)), ((0, -1), (0, 1))),
+    "Cross2": (((-1, -1), (1, 1)), ((1, -1), (-1, 1))),
+    "ArrowHead": (((-1, -1), (0, 0)), ((0, 0), (-1, 1))),
+}
+
+
+def marker_segments(shape: str, size: float, angle: float = 0.0,
+                    offset_x: float = 0.0, offset_y: float = 0.0):
+    """Segments of a stroke-only marker in map units relative to its point
+    (map y up): the path is scaled by ``size / 2``, rotated clockwise on
+    screen by ``angle`` and moved by the rotated offset, as
+    ``QgsSimpleMarkerSymbolLayer::renderPoint`` draws it."""
+    radians = math.radians(angle)
+    cos, sin = math.cos(radians), math.sin(radians)
+
+    def screen(x, y):  # rotate on screen (y down), then flip to map y up
+        return x * cos - y * sin, -(x * sin + y * cos)
+    ox, oy = screen(offset_x, offset_y)
+    half = size / 2.0
+    segments = []
+    for (x1, y1), (x2, y2) in STROKE_MARKER_PATHS[shape]:
+        ax, ay = screen(x1 * half, y1 * half)
+        bx, by = screen(x2 * half, y2 * half)
+        segments.append((ax + ox, ay + oy, bx + ox, by + oy))
+    return tuple(segments)
 
 
 def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
@@ -245,6 +283,10 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
 
     A marker is kept when its centre lies in the polygon shrunk by ``inset``
     (the marker radius for "completely within").
+
+    With ``segments`` (stroke-only markers, see :func:`marker_segments`) the
+    result is the markers' line work: clipped to the polygon for "Shape"
+    clipping (``clip_shape``), otherwise whole markers whose centre is inside.
     """
     p = recipe.param
     dx, dy = p("dx"), p("dy")
@@ -254,35 +296,78 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
     feature = p("anchor") == "feature"
     top = bool(p("top")) and feature
-    x0 = "x_min(@q2vt_g)" if feature else "0"
-    y0 = ("y_max(@q2vt_g)" if top else "y_min(@q2vt_g)") if feature else "0"
+    x0_expr = "x_min(@q2vt_g)" if feature else "0"
+    y0_expr = ("y_max(@q2vt_g)" if top else "y_min(@q2vt_g)") if feature else "0"
     sy = -1.0 if top else 1.0
     # Measured: with rows counted from the top, even columns are displaced.
     col_parity = 0 if top else 1
     ox, ddx, ddy = p("off_x"), p("disp_x"), p("disp_y")
     oy = -p("off_y")
     clip = "@q2vt_g" if not p("inset") else f"buffer(@q2vt_g, {-p('inset')!r})"
-    lo, hi = ("y_min(@q2vt_g)", "y_max(@q2vt_g)")
-    j_range = (
-        f"with_variable('q2vt_j0', floor(min(({lo} - @q2vt_y0) * {sy!r}, ({hi} - @q2vt_y0) * {sy!r})"
-        f" / {dy!r}) - 1, "
-        f"with_variable('q2vt_j1', ceil(max(({lo} - @q2vt_y0) * {sy!r}, ({hi} - @q2vt_y0) * {sy!r})"
-        f" / {dy!r}) + 1, "
-    )
+    segments = p("segments") or ()
+    # Markers whose centre lies outside the polygon can still reach into it.
+    reach = max((max(math.hypot(ax, ay), math.hypot(bx, by)) for ax, ay, bx, by in segments),
+                default=0.0)
+    margin_i = int(math.ceil(reach / dx)) + 1
+    margin_j = int(math.ceil(reach / dy)) + 1
+    # QGIS parses deeply nested expressions very slowly (depth 16 costs
+    # ~0.1 s, each extra level ~4x more): intermediate values live in arrays
+    # to keep the nesting shallow.
+    x0, y0 = "@q2vt_o[0]", "@q2vt_o[1]"
+    lo, hi = "y_min(@q2vt_g)", "y_max(@q2vt_g)"
+    rows = (f"min(({lo} - {y0}) * {sy!r}, ({hi} - {y0}) * {sy!r})",
+            f"max(({lo} - {y0}) * {sy!r}, ({hi} - {y0}) * {sy!r})")
+    ranges = (f"array(floor((x_min(@q2vt_g) - {x0} - abs({ddx!r})) / {dx!r}) - {margin_i}, "
+              f"ceil((x_max(@q2vt_g) - {x0} + abs({ddx!r})) / {dx!r}) + {margin_i}, "
+              f"floor({rows[0]} / {dy!r}) - {margin_j}, ceil({rows[1]} / {dy!r}) + {margin_j})")
+    i, j = "@q2vt_ij[0]", "@q2vt_ij[1]"
+    point_x = f"{x0} + {i} * {dx!r} + if(abs({j} % 2) = 1, {ddx!r}, 0)"
+    point_y = f"{y0} + {sy!r} * {j} * {dy!r} + if(abs({i} % 2) = {col_parity}, {ddy!r}, 0)"
+    per_point = max(1, len(segments))
+    if segments:
+        def pick(values):
+            return f"array({', '.join(repr(float(v)) for v in values)})[@q2vt_ij[2]]"
+        ax, ay, bx, by = (pick([seg[k] for seg in segments]) for k in range(4))
+        element = (f"with_variable('q2vt_p', array({point_x}, {point_y}), "
+                   f"make_line(make_point(@q2vt_p[0] + {ax}, @q2vt_p[1] + {ay}), "
+                   f"make_point(@q2vt_p[0] + {bx}, @q2vt_p[1] + {by})))")
+        # QgsPointPatternFillSymbolLayer::renderPolygon, per clip mode, with
+        # the marker bounds (envelope of its line work):
+        bx0 = min(min(seg[0], seg[2]) for seg in segments)
+        bx1 = max(max(seg[0], seg[2]) for seg in segments)
+        by0 = min(min(seg[1], seg[3]) for seg in segments)
+        by1 = max(max(seg[1], seg[3]) for seg in segments)
+        rect = (f"make_rectangle_3points(make_point({point_x} + {bx0!r}, {point_y} + {by0!r}), "
+                f"make_point({point_x} + {bx1!r}, {point_y} + {by0!r}), "
+                f"make_point({point_x} + {bx1!r}, {point_y} + {by1!r}))")
+        centre = (f"make_point({point_x} + {(bx0 + bx1) / 2!r}, "
+                  f"{point_y} + {(by0 + by1) / 2!r})")
+        mode = p("clip_mode") or ("shape" if p("clip_shape") else "centroid")
+        final = "@q2vt_all"
+        if mode == "shape":  # drawing clipped to the polygon
+            keep, final = "true", "intersection(@q2vt_g, @q2vt_all)"
+        elif mode == "within":  # bounds completely inside
+            keep = f"contains(@q2vt_g, {rect})"
+        elif mode == "none":  # bounds touching the polygon, drawn whole
+            keep = f"intersects(@q2vt_g, {rect})"
+        else:  # centre of the bounds intersecting the polygon
+            keep = f"intersects(@q2vt_g, {centre})"
+    else:
+        element = f"make_point({point_x}, {point_y})"
+        keep, final = "true", f"intersection({clip}, @q2vt_all)"
+    count = "(@q2vt_r[1] - @q2vt_r[0] + 1) * (@q2vt_r[3] - @q2vt_r[2] + 1)"
     body = (
         f"with_variable('q2vt_g', {geom}, "
-        f"with_variable('q2vt_x0', {x0} + {ox!r}, with_variable('q2vt_y0', {y0} + {oy!r}, "
-        f"with_variable('q2vt_i0', floor((x_min(@q2vt_g) - @q2vt_x0 - abs({ddx!r})) / {dx!r}) - 1, "
-        f"with_variable('q2vt_i1', ceil((x_max(@q2vt_g) - @q2vt_x0 + abs({ddx!r})) / {dx!r}) + 1, "
-        + j_range +
-        f"with_variable('q2vt_ni', @q2vt_i1 - @q2vt_i0 + 1, "
-        f"with_variable('q2vt_n', @q2vt_ni * (@q2vt_j1 - @q2vt_j0 + 1), "
-        f"if(@q2vt_n > {MAX_GRID_POINTS}, NULL, "
-        f"intersection({clip}, collect_geometries(array_foreach(generate_series(0, @q2vt_n - 1), "
-        f"with_variable('q2vt_i', @q2vt_i0 + @element % @q2vt_ni, "
-        f"with_variable('q2vt_j', @q2vt_j0 + floor(@element / @q2vt_ni), "
-        f"make_point(@q2vt_x0 + @q2vt_i * {dx!r} + if(abs(@q2vt_j % 2) = 1, {ddx!r}, 0), "
-        f"@q2vt_y0 + {sy!r} * @q2vt_j * {dy!r} + if(abs(@q2vt_i % 2) = {col_parity}, {ddy!r}, 0)))))))))))))))))"
+        f"with_variable('q2vt_o', array({x0_expr} + {ox!r}, {y0_expr} + {oy!r}), "
+        f"with_variable('q2vt_r', {ranges}, "
+        f"if({count} > {MAX_GRID_POINTS}, NULL, "
+        f"with_variable('q2vt_all', collect_geometries(array_filter(array_foreach("
+        f"generate_series(0, {count} * {per_point} - 1), "
+        f"with_variable('q2vt_ij', array("
+        f"@q2vt_r[0] + floor(@element / {per_point}) % (@q2vt_r[1] - @q2vt_r[0] + 1), "
+        f"@q2vt_r[2] + floor(floor(@element / {per_point}) / (@q2vt_r[1] - @q2vt_r[0] + 1)), "
+        f"@element % {per_point}), "
+        f"if({keep}, {element}, NULL))), @element IS NOT NULL)), {final})))))"
     )
     if crs == export_crs:
         return body

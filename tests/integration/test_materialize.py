@@ -404,3 +404,37 @@ def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):
     # Markers: QGIS averages corner angles over a screen length (4 mm), which a
     # multi-zoom point dataset reproduces at one zoom only.
     assert mask_difference(reference, ours) < (0.06 if kind == "line" else 0.1)
+
+
+@pytest.mark.parametrize("shape,size,angle,dx,clip", [
+    ("Cross2", 80, 0, 40, "Shape"),          # lattice of diagonals (Erdőtelepítés)
+    ("Line", 15, 45, 10, "Shape"),           # continuous diagonal lines
+    ("Line", 300, 90, 300, "Shape"),         # long horizontal lines
+    ("Cross", 12, 0, 20, "CentroidWithin"),  # unclipped crosses
+    ("Cross", 12, 0, 20, "NoClipping"),
+    ("Cross2", 12, 0, 20, "CompletelyWithin"),
+    ("ArrowHead", 10, 30, 20, "Shape"),
+])
+def test_stroke_marker_patterns_match_qgis(plugin, tmp_path, shape, size, angle, dx, clip):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -80 100, -97 71, -97 -83),"
+                               "(-40 -40, 10 -40, 10 10, -40 10, -40 -40))"],
+                   str(tmp_path / "sm.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = QgsSimpleMarkerSymbolLayer(getattr(Qgis.MarkerShape, shape), size, angle)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setStrokeColor(QColor("black"))
+    marker.setStrokeWidth(0.4)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    pp.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name, value in (("DistanceX", dx), ("DistanceY", dx)):
+        getattr(pp, f"set{name}")(value)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    pp.setClipMode(getattr(Qgis.MarkerClipMode, clip))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    lines = [(o, r) for o, r in zip(outputs, rules) if r.recipe and r.recipe.param("segments")]
+    assert lines and lines[0][1].rule.symbol().type() == Qgis.SymbolType.Line
+    ours = ink_mask(render([o for o, _ in lines], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.06
