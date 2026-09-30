@@ -769,6 +769,14 @@ class IconPropertyExtractor:
             # map-unit outline) are drawn at the reference zoom's scale.
             context = PropertyExtractor.context
             icon_size = IconPropertyExtractor.get_icon_size(symbol_layer, 1.0)
+            if uses_map and IconPropertyExtractor.map_growth(symbol)[0] > 1.7:
+                # Its extent is in map units after all (e.g. an ellipse's
+                # width and height): the icon grows with the map.
+                reference = max(PropertyExtractor.static_pixels(1.0, "map", context.reference_zoom),
+                                1e-12)
+                grow = ex.mul(PropertyExtractor.length(1.0, "map"), 1.0 / reference)
+                return ex.mul(icon_size, grow), 1.0 / reference, \
+                    context.sprite_oversampling or float(_SPRITE_QUALITY)
             if not uses_map:
                 # Drawn 1:1 like QGIS draws it: an oversampled image shrunk
                 # by the GPU (no mipmaps) breaks thin outlines into dots.
@@ -823,6 +831,33 @@ class IconPropertyExtractor:
                 if normalize_unit(layer.outputUnit()) in ("map", "m"):
                     return True
         return False
+
+    @staticmethod
+    def map_growth(symbol: QgsSymbol):
+        """``(growth, extent_px)``: how much the marker's rendered extent
+        grows when the map units per pixel halve (~2: sized in map units,
+        ~1: screen size), and its extent in px at one map unit per pixel."""
+        from qgis.core import QgsMapToPixel, QgsRenderContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QPointF  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QImage, QPainter  # pylint: disable=import-outside-toplevel
+        extents = []
+        for mupp in (1.0, 0.5):
+            image = QImage(1, 1, QImage.Format.Format_ARGB32)
+            painter = QPainter(image)
+            try:
+                context = QgsRenderContext.fromQPainter(painter)
+                context.setScaleFactor(96.0 / 25.4)
+                context.setMapToPixel(QgsMapToPixel(mupp))
+                probe = symbol.clone()
+                probe.startRender(context)
+                bounds = probe.bounds(QPointF(0, 0), context)
+                probe.stopRender(context)
+            finally:
+                painter.end()
+            extents.append(max(bounds.width(), bounds.height()))
+        if extents[0] <= 0:
+            return 1.0, 0.0
+        return extents[1] / extents[0], extents[0]
 
     @staticmethod
     def _rotated(symbol: QgsSymbol) -> bool:
@@ -2452,10 +2487,10 @@ class QgisMapLibreStyleExporter:
         saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
         try:
             bands = self._sprite_bands(min_zoom, max_zoom)
-            map_size = normalize_unit(symbol.sizeUnit()) in ("map", "m")
+            growth, extent = IconPropertyExtractor.map_growth(symbol)
             for index, (low, high, quality) in enumerate(bands):
-                if map_size and index < len(bands) - 1 and PropertyExtractor.static_pixels(
-                        symbol.size(), "map", low) > self.MAX_BAND_SPRITE_PX:
+                if growth > 1.7 and index < len(bands) - 1 and extent * \
+                        PropertyExtractor.static_pixels(1.0, "map", low) > self.MAX_BAND_SPRITE_PX:
                     # Large already: one last image, scaled up from here on.
                     high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
                     bands = bands[:index + 1]

@@ -156,3 +156,23 @@ def test_static_screen_sprites_are_drawn_one_to_one(exporter):
     symbol.symbolLayer(0).setShape(Qgis.MarkerShape.Square)
     layer = _convert(exporter, symbol)[0]
     assert exporter.marker_symbols[layer["layout"]["icon-image"]].oversampling == 1.0
+
+
+def test_marker_sized_by_map_unit_extents_grows_with_the_map(exporter):
+    """An ellipse whose width and height are in map units grows with the map
+    even though its nominal size unit is millimetres (a zoning-code box)."""
+    from qgis.core import QgsEllipseSymbolLayer
+    exporter.maxzoom = 16
+    box = QgsEllipseSymbolLayer()
+    box.setShape(Qgis.MarkerShape.Square)
+    box.setSize(30)
+    box.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    box.setSymbolWidth(28)
+    box.setSymbolHeight(18)
+    box.setSymbolWidthUnit(Qgis.RenderUnit.MapUnits)
+    box.setSymbolHeightUnit(Qgis.RenderUnit.MapUnits)
+    layers = _convert(exporter, QgsMarkerSymbol([box]))
+    size = layers[-1]["layout"]["icon-size"]
+    assert ex.is_zoom_curve(size)
+    assert ex.evaluate_zoom_curve(size, 16.5) == pytest.approx(
+        2 ** 0.5 * ex.evaluate_zoom_curve(size, 16), rel=1e-3)

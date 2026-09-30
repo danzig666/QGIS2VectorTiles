@@ -103,6 +103,7 @@ now has a regression test.
 | 45 | Offset point patterns drawn unshifted in textures (zig-zags became crosses) | the texture cell ignored the pattern offset | offset applied in the cell; `test_point_pattern_texture_applies_the_offset` |
 | 46 | Random deviation of pattern markers ignored | markers stood on the exact grid | seeded uniform deviation per grid cell (QGIS's range, not its sequence); `test_point_pattern_random_deviation_stays_in_range` |
 | 47 | All icons and patterns missing when the sprite sheet is too tall | the atlas stacked images in a 1024 px wide column (85 000 px tall with per-zoom sprites; 12 500 px at @2x before), above the GPU texture size | square shelf packing, a per-marker image budget, and an error when a sheet exceeds 16384 px; `test_atlas_stays_roughly_square` |
+| 48 | Markers sized by map-unit extents drawn at a fixed screen size | an ellipse's width/height in map units with a nominal size in mm was classified by its size unit | the marker's scaling is measured (bounds at two map scales); `test_marker_sized_by_map_unit_extents_grows_with_the_map` |
 
 ### Resolved suspicions
 
