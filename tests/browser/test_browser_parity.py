@@ -50,7 +50,7 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer):
+def _compare(tmp_path, layer, metric="near"):
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
@@ -77,7 +77,10 @@ def _compare(tmp_path, layer):
         assert run.returncode == 0, run.stderr
     finally:
         server.kill()
-    return _near_fraction(qgis_png, str(tmp_path / "v_browser.png"))
+    browser_png = str(tmp_path / "v_browser.png")
+    if metric == "shape":  # pixel-level mismatch (the gallery score)
+        return gallery.score(qgis_png, browser_png)["shape"]
+    return _near_fraction(qgis_png, browser_png)
 
 
 def _near_fraction(qgis_png, browser_png, grow=5):
@@ -120,3 +123,24 @@ def test_polygon_outline_offsets_follow_the_source_ring(tmp_path, kind, clockwis
     layer.setRenderer(QgsSingleSymbolRenderer(_outline_symbol(kind, -12)))
     # A wrong-side offset (24 m = 30 px away) puts all ink far from QGIS ink.
     assert _compare(tmp_path, layer) > 0.95
+
+
+@pytest.mark.parametrize("cap", ["flat", "square", "round"])
+@pytest.mark.parametrize("pattern", ["custom", "dash", "dashdot"])
+def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
+    from qgis.PyQt.QtCore import Qt
+    layer = _polygon_layer(str(tmp_path / "rings.gpkg"), False)
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 3.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    if pattern == "custom":
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector([6.0, 10.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    else:
+        line.setPenStyle({"dash": Qt.PenStyle.DashLine,
+                          "dashdot": Qt.PenStyle.DashDotLine}[pattern])
+    line.setPenCapStyle({"flat": Qt.PenCapStyle.FlatCap, "square": Qt.PenCapStyle.SquareCap,
+                         "round": Qt.PenCapStyle.RoundCap}[cap])
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    # Pixel-level: dash lengths and caps (a 1-width error per dash fails).
+    assert _compare(tmp_path, layer, metric="shape") < 0.08

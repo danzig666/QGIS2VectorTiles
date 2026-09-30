@@ -395,21 +395,28 @@ class LinePropertyExtractor:
             custom_dash_enabled, dash_vector = False, None
 
         if custom_dash_enabled and dash_vector:
+            # QGIS divides by max(1, width) and Qt scales the pattern back by
+            # the same clamped width, so on screen a dash is its own length;
+            # MapLibre multiplies by the line width.
             width = width_px if ex.is_number(width_px) and width_px > 0 else 1.0
             unit = symbol_layer.customDashPatternUnit()
-            return [
-                max(0.0, PropertyExtractor.static_pixels(d, unit)) / width
-                for d in dash_vector
-            ]
-
-        # Ratios are [dash_length, gap_length] as multiples of the line-width.
-        fixed_presets = {
-            2: [3, 2],             # Dash: 3x width dash, 2x width gap
-            3: [1, 2],             # Dot: 1x width dash (looks like a square dot), 2x gap
-            4: [3, 2, 1, 2],       # Dash-Dot: Dash, gap, dot, gap
-            5: [3, 2, 1, 2, 1, 2], # Dash-Dot-Dot: Dash, gap, dot, gap, dot, gap
-        }
-        return fixed_presets.get(_enum_int(symbol_layer.penStyle()))
+            pattern = [max(0.0, PropertyExtractor.static_pixels(d, unit)) / width
+                       for d in dash_vector]
+        else:
+            # Qt pen styles, in pen widths (QPen::dashPattern).
+            pattern = {
+                2: [4, 2],               # DashLine
+                3: [1, 2],               # DotLine
+                4: [4, 2, 1, 2],         # DashDotLine
+                5: [4, 2, 1, 2, 1, 2],   # DashDotDotLine
+            }.get(_enum_int(symbol_layer.penStyle()))
+            if pattern is None:
+                return None
+        # Qt and MapLibre both draw the line cap on every dash (checked in
+        # tests/browser/test_browser_parity.py), so lengths map one to one.
+        if len(pattern) % 2:
+            pattern = pattern + pattern
+        return [round(v, 4) for v in pattern]
 
     @staticmethod
     def get_line_offset(symbol_layer: QgsSimpleLineSymbolLayer) -> Union[float, List]:

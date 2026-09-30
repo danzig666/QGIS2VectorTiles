@@ -84,6 +84,9 @@ def load_items(args):
             items.append({"kind": "label", "name": name, "settings": settings})
     for path in args.qml or []:
         items.append({"kind": "qml", "name": os.path.basename(path), "path": path})
+    wanted = [n.strip().lower() for n in (getattr(args, "names", "") or "").split(",") if n.strip()]
+    if wanted:
+        items = [i for i in items if any(w in i["name"].lower() for w in wanted)]
     if args.limit:
         items = items[: args.limit]
     return items
@@ -351,6 +354,8 @@ def main():
     parser.add_argument("--zoom", type=float, default=16.25)
     parser.add_argument("--size", type=int, default=400)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--names", default="",
+                        help="only styles whose name contains one of these (comma-separated)")
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
