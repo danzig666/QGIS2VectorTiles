@@ -139,14 +139,18 @@ class SymbolImage:
         if hasattr(marker, "bufferSettings") and marker.bufferSettings():
             marker.bufferSettings().setSize(marker.bufferSettings().size() * scale_factor)
 
-    def _marker_canvas(self, symbol: QgsMarkerSymbol, context_factory) -> int:
-        """Canvas size (px) that holds the marker drawn at the image centre."""
+    def _marker_canvas(self, symbol: QgsMarkerSymbol, context_factory, feature=None,
+                       expression_context=None) -> int:
+        """Canvas size (px) that holds the marker drawn at the image centre
+        (with the variant's attributes: e.g. a data-defined character)."""
         probe = QImage(1, 1, _ARGB)
         painter = QPainter(probe)
         try:
             context = context_factory(painter)
-            symbol.startRender(context)
-            bounds = symbol.bounds(QPointF(0, 0), context)
+            if expression_context is not None:
+                context.setExpressionContext(QgsExpressionContext(expression_context))
+            symbol.startRender(context, feature.fields() if feature else QgsFields())
+            bounds = symbol.bounds(QPointF(0, 0), context, feature or QgsFeature())
             symbol.stopRender(context)
         finally:
             painter.end()
@@ -174,12 +178,6 @@ class SymbolImage:
         render map units at an arbitrary fixed scale.) The canvas is sized
         from the symbol's rendered bounds.
         """
-        canvas = self._marker_canvas(symbol, self._context)
-        image = QImage(canvas, canvas, _ARGB)
-        image.fill(0)
-        painter = QPainter(image)
-        painter.setRenderHint(_ANTIALIAS)
-        context = self._context(painter)
         expression_context = QgsExpressionContext([QgsExpressionContextUtils.globalScope()])
         feature = None
         if self.attributes:
@@ -193,6 +191,12 @@ class SymbolImage:
             scope.setFeature(feature)
             scope.setFields(fields)
             expression_context.appendScope(scope)
+        canvas = self._marker_canvas(symbol, self._context, feature, expression_context)
+        image = QImage(canvas, canvas, _ARGB)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(_ANTIALIAS)
+        context = self._context(painter)
         context.setExpressionContext(expression_context)
         try:
             symbol.startRender(context, feature.fields() if feature else QgsFields())

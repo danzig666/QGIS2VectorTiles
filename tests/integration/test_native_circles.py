@@ -101,3 +101,15 @@ def test_ineligible_markers_stay_sprites(exporter, change):
         symbol.appendSymbolLayer(QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2))
     layers = _convert(exporter, symbol)
     assert layers[0]["type"] == "symbol"
+
+
+@pytest.mark.parametrize("char,as_text", [("A", True), ("\U0001F815", False)])
+def test_font_markers_beyond_the_bmp_become_sprites(exporter, char, as_text):
+    """MapLibre glyph ranges end at U+FFFF (QGIS draws such characters from
+    a fallback font): those font markers are exported as images."""
+    from qgis.core import QgsFontMarkerSymbolLayer
+    exporter.utils_dir, exporter.glyphs = "", {}
+    layer = QgsFontMarkerSymbolLayer("DejaVu Sans", char, 4)
+    layers = _convert(exporter, QgsMarkerSymbol([layer]))
+    assert ("text-field" in layers[0]["layout"]) == as_text
+    assert ("icon-image" in layers[0]["layout"]) != as_text

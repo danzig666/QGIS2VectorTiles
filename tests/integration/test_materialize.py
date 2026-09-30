@@ -333,10 +333,15 @@ def test_centroid_fill_position_matches_qgis(plugin, tmp_path, on_surface):
 
 
 @pytest.mark.parametrize("along,offset,geometry", [
-    (0, 0, "line"), (7, 0, "line"), (7, 4, "line"), (0, 0, "polygon"), (5, -3, "polygon")])
+    (0, 0, "line"), (7, 0, "line"), (7, 4, "line"), (0, 0, "polygon"), (5, -3, "polygon"),
+    (0, 0, "holed")])
 def test_map_unit_interval_markers_match_qgis(plugin, tmp_path, along, offset, geometry):
     if geometry == "line":
         layer = _layer("LineString", LINES, str(tmp_path / "iv.gpkg"))
+    elif geometry == "holed":  # the style gallery's polygon
+        layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 40, -20 71, -97 40, -97 -83),"
+                                   "(-60 -40, -30 -40, -30 -10, -60 -10, -60 -40))"],
+                       str(tmp_path / "iv.gpkg"))
     else:
         layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
                        str(tmp_path / "iv.gpkg"))

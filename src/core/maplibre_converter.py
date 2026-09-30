@@ -1685,7 +1685,8 @@ class QgisMapLibreStyleExporter:
         if symbol_type == QgsSymbol.SymbolType.Marker:
             if self._classify(symbol_layer, 0) == Strategy.UNSUPPORTED:
                 return
-            if symbol.symbolLayerCount() == 1 and symbol_layer.layerType() == "FontMarker":
+            if symbol.symbolLayerCount() == 1 and symbol_layer.layerType() == "FontMarker" \
+                    and self._font_marker_as_text(symbol_layer, source_layer_name):
                 self._convert_font_marker(symbol_layer, symbol, style_name, source_layer_name,
                                           source_name, min_zoom, max_zoom)
                 return
@@ -1806,6 +1807,35 @@ class QgisMapLibreStyleExporter:
         self.pattern_images[name] = PatternImages(
             render_line_pattern(spec, cell, 1), render_line_pattern(spec, cell, 2))
         return name
+
+    def _font_marker_as_text(self, symbol_layer, source_layer_name: str) -> bool:
+        """Whether browser text can draw the marker's characters: MapLibre
+        glyph ranges stop at U+FFFF, and a character missing from the font
+        is drawn by QGIS from a fallback font. Otherwise the marker becomes
+        sprites (one per distinct data-defined character)."""
+        from qgis.PyQt.QtGui import QFontMetrics  # pylint: disable=import-outside-toplevel
+        texts = [symbol_layer.character()]
+        props = symbol_layer.dataDefinedProperties()
+        prop = props.property(QgsSymbolLayer.Property.PropertyCharacter)
+        if prop is not None and prop.isActive():
+            fields = sorted(ex.referenced_fields(PropertyExtractor.get_value_or_expression(
+                symbol_layer.character(), prop, "string")))
+            combos = self._distinct_values(source_layer_name, fields) if fields else []
+            if combos is None:
+                return True  # too many values for sprites
+            texts += [str(v) for combo in combos for v in combo if v is not None]
+        metrics = QFontMetrics(QFont(symbol_layer.fontFamily()))
+        for text in texts:
+            for char in text or "":
+                if ord(char) > 0xFFFF or (not char.isspace()
+                                          and not metrics.inFontUcs4(ord(char))):
+                    self.context.report(
+                        "Q2VT_FONT_MARKER_SPRITE",
+                        f"Font marker character U+{ord(char):04X} cannot be drawn as browser "
+                        "text; the marker is exported as images.",
+                        strategy=Strategy.SPRITE.value)
+                    return False
+        return True
 
     def _convert_font_marker(self, symbol_layer, symbol, style_name, source_layer_name,
                              source_name, min_zoom, max_zoom):

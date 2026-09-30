@@ -99,6 +99,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_FONT_UNRESOLVED": CodeInfo(
         Severity.ERROR, "Label font is not installed; labels would render without glyphs",
         "Install the font or choose an installed font for the label."),
+    "Q2VT_FONT_MARKER_SPRITE": CodeInfo(
+        Severity.INFO, "Font marker exported as images instead of browser text",
+        "Characters beyond U+FFFF or missing from the font (QGIS draws a fallback font) "
+        "have no browser glyphs."),
     "Q2VT_GLYPHS_MISSING": CodeInfo(
         Severity.ERROR, "Style references a font stack without generated glyphs",
         "Check the label font; protected labels would be invisible in the browser."),

@@ -132,3 +132,18 @@ def test_sprite_png_has_straight_alpha(sg, tmp_path):
     centre = sheet.getpixel((entry["x"] + entry["width"] // 2, entry["y"] + entry["height"] // 2))
     assert centre[3] == pytest.approx(128, abs=3)
     assert centre[0] >= 250 and centre[1] <= 3 and centre[2] <= 3
+
+
+def test_data_defined_font_marker_text_fits_the_sprite(sg):
+    """The canvas is sized with the variant's attributes: a data-defined
+    character string longer than the static character is not cut off."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = QgsFontMarkerSymbolLayer("DejaVu Sans", "A", 12)
+    layer.setColor(QColor("black"))
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyCharacter,
+                                 QgsProperty.fromExpression("concat('A', \"v\")"))
+    static = sg.SymbolImage(QgsMarkerSymbol([layer.clone()]), "s", 1, True)
+    wide = sg.SymbolImage(QgsMarkerSymbol([layer]), "w", 1, True,
+                          attributes={"v": "BCDEFGH"})
+    # Eight letters: sized from the static "A" the canvas would cut them off.
+    assert wide.img.width > 5 * static.img.width

@@ -90,6 +90,9 @@ now has a regression test.
 | 32 | Dash patterns wrong for pen styles and square caps | Qt pen presets (Dash 4/2, Dot 1/2, …) were not exported; Qt extends every dash by square caps, MapLibre only by round caps | Qt presets, square-cap dashes lengthened; `test_dash_patterns_follow_qt` (browser) |
 | 33 | Map-unit line labels missing | MapLibre checks that a line label fits along the line with the text size at zoom 18; map-unit text is 4x its z16 size there | one style layer per zoom below 18 with the size curve clamped to that zoom; labels that may overlap in QGIS (`displayAll`) allow overlap; `test_map_unit_line_labels_are_drawn` (browser) |
 | 34 | Random marker fill drawn as a solid block | the texture was a cropped symbol preview with the map-unit density evaluated at preview scale | QGIS count (`ceil(count * area / densityArea)` or absolute) as seeded points; seamless texture at the QGIS density where dense; `test_random_points_follow_the_qgis_count`, `test_random_marker_fill_is_materialized` |
+| 35 | Outline symbols on polygons started at the wrong vertex; holes rewound | `fixgeometries` (structure) rewrites *valid* polygons too (new start vertex, normalised ring orientation); QGIS draws marker intervals, dashes and offsets along the rings as stored | only invalid geometries are repaired; holed case of `test_map_unit_interval_markers_match_qgis` |
+| 36 | Interval markers on holes continued the exterior's phase | rings of a polygon outline were one multi-line | one line per ring |
+| 37 | Font markers beyond U+FFFF drawn as boxes; data-defined text cut off in sprites | MapLibre glyph ranges end at U+FFFF; sprite canvas sized without the feature's attributes | such markers become sprites (per distinct value); `test_font_markers_beyond_the_bmp_become_sprites`, `test_data_defined_font_marker_text_fits_the_sprite` |
 
 ### Resolved suspicions
 

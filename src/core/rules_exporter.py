@@ -581,32 +581,35 @@ class RulesExporter:
             INPUT=src_path, EXTENT=transform_extent, CLIP=False,
         )
         self._check_cancel()
-        is_polygon = QgsVectorLayer(clipped, "check", "ogr").geometryType() == 2
+        geometry_type = _enum_value(QgsVectorLayer(clipped, "check", "ogr").geometryType())
+        is_polygon = geometry_type == 2
+        # Finish the geometry fix of Phase 1 for *invalid* geometries only:
+        # fixgeometries(METHOD=1) also rewrites valid polygons (new start
+        # vertex, rewound rings), while QGIS draws directional outline
+        # symbols (marker intervals, arrows, offsets, dashes) along the
+        # source rings as stored.
+        fixed = "make_valid(@geometry, method:='structure')"
         if is_polygon:
-            # fixgeometries(METHOD=1) rewinds rings to a fixed orientation,
-            # but QGIS draws directional outline symbols (marker lines,
-            # arrows, offsets) along the *source* ring direction. Record the
-            # exterior orientation here and restore it after the fix.
+            # A repaired polygon keeps the orientation of its exterior ring.
             clipped = self._run_alg_safe(
                 "fieldcalculator", "native", INPUT=clipped, FIELD_NAME=_RING_FIELD,
                 FIELD_TYPE=1, FORMULA=_RING_CLOCKWISE_EXPRESSION)
-        # METHOD=1 (structure) — finishes the geometry fix started in Phase 1.
+            fixed = (f"with_variable('q2vt_f', {fixed}, if(\"{_RING_FIELD}\" = 1, "
+                     f"force_polygon_cw(@q2vt_f), if(\"{_RING_FIELD}\" = 0, "
+                     f"force_polygon_ccw(@q2vt_f), @q2vt_f)))")
         fixed_struct = self._run_alg_safe(
-            "fixgeometries", "native", INPUT=clipped, METHOD=1
-        )
+            "geometrybyexpression", "native", INPUT=clipped,
+            OUTPUT_GEOMETRY={0: 2, 1: 1, 2: 0}.get(geometry_type, 0),
+            EXPRESSION=f"if(@geometry IS NULL OR is_valid(@geometry), @geometry, {fixed})")
+        if is_polygon:
+            fixed_struct = self._run_alg_safe(
+                "deletecolumn", "native", INPUT=fixed_struct, COLUMN=[_RING_FIELD])
         self._check_cancel()
         reprojected = self._run_alg_safe(
             "reprojectlayer", "native",
             INPUT=fixed_struct,
             TARGET_CRS=QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
         )
-        if is_polygon:
-            restored = self._run_alg_safe(
-                "geometrybyexpression", "native", INPUT=reprojected, OUTPUT_GEOMETRY=0,
-                EXPRESSION=f'if("{_RING_FIELD}" = 1, force_polygon_cw(@geometry), '
-                           f'if("{_RING_FIELD}" = 0, force_polygon_ccw(@geometry), @geometry))')
-            reprojected = self._run_alg_safe(
-                "deletecolumn", "native", INPUT=restored, COLUMN=[_RING_FIELD])
         orig_id = self._run_alg_safe(
             "fieldcalculator", "native",
             INPUT=reprojected,
@@ -830,7 +833,9 @@ class RulesExporter:
                 EXPRESSION=mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}"))
             lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
         elif source_geometry == 2:  # marker line on a polygon outline
+            # One line per ring: QGIS starts every ring afresh.
             lines = self._run_alg_safe("polygonstolines", "native", INPUT=source)
+            lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
         elif recipe.param("offset"):
             lines = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
