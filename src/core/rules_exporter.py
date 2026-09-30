@@ -850,6 +850,16 @@ class RulesExporter:
             outputs.append(self._run_alg_safe(
                 "fieldcalculator", "native", INPUT=selected, FIELD_NAME=mat.ANGLE_FIELD,
                 FIELD_TYPE=0, FORMULA='"angle"'))
+        if "Interval" in recipe.placements:
+            multipoints = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=2, WITH_Z=True,
+                EXPRESSION=mat.interval_points_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+            points = self._run_alg_safe("multiparttosingleparts", "native", INPUT=multipoints)
+            angled = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=points, FIELD_NAME=mat.ANGLE_FIELD,
+                FIELD_TYPE=0, FORMULA="z(@geometry)")
+            outputs.append(self._run_alg_safe("dropmzvalues", "native", INPUT=angled,
+                                              DROP_M_VALUES=True, DROP_Z_VALUES=True))
         for placement in ("CentralPoint", "SegmentCenter"):
             if placement not in recipe.placements:
                 continue
@@ -1138,6 +1148,8 @@ class RulesExporter:
                 f'"{CALLOUT_X_FIELD}"', f'"{CALLOUT_Y_FIELD}"', recipe.param("crs"))
             return [1, callout_leader_expression(label, flat_rule.get_attr("g"),
                                                  recipe.param("anchor", 0))]
+        if symbol_layer.layerType() == "CentroidFill":
+            return [0, mat.centroid_fill_expression(bool(symbol_layer.pointOnSurface()))]
         if symbol_layer.layerType() == "GeometryGenerator":
             target_geom = symbol_layer.subSymbol().type()
             transform_expr = self._generator_in_layer_crs(

@@ -51,6 +51,48 @@ def marker_points(placements, offset: float = 0.0, crs: str = "") -> Recipe:
     return Recipe("marker_points", tuple(sorted(set(placements) & POINT_PLACEMENTS)), params)
 
 
+def interval_points(interval: float, along: float = 0.0, offset: float = 0.0,
+                    crs: str = "") -> Recipe:
+    """Interval marker positions (map units): ``along + k * interval`` from the
+    start of every (offset) line, like ``renderPolylineInterval``."""
+    params = [("interval", float(interval)), ("along", float(along)), ("crs", crs)]
+    if offset:
+        params.append(("offset", float(offset)))
+    return Recipe("marker_points", ("Interval",), tuple(params))
+
+
+def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Multipoint of interval marker positions with the line azimuth as Z.
+
+    Positions are measured in the recipe CRS (the project's map units). A
+    closed ring does not repeat the marker at its start point.
+    """
+    interval = float(recipe.param("interval"))
+    along = float(recipe.param("along", 0.0))
+    crs = recipe.param("crs") or export_crs
+
+    def body(line):
+        return (
+            f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
+            f"if(is_closed({line}) AND {along!r} < 0, @q2vt_len - (({-along!r}) % @q2vt_len), "
+            f"if(is_closed({line}), {along!r} % @q2vt_len, {along!r})), "
+            f"if(@q2vt_off > @q2vt_len OR @q2vt_off < 0, NULL, collect_geometries(array_foreach("
+            f"array_filter(generate_series(0, floor((@q2vt_len - @q2vt_off) / {interval!r} + 1e-9)), "
+            f"NOT (is_closed({line}) AND @element > 0 AND "
+            f"abs(@q2vt_off + @element * {interval!r} - @q2vt_len) < 1e-6)), "
+            f"with_variable('q2vt_d', min(@q2vt_off + @element * {interval!r}, @q2vt_len), "
+            f"with_variable('q2vt_p', line_interpolate_point({line}, @q2vt_d), "
+            f"make_point(x(@q2vt_p), y(@q2vt_p), "
+            f"line_interpolate_angle({line}, @q2vt_d)))))))))")
+    if crs == export_crs:
+        return body("@geometry")
+    # Positions and azimuths in the project CRS (QGIS draws in it); the small
+    # grid convergence to Web Mercator north is ignored.
+    return (f"with_variable('q2vt_pts', transform(with_variable('q2vt_l', transform(@geometry, "
+            f"'{export_crs}', '{crs}'), {body('@q2vt_l')}), '{crs}', '{export_crs}'), "
+            f"@q2vt_pts)")
+
+
 def offset_line_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     """Offset a line to the right by the recipe offset, measured in its CRS."""
     crs = recipe.param("crs") or export_crs
@@ -307,13 +349,21 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
     offset = float(recipe.param("offset", 0.0))
     crs = recipe.param("crs") or export_crs
 
-    def body(geom):
-        rings = (f"array_cat(array({_ring_buffer(f'exterior_ring({geom})', repr(-offset))}), "
-                 f"if(num_interior_rings({geom}) > 0, array_foreach(generate_series(1, "
-                 f"num_interior_rings({geom})), "
-                 f"{_ring_buffer(f'interior_ring_n({geom}, @element)', repr(offset))}), array()))")
-        return (f"collect_geometries(array_filter({rings}, "
+    def rings(part):
+        ring_lines = (
+            f"array_cat(array({_ring_buffer(f'exterior_ring({part})', repr(-offset))}), "
+            f"if(num_interior_rings({part}) > 0, array_foreach(generate_series(1, "
+            f"num_interior_rings({part})), "
+            f"{_ring_buffer(f'interior_ring_n({part}, @element)', repr(offset))}), array()))")
+        return (f"collect_geometries(array_filter({ring_lines}, "
                 f"@element IS NOT NULL AND NOT is_empty(@element)))")
+
+    def body(geom):
+        # Every polygon part (multi-polygons included) contributes its rings.
+        return (f"collect_geometries(array_filter(array_foreach(generate_series(1, "
+                f"num_geometries({geom})), with_variable('q2vt_part', if(is_multipart({geom}), "
+                f"geometry_n({geom}, @element), {geom}), "
+                f"{rings('@q2vt_part')})), @element IS NOT NULL AND NOT is_empty(@element)))")
     if crs == export_crs:
         return body("@geometry")
     return (f"transform(with_variable('q2vt_poly', transform(@geometry, '{export_crs}', '{crs}'), "
@@ -323,3 +373,19 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
 # Polygon outlines whose rings must run counter-clockwise (map y up) so that
 # MapLibre's right-hand line/icon offsets point inside, as QGIS offsets do.
 CCW_OUTLINE_EXPRESSION = "boundary(force_polygon_ccw(@geometry))"
+
+
+def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:
+    """Marker position of ``QgsCentroidFillSymbolLayer`` for one polygon part.
+
+    ``QgsSymbolLayerUtils::polygonCentroid`` uses the exterior ring only
+    (holes ignored); with *point on surface* that centroid is kept unless the
+    polygon has holes or the centroid falls outside the exterior, then GEOS
+    point-on-surface is used (``polygonPointOnSurface``).
+    """
+    exterior = f"make_polygon(exterior_ring({geom}))"
+    if not point_on_surface:
+        return f"centroid({exterior})"
+    return (f"with_variable('q2vt_c', centroid({exterior}), "
+            f"if(num_interior_rings({geom}) > 0 OR NOT intersects({exterior}, @q2vt_c), "
+            f"point_on_surface({geom}), @q2vt_c))")

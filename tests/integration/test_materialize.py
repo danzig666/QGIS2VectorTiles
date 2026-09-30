@@ -275,6 +275,7 @@ def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     outputs, rules, diags = _export(plugin, layer, tmp_path)
     grid = [o for o, r in zip(outputs, rules) if r.recipe]
     ours = ink_mask(render(grid, EXTENT, (240, 240)))
+
     assert mask_difference(reference, ours) < 0.15
 
 
@@ -292,3 +293,64 @@ def test_svg_fill_without_svg_draws_only_its_stroke(plugin, tmp_path):
     assert [r.rule.symbol().type() for r in rules] == [Qgis.SymbolType.Line]
     ours = ink_mask(render(outputs, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("wkt", [
+    "POLYGON((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3))",
+    "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3)))"])
+def test_polygon_offset_moves_every_ring_inwards(plugin, wkt):
+    from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature, QgsGeometry
+    from fidelity import materialize as mat
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(wkt))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    expr = QgsExpression(mat.polygon_offset_expression(
+        mat.Recipe("polygon_offset", params=(("offset", 1.0),))))
+    result = expr.evaluate(context)
+    assert result.asWkt() == "MultiLineString ((1 1, 9 1, 9 9, 1 9, 1 1),(2 2, 8 2, 8 8, 2 8, 2 2))"
+
+
+@pytest.mark.parametrize("on_surface", [False, True])
+def test_centroid_fill_position_matches_qgis(plugin, tmp_path, on_surface):
+    from qgis.core import QgsCentroidFillSymbolLayer
+    # U-shaped polygon with a hole: exterior centroid, true centroid and
+    # point-on-surface are all different points.
+    layer = _layer("Polygon", ["POLYGON((-100 -90, 100 -90, 100 90, 40 90, 40 -30, -40 -30, "
+                               "-40 90, -100 90, -100 -90),(-80 -70, -60 -70, -60 -50, -80 -50, "
+                               "-80 -70))"], str(tmp_path / "cf.gpkg"))
+    fill = QgsCentroidFillSymbolLayer()
+    fill.setSubSymbol(_marker(Qgis.MarkerShape.Square, 10))
+    fill.setPointOnSurface(on_surface)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    for output in outputs:  # the styler draws centroid points with the sub-symbol
+        output.setRenderer(QgsSingleSymbolRenderer(fill.subSymbol().clone()))
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("along,offset,geometry", [
+    (0, 0, "line"), (7, 0, "line"), (7, 4, "line"), (0, 0, "polygon"), (5, -3, "polygon")])
+def test_map_unit_interval_markers_match_qgis(plugin, tmp_path, along, offset, geometry):
+    if geometry == "line":
+        layer = _layer("LineString", LINES, str(tmp_path / "iv.gpkg"))
+    else:
+        layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                       str(tmp_path / "iv.gpkg"))
+    markers = QgsMarkerLineSymbolLayer(True, 17)
+    markers.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    markers.setOffsetAlongLine(along)
+    markers.setOffsetAlongLineUnit(Qgis.RenderUnit.MapUnits)
+    markers.setOffset(offset)
+    markers.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    markers.setSubSymbol(_marker(Qgis.MarkerShape.ArrowHeadFilled, 9))
+    symbol = QgsLineSymbol([markers]) if geometry == "line" else QgsFillSymbol([markers])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert exact and exact[-1][1].recipe.placements == ("Interval",)
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.08

@@ -108,7 +108,7 @@ class SymbolMaterializer:
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
         if kind in ("SimpleLine", "MarkerLine", "HashLine") and flat_rule.get_attr("g") == 2 \
-                and layer.offset():
+                and abs(layer.offset()) > 1e-9:
             outline = self._polygon_outline_offset(flat_rule, layer)
             if outline is not None:
                 return outline
@@ -160,6 +160,8 @@ class SymbolMaterializer:
             placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
             if placements & mat.POINT_PLACEMENTS:
                 return None
+            if layer.layerType() == "MarkerLine" and self._exact_interval(layer):
+                return None  # exact interval markers (see _marker_line)
         crs = self.project_crs or flat_rule.layer.crs().authid()
         rule = flat_rule.derive()
         clone = rule.rule.symbol().symbolLayer(0)
@@ -312,51 +314,78 @@ class SymbolMaterializer:
                 marker.setOffset(QPointF(current.x(), current.y() + delta))
         return symbol
 
+    @staticmethod
+    def _exact_interval(layer) -> bool:
+        """Interval markers whose positions do not depend on the zoom (map-unit
+        interval and offset along the line) can be placed exactly."""
+        if "Interval" not in _flag_names(layer.placements()):
+            return False
+        try:
+            along, along_unit = float(layer.offsetAlongLine()), layer.offsetAlongLineUnit()
+        except AttributeError:
+            along, along_unit = 0.0, None
+        if layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyInterval):
+            return False
+        return normalize_unit(layer.intervalUnit()) == "map" and layer.interval() > 0 and (
+            not along or normalize_unit(along_unit) == "map")
+
     def _marker_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
         placements = _flag_names(layer.placements())
         points = placements & mat.POINT_PLACEMENTS
-        if not points:
-            return None  # interval only: native repeated symbol
+        exact_interval = self._exact_interval(layer)
+        if not points and not exact_interval:
+            return None  # screen-unit interval only: native repeated symbol
         if "CurvePoint" in points:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                          "Curve-point markers are placed on every vertex.", flat_rule)
-        try:
-            along = float(layer.offsetAlongLine())
-        except AttributeError:
-            along = 0.0
-        if along:
-            self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                         "Offset along the line is not applied to materialized markers.",
-                         flat_rule)
         sub = layer.subSymbol()
         if sub is None:
             return []
-        rules = []
         offset, offset_unit = layer.offset(), layer.offsetUnit()
-        recipe = mat.marker_points(points)
-        corner_sensitive = points - {"FirstVertex", "LastVertex"}
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        # QGIS offsets the line (polygons: every ring, as a buffer) before
+        # measuring positions along it; vertex ends of open lines are the only
+        # positions where offsetting the markers instead is equivalent.
+        needs_offset_line = (points | ({"Interval"} if exact_interval else set())) \
+            - {"FirstVertex", "LastVertex"}
         if flat_rule.get_attr("g") == 2:
-            corner_sensitive = points  # QGIS offsets the whole ring (buffer) first
-        if offset and corner_sensitive:
+            needs_offset_line = points | ({"Interval"} if exact_interval else set())
+        line_offset = 0.0
+        if offset and needs_offset_line:
             if normalize_unit(offset_unit) == "map":
-                # QGIS places these markers on the offset line; offset the
-                # geometry itself (exact) instead of each marker.
-                crs = self.project_crs or flat_rule.layer.crs().authid()
-                recipe = mat.marker_points(points, offset=offset, crs=crs)
-                offset = 0.0
+                line_offset, offset = offset, 0.0
             else:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Screen-unit offset: markers are offset from the original line; "
                              "QGIS measures positions on the offset line.", flat_rule)
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, offset,
                                             offset_unit, flat_rule)
-        rules.append(self._with_symbol(flat_rule, symbol, 0, 1, recipe))
+        rules = []
+        if points:
+            try:
+                along = float(layer.offsetAlongLine())
+            except AttributeError:
+                along = 0.0
+            if along and points - {"Interval"}:
+                self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                             "Offset along the line is not applied to vertex/centre markers.",
+                             flat_rule)
+            rules.append(self._with_symbol(flat_rule, symbol, 0, 1,
+                                           mat.marker_points(points, offset=line_offset, crs=crs)))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
             interval_layer.setPlacements(Qgis.MarkerLinePlacement.Interval)
             native.rule.symbol().changeSymbolLayer(0, interval_layer)
-            rules.append(native)
+            if exact_interval:
+                recipe = mat.interval_points(layer.interval(), float(layer.offsetAlongLine()),
+                                             line_offset, crs)
+                split = self._dense_split(
+                    native, layer.interval(),
+                    lambda rule: [self._with_symbol(rule, symbol.clone(), 0, 2, recipe)])
+                rules.extend(split if split is not None else [native])
+            else:
+                rules.append(native)
         return rules
 
     def _hash_as_marker_line(self, layer, flat_rule: FlattenedRule) -> QgsMarkerLineSymbolLayer:
