@@ -48,6 +48,23 @@ docker run --rm -v "$PWD":/plugin -w /plugin qgis/qgis:release-3_44 \
 or the OSGeo4W shell on Windows (`python -m pytest tests\unit tests\integration`). These
 runs have **not** been performed yet; see [BASELINE.md](BASELINE.md).
 
+### QGIS-vs-browser comparisons
+
+`tests/browser/test_browser_parity.py` renders small fixtures with QGIS and with the
+bundled MapLibre at the same viewport and checks positional agreement of the ink.
+
+`tools/gallery/build_gallery.py` does the same for every symbol and label style of a QGIS
+style database (optionally filtered by tags) and for QML files, and writes an HTML page
+sorted by mismatch:
+
+```bash
+QT_QPA_PLATFORM=offscreen python3 tools/gallery/build_gallery.py \
+    --style-db symbology-style.db --tags mytag --qml styles/*.qml --out /tmp/gallery
+```
+
+Behaviour is checked against the QGIS source (`src/core/symbology`,
+`src/core/labeling`) before it is reproduced, then confirmed by rendering.
+
 ### Regenerating the compatibility table
 
 ```bash

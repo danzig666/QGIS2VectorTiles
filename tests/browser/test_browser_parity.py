@@ -8,13 +8,12 @@ check cannot tell whether the browser draws on the right side of a line.
 
 import importlib.util
 import json
-import math
 import os
 import subprocess
 
 import pytest
 from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature,
-                       QgsGeometry, QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
+                       QgsGeometry, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
                        QgsProcessingFeedback, QgsProject, QgsRectangle,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
                        QgsSingleSymbolRenderer, QgsVectorLayer, QgsFillSymbol)

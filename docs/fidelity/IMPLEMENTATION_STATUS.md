@@ -7,22 +7,22 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 
 | ID | Deliverable | Status | What exists / what is missing |
 |---|---|---|---|
-| PR-01 | Baseline, fixtures, environment lock, smoke browser test | **Done** (3.34) | Baseline record with 21 reproduced defects; programmatic fixtures; unit / PyQGIS / browser levels; pinned MapLibre 5.11.0 + style-spec 24.3.1 + Chromium 1194. *Missing:* runs on QGIS 3.44 and 4.x; QGIS-vs-browser reference image comparison. |
-| PR-02 | Falsy values, expression arithmetic, sprite errors, enums | **Done** | Typed property evaluation (0/False/'' kept, NULL → static, eval errors reported), typed expression builder (no list arithmetic), sprite input-type/exception reporting, named marker-line flags, Qt5/Qt6 enum adapters. |
-| PR-03 | Typed bindings, diagnostics, strict mode, capability registry | **Mostly done** | Stable `Q2VT_*` diagnostics (JSON + escaped HTML, path redaction), Strict mode (fails before publication), capability registry that generates `CAPABILITIES.md`, per-source-layer field dependencies. *Missing:* render-order planner; `PropertyBinding` records are defined but not yet collected into the report. |
-| PR-04 | Context-aware units, valid camera/data expressions | **Mostly done** | One unit service (mm/pt/px/in/map units/meters-at-scale; unknown = error), map-unit zoom curves with exact clamp knees, feature arithmetic inside zoom stops, label sizes/halos with their units. *Missing:* adaptive QGIS sampling for non-linear sizes; unit-accuracy calibration against QGIS renders. |
-| PR-05 | Visibility intervals, overzoom, explicit GDAL metadata | **Done** | Exact half-open `[min, max)` intervals from scales, tile ranges `floor/ceil−1`, overzoom policy option, source zoom range, explicit per-layer VRT zooms (no zoom-16 cap), archive inspection. |
-| PR-06 | Marker/pattern renderer separation, deterministic atlas | **Mostly done** | Whole-symbol renderer, pre-rendered pattern cells, deterministic packer, centre-preserving crop, single rotation, true 2× rendering. *Missing:* explicit alpha-premultiplication tests. |
-| PR-07 | LinePatternFill texture and materialized-hatch routes | **Partial** | Texture route: seamless cells solved for angle/spacing tolerance (0/45/90/17°…), analytic 1×/2× rendering, seam test, browser render. *Missing:* materialized-hatch route; map-unit spacing is frozen at the rule's first zoom (reported). |
-| PR-08 | PointPatternFill and image/SVG patterns | Not started | Exported from a wrapped QGIS preview and reported as `Q2VT_PATTERN_APPROXIMATE`. |
-| PR-09 | Feature-context properties, native circles, sprite variants | **Partial** | Static-vs-feature detection (feature functions/variables, geometry), `@map_scale` bound with `with_variable`, stable non-localized field names. *Missing:* native circles, per-feature sprite variants and budgets. |
-| PR-10 | Exact marker-line positions | Not started | Vertex/first/last/segment placements are approximated and reported (`Q2VT_MARKER_PLACEMENT_APPROX`). |
-| PR-11 | Label typography, glyph calibration, offsets | **Partial** | Text size units, offsets in ems, placement-specific properties, font-stack name shared with the glyph generator (fixes missing glyphs), `ő`/`ű` verified in the browser, unresolved fonts reported. *Missing:* glyph-metric calibration of the empirical 1.4 factor. |
-| PR-12 | Render ordering, geometry hardening | **Partial** | Geometry generators evaluated in the layer CRS for both `@geometry` and `$geometry` (literal-safe substitution). *Missing:* render-order planner, source buffering by symbol reach, output geometry validation. |
-| PR-13 | Pinned labels and callouts | Not started | |
-| PR-14 | Arrows / hash lines / filled lines | Not started | Reported as unsupported. |
+| PR-01 | Baseline, fixtures, environment lock, smoke browser test | **Done** (3.34) | Baseline record; programmatic fixtures; unit / PyQGIS / browser levels; pinned MapLibre 5.11.0 + style-spec 24.3.1 + Chromium 1194; QGIS-vs-browser gallery (`tools/gallery`) and parity tests. *Missing:* runs on QGIS 3.44 and 4.x. |
+| PR-02 | Falsy values, expression arithmetic, sprite errors, enums | **Done** | Typed property evaluation, typed expression builder, sprite error reporting, named marker-line flags, Qt5/Qt6 enum adapters, enum-based data-defined property names. |
+| PR-03 | Typed bindings, diagnostics, strict mode, capability registry | **Done** | Stable `Q2VT_*` diagnostics (JSON + HTML), strict mode, generated capability table, per-layer field dependencies, data/zoom-driven property bindings in the report, empty-output diagnostics. |
+| PR-04 | Context-aware units, valid camera/data expressions | **Mostly done** | One unit service, map-unit zoom curves with clamp knees, zoom-curve arithmetic (`mul`, `add`), hairlines. *Missing:* `@map_scale` properties still split datasets per zoom (now written only to their own zoom's tiles). |
+| PR-05 | Visibility intervals, overzoom, explicit GDAL metadata | **Done** | Exact intervals, overzoom policy, per-layer tile zooms through the MVT `CONF` option (the VRT options were ignored by GDAL), truncated-metadata-aware archive inspection. |
+| PR-06 | Marker/pattern renderer separation, deterministic atlas | **Done** | Whole-symbol renderer, oversampled sprites with `pixelRatio`, deterministic packer, true 2×, straight-alpha test. |
+| PR-07 | LinePatternFill texture and materialized-hatch routes | **Done** | Screen units: verified seamless texture. Map units: hatch lines materialized per feature. |
+| PR-08 | PointPatternFill and image/SVG patterns | **Done** | Exact repeat cells (fractional/dense periods repeated in the cell); map-unit grids materialized from the zoom where spacing ≥ 8 px, per-zoom textures below; SVG fills follow QGIS (only with parsable SVG data, stroke sub-symbol exported); raster fills tiled. |
+| PR-09 | Feature-context properties, native circles, sprite variants | **Done** | Native circle layers for plain circles; per-value sprite variants with a budget; static-vs-feature detection. |
+| PR-10 | Exact marker-line positions | **Done** | Vertex/first/last/inner/central/segment-centre markers materialized with the QGIS angle; polygon outlines offset like QGIS (ring buffers). *Approximate:* interval placement start and screen-unit spacing between integer zooms (±41 %). |
+| PR-11 | Label typography, glyph calibration, offsets | **Done** | Glyph metrics calibrated (24 px em, bearings), size factor removed, font stacks shared with glyph generation, `ő`/`ű`. |
+| PR-12 | Render ordering, geometry hardening | **Done** | QGIS draw order (later rules on top, rendering passes, layer tree), renderer order-by as sort keys, symbol-reach extent buffer with tile pruning, generators in the layer CRS, same-type generators drawn with their sub-symbol. *Not reproducible:* per-feature interleaving of different style layers. |
+| PR-13 | Pinned labels and callouts | **Partial** | Data-defined X/Y labels exported at the point with the data-defined alignment, always shown; simple callouts as leader lines ending at the label anchor. *Missing:* QGIS PAL-computed placements; leaders ending on the label box. |
+| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows as in `QgsArrowSymbolLayer` (straight first→last, circular arcs, per-segment, triangular heads); hash lines as marker lines; filled lines as strokes. *Approximate:* half and tapered arrows. |
 | PR-15 | Raster fallback / compositing groups | Not started | *Hybrid* mode is selectable but reports `Q2VT_HYBRID_NOT_AVAILABLE`. |
-| PR-16 | Atomic publication, HTTP packaging, UI report | **Partial** | Cancellable `ogr2ogr` (argument list, terminated on cancel), XML-safe VRT, JSON/HTML report per export, strict failures remove only the new output directory. *Missing:* relative URLs, XYZ/PMTiles output, preview panel. |
+| PR-16 | Atomic publication, HTTP packaging, UI report | **Partial** | Cancellable `ogr2ogr`, XML-safe VRT, JSON/HTML report, strict failures remove only the new output. *Missing:* relative URLs, XYZ/PMTiles output, preview panel. |
 
 ## Behavior changes users may notice
 
@@ -36,3 +36,9 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Data-defined widths, sizes and opacities are converted to the browser's units.
 * Line hatches (`LinePatternFill`) are visible and seamless; previously they were
   transparent.
+* Later rules of a rule-based renderer now draw above earlier ones (as in QGIS); symbol
+  layers follow their rendering passes.
+* Zero-width lines are drawn as one-pixel hairlines.
+* Offsets of polygon outlines move inwards for positive values whatever the ring
+  orientation (QGIS buffers each ring).
+* Tile archives no longer repeat per-zoom datasets at every zoom (smaller archives).

@@ -73,13 +73,24 @@ now has a regression test.
 * **ELSE with NULL values.** The `NOT (…) IS 1` form correctly matches features whose
   sibling filters evaluate to NULL.
 
+### Found later (QGIS-vs-browser gallery on real styles)
+
+| # | Defect | Evidence | Fix / test |
+|---|---|---|---|
+| 22 | Per-layer tile zooms ignored | VRT `LayerCreationOption` is not an OGR VRT element; every dataset was written at every zoom | MVT `CONF`; `test_zoom_split_datasets_only_fill_their_own_tiles` |
+| 23 | Rule draw order inverted | QGIS draws a feature's rules in tree order (later on top) and honours rendering passes | `test_later_rules_draw_on_top`, `test_rendering_pass_orders_symbol_layers` |
+| 24 | Polygon outline offsets on the wrong side | QGIS buffers each ring (`offsetLine`); MapLibre offsets by ring direction | `test_polygon_outline_offsets_follow_the_source_ring` (browser) |
+| 25 | Zero-width lines invisible | QGIS draws a cosmetic one-pixel pen | `test_line_width_units` |
+
+### Resolved suspicions
+
+* `_MAPLIBRE_LABELS_FACTOR` (1.4) came from wrong glyph metrics; with calibrated glyphs
+  (24 px em, bearings) the factor is 1.0.
+* The zoom ↔ scale convention now uses the 96-DPI Web Mercator resolution divided by the
+  Mercator scale of the project map units (≈1.48 for EOV in Hungary).
+
 ### Untested suspicions (not yet reproduced)
 
 * Label `yOffset` sign relative to MapLibre `text-offset` (kept unchanged).
-* The empirical `_MAPLIBRE_LABELS_FACTOR` (1.4) text-size/halo calibration — kept until
-  glyph metrics are calibrated against QGIS renders (plan §8.1).
 * `TilesStyler.get_label_priority` uses a numeric property key (87) that may differ
   between QGIS versions.
-* The zoom ↔ scale convention (`_TOP_SCALE = 419311712`) was kept as-is; it does not
-  match the 96-DPI MapLibre resolution exactly (≈1.4×), which is consistent with the label
-  factor above and needs a calibration fixture before it is changed.
