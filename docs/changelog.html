@@ -449,9 +449,54 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 
   <div class="cl-entry featured latest">
     <div class="cl-header">
+      <div class="cl-version">v3.7</div>
+      <div class="cl-date">30 Sep 2026</div>
+      <div class="cl-badge">Latest</div>
+    </div>
+    <div class="cl-body">
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Much closer match between the <strong>QGIS map</strong> and the <strong>web map</strong>, checked symbol by symbol against QGIS renders of real style libraries.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span><strong>Marker lines</strong> are placed exactly where QGIS draws them: interval, vertex, centre and segment markers, <strong>offset along the line</strong>, <strong>averaged angles</strong> at corners, <strong>ring filters</strong> and polygon outline offsets; markers no longer go missing at tile edges.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span><strong>Point pattern</strong>, <strong>line pattern (hatch)</strong>, <strong>SVG</strong>, <strong>raster image</strong> and <strong>random marker</strong> fills keep the QGIS spacing, density and clipping; large map-unit patterns are drawn as real geometry.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Map-unit <strong>dashes</strong>, Qt <strong>dash patterns</strong> and caps, <strong>sub-pixel line widths</strong>, <strong>font markers</strong> and <strong>geometry generators</strong> follow QGIS.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Map-unit <strong>line labels</strong> and <strong>label backgrounds</strong> are drawn at every zoom; pinned labels and callouts are supported.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Sharper <strong>map-unit markers</strong> at every zoom, and a sprite sheet that stays within browser texture limits.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Large and detailed layers export much faster: big polygons are processed in pieces, and very dense patterns fall back to textures.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>A <strong>fidelity report</strong> lists every symbol part that is approximated or not supported; <strong>strict mode</strong> stops the export on fidelity errors.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Optional <strong>static web package</strong> with relative URLs that runs from any web server folder.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="cl-entry">
+    <div class="cl-header">
       <div class="cl-version">v3.6</div>
       <div class="cl-date">06 Aug 2026</div>
-      <div class="cl-badge">Latest</div>
     </div>
     <div class="cl-body">
       <div class="cl-item">
