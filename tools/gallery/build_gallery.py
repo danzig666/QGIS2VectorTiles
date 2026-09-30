@@ -565,6 +565,13 @@ def main():
                f"zoom {', '.join(f'{z:g}' for z in zooms)}, mean shape mismatch {mean:.1%} "
                f"({'; '.join(by_geometry)}). Worst first.")
     print(f"Gallery: {os.path.join(img_dir, 'index.html')}")
+    # Self-contained comparison page (overlay, swipe, blink, zoom) of every
+    # style that differs.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import compare_page  # pylint: disable=import-outside-toplevel
+    compare = os.path.join(img_dir, "compare.html")
+    compare_page.build(out, compare)
+    print(f"Comparison: {compare}")
 
 
 if __name__ == "__main__":

@@ -70,6 +70,17 @@ Every cell is centred on a z14 tile corner, so tile edges cross the shapes at ev
 and each style is rendered at several zooms (`--zooms`, default 14.6, 16.25, 17.8; the
 item score is the mean). The summary line gives the mean per geometry type.
 
+Every run also writes `images/compare.html`, a self-contained page of the styles that
+differ: QGIS and browser renders side by side, an overlay (red: ink only QGIS draws,
+cyan: only the browser, grey: both), a swipe slider and a blink view, zoomable to 2x/4x
+with sharp pixels — a shifted arrow or a 2 px offset is visible at a glance, where the
+mismatch score of thin elements stays small. Build it for any run and filter:
+
+```bash
+python3 tools/gallery/compare_page.py /tmp/gallery --out compare.html \
+    --min 0.1 --names "Measure,Csíkozás" --baseline /tmp/gallery_before
+```
+
 Behaviour is checked against the QGIS source (`src/core/symbology`,
 `src/core/labeling`) before it is reproduced, then confirmed by rendering.
 

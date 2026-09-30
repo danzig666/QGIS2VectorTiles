@@ -918,8 +918,14 @@ class SymbolMaterializer:
                                      "Marker-line offset in map units is ignored for "
                                      "markers sized in other units.", flat_rule)
                         continue
+                # QGIS turns a marker's offset with the marker's own angle
+                # (dimension arrows at -90 degrees): turn it back, so the
+                # offset stays perpendicular to the line (exact at every zoom,
+                # MapLibre applies it in screen units in the rotated frame).
+                own = math.radians(marker.angle() + extra_angle)
                 current = marker.offset()
-                marker.setOffset(QPointF(current.x(), current.y() + delta))
+                marker.setOffset(QPointF(current.x() + delta * math.sin(own),
+                                         current.y() + delta * math.cos(own)))
         return symbol
 
     @staticmethod
@@ -1045,22 +1051,24 @@ class SymbolMaterializer:
         if flat_rule.get_attr("g") == 2:
             needs_offset_line = points | ({"Interval"} if exact_interval else set())
         line_offset = 0.0
-        # A screen-unit offset: placed on the offset line of every zoom
-        # (converted at the middle of the zoom), like the screen intervals.
+        # Screen-unit offsets: on an open line, markers at the ends, the
+        # centre or segment centres sit on a straight stretch, where offsetting
+        # the marker itself is exact at every zoom (MapLibre applies it in
+        # screen units). Elsewhere the markers are placed on the offset line of
+        # every zoom (converted at the middle of the zoom).
         zoom_offset_mm = None
-        # Offsetting the markers themselves is exact only at the ends of open
-        # lines, and only for unrotated markers: QGIS turns a marker's offset
-        # with the marker's own angle (dimension arrows at -90 degrees).
-        own_angle = any(getattr(sub.symbolLayer(i), "angle", lambda: 0)()
-                        for i in range(sub.symbolLayerCount()))
-        if offset and (points or exact_interval) and (needs_offset_line or own_angle):
+        straight = flat_rule.get_attr("g") != 2 and not (
+            (points | ({"Interval"} if exact_interval else set()))
+            - {"FirstVertex", "LastVertex", "CentralPoint", "SegmentCenter"})
+        if offset and (points or exact_interval) and needs_offset_line:
             if normalize_unit(offset_unit) == "map":
-                if needs_offset_line:
-                    line_offset, offset = offset, 0.0
+                line_offset, offset = offset, 0.0
+            elif straight:
+                pass  # the marker's own (screen) offset, see _marker_points_symbol
             elif _to_mm(offset, offset_unit) is not None and not \
                     layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyOffset):
                 zoom_offset_mm, offset = _to_mm(offset, offset_unit), 0.0
-            elif needs_offset_line:
+            else:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Screen-unit offset: markers are offset from the original line; "
                              "QGIS measures positions on the offset line.", flat_rule)
