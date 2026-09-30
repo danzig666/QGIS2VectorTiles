@@ -81,6 +81,11 @@ now has a regression test.
 | 23 | Rule draw order inverted | QGIS draws a feature's rules in tree order (later on top) and honours rendering passes | `test_later_rules_draw_on_top`, `test_rendering_pass_orders_symbol_layers` |
 | 24 | Polygon outline offsets on the wrong side | QGIS buffers each ring (`offsetLine`); MapLibre offsets by ring direction | `test_polygon_outline_offsets_follow_the_source_ring` (browser) |
 | 25 | Zero-width lines invisible | QGIS draws a cosmetic one-pixel pen | `test_line_width_units` |
+| 26 | Interval markers misplaced | MapLibre starts its own way and has no offset along the line; QGIS places markers at offset + k * interval (`renderPolylineInterval`) | `test_map_unit_interval_markers_match_qgis` |
+| 27 | Centroid-fill markers misplaced | QGIS uses the exterior-ring centroid, point-on-surface only when needed | `test_centroid_fill_position_matches_qgis` |
+| 28 | Nested geometry generators dropped | inner generators evaluated on mirrored painter geometry, outputs coerced to the sub-symbol type | `test_nested_geometry_generators_match_qgis` |
+| 29 | Ring filter ignored | exterior-only / interior-only outlines drew every ring | `test_ring_filters_match_qgis` |
+| 30 | SVG fill stroke missing; empty SVG drawn | the stroke sub-symbol was never exported; an SVG fill without SVG data draws nothing in QGIS | `test_svg_fill_without_svg_draws_only_its_stroke` |
 
 ### Resolved suspicions
 
