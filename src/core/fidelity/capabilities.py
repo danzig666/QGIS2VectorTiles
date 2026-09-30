@@ -78,14 +78,16 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("EllipseMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,
-               "First/last/every vertex, inner vertices, central point and segment centres "
-               "are exported as point features with the QGIS line angle; interval placement "
-               "is a native repeated symbol.",
-               ("Interval placement starts where MapLibre's line layout does (not at the "
-                "line start) and does not reproduce QGIS offset-along-line exactly.",
-                "Perpendicular offsets in screen units are applied to materialized points "
-                "at the rule's reference zoom only."),
-               ("tests/integration/test_materialize.py",)),
+               "First/last/every vertex, inner vertices, central point, segment centres and "
+               "map-unit intervals (with offset along the line) are exported as point features "
+               "at the QGIS positions with the line azimuth; polygon outline offsets buffer "
+               "every ring like QGIS.",
+               ("Screen-unit intervals are a native repeated symbol: start position differs "
+                "and spacing is within about ±41 % between integer zooms.",
+                "Map-unit intervals denser than 8 px on screen use the native symbol at "
+                "those zooms."),
+               ("tests/integration/test_materialize.py",
+                "tests/browser/test_browser_parity.py")),
     Capability("HashLine", "line", Strategy.MATERIALIZED,
                "Hash marks are exported as rotated line markers at the QGIS positions.",
                ("Hash angle relative to a data-defined value is frozen.",),
@@ -126,9 +128,13 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("RandomMarkerFill", "pattern", Strategy.APPROXIMATE,
                "Random positions are not periodic; a preview texture is repeated."),
     Capability("CentroidFill", "marker", Strategy.MATERIALIZED,
-               "Centroid points are materialized as point features."),
+               "Marker points at the QGIS position (exterior-ring centroid, or GEOS "
+               "point-on-surface when requested and needed).",
+               ("Markers are not clipped to the polygon.",)),
     Capability("GeometryGenerator", "other", Strategy.MATERIALIZED,
-               "Generated geometry is materialized, evaluated in the layer CRS."),
+               "Generated geometry is materialized in the layer CRS and coerced to the "
+               "sub-symbol type; nested generators are composed as QGIS evaluates them.",
+               ("Nested generators in screen units are evaluated in map units.",)),
     Capability("GradientFill", "fill", Strategy.UNSUPPORTED,
                "Feature-relative gradients need geometry bands or raster fallback."),
     Capability("ShapeburstFill", "fill", Strategy.UNSUPPORTED,
