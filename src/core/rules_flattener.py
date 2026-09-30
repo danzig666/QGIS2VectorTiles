@@ -731,9 +731,9 @@ class RulesFlattener:
         )
         if vis_prop and vis_prop.isActive():
             min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            if self._is_feature_dependent(vis_prop.expressionString()):
+                return True  # feature dependent: folded into the rule filter
             expression = QgsExpression(with_map_scale(vis_prop.expressionString(), min_scale))
-            if expression.referencedColumns() or expression.needsGeometry():
-                return True  # feature dependent: decided per feature at export
             evaluation = expression.evaluate()
             if not expression.hasEvalError() and evaluation is not None and not evaluation:
                 return False

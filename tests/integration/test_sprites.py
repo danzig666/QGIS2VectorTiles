@@ -92,8 +92,9 @@ def test_2x_sheet_is_rendered_at_double_resolution(sg, tmp_path):
     gen.generate()
     one = gen.index[1]["m"]
     two = gen.index[2]["m"]
-    assert two["pixelRatio"] == 2 and one["pixelRatio"] == 1
-    assert abs(two["width"] / 2 - one["width"]) <= 2
+    # Oversampled 3x (1x sheet) and 6x (2x sheet); logical sizes agree.
+    assert one["pixelRatio"] == 3 and two["pixelRatio"] == 6
+    assert abs(two["width"] / 6 - one["width"] / 3) <= 1
 
 
 def test_screen_unit_point_pattern_texture(plugin, tmp_path):

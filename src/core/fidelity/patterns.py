@@ -166,3 +166,41 @@ def point_pattern_cell(dx: float, dy: float, disp_x: float, disp_y: float):
             y = height - (j * real_dy + (disp_y if i % 2 else 0.0))
             positions.append((x % width, y % height))
     return width, height, positions, error
+
+
+def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px: float,
+                pixel_ratio: float, size_px: int = 0):
+    """Label background frame and its stretch metadata (logical pixels).
+
+    ``shape``: "rectangle" (stretchable: corners and border keep their size
+    when MapLibre fits the frame around the text) or "ellipse" (the whole
+    image is scaled). Returns ``(image, metadata)``.
+    """
+    from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel
+
+    edge = max(stroke_px, 0.0)
+    radius = max(radius_px, 0.0)
+    logical = size_px or int(max(32, 2 * (radius + edge) + 16))
+    ss = 4  # supersampling for anti-aliased edges
+    scale = pixel_ratio * ss
+    big = max(1, round(logical * scale))
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    inset = edge * scale / 2.0
+    box = [inset, inset, big - 1 - inset, big - 1 - inset]
+    width = max(0, round(edge * scale))
+    fill = tuple(fill_rgba)
+    outline = tuple(stroke_rgba) if width else None
+    if shape == "ellipse":
+        draw.ellipse(box, fill=fill, outline=outline, width=width)
+    else:
+        draw.rounded_rectangle(box, radius=radius * scale, fill=fill, outline=outline,
+                               width=width)
+    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.LANCZOS)
+    metadata = {}
+    if shape != "ellipse" and not size_px:
+        fixed = radius + edge + 1
+        metadata = {"stretchX": [[fixed, logical - fixed]],
+                    "stretchY": [[fixed, logical - fixed]],
+                    "content": [edge, edge, logical - edge, logical - edge]}
+    return out, metadata

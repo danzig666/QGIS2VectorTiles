@@ -14,11 +14,12 @@ Rendering and packing are separate steps:
 * ``fidelity.assets.pack`` lays completed images out deterministically.
 * The @2x sheet is rendered at twice the resolution, not upscaled from @1x.
 
-scale_factor multiplies symbol sizes before rendering (icons only):
-  - 1: native size    - 2: 2× larger    - 4: 4× larger
-The style compensates with ``icon-size = 1 / scale_factor``.
+scale_factor oversamples symbols (icons only): the image is rendered
+scale_factor× larger and declares ``pixelRatio = scale_factor`` so its
+logical size — what MapLibre lays out — is the symbol's real size.
 """
 
+import math
 from io import BytesIO
 from dataclasses import dataclass, field
 from json import dumps
@@ -53,6 +54,7 @@ else:
 Img: TypeAlias = Image.Image
 
 _BASE_CANVAS_PX = 1000
+_MAX_CANVAS_PX = 4096
 _PX_PER_MM = 96.0 / 25.4
 
 
@@ -80,6 +82,8 @@ class SpriteRequest:
     map_units_per_pixel: float = 1.0
     # Attribute values used to evaluate data-defined properties (variants).
     attributes: Optional[Dict[str, object]] = None
+    # Oversampling (= declared pixelRatio of the 1x image); None: generator default.
+    oversampling: Optional[float] = None
 
 
 @dataclass
@@ -88,6 +92,8 @@ class PatternImages:
 
     img_1x: Img
     img_2x: Img
+    # Stretch metadata (logical px), e.g. for label background frames.
+    metadata: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -133,21 +139,47 @@ class SymbolImage:
         if hasattr(marker, "bufferSettings") and marker.bufferSettings():
             marker.bufferSettings().setSize(marker.bufferSettings().size() * scale_factor)
 
-    def _render_marker(self, symbol: QgsMarkerSymbol, canvas: int) -> QImage:
-        """Draw a marker at the image centre with an explicit render context.
+    def _marker_canvas(self, symbol: QgsMarkerSymbol, context_factory) -> int:
+        """Canvas size (px) that holds the marker drawn at the image centre."""
+        probe = QImage(1, 1, _ARGB)
+        painter = QPainter(probe)
+        try:
+            context = context_factory(painter)
+            symbol.startRender(context)
+            bounds = symbol.bounds(QPointF(0, 0), context)
+            symbol.stopRender(context)
+        finally:
+            painter.end()
+        extent = max(abs(bounds.left()), abs(bounds.right()), abs(bounds.top()),
+                     abs(bounds.bottom()), 1.0)
+        canvas = int(math.ceil(2 * extent)) + 16
+        if canvas > _MAX_CANVAS_PX:
+            raise SpriteRenderError(
+                f"Sprite '{self.name}' would be {canvas} px wide; reduce its size or "
+                "the export's zoom range")
+        return canvas
 
-        Physical units use ``scale_factor`` × 96 DPI; map units use
-        ``map_units_per_pixel`` / ``scale_factor``. (``asImage`` previews
-        render map units at an arbitrary fixed scale.)
-        """
-        image = QImage(canvas, canvas, _ARGB)
-        image.fill(0)
-        painter = QPainter(image)
-        painter.setRenderHint(_ANTIALIAS)
+    def _context(self, painter):
         context = QgsRenderContext.fromQPainter(painter)
         context.setScaleFactor(_PX_PER_MM * self.scale_factor)
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
         context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+        return context
+
+    def _render_marker(self, symbol: QgsMarkerSymbol, canvas: int = 0) -> QImage:
+        """Draw a marker at the image centre with an explicit render context.
+
+        Physical units use ``scale_factor`` × 96 DPI; map units use
+        ``map_units_per_pixel`` / ``scale_factor``. (``asImage`` previews
+        render map units at an arbitrary fixed scale.) The canvas is sized
+        from the symbol's rendered bounds.
+        """
+        canvas = self._marker_canvas(symbol, self._context)
+        image = QImage(canvas, canvas, _ARGB)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(_ANTIALIAS)
+        context = self._context(painter)
         expression_context = QgsExpressionContext([QgsExpressionContextUtils.globalScope()])
         feature = None
         if self.attributes:
@@ -177,7 +209,7 @@ class SymbolImage:
             symbol.setAngle(0)
         canvas = int(_BASE_CANVAS_PX * max(1.0, self.scale_factor / 3.0))
         if isinstance(symbol, QgsMarkerSymbol):
-            qt_img = self._render_marker(symbol, canvas)
+            qt_img = self._render_marker(symbol)
         else:
             # Fill/line previews (pattern approximations): legacy size scaling.
             markers = []
@@ -242,9 +274,10 @@ class SpriteGenerator:
         if not isinstance(request, SpriteRequest):
             request = SpriteRequest(request)
         try:
-            one = SymbolImage(request.symbol, name, self.scale_factor, request.bake_rotation,
+            quality = request.oversampling or self.scale_factor
+            one = SymbolImage(request.symbol, name, quality, request.bake_rotation,
                               request.map_units_per_pixel, request.attributes)
-            two = SymbolImage(request.symbol, name, self.scale_factor * self.lower_factor,
+            two = SymbolImage(request.symbol, name, quality * self.lower_factor,
                               request.bake_rotation, request.map_units_per_pixel,
                               request.attributes)
         except SpriteInputError as err:
@@ -260,7 +293,12 @@ class SpriteGenerator:
         if one.transparent:
             self.diagnostics.add("Q2VT_SPRITE_TRANSPARENT",
                                  f"Sprite '{name}' is fully transparent", component=name)
-        return AtlasEntry(name, {1: (one.img, 1), self.lower_factor: (two.img, self.lower_factor)})
+        # Oversampled images declare their oversampling as pixelRatio so the
+        # logical icon size equals the symbol size (icon-size 1).
+        return AtlasEntry(name, {
+            1: (one.img, round(quality, 4)),
+            self.lower_factor: (two.img, round(quality * self.lower_factor, 4)),
+        })
 
     def generate(self) -> Optional[str]:
         """Run the sprite pipeline; return the output directory or None if nothing was written."""
@@ -271,7 +309,8 @@ class SpriteGenerator:
                 entries.append(entry)
         for name, images in self.pattern_images.items():
             entries.append(AtlasEntry(name, {1: (images.img_1x, 1),
-                                             self.lower_factor: (images.img_2x, self.lower_factor)}))
+                                             self.lower_factor: (images.img_2x, self.lower_factor)},
+                                      dict(images.metadata or {})))
         if not entries:
             return None
         atlas = pack(entries, ratios=(1, self.lower_factor))

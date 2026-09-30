@@ -18,8 +18,25 @@ from typing import Optional
 
 from .model import ZoomInterval
 
-TOP_SCALE = 419311712.0
+# QGIS map scale of MapLibre zoom 0 at 96 DPI in a Web Mercator project:
+# 40075016.68557849 m / 512 px x 96 px/in / 0.0254 m/in. For another project
+# CRS the scale of the same ground resolution is this value divided by the
+# Mercator units per map unit (≈ cos(latitude) for projected metre CRSs).
+WEB_MERCATOR_TOP_SCALE = 40075016.68557849 / 512.0 * 96.0 / 0.0254
+# Historical plugin constant (≈ 1.4174 × the value above): scale-dependent
+# rules switched about half a zoom level late.
+LEGACY_TOP_SCALE = 419311712.0
+
+TOP_SCALE = WEB_MERCATOR_TOP_SCALE
 MAX_TILE_ZOOM = 22
+
+
+def configure(top_scale: float) -> None:
+    """Set the scale of zoom 0 for this export (see ``WEB_MERCATOR_TOP_SCALE``)."""
+    global TOP_SCALE  # pylint: disable=global-statement
+    if top_scale <= 0 or not math.isfinite(top_scale):
+        raise ValueError(f"Invalid top scale {top_scale!r}")
+    TOP_SCALE = float(top_scale)
 
 
 def zoom_to_scale(zoom: float) -> float:

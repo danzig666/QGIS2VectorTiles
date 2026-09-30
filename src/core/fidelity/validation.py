@@ -22,7 +22,11 @@ def _constant_images(value) -> Set[str]:
     if isinstance(value, str):
         return {value}
     names: Set[str] = set()
-    if isinstance(value, list) and value and value[0] in ("case", "match", "step", "coalesce"):
+    if isinstance(value, list) and value and value[0] == "match":
+        # ["match", key, v1, out1, ..., default]: outputs and default only.
+        outputs = value[3:-1:2] + [value[-1]]
+        names |= {o for o in outputs if isinstance(o, str)}
+    elif isinstance(value, list) and value and value[0] in ("case", "step", "coalesce"):
         for item in value[1:]:
             if isinstance(item, str) and not item.startswith("q2vt_"):
                 names.add(item)
@@ -51,6 +55,10 @@ def validate_style(style: dict, collector: DiagnosticCollector,
 
         for section in ("layout", "paint"):
             for key, value in (layer.get(section) or {}).items():
+                if key in ex.CAMERA_ONLY_PROPERTIES and not ex.is_camera_only(value):
+                    collector.add("Q2VT_EXPR_INVALID",
+                                  f"{layer_id}: {key} does not accept feature data",
+                                  component=layer_id, detail=repr(value))
                 try:
                     ex.validate_zoom_usage(value)
                     ex.check_finite_numbers(value)

@@ -77,6 +77,9 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_SPRITE_TRANSPARENT": CodeInfo(
         Severity.INFO, "Symbol renders fully transparent by design",
         fidelity_loss=False),
+    "Q2VT_SPRITE_VARIANTS_BUDGET": CodeInfo(
+        Severity.WARNING, "Too many distinct data-defined symbol appearances",
+        "Reduce the number of distinct colours/shapes or accept the static symbol."),
     "Q2VT_SPRITE_MISSING": CodeInfo(
         Severity.ERROR, "Style references an image missing from the sprite sheet",
         "Report this as a converter bug with the diagnostic detail."),

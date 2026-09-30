@@ -20,6 +20,10 @@ class AtlasEntry:
     name: str
     # {sheet_ratio: (PIL image, declared pixelRatio)}
     images: Dict[int, Tuple[object, float]] = field(default_factory=dict)
+    # Extra sprite metadata in *logical* pixels: stretchX / stretchY (lists
+    # of [from, to]) and content ([left, top, right, bottom]). Scaled by each
+    # image's pixelRatio when written.
+    metadata: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,9 +78,17 @@ def pack(entries: List[AtlasEntry], ratios=(1, 2), gutter: int = 2,
                 "width": img.width, "height": img.height,
                 "pixelRatio": pixel_ratio,
             }
+            for key, value in entry.metadata.items():
+                entries_json[entry.name][key] = _scale_metadata(value, pixel_ratio)
         sheets[ratio] = sheet
         index[ratio] = entries_json
     return Atlas(sheets, index)
+
+
+def _scale_metadata(value, factor):
+    if isinstance(value, (list, tuple)):
+        return [_scale_metadata(v, factor) for v in value]
+    return round(value * factor)
 
 
 def symmetric_crop_box(bbox, width: int, height: int):

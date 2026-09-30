@@ -12,6 +12,14 @@ def render(layers, extent, size=(300, 300), crs=None):
     settings.setExtent(QgsRectangle(*extent) if isinstance(extent, tuple) else extent)
     settings.setOutputSize(QSize(*size))
     settings.setBackgroundColor(QColor("white"))
+    # Like the map canvas: without the map settings scope, @map_scale and
+    # other map variables are NULL in symbol and label expressions.
+    from qgis.core import QgsExpressionContext, QgsExpressionContextUtils, QgsProject
+    settings.setExpressionContext(QgsExpressionContext([
+        QgsExpressionContextUtils.globalScope(),
+        QgsExpressionContextUtils.projectScope(QgsProject.instance()),
+        QgsExpressionContextUtils.mapSettingsScope(settings),
+    ]))
     job = QgsMapRendererSequentialJob(settings)
     job.start()
     job.waitForFinished()

@@ -72,7 +72,7 @@ def test_data_defined_icon_size_is_a_valid_expression(mc):
     size = mc.IconPropertyExtractor.get_icon_size(layer, 1.0)
     assert isinstance(size, list)
     ex.validate_zoom_usage(size)
-    # Static size 4 at feature value 8 => twice the base scale 1/Q.
+    # Static size 4 at feature value 8 => icon-size 2 (logical sprite size = static size).
     assert "q2vt_property_size_5_00" in ex.referenced_fields(size)
 
 

@@ -252,3 +252,30 @@ def ratio(numerator: Expression, denominator: Expression,
     for zoom, value in values[1:]:
         expr.extend([zoom, finite(value)])
     return expr
+
+
+_DATA_OPERATORS = frozenset({"get", "has", "properties", "feature-state", "geometry-type",
+                             "id", "line-progress", "accumulated"})
+
+# MapLibre properties that accept constants and zoom curves but no feature data.
+CAMERA_ONLY_PROPERTIES = frozenset({
+    "symbol-spacing", "symbol-avoid-edges", "symbol-placement", "symbol-z-order",
+    "icon-allow-overlap", "icon-ignore-placement", "icon-optional", "icon-keep-upright",
+    "icon-rotation-alignment", "icon-pitch-alignment", "icon-text-fit", "icon-padding",
+    "text-allow-overlap", "text-ignore-placement", "text-optional", "text-keep-upright",
+    "text-rotation-alignment", "text-pitch-alignment", "text-max-angle", "text-padding",
+    "line-cap", "line-miter-limit", "line-round-limit", "line-translate",
+    "line-translate-anchor", "fill-antialias", "fill-translate", "fill-translate-anchor",
+    "icon-translate", "icon-translate-anchor", "text-translate", "text-translate-anchor",
+    "circle-translate", "circle-translate-anchor", "circle-pitch-scale",
+    "circle-pitch-alignment", "visibility",
+})
+
+
+def is_camera_only(expr: Expression) -> bool:
+    """True when the value reads no feature data (constant or zoom curve)."""
+    if isinstance(expr, list):
+        if expr and isinstance(expr[0], str) and expr[0] in _DATA_OPERATORS:
+            return False
+        return all(is_camera_only(item) for item in expr)
+    return True

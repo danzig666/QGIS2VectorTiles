@@ -34,7 +34,7 @@ _PORT = 9000
 _EPSG_CRS = 3857                          # Output projection (Web Mercator)
 _DATA_SIMPLIFICATION_TOLERANCE = 1        # Geometry simplification, in CRS units
 _REMOVE_DUPLICATES_DISTANCE = 300         # Minimum spacing between points, in points
-_TOP_SCALE = 419311712                    # Max zoomed-out map scale
+_TOP_SCALE = 295829355.45                 # Map scale of zoom 0 (96 DPI, Web Mercator); see fidelity/zoom.py
 _SPRITE_QUALITY = 3
 _FIELD_PREFIX = 'q2vt'    
 _SIMPLIFICATION=1
@@ -70,7 +70,7 @@ _SUPERSAMPLE = 4               # Internal antialiasing supersample factor
 _SDF_RADIUS = 8.0              # = _REFERENCE_RADIUS * (_FONT_RENDER_SIZE / _REFERENCE_EM)
 _BUFFER = 10                   # = ceil(max(_REFERENCE_BUFFER * scale, _SDF_RADIUS + 2, _MAPLIBRE_GLYPH_BORDER))
 _SDF_COVERAGE_THRESHOLD = 127  # AA coverage midpoint used to binarize the glyph mask
-_MAPLIBRE_LABELS_FACTOR = 1.4   # Factor to decrease label size to match MapLibre GL JS's rendering to the original QGIS project.
+_MAPLIBRE_LABELS_FACTOR = 1.0   # Measured parity with QGIS after the glyph-metric and zoom-scale fixes (was an empirical 1.4).
 
 # =====================================================================
 # PyQt VERSION GUARD

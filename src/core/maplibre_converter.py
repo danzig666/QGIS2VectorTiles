@@ -50,6 +50,14 @@ def _enum_int(value, default=None):
     return default
 
 
+def _argb_hex(value) -> str:
+    """Generated colour fields store '#RRGGBBAA'; QGIS parses '#AARRGGBB'."""
+    text = str(value or "")
+    if len(text) == 9 and text.startswith("#"):
+        return "#" + text[7:9] + text[1:7]
+    return text
+
+
 def _enum_name(value) -> str:
     name = getattr(value, "name", None)
     return name if isinstance(name, str) else ""
@@ -73,6 +81,8 @@ class ConversionContext:
         self.component = ""
         self.source_layer = ""
         self.reference_zoom = 0.0
+        # Zooms over which the current component is visible above reference_zoom.
+        self.reference_zoom_span = 0.0
 
     def report(self, code: str, message: str = "", **extra):
         extra.setdefault("component", self.component)
@@ -497,7 +507,7 @@ class LinePropertyExtractor:
         if "Interval" in placements and (interval > 0 or (prop and prop.isActive())):
             spacing = PropertyExtractor.length(interval, symbol_layer.intervalUnit(), prop,
                                                symbol_layer.intervalMapUnitScale())
-            if isinstance(spacing, list) and not ex.is_zoom_curve(spacing):
+            if not ex.is_camera_only(spacing):
                 PropertyExtractor.context.report(
                     "Q2VT_DDP_NO_EMITTER",
                     "Feature-dependent marker-line interval is not supported; static value used.")
@@ -627,14 +637,21 @@ class IconPropertyExtractor:
     def marker_scale(symbol: QgsSymbol, symbol_layer: QgsSymbolLayer):
         """``(icon-size, map_units_per_pixel)`` for a marker symbol.
 
-        Physical units: the sprite is rendered at ``_SPRITE_QUALITY``× its
-        size, so ``icon-size = 1 / Q`` (times ``v / s`` for a data-defined
+        Sprites are oversampled ``Q`` times and declare ``pixelRatio = Q``, so
+        their *logical* size is the symbol's real size. (Shrinking a large
+        image with ``icon-size`` instead makes MapLibre space line markers by
+        the unscaled image width.)
+
+        Physical units: ``icon-size = 1`` (times ``v / s`` for a data-defined
         size ``v`` over the static size ``s``).
 
-        Map units: the sprite is rendered at a reference resolution of ``r``
-        map units per pixel (the symbol spans ``32`` logical pixels, ``32·Q``
-        image pixels), and ``icon-size(z) = px(size, z) / (32·Q)`` follows the
-        map like QGIS, including ``QgsMapUnitScale`` limits.
+        Map units: the sprite's logical size is the symbol's displayed size
+        at the rule's first visible zoom ``z0`` (MapLibre lays out and spaces
+        line markers by the logical size), ``icon-size(z) = px(size, z) /
+        px(size, z0)`` follows the map like QGIS (including
+        ``QgsMapUnitScale`` limits), and the image is oversampled enough to
+        stay sharp a few zooms higher. Returns ``(icon-size,
+        map_units_per_pixel, oversampling)``.
         """
         try:
             unit = normalize_unit(symbol.sizeUnit())
@@ -646,22 +663,30 @@ class IconPropertyExtractor:
                        for i in range(symbol.symbolLayerCount())} if symbol else set()
         uses_map = unit in ("map", "m") or bool(layer_units & {"map", "m"})
         if not uses_map:
-            return IconPropertyExtractor.get_icon_size(symbol_layer, 1.0), 1.0
+            return IconPropertyExtractor.get_icon_size(symbol_layer, 1.0), 1.0, None
         if unit not in ("map", "m") or (layer_units - {"map", "m"}):
             PropertyExtractor.context.report(
                 "Q2VT_MIXED_UNITS",
                 "Marker mixes map units with screen units; the whole icon scales with the map.")
-        if size <= 0:
-            size = 1.0
-        reference_px = 32.0
-        map_units_per_pixel = size / reference_px
         value = size
         if size_prop and size_prop.isActive():
             value = PropertyExtractor.get_value_or_expression(size, size_prop, "number")
-        px = PropertyExtractor.length(value, "map" if unit not in ("map", "m") else unit,
-                                      None, symbol.sizeMapUnitScale())
-        return ex.clamp(ex.mul(px, 1.0 / (reference_px * _SPRITE_QUALITY)), 0, None), \
-            map_units_per_pixel
+            if ex.is_number(value):
+                # A static (e.g. per-zoom resolved) size is applied by QGIS
+                # when the sprite is rendered: it *is* the sprite's size.
+                size = value
+        if size <= 0:
+            size = 1.0
+        context = PropertyExtractor.context
+        unit_name = "map" if unit not in ("map", "m") else unit
+        reference_px = max(1.0, PropertyExtractor.static_pixels(size, unit_name, context.reference_zoom))
+        map_units_per_pixel = size / reference_px
+        span = max(0.0, min(3.0, context.reference_zoom_span))
+        oversampling = max(float(_SPRITE_QUALITY),
+                           min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / reference_px))
+        px = PropertyExtractor.length(value, unit_name, None, symbol.sizeMapUnitScale())
+        return ex.clamp(ex.mul(px, 1.0 / reference_px), 0, None), \
+            map_units_per_pixel, oversampling
 
     @staticmethod
     def get_icon_size(
@@ -669,13 +694,13 @@ class IconPropertyExtractor:
     ) -> Union[float, List]:
         """Return ``icon-size`` honouring any data-defined size.
 
-        The sprite is rendered at ``_SPRITE_QUALITY`` times the static size,
-        so the static icon-size is ``1 / _SPRITE_QUALITY``. A data-defined
+        The sprite's logical size is the static size (see ``marker_scale``),
+        so the static icon-size is ``1``. A data-defined
         size ``v`` (same unit as the static size ``s``) scales the image by
         ``v / s``. The expression is built with the typed builder — the legacy
         code divided a Python list by a number and raised ``TypeError``.
         """
-        base_scale = default_size / _SPRITE_QUALITY
+        base_scale = default_size
         size_prop = symbol_layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertySize)
         if not size_prop or not size_prop.isActive():
             return base_scale
@@ -689,6 +714,8 @@ class IconPropertyExtractor:
                 "Data-defined marker size cannot be scaled from a zero static size.")
             return base_scale
         value = PropertyExtractor.get_value_or_expression(static_size, size_prop, "number")
+        if ex.is_number(value):
+            return base_scale  # static size: already applied in the rendered sprite
         return ex.clamp(ex.mul(ex.div(value, static_size, fallback=1.0), base_scale), 0, None)
 
     @staticmethod
@@ -777,13 +804,16 @@ class IconPropertyExtractor:
     def get_icon_text_fit_padding(
         background: QgsTextBackgroundSettings,
     ) -> Optional[List[float]]:
-        """Return ``icon-text-fit-padding`` ``[top, right, bottom, left]`` from buffer size."""
+        """``icon-text-fit-padding`` ``[top, right, bottom, left]``.
+
+        QGIS adds the buffer size (x horizontally, y vertically) around the
+        text bounds.
+        """
         if background.enabled() and background.sizeType() == 0:
-            buf_px = PropertyExtractor.static_pixels(
-                background.size().width(), background.sizeUnit()
-            )
-            buf_px = max(buf_px, 3)
-            return [buf_px * 2, buf_px, buf_px * 2, buf_px]
+            size = background.size()
+            x_px = PropertyExtractor.static_pixels(size.width(), background.sizeUnit())
+            y_px = PropertyExtractor.static_pixels(size.height(), background.sizeUnit())
+            return [y_px, x_px, y_px, x_px]
         return None
 
     @staticmethod
@@ -1032,8 +1062,8 @@ class TextPropertyExtractor:
     ) -> Union[float, List]:
         """Return ``text-halo-width`` in pixels from the buffer size and unit.
 
-        The empirical ``/(_MAPLIBRE_LABELS_FACTOR * 2)`` calibration is kept
-        until glyph metrics are calibrated against QGIS (see plan §8.1).
+        QGIS buffers and MapLibre halos both extend the stated distance beyond
+        the glyph outline.
         """
         buffer = text_format.buffer()
         if not buffer.enabled():
@@ -1045,7 +1075,7 @@ class TextPropertyExtractor:
             )
         width = PropertyExtractor.length(buffer.size(), buffer.sizeUnit(), size_prop,
                                          buffer.sizeMapUnitScale())
-        return ex.div(width, _MAPLIBRE_LABELS_FACTOR * 2)
+        return ex.div(width, _MAPLIBRE_LABELS_FACTOR)
 
     @staticmethod
     def get_text_halo_blur(
@@ -1453,7 +1483,9 @@ class QgisMapLibreStyleExporter:
                 component=style.styleName(), layer_id=style.layerName())
             return None
         self.context.reference_zoom = interval.min_zoom
-        return interval.style_bounds(self.maxzoom, self.profile.overzoom)
+        bounds = interval.style_bounds(self.maxzoom, self.profile.overzoom)
+        self.context.reference_zoom_span = min(bounds[1], self.maxzoom + 1) - interval.min_zoom
+        return bounds
 
     def _convert_renderer_style(self, style):
         """Convert a single ``QgsVectorTileBasicRendererStyle`` into MapLibre layer(s)."""
@@ -1746,6 +1778,61 @@ class QgisMapLibreStyleExporter:
         layer_def["paint"].update(paint)
         self.style["layers"].append(layer_def)
 
+    # --- sprite variants -----------------------------------------------------------
+    MAX_VARIANTS = 64
+
+    def _distinct_values(self, source_layer: str, fields: List[str]) -> Optional[list]:
+        """Distinct value combinations of ``fields`` in an exported dataset
+        (None when more than ``MAX_VARIANTS``)."""
+        from osgeo import ogr  # pylint: disable=import-outside-toplevel
+        path = join(self.utils_dir, f"{source_layer}.gpkg")
+        dataset = ogr.Open(path)
+        if dataset is None:
+            return []
+        layer = dataset.GetLayer(0)
+        seen = []
+        keys = set()
+        for feature in layer:
+            combo = tuple(feature.GetField(f) if feature.GetFieldIndex(f) >= 0 else None
+                          for f in fields)
+            if combo in keys:
+                continue
+            keys.add(combo)
+            seen.append(combo)
+            if len(seen) > self.MAX_VARIANTS:
+                return None
+        return seen
+
+    def _variant_images(self, fields: List[str], combos: list, make_name) -> list:
+        """``["match", key, value, name, ..., default]`` pieces for combos."""
+        key = ex.get(fields[0]) if len(fields) == 1 else \
+            ["concat"] + sum(([["to-string", ex.get(f)], "|"] for f in fields), [])[:-1]
+        cases = []
+        for combo in combos:
+            if any(v is None for v in combo):
+                continue
+            value = str(combo[0]) if len(fields) == 1 else "|".join(str(v) for v in combo)
+            cases += [value, make_name(combo)]
+        return key, cases
+
+    def _variant_fields(self, obj, excluded=()) -> List[str]:
+        """Generated fields read by appearance-changing data-defined properties."""
+        fields = set()
+        try:
+            props = obj.dataDefinedProperties()
+            definitions = obj.propertyDefinitions()
+        except (AttributeError, RuntimeError):
+            return []
+        for key in props.propertyKeys():
+            prop = props.property(key)
+            definition = definitions.get(key)
+            name = definition.name() if definition else ""
+            if not prop or not prop.isActive() or name.lower() in excluded:
+                continue
+            fields |= {c for c in QgsExpression(prop.asExpression()).referencedColumns()
+                       if c.startswith(f"{_FIELD_PREFIX}_")}
+        return sorted(fields)
+
     # --- screen-unit pattern textures -------------------------------------------
     def _reference_map_units_per_px(self) -> float:
         """Map units per CSS px at the component's reference zoom."""
@@ -1849,6 +1936,43 @@ class QgisMapLibreStyleExporter:
             cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
         return self._textures(cells[0], cells[1], 0.0, "Raster fill")
 
+    _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "enabled", "layerenabled"})
+
+    def _marker_variants(self, symbol, marker_name, source_layer, map_units_per_pixel,
+                         oversampling):
+        """``icon-image``: one sprite per distinct data-defined appearance.
+
+        Size, angle and opacity are applied by the style; every other
+        data-defined property (colours, SVG path, shape, stroke width...)
+        changes the image, so each distinct value combination in the data is
+        rendered by QGIS with those attribute values.
+        """
+        fields = sorted({f for i in range(symbol.symbolLayerCount())
+                         for f in self._variant_fields(symbol.symbolLayer(i),
+                                                       self._SPRITE_INDEPENDENT)})
+        if not fields:
+            return marker_name
+        combos = self._distinct_values(source_layer, fields)
+        if combos is None:
+            self.context.report(
+                "Q2VT_SPRITE_VARIANTS_BUDGET",
+                f"More than {self.MAX_VARIANTS} distinct data-defined appearances; "
+                "the static symbol is used for all features.")
+            return marker_name
+        names = {}
+
+        def make(combo):
+            name = f"{marker_name}_v{len(names)}"
+            names[combo] = name
+            self.marker_symbols[name] = SpriteRequest(
+                symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
+                attributes=dict(zip(fields, combo)), oversampling=oversampling)
+            return name
+        key, cases = self._variant_images(fields, combos, make)
+        if not cases:
+            return marker_name
+        return ["match", key] + cases + [marker_name]
+
     def _convert_marker_symbol(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -1866,12 +1990,16 @@ class QgisMapLibreStyleExporter:
 
         marker_name = self._next_name("marker")
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
-        icon_size, map_units_per_pixel = IconPropertyExtractor.marker_scale(symbol, symbol_layer)
+        icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
+            symbol, symbol_layer)
         self.marker_symbols[marker_name] = SpriteRequest(
-            symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel)
+            symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
+            oversampling=oversampling)
+        icon_image = self._marker_variants(symbol, marker_name, source_layer_name,
+                                           map_units_per_pixel, oversampling)
 
         layer_def["layout"].update({
-            "icon-image": IconPropertyExtractor.get_icon_image(marker_name),
+            "icon-image": icon_image,
             "icon-size": icon_size,
             "icon-rotate": IconPropertyExtractor.get_icon_rotate(symbol_layer=symbol_layer),
             "icon-padding": IconPropertyExtractor.get_icon_padding(),
@@ -1960,10 +2088,11 @@ class QgisMapLibreStyleExporter:
 
         marker_name = self._next_name("marker")
         marker_sub_layer = sub_symbol.symbolLayer(0)
-        icon_size, map_units_per_pixel = IconPropertyExtractor.marker_scale(
+        icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             sub_symbol, marker_sub_layer)
         self.marker_symbols[marker_name] = SpriteRequest(
-            sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel)
+            sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel,
+            oversampling=oversampling)
         rotate_with_line = LinePropertyExtractor.get_marker_line_rotate_symbols(symbol_layer)
         offset_px = LinePropertyExtractor.get_marker_line_offset(symbol_layer)
 
@@ -2014,10 +2143,10 @@ class QgisMapLibreStyleExporter:
         base (MapLibre offsets cannot depend on features and zoom at once).
         """
         if isinstance(icon_size, list) and not ex.is_zoom_curve(icon_size):
-            icon_size = 1.0 / _SPRITE_QUALITY
+            icon_size = 1.0
         elif ex.is_zoom_curve(icon_size) and any(
                 not ex.is_number(o) for o in icon_size[4::2]):
-            icon_size = 1.0 / _SPRITE_QUALITY
+            icon_size = 1.0
         value = ex.ratio(offset_px, icon_size)
         if ex.is_number(value):
             return [0, value]
@@ -2263,24 +2392,139 @@ class QgisMapLibreStyleExporter:
         label_format.setBackground(background)
         label_settings.setFormat(label_format)
 
-        if background.enabled() and background.markerSymbol():
-            self._apply_icon_from_background(layer_def, background, style_name)
+        if background.enabled():
+            self._apply_icon_from_background(layer_def, background, style_name, label_settings)
         else:
             self._apply_default_icon_props(layer_def)
 
         self.style["layers"].append(layer_def)
 
-    def _apply_icon_from_background(self, layer_def: dict, background, style_name: str):
-        """Configure icon layout/paint from a label background marker symbol."""
-        marker = background.markerSymbol() if hasattr(background, "markerSymbol") else None
-        if marker and marker.type() == QgsSymbol.SymbolType.Marker:
-            marker_name = self._next_name("marker")
-            self.marker_symbols[marker_name] = SpriteRequest(marker.clone(), bake_rotation=True)
-            layer_def["layout"]["icon-image"] = marker_name
-        else:
+    def _background_image(self, background) -> Optional[str]:
+        """Sprite for a label background shape (rectangle/ellipse/SVG/marker)."""
+        from .fidelity.patterns import frame_image  # pylint: disable=import-outside-toplevel
+        shape = _enum_int(background.type(), 0)
+        names = {0: "rectangle", 1: "rectangle", 2: "ellipse", 3: "ellipse", 4: "svg", 5: "marker"}
+        kind = names.get(shape, "rectangle")
+        if kind == "marker":
+            marker = background.markerSymbol()
+            if marker is None:
+                return None
+            name = self._next_name("marker")
+            self.marker_symbols[name] = SpriteRequest(marker.clone(), bake_rotation=True)
+            return name
+        if kind == "svg":
+            from qgis.core import QgsSvgMarkerSymbolLayer, QgsMarkerSymbol  # pylint: disable=import-outside-toplevel
+            if not background.svgFile():
+                return None
+            svg = QgsSvgMarkerSymbolLayer(background.svgFile(), 10)
+            svg.setFillColor(background.fillColor())
+            svg.setStrokeColor(background.strokeColor())
+            name = self._next_name("marker")
+            self.marker_symbols[name] = SpriteRequest(QgsMarkerSymbol([svg]), bake_rotation=True)
+            return name
+        if shape in (1, 3):
+            self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                "Square/circle label backgrounds are fitted to the text box "
+                                "(width and height may differ).")
+        fill = background.fillColor()
+        stroke = background.strokeColor()
+        stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
+                                                    background.strokeWidthUnit())
+        radii = background.radii()
+        radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
+                                                    background.radiiUnit()) if kind == "rectangle" else 0
+        fixed = 0
+        if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed
+            size = background.size()
+            fixed = max(1, round(PropertyExtractor.static_pixels(
+                max(size.width(), size.height()), background.sizeUnit())))
+        rgba = lambda c: (c.red(), c.green(), c.blue(), c.alpha())  # noqa: E731
+        one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 1, fixed)
+        two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2, fixed)
+        name = self._next_name("frame")
+        self.pattern_images[name] = PatternImages(one, two, meta)
+        return name
+
+    def _frame_variants(self, background, label_settings, base: str, source_layer: str):
+        """Frame per distinct data-defined frame fill/border colour."""
+        from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+        props = label_settings.dataDefinedProperties()
+        keys = {"stroke": QgsPalLayerSettings.Property.ShapeStrokeColor,
+                "fill": QgsPalLayerSettings.Property.ShapeFillColor}
+        fields = {}
+        for part, key in keys.items():
+            prop = props.property(key)
+            if prop and prop.isActive():
+                refs = sorted(c for c in QgsExpression(prop.asExpression()).referencedColumns()
+                              if c.startswith(f"{_FIELD_PREFIX}_"))
+                if refs:
+                    fields[part] = refs[0]
+        if not fields:
+            return base
+        names = sorted(set(fields.values()))
+        combos = self._distinct_values(source_layer, names)
+        if combos is None:
+            self.context.report("Q2VT_SPRITE_VARIANTS_BUDGET",
+                                "Too many distinct label frame colours; static colour used.")
+            return base
+
+        def make(combo):
+            values = dict(zip(names, combo))
+            variant = QgsTextBackgroundSettings(background)
+            for part, field in fields.items():
+                color = QgsSymbolLayerUtils.decodeColor(_argb_hex(values[field]))
+                if part == "stroke":
+                    variant.setStrokeColor(color)
+                else:
+                    variant.setFillColor(color)
+            return self._background_image(variant)
+        key, cases = self._variant_images(names, combos, make)
+        return ["match", key] + cases + [base] if cases else base
+
+    def _text_fit_icon_size(self):
+        """Compensate MapLibre's text-fit layout at tile zoom + 1.
+
+        With a zoom-dependent ``text-size`` MapLibre fits the icon to the text
+        box shaped at ``tile zoom + 1``; map-unit sizes double per zoom, so
+        the frame is scaled by ``2^(z - tile_zoom - 1)``: a sawtooth per zoom
+        level up to the archive's max zoom, then smooth overzoom.
+        """
+        top = int(self.maxzoom)
+        stops = []
+        for level in range(0, top):
+            stops += [level, 0.5, level + 0.999, 2 ** -0.001]
+        stops += [top, 0.5, 24, 2.0 ** (24 - top - 1)]
+        return ["interpolate", ["exponential", 2], ["zoom"]] + stops
+
+    def _text_fit_padding_curve(self, background):
+        """``icon-text-fit-padding`` as a zoom curve for map-unit buffers."""
+        if _enum_int(background.sizeType(), 0) != 0 or \
+                normalize_unit(background.sizeUnit()) not in ("map", "m"):
+            return None
+        size = background.size()
+        x = PropertyExtractor.length(size.width(), background.sizeUnit())
+        y = PropertyExtractor.length(size.height(), background.sizeUnit())
+        if not (ex.is_zoom_curve(x) and ex.is_zoom_curve(y)):
+            return None
+        out = ["interpolate", ["exponential", 2], ["zoom"]]
+        for zoom in (0, 24):
+            vx, vy = ex.evaluate_zoom_curve(x, zoom), ex.evaluate_zoom_curve(y, zoom)
+            out += [zoom, ["literal", [vy, vx, vy, vx]]]
+        return out
+
+    def _apply_icon_from_background(self, layer_def: dict, background, style_name: str,
+                                    label_settings=None):
+        """Configure icon layout/paint from a label background shape."""
+        image = self._background_image(background)
+        if image is None:
             self.context.report("Q2VT_UNSUPPORTED_SYMBOL_LAYER",
-                                "Label background shape without a marker symbol is not exported.")
+                                "Label background shape could not be exported.")
             return
+        is_frame = image.startswith("frame_")
+        if is_frame and label_settings is not None:
+            image = self._frame_variants(background, label_settings, image,
+                                         layer_def.get("source-layer", ""))
+        layer_def["layout"]["icon-image"] = image
 
         text_fit = IconPropertyExtractor.get_icon_text_fit(background)
         if text_fit:
@@ -2302,11 +2546,16 @@ class QgisMapLibreStyleExporter:
             "icon-offset": IconPropertyExtractor.get_icon_offset(background),
         })
 
+        if is_frame:
+            layer_def["layout"]["icon-allow-overlap"] = True
+            layer_def["layout"]["icon-ignore-placement"] = True
+            if ex.is_zoom_curve(layer_def["layout"].get("text-size")):
+                layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
+                padding = self._text_fit_padding_curve(background)
+                if padding is not None:
+                    layer_def["layout"]["icon-text-fit-padding"] = padding
         layer_def["paint"].update({
             "icon-opacity": IconPropertyExtractor.get_icon_opacity(background),
-            "icon-color": IconPropertyExtractor.get_icon_color(background),
-            "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(background),
-            "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(background),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
@@ -2345,6 +2594,10 @@ class QgisMapLibreStyleExporter:
                 (layer_def.get("paint") or {}).get("line-pattern"),
             }
             if images & set(failed):
+                self.diagnostics.add(
+                    "Q2VT_SPRITE_RENDER_FAILED",
+                    f"Style layer '{layer_def['id']}' omitted: its image could not be rendered.",
+                    component=layer_def["id"], layer_id=layer_def.get("source-layer", ""))
                 continue
             kept.append(layer_def)
         self.style["layers"] = kept

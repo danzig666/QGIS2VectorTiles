@@ -30,6 +30,12 @@ class ZoomLevels:
     SCALES = [_zoom.TOP_SCALE / (2**zoom) for zoom in range(_zoom.MAX_TILE_ZOOM + 1)]
 
     @classmethod
+    def configure(cls, top_scale: float) -> None:
+        """Set the map scale of zoom 0 for the current export."""
+        _zoom.configure(top_scale)
+        cls.SCALES = [_zoom.TOP_SCALE / (2**zoom) for zoom in range(_zoom.MAX_TILE_ZOOM + 1)]
+
+    @classmethod
     def scale_to_zoom(cls, scale: float, edge: str) -> int:
         """Convert a rule scale limit to the integer tile zoom of that edge."""
         if edge == "o":

@@ -60,3 +60,9 @@ def test_clamp_inside_zoom_curve():
     curve = ex.exponential_zoom_curve([(0, 0.5), (10, 512.0)])
     clamped = ex.clamp(curve, 1, 100)
     assert clamped[4] == 1 and clamped[6] == 100
+
+
+def test_camera_only_detection():
+    curve = ex.exponential_zoom_curve([(0, 1.0), (10, 2.0)])
+    assert ex.is_camera_only(curve) and ex.is_camera_only(3)
+    assert not ex.is_camera_only(ex.mul(curve, ex.get("w")))

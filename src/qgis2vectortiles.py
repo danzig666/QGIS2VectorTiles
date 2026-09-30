@@ -44,6 +44,8 @@ from qgis.PyQt.QtXml import QDomDocument
 
 from .utils.config import _EPSG_CRS
 from .utils.flattened_rule import FlattenedRule
+from .utils.zoom_levels import ZoomLevels
+from .core.fidelity import zoom as fidelity_zoom
 from .core.rules_flattener import RulesFlattener
 from .core.rules_exporter import RulesExporter
 from .core.tiles_generator import GDALTilesGenerator
@@ -96,6 +98,11 @@ class QGIS2VectorTiles:
             overzoom=[OverzoomPolicy.PERSIST, OverzoomPolicy.STOP][int(overzoom)],
             reference_latitude=self._reference_latitude(),
         )
+        self.lengths = self._length_converter()
+        # zoom <-> scale: QGIS's scale for the browser's ground resolution in
+        # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.).
+        ZoomLevels.configure(
+            fidelity_zoom.WEB_MERCATOR_TOP_SCALE / self.lengths.map_context.mercator_per_map_unit)
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
@@ -365,7 +372,7 @@ class QGIS2VectorTiles:
             self.min_zoom, self.max_zoom,
             diagnostics=self.diagnostics, profile=self.profile,
             visibility=self._visibility_by_style(rules or []),
-            lengths=self._length_converter(),
+            lengths=self.lengths,
         )
         exporter.export()
         return exporter

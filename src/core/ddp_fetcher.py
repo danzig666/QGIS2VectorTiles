@@ -163,17 +163,20 @@ class DataDefinedPropertiesFetcher:
         Build the calculated-field expression for string/numeric DDPs.
         Returns None if the expression evaluates to a static value (no field needed).
         """
-        raw = with_map_scale(prop.asExpression(), self._min_scale)
+        original = prop.asExpression()
+        raw = with_map_scale(original, self._min_scale)
         is_color = prop_def and "color" in prop_def.name().lower() and field_type == 10
 
         expression = _to_color_hex_expr(raw) if is_color else raw
 
-        if self._is_static(raw):
-            # Feature-independent: keep the (typed) expression on the
-            # property itself and do not create a field. The legacy code
-            # tested truthiness, so 0/False/'' became per-feature fields, and
-            # stored the value as a quoted string (turning 3 into '3').
-            prop.setExpressionString(raw)
+        if self._is_static(original):
+            # Feature-independent (possibly scale-dependent, resolved for
+            # this rule's zoom): store the evaluated value as a static
+            # property and create no field. The legacy code tested
+            # truthiness, so 0/False/'' became per-feature fields, and stored
+            # the value as a quoted string (turning 3 into '3').
+            value = QgsExpression(raw).evaluate()
+            props_collection.setProperty(key, QgsProperty.fromValue(value))
             return None
 
         field_ref = f'"{field_name}"'
@@ -204,16 +207,22 @@ class DataDefinedPropertiesFetcher:
 
     @classmethod
     def _is_static(cls, expression: str) -> bool:
-        """True if ``expression`` has the same value for every feature."""
-        qexpr = QgsExpression(expression)
-        if qexpr.hasParserError():
+        """True if ``expression`` has the same value for every feature.
+
+        Must be given the expression *before* ``with_map_scale`` wrapping:
+        QGIS reports every ``with_variable`` expression as reading all
+        attributes and the geometry.
+        """
+        qexpr = QgsExpression(with_map_scale(expression, 1.0))
+        dependencies = QgsExpression(expression)
+        if qexpr.hasParserError() or dependencies.hasParserError():
             return False
-        if qexpr.referencedColumns() or qexpr.needsGeometry():
+        if dependencies.referencedColumns() or dependencies.needsGeometry():
             return False
-        functions = {name.lower() for name in qexpr.referencedFunctions()}
+        functions = {name.lower() for name in dependencies.referencedFunctions()}
         if functions & cls._FEATURE_FUNCTIONS:
             return False
-        if set(qexpr.referencedVariables()) & cls._FEATURE_VARIABLES:
+        if set(dependencies.referencedVariables()) & cls._FEATURE_VARIABLES:
             return False
         qexpr.evaluate()
         return not qexpr.hasEvalError()

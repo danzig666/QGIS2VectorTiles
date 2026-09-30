@@ -288,9 +288,13 @@ class GlyphGenerator:
             fontstack_dir = self.output_dir / fontstack_name
             fontstack_dir.mkdir(exist_ok=True)
 
+            # MapLibre glyphs are defined on a 24 *pixel* em. QFontDatabase
+            # sizes are points (24 pt = 32 px at 96 DPI), which made every
+            # label 1.33x too large (the old empirical 1.4 label factor).
             qfont = qfontdb.font(family, style, self.font_render_size)
+            qfont.setPixelSize(int(self.font_render_size))
             hi_font = QFont(qfont)
-            hi_font.setPointSizeF(qfont.pointSizeF() * self.supersample)
+            hi_font.setPixelSize(int(self.font_render_size * self.supersample))
             renderer = _GlyphRenderer(self, qfont, hi_font)
 
             self._generate_blocks_for_fontstack(renderer, fontstack_name, fontstack_dir, codepoints)
@@ -494,7 +498,22 @@ class _GlyphRenderer:
         width_field = max(0, bitmap_width - 2 * _MAPLIBRE_GLYPH_BORDER)
         height_field = max(0, bitmap_height - 2 * _MAPLIBRE_GLYPH_BORDER)
 
-        return sdf_bitmap.tobytes(), width_field, height_field, int(bounding_rect.left()), -int(bounding_rect.top())
+        # Glyph "top" follows the server-glyph convention (fontnik / sdf glyph
+        # foundry): distance from the baseline to the glyph top *minus one em*
+        # (24 px). MapLibre positions glyphs at SHAPING_DEFAULT_OFFSET (-17)
+        # minus top, so this puts the baseline ~0.29 em below the centre of
+        # the text box (QGIS: half the ascent-descent difference, ~0.35 em for
+        # DejaVu). Without the em offset text was drawn ~1 em above its box,
+        # e.g. above label background frames.
+        #
+        # The bitmap carries a ``render_buffer`` margin but MapLibre assumes
+        # the standard 3 px glyph border, so left/top are shifted by the
+        # difference; otherwise every glyph is drawn (buffer - 3) px right of
+        # and below its advance box.
+        extra = render_buffer - _MAPLIBRE_GLYPH_BORDER
+        left = int(bounding_rect.left()) - extra
+        top = -int(bounding_rect.top()) + extra - int(_FONT_RENDER_SIZE)
+        return sdf_bitmap.tobytes(), width_field, height_field, left, top
 
 
 def main():
