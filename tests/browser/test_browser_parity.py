@@ -16,7 +16,8 @@ from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransfor
                        QgsGeometry, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
                        QgsProcessingFeedback, QgsProject, QgsRectangle,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
-                       QgsSingleSymbolRenderer, QgsVectorLayer, QgsFillSymbol)
+                       QgsSingleSymbolRenderer, QgsVectorLayer, QgsFillSymbol,
+                       QgsLineSymbol)
 from qgis.PyQt.QtGui import QColor
 
 import sys
@@ -80,6 +81,9 @@ def _compare(tmp_path, layer, metric="near"):
     browser_png = str(tmp_path / "v_browser.png")
     if metric == "shape":  # pixel-level mismatch (the gallery score)
         return gallery.score(qgis_png, browser_png)["shape"]
+    if metric == "ink":  # inked pixel counts (qgis, browser)
+        result = gallery.score(qgis_png, browser_png)
+        return result["ink_qgis"], result["ink_browser"]
     return _near_fraction(qgis_png, browser_png)
 
 
@@ -144,3 +148,32 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
     # Pixel-level: dash lengths and caps (a 1-width error per dash fails).
     assert _compare(tmp_path, layer, metric="shape") < 0.08
+
+
+@pytest.mark.parametrize("placement", ["Line", "Curved"])
+def test_map_unit_line_labels_are_drawn(tmp_path, placement):
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=name:string", "roads", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttribute("name", "1ő")
+    points = [(-120, -80), (-40, 100), (30, -40), (120, 70)]
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(" + ", ".join(
+        f"{CENTER[0] + x} {CENTER[1] + y}" for x, y in points) + ")"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "roads.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "200,200,200"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = getattr(Qgis.LabelPlacement, placement)
+    fmt = QgsTextFormat()
+    fmt.setSize(40)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    # MapLibre fits line labels with the text size at zoom 18 (4x the z16
+    # size here): without per-zoom sizes the label is dropped.
+    ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink")
+    line_only = 0.5 * ink_qgis
+    assert ink_browser > line_only and ink_browser == pytest.approx(ink_qgis, rel=0.35)

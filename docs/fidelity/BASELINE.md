@@ -86,6 +86,9 @@ now has a regression test.
 | 28 | Nested geometry generators dropped | inner generators evaluated on mirrored painter geometry, outputs coerced to the sub-symbol type | `test_nested_geometry_generators_match_qgis` |
 | 29 | Ring filter ignored | exterior-only / interior-only outlines drew every ring | `test_ring_filters_match_qgis` |
 | 30 | SVG fill stroke missing; empty SVG drawn | the stroke sub-symbol was never exported; an SVG fill without SVG data draws nothing in QGIS | `test_svg_fill_without_svg_draws_only_its_stroke` |
+| 31 | Stroke-only point patterns (Line, Cross, Cross2, ArrowHead markers) drawn as tiny sprites | QGIS renders a texture of stroked marker paths clipped per its clip mode | clipped line geometry on the pattern grid; `test_stroke_marker_patterns_match_qgis` |
+| 32 | Dash patterns wrong for pen styles and square caps | Qt pen presets (Dash 4/2, Dot 1/2, …) were not exported; Qt extends every dash by square caps, MapLibre only by round caps | Qt presets, square-cap dashes lengthened; `test_dash_patterns_follow_qt` (browser) |
+| 33 | Map-unit line labels missing | MapLibre checks that a line label fits along the line with the text size at zoom 18; map-unit text is 4x its z16 size there | one style layer per zoom below 18 with the size curve clamped to that zoom; labels that may overlap in QGIS (`displayAll`) allow overlap; `test_map_unit_line_labels_are_drawn` (browser) |
 
 ### Resolved suspicions
 

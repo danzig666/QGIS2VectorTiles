@@ -34,6 +34,10 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Unsupported fills (gradient, shapeburst, …) are omitted and reported instead of being
   drawn black; failed sprites are omitted and reported instead of being transparent.
 * Data-defined widths, sizes and opacities are converted to the browser's units.
+* Line labels with map-unit text sizes are drawn (MapLibre dropped them below zoom 18);
+  "show all labels" layers allow overlapping labels. A line label may still sit on a
+  different stretch of the line than in QGIS (QGIS prefers the middle) and repeats every
+  `symbol-spacing` pixels.
 * Line hatches (`LinePatternFill`) are visible and seamless; previously they were
   transparent.
 * Later rules of a rule-based renderer now draw above earlier ones (as in QGIS); symbol

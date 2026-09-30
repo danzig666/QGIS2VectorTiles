@@ -1,5 +1,6 @@
 """Convert QGIS Vector Tile Layer styles to MapLibre GL JSON style format."""
 
+import copy
 import json
 import math
 import os
@@ -1256,9 +1257,17 @@ class TextPropertyExtractor:
         return 45.0
 
     @staticmethod
-    def get_text_allow_overlap() -> bool:
-        """Return ``text-allow-overlap`` (MapLibre default: ``False``)."""
-        return False
+    def get_text_allow_overlap(label_settings: QgsPalLayerSettings = None) -> bool:
+        """Return ``text-allow-overlap``: QGIS labels that may overlap
+        ("show all labels", overlap if required / at no cost) are always
+        drawn; MapLibre has no "only if required" mode."""
+        if label_settings is None:
+            return False
+        try:
+            handling = label_settings.placementSettings().overlapHandling()
+        except AttributeError:  # QGIS < 3.26
+            return bool(getattr(label_settings, "displayAll", False))
+        return _enum_int(handling, 0) != 0  # Qgis.LabelOverlapHandling.PreventOverlap
 
     @staticmethod
     def get_text_ignore_placement() -> bool:
@@ -2590,7 +2599,7 @@ class QgisMapLibreStyleExporter:
             "text-size": text_size,
             "text-anchor": TextPropertyExtractor.get_text_anchor(label_settings),
             "text-justify": TextPropertyExtractor.get_text_justify(label_settings),
-            "text-allow-overlap": TextPropertyExtractor.get_text_allow_overlap(),
+            "text-allow-overlap": TextPropertyExtractor.get_text_allow_overlap(label_settings),
             "text-ignore-placement": TextPropertyExtractor.get_text_ignore_placement(),
             "text-optional": TextPropertyExtractor.get_text_optional(),
             "text-padding": TextPropertyExtractor.get_text_padding(),
@@ -2658,7 +2667,48 @@ class QgisMapLibreStyleExporter:
         else:
             self._apply_default_icon_props(layer_def)
 
-        self.style["layers"].append(layer_def)
+        self.style["layers"].extend(self._line_label_zoom_split(layer_def))
+
+    # MapLibre checks that a line label fits along its line with the
+    # text-size evaluated at zoom 18 (symbol_layout.ts, textMaxSize), whatever
+    # the tile zoom; map-unit text doubles per zoom, so below z18 labels that
+    # fit are dropped.
+    LINE_LABEL_FIT_ZOOM = 18
+
+    @classmethod
+    def _line_label_zoom_split(cls, layer_def: dict) -> list:
+        """A line label with a zoom-curve ``text-size`` as one style layer per
+        integer zoom below 18, each with the curve clamped to its own zoom
+        range (the sizes it renders are unchanged; the zoom-18 fit check then
+        uses the largest size the layer draws)."""
+        layout = layer_def["layout"]
+        size = layout.get("text-size")
+        if layout.get("symbol-placement") not in ("line", "line-center") \
+                or not ex.is_zoom_curve(size) or size[0] != "interpolate":
+            return [layer_def]
+        try:
+            values = {z: ex.evaluate_zoom_curve(size, z) for z in range(0, 25)}
+        except ex.ExpressionError:
+            return [layer_def]
+        low = layer_def.get("minzoom", 0)
+        high = layer_def.get("maxzoom", 24)
+        top = cls.LINE_LABEL_FIT_ZOOM
+        if low >= top:
+            return [layer_def]
+        out = []
+        for zoom in range(int(math.floor(low)), min(int(math.ceil(high)), top)):
+            part = copy.deepcopy(layer_def)
+            part["id"] = f"{layer_def['id']}_z{zoom}"
+            part["minzoom"] = max(low, zoom)
+            part["maxzoom"] = min(high, zoom + 1)
+            part["layout"]["text-size"] = ["interpolate", list(size[1]), ["zoom"],
+                                           zoom, values[zoom], zoom + 1, values[zoom + 1]]
+            out.append(part)
+        if high > top:
+            rest = copy.deepcopy(layer_def)
+            rest["minzoom"] = max(low, top)
+            out.append(rest)
+        return out
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:
