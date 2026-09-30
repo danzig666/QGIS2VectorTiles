@@ -389,3 +389,18 @@ def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") ->
     return (f"with_variable('q2vt_c', centroid({exterior}), "
             f"if(num_interior_rings({geom}) > 0 OR NOT intersects({exterior}, @q2vt_c), "
             f"point_on_surface({geom}), @q2vt_c))")
+
+
+def coerce_to_symbol_type(expression: str, symbol_type: int) -> str:
+    """Geometry generator output as its sub-symbol receives it
+    (``QgsGeometryGeneratorSymbolLayer::render`` coerces to MultiPoint /
+    MultiLineString / MultiPolygon): lines drawn by a line symbol from a
+    polygon are its rings, points drawn by a marker symbol from lines or
+    polygons are their vertices."""
+    if symbol_type == 1:
+        return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
+                f"'Polygon', boundary(@q2vt_coerce), @q2vt_coerce))")
+    if symbol_type == 0:
+        return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
+                f"'Point', @q2vt_coerce, nodes_to_points(@q2vt_coerce)))")
+    return expression

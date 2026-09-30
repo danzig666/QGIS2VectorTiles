@@ -109,6 +109,10 @@ from .fidelity.qgis_expr import bind_geometry, in_layer_crs, with_map_scale
 from .fidelity import materialize as mat
 from .fidelity.materialize import Recipe
 
+def _enum_value(value) -> int:
+    return int(getattr(value, "value", value))
+
+
 # Drawing rank of each feature under the renderer's order-by clauses.
 ORDER_FIELD = f"{_FIELD_PREFIX}_draw_order"
 # Data-defined label position of a callout leader (layer CRS).
@@ -1151,9 +1155,12 @@ class RulesExporter:
         if symbol_layer.layerType() == "CentroidFill":
             return [0, mat.centroid_fill_expression(bool(symbol_layer.pointOnSurface()))]
         if symbol_layer.layerType() == "GeometryGenerator":
-            target_geom = symbol_layer.subSymbol().type()
+            target_geom = _enum_value(symbol_layer.subSymbol().type())
             transform_expr = self._generator_in_layer_crs(
                 symbol_layer.geometryExpression(), flat_rule)
+            # As drawn by the sub-symbol (e.g. a "$geometry" generator with a
+            # line sub-symbol on a polygon layer draws the rings).
+            transform_expr = mat.coerce_to_symbol_type(transform_expr, target_geom)
         else:
             target_geom = flat_rule.get_attr("c")
             source_geom = flat_rule.get_attr("g")

@@ -354,3 +354,25 @@ def test_map_unit_interval_markers_match_qgis(plugin, tmp_path, along, offset, g
     assert exact and exact[-1][1].recipe.placements == ("Interval",)
     ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.08
+
+
+def test_nested_geometry_generators_match_qgis(plugin, tmp_path):
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "wave.gpkg"))
+    inner = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "triangular_wave($geometry, wavelength:=25, amplitude:=8)",
+        "SymbolType": "Line"})
+    inner.setSubSymbol(QgsLineSymbol.createSimple({"color": "black", "width": "0.6"}))
+    outer = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "$geometry",
+                                                    "SymbolType": "Line"})
+    outer.setSubSymbol(QgsLineSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([outer])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert len(rules) == 1
+    for output, rule in zip(outputs, rules):  # the styler draws with the sub-symbol
+        output.setRenderer(QgsSingleSymbolRenderer(
+            rule.rule.symbol().symbolLayer(0).subSymbol().clone()))
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05

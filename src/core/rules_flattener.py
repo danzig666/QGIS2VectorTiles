@@ -37,7 +37,9 @@ from ..utils.zoom_levels import ZoomLevels
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ZoomInterval
 from .fidelity import zoom as fidelity_zoom
-from .fidelity.qgis_expr import and_filters, enabled_condition, with_map_scale
+from .fidelity.qgis_expr import (and_filters, enabled_condition, substitute_geometry,
+                                 with_map_scale)
+from .fidelity.materialize import coerce_to_symbol_type
 from .materializer import SymbolMaterializer
 
 
@@ -568,11 +570,79 @@ class RulesFlattener:
             if flat_rule.get_attr("i") > self.max_zoom:
                 flat_rule.set_attr("i", self.max_zoom)
 
+    @classmethod
+    def _flatten_generators(cls, symbol):
+        """Symbol whose nested geometry generators are composed into single ones.
+
+        A generator whose sub-symbol holds further generators (e.g. an outer
+        ``$geometry`` drawn as a line around an inner ``wave($geometry)``)
+        becomes one generator per sub-symbol layer: the inner expression with
+        its geometry replaced by the outer one. Returns None when nothing is
+        nested.
+        """
+        from qgis.core import QgsGeometryGeneratorSymbolLayer  # pylint: disable=import-outside-toplevel
+        nested = any(
+            layer.layerType() == "GeometryGenerator" and layer.subSymbol() is not None and any(
+                sub.layerType() == "GeometryGenerator" for sub in layer.subSymbol().symbolLayers())
+            for layer in symbol.symbolLayers())
+        if not nested:
+            return None
+        result = symbol.clone()
+        for index in reversed(range(result.symbolLayerCount())):
+            result.deleteSymbolLayer(index)
+
+        def generator(expression, sub_symbol, template):
+            layer = QgsGeometryGeneratorSymbolLayer.create({
+                "geometryModifier": expression,
+                "SymbolType": {0: "Marker", 1: "Line", 2: "Fill"}[int(getattr(
+                    sub_symbol.type(), "value", sub_symbol.type()))]})
+            layer.setSubSymbol(sub_symbol)
+            layer.setUnits(template.units())
+            layer.setEnabled(template.enabled())
+            layer.setRenderingPass(template.renderingPass())
+            return layer
+
+        def expand(layer, expression):
+            sub = layer.subSymbol()
+            for index in range(sub.symbolLayerCount()):
+                inner = sub.symbolLayer(index)
+                if inner.layerType() == "GeometryGenerator" and inner.subSymbol() is not None:
+                    # The inner generator receives the outer output coerced to
+                    # the outer sub-symbol's type (rings for a line symbol...).
+                    received = coerce_to_symbol_type(
+                        expression, int(getattr(sub.type(), "value", sub.type())))
+                    # Inside another symbol QGIS evaluates a generator on the
+                    # painter geometry (y down), scaled back to its units
+                    # (QgsGeometryGeneratorSymbolLayer::render /
+                    # evaluateGeometryInPainterUnits): mirror, evaluate, mirror.
+                    mirrored = f"scale({received}, 1, -1, make_point(0, 0))"
+                    composed = (f"scale({substitute_geometry(inner.geometryExpression(), mirrored)}"
+                                f", 1, -1, make_point(0, 0))")
+                    yield from expand(inner, composed)
+                else:
+                    single = sub.clone()
+                    for i in reversed(range(single.symbolLayerCount())):
+                        if i != index:
+                            single.deleteSymbolLayer(i)
+                    yield generator(expression, single, layer)
+
+        for layer in symbol.symbolLayers():
+            if layer.layerType() == "GeometryGenerator" and layer.subSymbol() is not None:
+                for part in expand(layer, layer.geometryExpression()):
+                    result.appendSymbolLayer(part)
+            else:
+                result.appendSymbolLayer(layer.clone())
+        return result
+
     def _split_by_symbol_layers(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
         """Split a renderer rule into one rule per enabled symbol layer."""
         symbol = flat_rule.rule.symbol()
         if not symbol:
             return [flat_rule]
+        flattened = self._flatten_generators(symbol)
+        if flattened is not None:
+            flat_rule.rule.setSymbol(flattened)
+            symbol = flat_rule.rule.symbol()
 
         layer_count = symbol.symbolLayerCount()
         split_rules = []
