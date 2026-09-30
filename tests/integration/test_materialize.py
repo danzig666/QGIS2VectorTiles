@@ -10,7 +10,7 @@ from qgis.core import (Qgis, QgsFeature, QgsField, QgsFillSymbol, QgsGeometry,
                        QgsHashedLineSymbolLayer, QgsLinePatternFillSymbolLayer, QgsLineSymbol,
                        QgsMarkerLineSymbolLayer, QgsMarkerSymbol, QgsProcessingFeedback,
                        QgsRectangle, QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer,
-                       QgsVectorLayer)
+                       QgsVectorLayer, QgsSimpleLineSymbolLayer, QgsLineSymbolLayer)
 from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 
@@ -481,3 +481,41 @@ def test_random_marker_fill_is_materialized(plugin, tmp_path):
     assert len(points) == 1
     parts = sum(len(f.geometry().asGeometryCollection()) for f in points[0].getFeatures())
     assert parts == 2 * 9  # QGIS draws the count per feature
+
+
+@pytest.mark.parametrize("geometry,offset,ring_filter,dash_offset", [
+    ("line", 0, 0, 0), ("line", 4, 0, 3), ("holed", 0, 0, 0), ("holed", 3, 0, 5),
+    ("holed", 0, 1, 0)])
+def test_map_unit_dashes_match_qgis(plugin, tmp_path, geometry, offset, ring_filter, dash_offset):
+    """Qt starts the dash pattern on every line and ring and runs it across
+    vertices: the exported dashes are the QGIS dashes."""
+    from qgis.PyQt.QtCore import Qt
+    if geometry == "line":
+        layer = _layer("LineString", LINES, str(tmp_path / "dash.gpkg"))
+    else:
+        layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 40, -20 71, -97 40, -97 -83),"
+                                   "(-60 -40, -30 -40, -30 -10, -60 -10, -60 -40))"],
+                       str(tmp_path / "dash.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 2.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector([9.0, 5.0, 2.0, 5.0])
+    line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    line.setDashPatternOffset(dash_offset)
+    line.setDashPatternOffsetUnit(Qgis.RenderUnit.MapUnits)
+    if ring_filter:
+        line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    symbol = QgsLineSymbol([line]) if geometry == "line" else QgsFillSymbol([line])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    dashed = [o for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert len(dashed) == 1 and rules[-1].recipe.kind == "dash_segments"
+    for output in dashed:  # the styler draws the outline as lines
+        output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol(
+            [rules[-1].rule.symbol().symbolLayer(0).clone()])))
+    ours = ink_mask(render(dashed, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05

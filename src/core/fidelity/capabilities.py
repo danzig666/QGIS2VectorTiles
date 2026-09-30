@@ -23,7 +23,7 @@ DDP_EMITTERS: Dict[str, frozenset] = {
     "fill": frozenset({"FillColor", "Opacity", "StrokeColor", "Color"}),
     "marker": frozenset({"Size", "Angle", "Opacity", "any other (sprite variants)"}),
     "marker_line": frozenset({"Opacity", "Interval"}),
-    "font_marker": frozenset({"Char", "Size", "Angle", "Opacity", "FillColor", "Color"}),
+    "font_marker": frozenset({"Character", "Size", "Angle", "Opacity", "FillColor", "Color"}),
     "pattern": frozenset(),
 }
 
@@ -53,10 +53,15 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Qt brush styles other than solid/no-brush are drawn solid.",),
                ("tests/integration/test_converter.py",)),
     Capability("SimpleLine", "line", Strategy.NATIVE,
-               "Stroke color, width, opacity, offset, cap, join and dash patterns.",
+               "Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit "
+               "custom dashes are exported as their dashes (Qt pattern restarted on every "
+               "line and ring) from the zoom where the pattern is 6 px long.",
                ("Map-unit widths become exponential zoom curves.",
-                "Dash lengths are scaled by MapLibre with the line width."),
-               ("tests/integration/test_converter.py",)),
+                "Other dashes are MapLibre dash arrays: they restart where tiles clip a line.",
+                "Aligned or corner-tweaked dash patterns and trimmed lines use MapLibre "
+                "dash arrays."),
+               ("tests/integration/test_converter.py", "tests/integration/test_materialize.py",
+                "tests/browser/test_browser_parity.py")),
     Capability("SimpleMarker", "marker", Strategy.SPRITE,
                "Plain circles (solid or no stroke, no offset/effect) become native circle "
                "layers with data-defined size, colours and stroke width; other shapes are "

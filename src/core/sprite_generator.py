@@ -206,9 +206,25 @@ class SymbolImage:
             painter.end()
         return image
 
+    @staticmethod
+    def _independent_copy(symbol: QgsSymbol) -> QgsSymbol:
+        """A copy sharing no data-defined property state with ``symbol``.
+
+        ``clone()`` shares each QgsProperty's cached expression; a sprite
+        variant rendered from such a clone intermittently evaluated its
+        data-defined character to NULL. A symbol read back from XML has
+        fresh properties."""
+        from qgis.core import QgsReadWriteContext, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+        clone = symbol.clone()
+        document = QDomDocument()
+        element = QgsSymbolLayerUtils.saveSymbol("sprite", clone, document, QgsReadWriteContext())
+        copy = QgsSymbolLayerUtils.loadSymbol(element, QgsReadWriteContext())
+        return copy if copy is not None else clone
+
     def _render(self):
         """Render at the requested scale and crop symmetrically about the origin."""
-        symbol = self.symbol.clone()
+        symbol = self._independent_copy(self.symbol)
         if not self.bake_rotation and isinstance(symbol, QgsMarkerSymbol):
             symbol.setAngle(0)
         canvas = int(_BASE_CANVAS_PX * max(1.0, self.scale_factor / 3.0))

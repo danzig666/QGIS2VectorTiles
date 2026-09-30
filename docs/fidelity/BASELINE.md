@@ -93,6 +93,8 @@ now has a regression test.
 | 35 | Outline symbols on polygons started at the wrong vertex; holes rewound | `fixgeometries` (structure) rewrites *valid* polygons too (new start vertex, normalised ring orientation); QGIS draws marker intervals, dashes and offsets along the rings as stored | only invalid geometries are repaired; holed case of `test_map_unit_interval_markers_match_qgis` |
 | 36 | Interval markers on holes continued the exterior's phase | rings of a polygon outline were one multi-line | one line per ring |
 | 37 | Font markers beyond U+FFFF drawn as boxes; data-defined text cut off in sprites | MapLibre glyph ranges end at U+FFFF; sprite canvas sized without the feature's attributes | such markers become sprites (per distinct value); `test_font_markers_beyond_the_bmp_become_sprites`, `test_data_defined_font_marker_text_fits_the_sprite` |
+| 38 | Dashes misplaced against markers drawn in their gaps | MapLibre restarts a dash array wherever a tile clips the line; Qt runs the pattern from each line or ring start | map-unit dashes exported as their dashes; `test_map_unit_dashes_match_qgis` |
+| 39 | Data-defined sprite variants intermittently drawn with the static value | symbol clones share each property's cached expression state (about 40 % of runs evaluated the character to NULL) | sprites render from an XML copy of the symbol |
 
 ### Resolved suspicions
 

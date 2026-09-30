@@ -476,6 +476,58 @@ def arrow_body_for(recipe: Recipe, export_crs: str = "EPSG:3857", cuts: bool = T
             f"{body('@q2vt_src')}), '{crs}', '{export_crs}')")
 
 
+def dash_recipe(pattern, dash_offset: float, construction_crs: str, offset: float = 0.0,
+                ring_filter: int = 0) -> Recipe:
+    """Map-unit dash pattern drawn as its dashes (see :func:`dash_expression`)."""
+    params = [("pattern", tuple(float(v) for v in pattern)), ("dash_offset", float(dash_offset)),
+              ("crs", construction_crs), ("ring_filter", int(ring_filter))]
+    if offset:
+        params.append(("offset", float(offset)))
+    return Recipe("dash_segments", (), tuple(params))
+
+
+def dash_expression(recipe: Recipe, lines: str, export_crs: str = "EPSG:3857") -> str:
+    """The dashes of a Qt dash pattern along ``lines`` (export CRS).
+
+    Qt starts the pattern afresh on every line part and ring (QGIS draws
+    each separately) at ``dash offset`` into the pattern, and continues it
+    across vertices. Lengths are measured in the recipe CRS (map units).
+    MapLibre instead restarts dashes wherever a tile clips the line, which
+    moves them against markers placed in the gaps.
+    """
+    pattern = list(recipe.param("pattern"))
+    if len(pattern) % 2:
+        pattern += pattern
+    period = sum(pattern)
+    if period <= 0:
+        raise ValueError("Dash pattern must have a positive length")
+    starts = [sum(pattern[:i]) for i in range(0, len(pattern), 2)]
+    lengths = pattern[0::2]
+    count = len(starts)
+    shift = float(recipe.param("dash_offset", 0.0)) % period
+    crs = recipe.param("crs") or export_crs
+    source = lines if crs == export_crs else f"transform({lines}, '{export_crs}', '{crs}')"
+
+    def pick(values):
+        return f"array({', '.join(repr(float(v)) for v in values)})[@element % {count}]"
+    dash = (f"with_variable('q2vt_d', array(floor(@element / {count}) * {period!r} + "
+            f"{pick(starts)} - {shift!r}, {pick(lengths)}), "
+            f"if(@q2vt_d[0] + @q2vt_d[1] <= 0 OR @q2vt_d[0] >= @q2vt_n[1], NULL, "
+            f"line_substring(@q2vt_n[0], max(0, @q2vt_d[0]), "
+            f"min(@q2vt_n[1], @q2vt_d[0] + @q2vt_d[1]))))")
+    per_line = (f"with_variable('q2vt_n', array(if(is_multipart(@q2vt_ls), "
+                f"geometry_n(@q2vt_ls, @element), @q2vt_ls), 0), "
+                f"with_variable('q2vt_n', array(@q2vt_n[0], length(@q2vt_n[0])), "
+                f"collect_geometries(array_filter(array_foreach(generate_series(0, {count} * "
+                f"(floor((@q2vt_n[1] + {shift!r}) / {period!r}) + 1) - 1), {dash}), "
+                f"@element IS NOT NULL))))")
+    # collect_geometries flattens the per-line multi-lines.
+    body = (f"with_variable('q2vt_ls', {source}, collect_geometries(array_filter(array_foreach("
+            f"generate_series(1, num_geometries(@q2vt_ls)), {per_line}), "
+            f"@element IS NOT NULL AND NOT is_empty(@element))))")
+    return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
+
+
 def _ring_buffer(ring: str, distance: str) -> str:
     """One ring buffered as its own polygon (miter joins, limit 2) and returned
     as a counter-clockwise line, like ``QgsSymbolLayerUtils::offsetLine`` for

@@ -14,7 +14,7 @@ Generated from `src/core/fidelity/capabilities.py` by `tools/generate_capabiliti
 | `InterpolatedLine` | line | unsupported | Not supported. | — |
 | `Lineburst` | line | unsupported | Not supported. | — |
 | `RasterLine` | line | approximate | Emitted as a line pattern from the image preview. | — |
-| `SimpleLine` | line | native | Stroke color, width, opacity, offset, cap, join and dash patterns. | Map-unit widths become exponential zoom curves.<br>Dash lengths are scaled by MapLibre with the line width. |
+| `SimpleLine` | line | native | Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit custom dashes are exported as their dashes (Qt pattern restarted on every line and ring) from the zoom where the pattern is 6 px long. | Map-unit widths become exponential zoom curves.<br>Other dashes are MapLibre dash arrays: they restart where tiles clip a line.<br>Aligned or corner-tweaked dash patterns and trimmed lines use MapLibre dash arrays. |
 | `CentroidFill` | marker | materialized | Marker points at the QGIS position (exterior-ring centroid, or GEOS point-on-surface when requested and needed). | Markers are not clipped to the polygon. |
 | `EllipseMarker` | marker | sprite | Rendered by QGIS to a sprite. | — |
 | `FilledMarker` | marker | sprite | Rendered by QGIS to a sprite. | — |
@@ -32,7 +32,7 @@ Generated from `src/core/fidelity/capabilities.py` by `tools/generate_capabiliti
 ## Data-defined properties with a browser emitter
 
 - **fill**: Color, FillColor, Opacity, StrokeColor
-- **font_marker**: Angle, Char, Color, FillColor, Opacity, Size
+- **font_marker**: Angle, Character, Color, FillColor, Opacity, Size
 - **line**: Color, Offset, Opacity, StrokeColor, StrokeWidth
 - **marker**: Angle, Opacity, Size, any other (sprite variants)
 - **marker_line**: Interval, Opacity

@@ -25,6 +25,7 @@ from typing import List, Optional
 from qgis.core import (
     Qgis,
     QgsLineSymbol,
+    QgsLineSymbolLayer,
     QgsMarkerLineSymbolLayer,
     QgsMarkerSymbol,
     QgsProject,
@@ -121,6 +122,10 @@ class SymbolMaterializer:
         kind = layer.layerType()
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
+        if kind == "SimpleLine":
+            dashes = self._dash_segments(flat_rule, layer)
+            if dashes is not None:
+                return dashes
         if kind in ("SimpleLine", "MarkerLine", "HashLine") and flat_rule.get_attr("g") == 2 \
                 and (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
             outline = self._polygon_outline_offset(flat_rule, layer)
@@ -195,6 +200,62 @@ class SymbolMaterializer:
             converted = self._hash_as_marker_line(clone, rule)
             rule.rule.symbol().changeSymbolLayer(0, converted)
         return [rule]
+
+    # Map-unit dashes become line features from the zoom where the pattern
+    # period reaches this many CSS px (below that MapLibre dashes are used).
+    DASH_MIN_PERIOD_PX = 6.0
+
+    def _dash_segments(self, flat_rule: FlattenedRule, layer):
+        """Map-unit custom dashes as their dashes: Qt starts the pattern on
+        every line and ring and runs it across vertices, while MapLibre
+        restarts it wherever a tile clips the line, which misplaces dashes
+        against markers drawn in the gaps. Solid lines with the layer's cap
+        are drawn along the dashes."""
+        if not layer.useCustomDashPattern() or \
+                normalize_unit(layer.customDashPatternUnit()) != "map" or \
+                layer.penStyle() == Qt.PenStyle.NoPen:
+            return None
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        if any(props.isActive(k) for k in (P.PropertyCustomDash, P.PropertyOffset,
+                                           P.PropertyDashPatternOffset,
+                                           P.PropertyTrimStart, P.PropertyTrimEnd)):
+            return None
+        if layer.alignDashPattern() or layer.tweakDashPatternOnCorners() or \
+                layer.trimDistanceStart() or layer.trimDistanceEnd():
+            return None
+        pattern = [float(v) for v in layer.customDashVector()]
+        if not pattern or min(pattern) < 0 or sum(pattern[0::2]) <= 0 or \
+                any(v <= 0 for v in pattern[0::2]):
+            return None
+        dash_offset = 0.0
+        if layer.dashPatternOffset():
+            if normalize_unit(layer.dashPatternOffsetUnit()) != "map":
+                return None
+            dash_offset = float(layer.dashPatternOffset())
+        offset = 0.0
+        if abs(layer.offset()) > 1e-9:
+            if normalize_unit(layer.offsetUnit()) != "map":
+                return None
+            offset = float(layer.offset())
+        polygon = flat_rule.get_attr("g") == 2
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        recipe = mat.dash_recipe(pattern, dash_offset, crs, offset,
+                                 _ring_filter(layer) if polygon else 0)
+
+        def dashes(rule):
+            derived = rule.derive()
+            clone = derived.rule.symbol().symbolLayer(0)
+            clone.setUseCustomDashPattern(False)
+            clone.setPenStyle(Qt.PenStyle.SolidLine)
+            clone.setOffset(0.0)
+            if hasattr(clone, "setRingFilter"):
+                clone.setRingFilter(QgsLineSymbolLayer.RenderRingFilter.AllRings)
+            derived.recipe = recipe
+            derived.set_attr("m", 2)
+            return [derived]
+        period = sum(pattern) * (2 if len(pattern) % 2 else 1)
+        return self._dense_split(flat_rule, period, dashes, min_px=self.DASH_MIN_PERIOD_PX)
 
     # A map-unit grid becomes point features only from the zoom where its
     # spacing reaches this many CSS px; below that it is a per-zoom texture
