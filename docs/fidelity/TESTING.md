@@ -62,6 +62,14 @@ QT_QPA_PLATFORM=offscreen python3 tools/gallery/build_gallery.py \
     --style-db symbology-style.db --tags mytag --qml styles/*.qml --out /tmp/gallery
 ```
 
+The default shapes are simple (a three-segment line, a pentagon with a hole) at one zoom.
+`--hard` uses demanding ones instead: a long line with a sharp zigzag, a run of 1.6 m
+segments, a smooth 60-vertex wave, a hairpin and a closed loop; a two-part polygon with a
+many-vertex curve, a narrow notch, an acute spike, a saw of 2 m segments and two holes.
+Every cell is centred on a z14 tile corner, so tile edges cross the shapes at every zoom,
+and each style is rendered at several zooms (`--zooms`, default 14.6, 16.25, 17.8; the
+item score is the mean). The summary line gives the mean per geometry type.
+
 Behaviour is checked against the QGIS source (`src/core/symbology`,
 `src/core/labeling`) before it is reproduced, then confirmed by rendering.
 

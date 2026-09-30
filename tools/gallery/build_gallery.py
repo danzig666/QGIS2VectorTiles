@@ -13,6 +13,12 @@ Usage (QGIS Python, e.g. ``python3`` of your QGIS install)::
     python3 tools/gallery/build_gallery.py --style-db symbology-style.db \
         --tags abel,ábel --qml path/to/*.qml --out /tmp/gallery
 
+``--hard`` swaps the simple shapes for demanding ones (long lines with sharp
+corners, very short segments and a closed loop; multipart polygons with a
+many-vertex curve, a narrow notch, a spike and two holes), centres every cell
+on a tile corner so the shapes cross tile edges at every zoom, and renders
+each style at several zooms (``--zooms``, default 14.6, 16.25 and 17.8).
+
 Browser capture needs Node and ``npm install`` in ``tests/browser``.
 """
 
@@ -180,8 +186,72 @@ def describe_layer(item):
     return geom, rules, exprs, probe
 
 
-def feature_geometries(geom, x0, y0, n):
+HARD_ZOOMS = (14.6, 16.25, 17.8)
+TILE14 = EARTH / 2 ** 14   # a z14 tile corner is a tile corner at every higher zoom
+
+
+def cell_origin(index, hard):
+    """Top-left corner of the cell of style ``index``: hard cells are centred
+    on a z14 tile corner, so tile edges cross them at every zoom."""
+    row, col = divmod(index, COLUMNS)
+    if not hard:
+        return ORIGIN[0] + col * (CELL + GAP), ORIGIN[1] - row * (CELL + GAP)
+    k0 = round((ORIGIN[0] + EARTH / 2) / TILE14)
+    j0 = round((EARTH / 2 - ORIGIN[1]) / TILE14)
+    cx = -EARTH / 2 + (k0 + col) * TILE14
+    cy = EARTH / 2 - (j0 + row) * TILE14
+    return cx - CELL / 2, cy + CELL / 2
+
+
+def _wkt_points(points):
+    return ", ".join(f"{x:.3f} {y:.3f}" for x, y in points)
+
+
+def _hard_line(cx, cy, s):
+    """Long line (sharp zigzag, hairpin, very short segments, smooth wave)
+    plus a closed loop, in a cell of size ``s`` centred on (cx, cy)."""
+    def at(u, v):
+        return cx + (u - 0.5) * s, cy + (v - 0.5) * s
+    path = [at(0.04, 0.10), at(0.12, 0.42), at(0.17, 0.12), at(0.22, 0.44),  # sharp zigzag
+            at(0.26, 0.14), at(0.30, 0.46)]
+    path += [at(0.30 + 0.004 * k, 0.46 + 0.004 * (k % 2)) for k in range(1, 16)]  # 1.6 m steps
+    path += [at(0.40 + 0.5 * t / 60, 0.55 + 0.2 * math.sin(t / 60 * 3 * math.pi))
+             for t in range(61)]                                                # smooth wave
+    path += [at(0.93, 0.70), at(0.60, 0.72)]                                     # hairpin
+    loop = [at(0.70 + 0.12 * math.cos(a / 24 * 2 * math.pi),
+               0.25 + 0.12 * math.sin(a / 24 * 2 * math.pi)) for a in range(25)]
+    return f"MULTILINESTRING(({_wkt_points(path)}),({_wkt_points(loop)}))"
+
+
+def _hard_polygon(cx, cy, s):
+    """Two-part polygon: many-vertex curved edge, deep narrow notch, acute
+    spike, a saw of short segments and two holes; plus a small island."""
+    def at(u, v):
+        return cx + (u - 0.5) * s, cy + (v - 0.5) * s
+    ring = [at(0.06, 0.08), at(0.45, 0.08), at(0.47, 0.40), at(0.49, 0.08)]      # narrow notch
+    ring += [at(0.62 + 0.005 * k, 0.08 + 0.006 * (k % 2)) for k in range(0, 20)]  # saw, 2 m steps
+    ring += [at(0.90, 0.08)]
+    ring += [at(0.90 - 0.30 * (1 - math.cos(t / 40 * math.pi / 2)),
+                0.08 + 0.80 * math.sin(t / 40 * math.pi / 2)) for t in range(1, 41)]  # curve
+    ring += [at(0.45, 0.88), at(0.30, 0.97), at(0.40, 0.84)]                       # acute spike
+    ring += [at(0.06, 0.80), at(0.06, 0.08)]
+    hole1 = [at(0.15, 0.20), at(0.30, 0.20), at(0.30, 0.35), at(0.15, 0.35), at(0.15, 0.20)]
+    hole2 = [at(0.52, 0.52), at(0.66, 0.46), at(0.60, 0.64), at(0.52, 0.52)]
+    island = [at(0.80, 0.80), at(0.95, 0.82), at(0.92, 0.95), at(0.80, 0.80)]
+    return (f"MULTIPOLYGON((({_wkt_points(ring)}),({_wkt_points(hole1)}),"
+            f"({_wkt_points(hole2)})),(({_wkt_points(island)})))")
+
+
+def feature_geometries(geom, x0, y0, n, hard=False):
     """``n`` geometries of ``geom`` type inside the cell at (x0, y0)."""
+    if hard and geom in ("LineString", "Polygon"):
+        # One demanding shape per rule, side by side; rule 1 at the centre.
+        out = []
+        for k in range(n):
+            cx, cy = x0 + CELL / 2 + k * CELL * 1.2, y0 - CELL / 2
+            out.append(_hard_line(cx, cy, CELL) if geom == "LineString"
+                       else _hard_polygon(cx, cy, CELL))
+        return out
     cols = max(1, math.ceil(math.sqrt(n)))
     size = CELL / cols
     out = []
@@ -203,7 +273,7 @@ def feature_geometries(geom, x0, y0, n):
     return out
 
 
-def build_layer(item, index, data_dir):
+def build_layer(item, index, data_dir, hard=False):
     from qgis.core import (QgsCoordinateTransformContext, QgsExpression, QgsFeature, QgsField,
                            QgsGeometry, QgsSingleSymbolRenderer, QgsVectorFileWriter,
                            QgsVectorLayer, QgsVectorLayerSimpleLabeling)
@@ -216,15 +286,14 @@ def build_layer(item, index, data_dir):
     for flt, _ in rules:
         for m in _BARE_BOOL.finditer(flt or ""):
             bools.add(m.group(1))
-    row, col = divmod(index, COLUMNS)
-    x0 = ORIGIN[0] + col * (CELL + GAP)
-    y0 = ORIGIN[1] - row * (CELL + GAP)
-    layer = QgsVectorLayer(f"{geom}?crs=EPSG:3857", f"i{index:03d}", "memory")
+    x0, y0 = cell_origin(index, hard)
+    multi = "Multi" if hard and geom in ("LineString", "Polygon") else ""
+    layer = QgsVectorLayer(f"{multi}{geom}?crs=EPSG:3857", f"i{index:03d}", "memory")
     fields = sorted(columns)
     layer.dataProvider().addAttributes(
         [QgsField(c, QVariant.Int if c in bools else QVariant.String) for c in fields])
     layer.updateFields()
-    geoms = feature_geometries(geom, x0, y0, len(rules))
+    geoms = feature_geometries(geom, x0, y0, len(rules), hard)
     features = []
     for k, ((flt, label), wkt) in enumerate(zip(rules, geoms)):
         feature = QgsFeature(layer.fields())
@@ -259,7 +328,7 @@ def build_layer(item, index, data_dir):
         saved.loadNamedStyle(item["path"])
     saved.setScaleBasedVisibility(False)
     center = (x0 + CELL / 2, y0 - CELL / 2)
-    return saved, center
+    return saved, center, geom
 
 
 # --------------------------------------------------------------------------
@@ -319,14 +388,19 @@ def write_html(out_dir, cards, summary):
     for card in cards:
         diags = "".join(f"<li class='{esc(d['severity'])}'><code>{esc(d['code'])}</code> "
                         f"{esc(d['message'])}</li>" for d in card["diagnostics"])
+        views = card.get("views") or [{"id": card["id"], "zoom": None, "score": card["score"]}]
+        figures = []
+        for view in views:
+            at = f" · z{view['zoom']:g} {view['score']['shape']:.1%}" if len(views) > 1 else ""
+            figures.append(f"""
+  <div class="imgs">
+    <figure><img src="{esc(view['id'])}_qgis.png" alt="QGIS render of {esc(card['name'])}"><figcaption>QGIS{esc(at)}</figcaption></figure>
+    <figure><img src="{esc(view['id'])}_browser.png" alt="Browser render of {esc(card['name'])}"><figcaption>Browser (MapLibre)</figcaption></figure>
+    <figure><img src="{esc(view['id'])}_diff.png" alt="Difference"><figcaption>Difference</figcaption></figure>
+  </div>""")
         rows.append(f"""
 <section class="card">
-  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · shape mismatch {card['score']['shape']:.1%}</small></h2>
-  <div class="imgs">
-    <figure><img src="{esc(card['id'])}_qgis.png" alt="QGIS render of {esc(card['name'])}"><figcaption>QGIS</figcaption></figure>
-    <figure><img src="{esc(card['id'])}_browser.png" alt="Browser render of {esc(card['name'])}"><figcaption>Browser (MapLibre)</figcaption></figure>
-    <figure><img src="{esc(card['id'])}_diff.png" alt="Difference"><figcaption>Difference</figcaption></figure>
-  </div>
+  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · {esc(card.get('geometry', ''))} · shape mismatch {card['score']['shape']:.1%}</small></h2>{''.join(figures)}
   <ul class="diags">{diags or '<li class="ok">No diagnostics</li>'}</ul>
 </section>""")
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -337,7 +411,7 @@ def write_html(out_dir, cards, summary):
 body{{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0;padding:16px}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin:0 0 16px}}
 .card h2{{font-size:16px;margin:0 0 8px}} small{{color:var(--muted);font-weight:normal}}
-.imgs{{display:flex;flex-wrap:wrap;gap:8px}} figure{{margin:0}} img{{width:260px;max-width:100%;border:1px solid var(--line);background:#fff}}
+.imgs{{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px}} figure{{margin:0}} img{{width:260px;max-width:100%;border:1px solid var(--line);background:#fff}}
 figcaption{{color:var(--muted);font-size:12px}} .diags{{margin:8px 0 0;padding-left:18px}}
 .error{{color:var(--err)}} .warning{{color:var(--warn)}}
 </style></head><body><h1>Style gallery</h1><p>{esc(summary)}</p>{''.join(rows)}</body></html>"""
@@ -357,7 +431,15 @@ def main():
     parser.add_argument("--names", default="",
                         help="only styles whose name contains one of these (comma-separated)")
     parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument("--hard", action="store_true",
+                        help="demanding line/polygon shapes across tile edges, several zooms")
+    parser.add_argument("--zooms", default="",
+                        help="comma-separated zooms (default: --zoom, or 14.6,16.25,17.8 with --hard)")
     args = parser.parse_args()
+    if args.zooms:
+        zooms = [float(z) for z in args.zooms.split(",") if z.strip()]
+    else:
+        zooms = list(HARD_ZOOMS) if args.hard else [args.zoom]
 
     global _APP
     _APP = init_qgis()  # keep a reference: QGIS must outlive the export
@@ -376,7 +458,7 @@ def main():
     project.setEllipsoid("EPSG:7019")
     layers, centers = [], []
     for index, item in enumerate(items):
-        layer, center = build_layer(item, index, data_dir)
+        layer, center, item["geometry"] = build_layer(item, index, data_dir, args.hard)
         item["id"] = f"i{index:03d}"
         layers.append(layer)
         centers.append(center)
@@ -386,14 +468,15 @@ def main():
                   enumerate(project.layerTreeRoot().findLayers())}
     xs = [c[0] for c in centers]
     ys = [c[1] for c in centers]
-    extent = QgsRectangle(min(xs) - CELL, min(ys) - CELL, max(xs) + CELL, max(ys) + CELL)
+    extent = QgsRectangle(min(xs) - CELL, min(ys) - CELL, max(xs) + 2 * CELL, max(ys) + CELL)
 
     class Feedback(QgsProcessingFeedback):
         def pushInfo(self, info):  # noqa: N802
             print(info, flush=True)
 
     started = time.time()
-    exporter = QGIS2VectorTiles(min_zoom=14, max_zoom=int(math.ceil(args.zoom)), extent=extent,
+    exporter = QGIS2VectorTiles(min_zoom=min(14, int(math.floor(min(zooms)))),
+                                max_zoom=int(math.ceil(max(zooms))), extent=extent,
                                 output_dir=os.path.join(out, "export"), feedback=Feedback(),
                                 serve=False, background_type=2)
     export_dir = exporter.convert_project_to_vector_tiles()
@@ -403,14 +486,19 @@ def main():
     img_dir = os.path.join(out, "images")
     os.makedirs(img_dir)
     views = []
+    from qgis.core import QgsCoordinateTransform
+    to_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
+                                    QgsCoordinateReferenceSystem("EPSG:4326"), project)
+
+    def view_id(item, k):  # single-zoom ids stay i000, as before
+        return item["id"] if len(zooms) == 1 else f"{item['id']}_z{k}"
     for item, layer, center in zip(items, layers, centers):
-        qgis_render(layer, center, args.zoom, args.size, os.path.join(img_dir, f"{item['id']}_qgis.png"))
-        from qgis.core import QgsCoordinateTransform
-        to_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
-                                        QgsCoordinateReferenceSystem("EPSG:4326"), project)
         point = to_wgs.transform(center[0], center[1])
-        views.append({"id": item["id"], "lon": point.x(), "lat": point.y(), "zoom": args.zoom,
-                      "width": args.size, "height": args.size})
+        for k, zoom in enumerate(zooms):
+            qgis_render(layer, center, zoom, args.size,
+                        os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"))
+            views.append({"id": view_id(item, k), "lon": point.x(), "lat": point.y(),
+                          "zoom": zoom, "width": args.size, "height": args.size})
     with open(os.path.join(out, "views.json"), "w", encoding="utf-8") as f:
         json.dump(views, f)
 
@@ -452,16 +540,30 @@ def main():
             return (d.layer_id == layer.id() or (d.layer_id or "").startswith(prefix)
                     or owner.startswith(prefix))
         own = [d.to_dict() for d in diagnostics if belongs(d)]
-        result = score(os.path.join(img_dir, f"{item['id']}_qgis.png"),
-                       os.path.join(img_dir, f"{item['id']}_browser.png"))
+        per_zoom = []
+        for k, zoom in enumerate(zooms):
+            result = score(os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"),
+                           os.path.join(img_dir, f"{view_id(item, k)}_browser.png"))
+            per_zoom.append({"id": view_id(item, k), "zoom": zoom, "score": result})
+        # The item's score is the mean over its zooms.
+        result = dict(per_zoom[0]["score"])
+        result["shape"] = round(sum(v["score"]["shape"] for v in per_zoom) / len(per_zoom), 4)
         cards.append({"id": item["id"], "name": item["name"], "kind": item["kind"],
-                      "score": result, "diagnostics": own})
+                      "geometry": item["geometry"], "score": result, "diagnostics": own,
+                      "views": per_zoom})
     cards.sort(key=lambda c: -c["score"]["shape"])
     with open(os.path.join(img_dir, "results.json"), "w", encoding="utf-8") as f:
         json.dump(cards, f, indent=1, ensure_ascii=False)
     mean = sum(c["score"]["shape"] for c in cards) / max(1, len(cards))
-    write_html(img_dir, cards, f"{len(cards)} styles, zoom {args.zoom}, mean shape mismatch "
-               f"{mean:.1%}. Worst first.")
+    by_geometry = []
+    for geometry in ("Point", "LineString", "Polygon"):
+        values = [c["score"]["shape"] for c in cards if c["geometry"] == geometry]
+        if values:
+            by_geometry.append(f"{geometry.lower()}s {sum(values) / len(values):.1%} "
+                               f"({len(values)})")
+    write_html(img_dir, cards, f"{len(cards)} styles{' (hard shapes)' if args.hard else ''}, "
+               f"zoom {', '.join(f'{z:g}' for z in zooms)}, mean shape mismatch {mean:.1%} "
+               f"({'; '.join(by_geometry)}). Worst first.")
     print(f"Gallery: {os.path.join(img_dir, 'index.html')}")
 
 

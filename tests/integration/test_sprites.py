@@ -115,9 +115,14 @@ def test_screen_unit_point_pattern_texture(plugin, tmp_path):
         getattr(layer, f"set{unit}Unit")(Qgis.RenderUnit.Millimeters)
     name = exporter._register_point_pattern(layer)
     cells = exporter.pattern_images[name]
-    mm = 96 / 25.4
-    assert cells.img_1x.size == (round(4 * mm), round(2 * 3 * mm))
-    assert cells.img_2x.size == (round(8 * mm), round(12 * mm))
+    # MapLibre grows a texture 2x with the map until the next zoom: screen
+    # sizes are drawn at 1/sqrt(2), exact in the middle of every zoom.
+    from fidelity.patterns import point_pattern_cell
+    px = 96 / 25.4 * exporter.TEXTURE_SCREEN_SCALE
+    for ratio, image in ((1, cells.img_1x), (2, cells.img_2x)):
+        width, height, _, _ = point_pattern_cell(4 * px * ratio, 3 * px * ratio,
+                                                 2 * px * ratio, 0)
+        assert image.size == (width, height)
     assert cells.img_1x.getbbox() is not None
 
 
@@ -149,7 +154,7 @@ def test_data_defined_font_marker_text_fits_the_sprite(sg):
     assert wide.img.width > 5 * static.img.width
 
 
-def test_point_pattern_texture_applies_the_offset(plugin):
+def test_point_pattern_texture_applies_the_offset(plugin, monkeypatch):
     """QGIS shifts the markers inside the pattern cell by the offset; two
     patterns offset against each other (e.g. "\\" and "/" forming zig-zags)
     must not collapse onto the same place."""
@@ -162,6 +167,7 @@ def test_point_pattern_texture_applies_the_offset(plugin):
     exporter.profile = mc.ExportProfile()
     exporter.context = mc.ConversionContext(DiagnosticCollector())
     mc.PropertyExtractor.context = exporter.context
+    monkeypatch.setattr(exporter, "TEXTURE_SCREEN_SCALE", 1.0)  # whole-pixel shifts
     cells = []
     for offset in (0.0, 4.0):
         layer = QgsPointPatternFillSymbolLayer()
