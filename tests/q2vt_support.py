@@ -71,8 +71,9 @@ def register_plugin_package():
     module = importlib.util.module_from_spec(spec)
     sys.modules["q2vt_plugin"] = module
     spec.loader.exec_module(module)
-    prefix = "q2vt_plugin.src.core.fidelity"
-    for name, mod in list(sys.modules.items()):
-        if name == prefix or name.startswith(prefix + "."):
-            sys.modules["fidelity" + name[len(prefix):]] = mod
+    for prefix, alias in (("q2vt_plugin.src.core.fidelity", "fidelity"),
+                          ("q2vt_plugin.src.publishing", "publishing")):
+        for name, mod in list(sys.modules.items()):
+            if name == prefix or name.startswith(prefix + "."):
+                sys.modules[alias + name[len(prefix):]] = mod
     return module
