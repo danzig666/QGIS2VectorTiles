@@ -10,6 +10,8 @@
     "kind": {"enum": ["search", "features"]},
     "mode": {"enum": ["single", "prefix", "hash"]},
     "prefixLength": {"type": "integer", "minimum": 0},
+    "layers": {"type": "array", "items": {"type": "string"}},
+    "hash": {"type": "string"},
     "records": {"type": "integer", "minimum": 0},
     "normalization": {"type": "string"},
     "coverage": {
@@ -24,7 +26,7 @@
       "items": {
         "type": "object", "required": ["key", "path", "records", "bytes", "sha256"], "additionalProperties": false,
         "properties": {
-          "key": {"type": "string"}, "path": {"type": "string"},
+          "key": {"type": "string"}, "path": {"type": "string"}, "part": {"type": "integer", "minimum": 0},
           "records": {"type": "integer", "minimum": 0}, "bytes": {"type": "integer", "minimum": 0},
           "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         }

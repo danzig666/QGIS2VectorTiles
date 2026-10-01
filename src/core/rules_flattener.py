@@ -58,6 +58,8 @@ class RulesFlattener:
         self.layer_tree_root = QgsProject.instance().layerTreeRoot()
         # Publishing: exactly these layers, visible or not (None: visible layers).
         self.layer_ids = None if layer_ids is None else set(layer_ids)
+        self._legend_keys: dict = {}
+        self._current_provenance = None
         self.flattened_rules: List[FlattenedRule] = []
         self.feedback = feedback
         self.diagnostics = diagnostics or DiagnosticCollector()
@@ -144,6 +146,7 @@ class RulesFlattener:
             rule_system = self._get_or_convert_rule_system(layer, rule_type)
             if not rule_system:
                 continue
+            self._legend_keys = self._legend_key_map(layer, rule_system, rule_type)
             self._rule_systems.append(rule_system)
             self._drop_missing_field_properties(rule_system, layer, rule_type)
             root_rule = self._prepare_root_rule(rule_system, layer)
@@ -155,6 +158,63 @@ class RulesFlattener:
                 # because FlattenedRule.set_attr formats as 2 digits.
                 self._unique_counter = 0
                 self._flatten_rule(layer, layer_idx, root_rule, rule_type, 0, 0)
+
+    @staticmethod
+    @staticmethod
+    def _leader_provenance(pinned):
+        import dataclasses  # pylint: disable=import-outside-toplevel
+        if pinned.provenance is None:
+            return None
+        return dataclasses.replace(pinned.provenance, component="leader")
+
+    @staticmethod
+    def _legend_key_map(layer, rule_system, rule_type: int) -> dict:
+        """{rule key in ``rule_system``: (legend key, legend label)} of the
+        original renderer, for publication provenance.
+
+        Rule-based renderers keep their rule keys when cloned (identity);
+        single/categorized/graduated renderers were converted to rules in
+        the order of their active legend items, which carry the stable
+        category/range keys. Labeling rules keep their own keys."""
+        mapping = {}
+        if rule_type != 0:
+            for index, rule in enumerate(rule_system.rootRule().children()):
+                mapping[rule.ruleKey()] = (rule.ruleKey() if isinstance(layer.labeling(), QgsRuleBasedLabeling)
+                                           else "labels", rule.description() or "")
+            return mapping
+        renderer = layer.renderer()
+        if renderer is None or isinstance(renderer, QgsRuleBasedRenderer):
+            return mapping
+        try:
+            items = [item for item in renderer.legendSymbolItems()
+                     if item.symbol() is not None]
+        except (AttributeError, RuntimeError):
+            return mapping
+        if isinstance(renderer, (QgsCategorizedSymbolRenderer, QgsGraduatedSymbolRenderer)):
+            states = (renderer.categories() if isinstance(renderer, QgsCategorizedSymbolRenderer)
+                      else renderer.ranges())
+            items = [item for item, state in zip(items, states) if state.renderState()]
+        for rule, item in zip(rule_system.rootRule().children(), items):
+            mapping[rule.ruleKey()] = (item.ruleKey() or "single", item.label() or "")
+        return mapping
+
+    def _provenance(self, layer, rule, rule_type: int, origin, ancestors) -> object:
+        """RuleProvenance of a rule about to be flattened (see
+        publishing.provenance); ``origin`` is the rule an ELSE variant was
+        split from."""
+        from ..publishing.provenance import RuleProvenance  # pylint: disable=import-outside-toplevel
+        source = origin if origin is not None else rule
+        key = self._rule_key(source)
+        legend_key, label = self._legend_keys.get(key, (key, ""))
+        if not label:
+            label = (source.label() if rule_type == 0 else source.description()) or ""
+        parents = tuple(self._legend_keys.get(self._rule_key(a), (self._rule_key(a), ""))[0]
+                        for a in ancestors if self._rule_key(a))
+        return RuleProvenance(
+            layer_id=layer.id(), layer_name=layer.name(),
+            kind="symbology" if rule_type == 0 else "labeling",
+            rule_key=legend_key, rule_label=label, parent_keys=parents,
+            else_rule=self._is_else_rule(source))
 
     def _drop_missing_field_properties(self, rule_system, layer, rule_type: int) -> None:
         """Switch off data-defined properties that read a field the layer does
@@ -353,17 +413,24 @@ class RulesFlattener:
         rule_level: int,
         rule_idx: int,
         inherited_parent=None,
+        origin=None,
+        ancestors=(),
     ):
-        """Recursively flatten the rule hierarchy with property inheritance."""
+        """Recursively flatten the rule hierarchy with property inheritance.
+
+        ``origin``: the original rule of a split ELSE variant; ``ancestors``:
+        original parent rules (both only for publication provenance)."""
         # Children of an unprocessed node (the root) inherit from the node itself;
         # children of a processed node inherit from its accumulated (flattened) state.
         parent_for_children = rule
         if rule.parent() or rule_level > 0:  # split ELSE variants are parentless clones
+            self._current_provenance = self._provenance(layer, rule, rule_type, origin, ancestors)
             inheritance_source = self._process_rule(
                 layer, layer_idx, rule, rule_type, rule_level, rule_idx, inherited_parent
             )
             if inheritance_source is not None:
                 parent_for_children = inheritance_source
+        child_ancestors = tuple(ancestors) + ((origin or rule,) if rule_level > 0 else ())
         for child_idx, child in enumerate(rule.children()):
             if not child.active():
                 continue
@@ -373,7 +440,8 @@ class RulesFlattener:
             for variant in variants:
                 self._flatten_rule(
                     layer, layer_idx, variant, rule_type, rule_level + 1, child_idx,
-                    parent_for_children,
+                    parent_for_children, origin=child if variant is not child else None,
+                    ancestors=child_ancestors,
                 )
 
     @staticmethod
@@ -521,7 +589,8 @@ class RulesFlattener:
             self._fold_show_property(inherited_rule)
         # self._exclude_children_from_filter(inherited_rule, rule)
 
-        flat_rule = FlattenedRule(inherited_rule, layer)
+        flat_rule = FlattenedRule(inherited_rule, layer,
+                                  provenance=getattr(self, "_current_provenance", None))
         flat_rule.rule.setDescription("")
         self._set_rule_attributes(flat_rule, layer_idx, rule_type, rule_level, rule_idx)
 
@@ -960,7 +1029,7 @@ class RulesFlattener:
         recipe = Recipe("callout", params=(("x", x), ("y", y), ("anchor", anchor),
                                            ("crs", pinned.layer.crs().authid())))
         leader = FlattenedRule(rule, pinned.layer, "", pinned.visibility, recipe,
-                               self._CALLOUT_ORDER)
+                               self._CALLOUT_ORDER, provenance=self._leader_provenance(pinned))
         leader.set_attr("t", 0)
         leader.set_attr("c", 1)
         leader.set_attr("s", 0)

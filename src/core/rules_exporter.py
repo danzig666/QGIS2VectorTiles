@@ -124,6 +124,9 @@ def _enum_value(value) -> int:
 
 # Drawing rank of each feature under the renderer's order-by clauses.
 ORDER_FIELD = f"{_FIELD_PREFIX}_draw_order"
+# Stable original-feature key of published layers (string; see
+# publishing/identifiers.py), carried through every derived dataset.
+FEATURE_KEY_FIELD = f"{_FIELD_PREFIX}_feature_key"
 # Data-defined label position of a callout leader (layer CRS).
 CALLOUT_X_FIELD = f"{_FIELD_PREFIX}_callout_x"
 CALLOUT_Y_FIELD = f"{_FIELD_PREFIX}_callout_y"
@@ -193,6 +196,8 @@ class _SourceSnapshot:
     # The layer's CRS as the project has it (WKT). A data source without a
     # .prj, or with its CRS overridden in the project, reopens without it.
     crs_wkt: str = ""
+    # Publishing: QGIS expression of the stable feature key ("" = none).
+    feature_key: str = ""
 
     @property
     def needs_serial_read(self) -> bool:
@@ -316,8 +321,15 @@ class RulesExporter:
         diagnostics: Optional[DiagnosticCollector] = None,
         progress_range: Tuple[float, float] = (0.0, 100.0),
         parallel: bool = False,
+        feature_keys: Optional[Dict[str, str]] = None,
+        extra_tile_fields: Optional[Dict[str, List[str]]] = None,
     ):
         self.flattened_rules = flattened_rules
+        # Publishing: {layer id: QGIS expression of the stable feature key}
+        # (written to FEATURE_KEY_FIELD of every dataset of the layer) and
+        # {layer id: approved source fields kept in the tiles (filters)}.
+        self.feature_keys = dict(feature_keys or {})
+        self.extra_tile_fields = {k: list(v) for k, v in (extra_tile_fields or {}).items()}
         # Share of the Processing progress bar this export fills.
         self._progress_range = progress_range
         # Messages from worker threads, written by the main thread
@@ -449,6 +461,7 @@ class RulesExporter:
                 provider=r.layer.providerType(),
                 order_by=self._order_by(r.layer),
                 crs_wkt=r.layer.crs().toWkt(),
+                feature_key=self.feature_keys.get(lid, ""),
             )
 
         # Snapshot rule groups.
@@ -627,17 +640,24 @@ class RulesExporter:
 
                 # Materialise via fixgeometries(METHOD=0): does the first
                 # geometry-cleaning pass AND dumps provider data to Parquet
-                # in one shot.
+                # in one shot. Published layers first get their stable
+                # feature key, computed on the source (provider FIDs and
+                # attributes as the project has them).
+                source = layer
+                if src.feature_key:
+                    source = self._run_alg_safe(
+                        "fieldcalculator", "native", INPUT=layer, FIELD_NAME=FEATURE_KEY_FIELD,
+                        FIELD_TYPE=2, FIELD_LENGTH=0, FORMULA=src.feature_key)
                 if src.needs_serial_read:
                     with self._serial_read_lock:
                         self._run_alg_safe(
                             "fixgeometries", "native",
-                            INPUT=layer, METHOD=0, OUTPUT=out_path,
+                            INPUT=source, METHOD=0, OUTPUT=out_path,
                         )
                 else:
                     self._run_alg_safe(
                         "fixgeometries", "native",
-                        INPUT=layer, METHOD=0, OUTPUT=out_path,
+                        INPUT=source, METHOD=0, OUTPUT=out_path,
                     )
                 if src.order_by:
                     self._add_order_field(out_path, src.order_by)
@@ -1192,6 +1212,12 @@ class RulesExporter:
         source_fields = QgsVectorLayer(current_input, "fields", "ogr").fields()
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
+        if source_fields.indexFromName(FEATURE_KEY_FIELD) >= 0:
+            mapping.append((10, f'"{FEATURE_KEY_FIELD}"', FEATURE_KEY_FIELD))
+        for name in self.extra_tile_fields.get(grp.layer_id, []):
+            index = source_fields.indexFromName(name)
+            if index >= 0 and name not in [m[2] for m in mapping]:
+                mapping.append((source_fields.at(index).type(), f'"{name}"', name))
         for anchor in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD):
             if source_fields.indexFromName(anchor) >= 0:
                 mapping.append((6, f'"{anchor}"', anchor))

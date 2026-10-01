@@ -106,6 +106,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self._common_headers(target)
         self.end_headers()
+        # Recorded before the body is sent: a client that has read the
+        # whole response always finds its request in the log.
+        self._record(206 if span else 200, 0 if head_only else length)
         sent = 0
         if not head_only and length:
             with open(target, "rb") as handle:
@@ -121,7 +124,6 @@ class _Handler(BaseHTTPRequestHandler):
                         break
                     sent += len(block)
                     remaining -= len(block)
-        self._record(206 if span else 200, sent)
 
     def _common_headers(self, target: str):
         rel = os.path.relpath(target, self.server.root).replace(os.sep, "/")  # type: ignore[attr-defined]

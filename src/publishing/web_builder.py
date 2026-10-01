@@ -329,14 +329,17 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
                   extra_builders: Optional[List[Callable[[str, dict], None]]] = None,
                   manifest_extra: Optional[dict] = None,
                   connect_origins: Iterable[str] = (),
-                  pmtiles_path: Optional[str] = None) -> ReleaseResult:
+                  pmtiles_path: Optional[str] = None,
+                  extra_validators: Optional[List[Callable[[str, dict], None]]] = None) -> ReleaseResult:
     """Build, validate and (optionally) activate one immutable local release.
 
     ``extra_files``: ``{release path: local file}`` (legend swatches, ...).
     ``extra_builders``: callables ``(staging_dir, manifest)`` that write more
     public files (search/feature indexes) and update the manifest.
     ``pmtiles_path``: an already built and validated archive to copy instead
-    of converting ``bundle.mbtiles_path`` again (retry/reuse)."""
+    of converting ``bundle.mbtiles_path`` again (retry/reuse).
+    ``extra_validators``: callables ``(staging_dir, manifest)`` raising
+    PublishingError; they run before the release is renamed into place."""
     if transport not in ("pmtiles", "xyz"):
         raise ValueError(transport)
     progress = feedback if isinstance(feedback, Progress) else Progress(feedback)
@@ -356,6 +359,8 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
             progress.update(0.9, "Validating the web release...", force=True)
             warnings = validate_release_dir(
                 staging, style, archive.vector_layers if archive else None, secrets, canaries)
+            for validator in extra_validators or []:  # e.g. field disclosure
+                validator(staging, manifest)
             files = [rel for rel in walk_files(staging)]
             items = inventory(staging, files)
             release_doc = {

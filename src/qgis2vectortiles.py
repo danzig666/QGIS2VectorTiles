@@ -91,6 +91,8 @@ class QGIS2VectorTiles:
         layer_ids=None,
         archive_format: str = "mbtiles",
         add_result_layer: bool = True,
+        feature_keys=None,
+        extra_tile_fields=None,
     ):
         """``layer_ids``: export exactly these vector layers (also hidden
         ones; the layer tree is not touched); None = the visible layers, as
@@ -98,7 +100,9 @@ class QGIS2VectorTiles:
         or "both" (the same MVT tiles repackaged as PMTiles v3).
         ``add_result_layer``: add the "Vector Tiles" result layer and the
         local viewer files (the publishing workflow turns this off so the
-        project is not changed)."""
+        project is not changed). ``feature_keys`` ({layer id: QGIS
+        expression}) and ``extra_tile_fields`` ({layer id: [field]}) are the
+        publishing identity/filter fields (see RulesExporter)."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -118,6 +122,8 @@ class QGIS2VectorTiles:
             raise ValueError(f"archive_format must be mbtiles, pmtiles or both, not {archive_format!r}")
         self.archive_format = archive_format
         self.add_result_layer = add_result_layer
+        self.feature_keys = dict(feature_keys or {})
+        self.extra_tile_fields = dict(extra_tile_fields or {})
         # Results of the last run (the publishing workflow builds its
         # ExportBundle from them; see export_bundle()).
         self.rules: List[FlattenedRule] = []
@@ -455,6 +461,7 @@ class QGIS2VectorTiles:
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
             progress_range=(5.0, 70.0), parallel=self.parallel,
+            feature_keys=self.feature_keys, extra_tile_fields=self.extra_tile_fields,
         ).export()
 
     def _has_features(self, layers: List[QgsVectorLayer]) -> bool:

@@ -34,13 +34,17 @@ class FlattenedRule:
     # Geometry generator (line output) applied to the source features before
     # anything else: the rule is a sub-symbol layer drawn on generated lines.
     pre_generator: Optional[str] = None
+    # Original QGIS layer / legend rule this component comes from
+    # (publishing.provenance.RuleProvenance); captured before cloning and
+    # conversion, copied by derive() and every other construction.
+    provenance: Optional[object] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
         return FlattenedRule(
             rule if rule is not None else self.rule.clone(),
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
-            self.pre_generator,
+            self.pre_generator, self.provenance,
         )
 
     @property

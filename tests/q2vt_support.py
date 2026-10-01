@@ -71,6 +71,12 @@ def register_plugin_package():
     module = importlib.util.module_from_spec(spec)
     sys.modules["q2vt_plugin"] = module
     spec.loader.exec_module(module)
+    # Every publishing module through the plugin package (QGIS adapters use
+    # relative imports into the plugin), then alias them as ``publishing``.
+    import pkgutil  # pylint: disable=import-outside-toplevel
+    publishing_dir = os.path.join(REPO_ROOT, "src", "publishing")
+    for info in pkgutil.iter_modules([publishing_dir]):
+        importlib.import_module(f"q2vt_plugin.src.publishing.{info.name}")
     for prefix, alias in (("q2vt_plugin.src.core.fidelity", "fidelity"),
                           ("q2vt_plugin.src.publishing", "publishing")):
         for name, mod in list(sys.modules.items()):
