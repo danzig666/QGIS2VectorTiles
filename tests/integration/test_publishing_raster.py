@@ -23,6 +23,16 @@ from q2vt_fixtures import reset_project
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_publishing_pipeline import _parcels, _profile  # noqa: E402  pylint: disable=wrong-import-position
 
+SCHEMA = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                      "schemas", "publishing", "manifest-v1.schema.json")
+
+
+def _validate_manifest(manifest):
+    jsonschema = pytest.importorskip("jsonschema")
+    with open(SCHEMA, encoding="utf-8") as handle:
+        jsonschema.validate(manifest, json.load(handle))
+
+
 EXTENT = QgsRectangle(2119000, 6019000, 2123000, 6023000)
 
 
@@ -67,6 +77,7 @@ def test_raster_layer_gets_its_own_image_archive_under_the_vectors(tmp_path):
     result = export_local(project, profile, EXTENT)
     rel = result.release.release_dir
     manifest = json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))
+    _validate_manifest(manifest)
     style = json.load(open(os.path.join(rel, "style.json"), encoding="utf-8"))
     lid = layer_logical_id(ortho.id())
     raster = [s for s in manifest["sources"] if s.get("role") == "raster"]
@@ -97,6 +108,7 @@ def test_raster_above_vectors_stays_under_labels(tmp_path):
     result = export_local(project, profile, EXTENT)
     rel = result.release.release_dir
     manifest = json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))
+    _validate_manifest(manifest)
     style = json.load(open(os.path.join(rel, "style.json"), encoding="utf-8"))
     ids = [layer["id"] for layer in style["layers"]]
     lid = layer_logical_id(ortho.id())
