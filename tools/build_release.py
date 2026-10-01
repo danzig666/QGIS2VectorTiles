@@ -8,6 +8,7 @@ the official QGIS2VectorTiles plugin instead of replacing it.
 Usage::
 
     python3 tools/build_release.py          # version from metadata.txt
+    python3 tools/build_release.py --out /tmp/plugin.zip
 """
 
 import configparser
@@ -21,13 +22,17 @@ FOLDER = "QGIS2VectorTilesFork"
 CONTENT = ["__init__.py", "metadata.txt", "LICENSE", "icon.png", "icon.svg", "resources", "src"]
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     metadata = configparser.ConfigParser()
     metadata.read(os.path.join(ROOT, "metadata.txt"), encoding="utf-8")
     version = metadata["general"]["version"]
-    files = subprocess.run(["git", "ls-files", *CONTENT], cwd=ROOT, capture_output=True,
-                           text=True, check=True).stdout.split()
+    files = subprocess.run(["git", "ls-files", "-z", *CONTENT], cwd=ROOT, capture_output=True,
+                           text=True, check=True).stdout.split("\0")
+    files = [path for path in files if path]
     out = os.path.join(ROOT, "releases", f"{FOLDER}-{version}.zip")
+    if len(argv) == 2 and argv[0] == "--out":
+        out = os.path.abspath(argv[1])
     folders = set()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(zipfile.ZipInfo(f"{FOLDER}/"), "")
