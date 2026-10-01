@@ -5,13 +5,18 @@
 // The exported style draws such labels at the centroid of the whole polygon
 // (static points, for any client). Their style layers carry
 //   metadata["q2vt:visible-polygons"] = <source layer with the polygons>
-// and this module moves them to a GeoJSON source that is rebuilt whenever
-// the map stops moving: each polygon's tile pieces are clipped to their own
+// and this module moves them to a GeoJSON source that is rebuilt as the
+// polygon tiles arrive and while the map moves (throttled; see the
+// *_INTERVAL_MS constants), not only when everything has loaded: each
+// polygon's tile pieces are clipped to their own
 // tile (tiles overlap by a buffer) and to the screen, and the label goes to
 // the centroid of the visible area when that lies inside the polygon, else to
 // an interior point (the GEOS / QGIS rule). A label stays where it is while
 // that point is still on the visible part of its polygon (and not at the
-// screen edge), so panning does not make labels jump.
+// screen edge), so panning does not make labels jump. Polygons in the
+// loaded tiles just outside the screen get their label in advance (the
+// centroid of what is loaded of them), so panning reveals labels that are
+// already placed instead of waiting for a new round.
 //
 // Labels QGIS may overlap "if required" (or "at no cost") carry
 //   metadata["q2vt:overlap"] = "if-required"
@@ -22,13 +27,26 @@ const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
 export const OVERLAP_SUFFIX = "_q2vt_overlap";
 const EDGE_PX = 24; // a kept label must stay this far inside the screen
+// Recompute at most this often while polygon tiles arrive / the map moves.
+// Unchanged labels keep their fade state across the GeoJSON reloads
+// (MapLibre matches them by tile and position), so this does not flicker.
+const TILE_INTERVAL_MS = 80;
+const MOVE_INTERVAL_MS = 150;
+const REACH = 0.5;   // labels in advance up to half a screen beyond each edge
+const GUARD_PX = 48; // ... but not so close that their text reaches the screen
+// Label point tiles stop at this zoom (then overzoomed): bigger tiles cover
+// more around the screen, so panning rarely needs new ones laid out. Points
+// keep 1/8192 of a z15 tile (about 0.1 m at mid latitudes).
+const POINT_MAXZOOM = 15;
 
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
 //     get a label (layer/rule toggles, attribute filters);
 //   onUnsupported(reason): MapLibre no longer exposes the tile fields this
 //     helper reads (_x/_y/_z/_vectorTileFeature) - labels stay static.
-// Returns {update, sync, groups, setEligibility, pause, resume, destroy}.
+// Returns {update, sync, groups, snapshot, setEligibility, pause, resume,
+// destroy}; snapshot() maps each polygon source layer to the label points
+// (GeoJSON features) last written.
 export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", options = {}) {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
   const style = map.getStyle();
@@ -43,8 +61,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   const noop = () => {};
   if (!groups.size) {
     const overlap = enableOverlapFallback(map);
-    return { update: noop, sync: overlap.sync, groups, setEligibility: noop, pause: noop,
-             resume: noop, destroy: overlap.destroy };
+    return { update: noop, sync: overlap.sync, groups, snapshot: () => new Map(), setEligibility: noop,
+             pause: noop, resume: noop, destroy: overlap.destroy };
   }
 
   const firstLayer = style.layers.length ? style.layers[0].id : undefined;
@@ -59,7 +77,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     }, firstLayer);
     map.addSource(group.source, {
       type: "geojson", data: { type: "FeatureCollection", features: [] },
-      maxzoom: tileSource.maxzoom === undefined ? 18 : tileSource.maxzoom,
+      maxzoom: Math.min(tileSource.maxzoom ?? POINT_MAXZOOM, POINT_MAXZOOM),
     });
     for (const { def } of group.layers) map.removeLayer(def.id);
   }
@@ -76,16 +94,25 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   const overlap = enableOverlapFallback(map);
 
   let pending = null;
+  let last = -Infinity;
   let paused = false;
   let unsupported = false;
   let eligible = options.eligible || null;
   const states = new Map(); // polygon source layer -> label positions kept
-  const signatures = new Map(); // polygon source layer -> last data written
+  const written = new Map(); // polygon source layer -> Map(id -> [x, y, properties json])
+  const latest = new Map(); // polygon source layer -> features last written
   const update = () => {
+    if (pending) clearTimeout(pending);
     pending = null;
     if (paused || unsupported) return;
+    last = performance.now();
     const view = viewRect(map, maplibregl);
-    const margin = EDGE_PX * (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
+    const perPx = (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
+    const margin = EDGE_PX * perPx;
+    const reach = grow(view, REACH * (view[2] - view[0]), REACH * (view[3] - view[1]));
+    // The tile level MapLibre covers the view with (vector sources: floor).
+    const tileZoom = Math.max(tileSource.minzoom ?? 0, Math.min(tileSource.maxzoom ?? 22,
+      Math.floor(map.getZoom() + Math.log2(512 / (tileSource.tileSize || 512)))));
     for (const [polygons, group] of groups) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
       const features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
@@ -95,41 +122,77 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         return;
       }
       const data = labelPoints(features, view, maplibregl, {
-        state: states.get(polygons), margin,
+        state: states.get(polygons), margin, reach, tileZoom, guard: GUARD_PX * perPx,
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
-      // Unchanged labels: no setData (it would trigger another idle ->
-      // update round trip forever).
-      const signature = JSON.stringify(data.features.map((f) => [f.id, f.geometry.coordinates]));
-      if (signatures.get(polygons) === signature) continue;
-      signatures.set(polygons, signature);
-      map.getSource(group.source).setData(data);
+      write(map.getSource(group.source), data, polygons);
     }
   };
-  const schedule = () => { if (!pending && !paused) pending = setTimeout(update, 60); };
-  const onSourceData = (e) => { if (e.sourceId === sourceId && e.isSourceLoaded) schedule(); };
-  map.on("moveend", schedule);
+  // Only what changed goes to the source: an incremental update reloads just
+  // the label tiles around the added, moved or removed points (setData
+  // reloads all). Nothing changed: nothing written (else idle -> update
+  // would loop forever).
+  const write = (source, data, polygons) => {
+    const before = written.get(polygons);
+    const now = new Map(data.features.map((f) => [f.id, [...f.geometry.coordinates, JSON.stringify(f.properties)]]));
+    written.set(polygons, now);
+    latest.set(polygons, data.features);
+    if (!before || typeof source.updateData !== "function") {
+      if (before || data.features.length) source.setData(data);
+      return;
+    }
+    const diff = { remove: [], add: [], update: [] };
+    for (const id of before.keys()) if (!now.has(id)) diff.remove.push(id);
+    for (const f of data.features) {
+      const old = before.get(f.id);
+      if (!old || old[2] !== now.get(f.id)[2]) {
+        if (old) diff.remove.push(f.id);
+        diff.add.push(f);
+      } else if (old[0] !== f.geometry.coordinates[0] || old[1] !== f.geometry.coordinates[1]) {
+        diff.update.push({ id: f.id, newGeometry: f.geometry });
+      }
+    }
+    if (diff.remove.length || diff.add.length || diff.update.length) source.updateData(diff);
+  };
+  // Throttled, not debounced: the first change is handled at once, later
+  // ones at most every `interval` ms, so labels follow tiles and moves.
+  const throttled = (interval) => () => {
+    if (pending || paused || unsupported) return;
+    pending = setTimeout(update, Math.max(0, last + interval - performance.now()));
+  };
+  const schedule = throttled(0);
+  const onTile = throttled(TILE_INTERVAL_MS);
+  const onMove = throttled(MOVE_INTERVAL_MS);
+  // Each polygon tile as it arrives (not only once the whole source loaded).
+  const onSourceData = (e) => { if (e.sourceId === sourceId && (e.tile || e.isSourceLoaded)) onTile(); };
+  const onMoveEnd = () => { if (pending) { clearTimeout(pending); pending = null; } schedule(); };
+  map.on("move", onMove);
+  map.on("moveend", onMoveEnd);
   map.on("sourcedata", onSourceData);
   map.on("idle", schedule);
   update();
   return {
     update, sync: overlap.sync, groups,
+    snapshot: () => new Map(latest),
     // New eligibility (toggles/filters): positions of polygons that stay
     // eligible are kept; the others lose their label at the next update.
-    setEligibility(fn) { eligible = fn || null; signatures.clear(); schedule(); },
+    setEligibility(fn) { eligible = fn || null; schedule(); },
     pause() { paused = true; if (pending) { clearTimeout(pending); pending = null; } },
-    resume() { paused = false; signatures.clear(); schedule(); },
+    resume() { paused = false; schedule(); },
     destroy() {
       paused = true;
       if (pending) clearTimeout(pending);
       pending = null;
-      map.off("moveend", schedule);
+      map.off("move", onMove);
+      map.off("moveend", onMoveEnd);
       map.off("sourcedata", onSourceData);
       map.off("idle", schedule);
       overlap.destroy();
       for (const group of groups.values()) {
         const source = map.getSource(group.source);
         if (source) source.setData({ type: "FeatureCollection", features: [] });
+        written.clear();
+        latest.clear();
       }
     },
   };
@@ -154,14 +217,27 @@ function viewRect(map, maplibregl) {
 // (world units) inside the screen; options.margin defaults to 0.
 // options.eligible(properties): polygons that may have a label (toggles,
 // filters); the others lose their label even where tiles are still loading.
+// options.reach (world rectangle around view): polygons there that are not
+// on the screen get the label point of what is loaded of them in advance,
+// unless it lies within options.guard (world units) of the screen.
 export function labelPoints(features, view, maplibregl, options = {}) {
   const state = options.state || newLabelState();
   const margin = options.margin || 0;
-  const inner = [view[0] + margin, view[1] + margin, view[2] - margin, view[3] - margin];
-  // Only the deepest tiles: parent tiles shown while children load would
-  // count the same area twice.
+  const inner = grow(view, -margin, -margin);
+  const reach = options.reach || view;
+  const guarded = grow(view, options.guard || 0, options.guard || 0);
+  // One tile level only: parent tiles shown while children load (or
+  // children kept while parents load) would count the same area twice. The
+  // level the map wants (options.tileZoom) as soon as it has data, else the
+  // deepest loaded: zooming out, the new tiles are used before the old,
+  // deeper ones are dropped.
   let deepest = -1;
-  for (const f of features) if (f._z > deepest) deepest = f._z;
+  let wanted = false;
+  for (const f of features) {
+    if (f._z > deepest) deepest = f._z;
+    if (f._z === options.tileZoom) wanted = true;
+  }
+  if (wanted) deepest = options.tileZoom;
   const loaded = new Set(); // deepest tiles with data
   const byFeature = new Map();
   const excluded = new Set();
@@ -176,7 +252,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const tile = f._vectorTileFeature;
     const scale = 1 / (tile.extent * 2 ** f._z);
     const ox = f._x / 2 ** f._z, oy = f._y / 2 ** f._z;
-    const clip = intersect(view, [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z]);
+    const clip = intersect(reach, [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z]);
     if (!clip) continue;
     const rings = [];
     for (const ring of tile.loadGeometry()) {
@@ -194,7 +270,14 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   const unchecked = (point) => !loaded.has(
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
   const points = new Map();
-  for (const [key, { properties, rings }] of byFeature) {
+  for (const [key, { properties, rings: loaded }] of byFeature) {
+    const rings = reach === view ? loaded
+      : loaded.map((ring) => clipRing(ring, view)).filter((ring) => ring.length >= 3);
+    if (!rings.length) {  // off the screen: in advance, away from the screen edge
+      const point = labelPoint(loaded);
+      if (point && !within(guarded, point)) points.set(key, { point, properties });
+      continue;
+    }
     const old = state.points.get(key);
     const keep = old && within(inner, old.point) && (unchecked(old.point) || inside(rings, old.point));
     const point = keep ? old.point : labelPoint(rings);
@@ -213,6 +296,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out };
+}
+
+function grow([x0, y0, x1, y1], dx, dy) {
+  return [x0 - dx, y0 - dy, x1 + dx, y1 + dy];
 }
 
 function within([x0, y0, x1, y1], [x, y]) {

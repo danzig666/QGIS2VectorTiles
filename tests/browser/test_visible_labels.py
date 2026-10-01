@@ -104,3 +104,44 @@ def test_overlap_fallback_keeps_zoom_curves_on_top():
     placed = ["boolean", ["feature-state", "q2vtPlaced"], False]
     assert copy["paint"]["text-opacity"] == ["interpolate", ["linear"], ["zoom"],
                                              10, ["case", placed, 0, 0.5], 14, ["case", placed, 0, 1]]
+
+
+def _points(squares, view, options):
+    """labelPoints of square polygons [(id, z, x, y, (x0, y0, x1, y1) in tile units)]."""
+    script = f"""
+import {{ labelPoints }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(squares)}.map(([id, z, x, y, [x0, y0, x1, y1]]) => ({{
+  _x: x, _y: y, _z: z, properties: {{ q2vt_orig_id: id }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    .map(([px, py]) => ({{ x: px, y: py }}))] }} }}));
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, {json.dumps(options)});
+console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return {item[0]: item[1:] for item in json.loads(run.stdout)}
+
+
+def test_labels_just_off_screen_are_placed_in_advance():
+    # One z0 tile; the screen is its left half. Polygon 1 on screen, 2 off
+    # screen within reach, 3 off screen but too close to the edge (guard).
+    squares = [(1, 0, 0, 0, (512, 512, 1024, 1024)), (2, 0, 0, 0, (3072, 512, 3584, 1024)),
+               (3, 0, 0, 0, (2100, 2048, 2300, 2248))]
+    view = [0, 0, 0.5, 1]
+    points = _points(squares, view, {"reach": [0, 0, 1, 1], "guard": 0.05})
+    assert points[1] == pytest.approx([0.1875, 0.1875])
+    assert points[2] == pytest.approx([0.8125, 0.1875])   # whole polygon's centroid
+    assert 3 not in points                                  # its text could reach the screen
+    assert set(_points(squares, view, {})) == {1}           # without reach: on screen only
+
+
+def test_the_wanted_tile_level_wins_over_deeper_leftovers():
+    # Zooming out: an old z1 tile still drawn next to the new z0 tile. With
+    # tileZoom 0 the z0 data is used (both polygons), not only the z1 piece.
+    squares = [(1, 0, 0, 0, (512, 512, 1024, 1024)), (2, 0, 0, 0, (3072, 3072, 3584, 3584)),
+               (1, 1, 0, 0, (1024, 1024, 2048, 2048))]
+    assert set(_points(squares, [0, 0, 1, 1], {"tileZoom": 0})) == {1, 2}
+    assert set(_points(squares, [0, 0, 1, 1], {})) == {1}  # deepest only (zooming in)
