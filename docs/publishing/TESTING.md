@@ -17,6 +17,11 @@ All tests run with `pytest` from the repository root (see also `docs/fidelity/TE
 | `tests/integration/test_publish_dialog.py` | PyQGIS (offscreen) | the Publish window end to end |
 | `tests/browser/test_pmtiles_transport.py` | browser | XYZ vs PMTiles pixel parity, partial reads, stable entry, error states |
 | `tests/browser/test_web_viewer_features.py` | browser | toggles, opacity, labels/filters, identify/XSS, search, deep links, permalinks, measure, phone |
+| `tests/unit/test_publishing_basemap.py` | pure | basemap extract (local + HTTP ranges), build discovery, retries, schema/size refusal, 10 flavors vector-only |
+| `tests/integration/test_publishing_raster.py` | PyQGIS | raster layers → own image archive, z-order, transparency skipped, empty/oversized |
+| `tests/integration/test_publishing_basemap_themes.py` | PyQGIS | bundled basemap + glyphs, theme presets, locked layers/groups, manifest schema |
+| `tests/integration/test_publish_dialog_layers.py` | PyQGIS (offscreen) | raster rows, bulk changes, group locks, map themes, raster/basemap settings saved |
+| `tests/browser/test_web_viewer_basemap_raster.py` | browser | basemap flavors under the map, raster drawn, presets, locks vs links, no third party, layouts, dark switch |
 
 Optional tools:
 

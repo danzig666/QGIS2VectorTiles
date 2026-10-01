@@ -66,6 +66,14 @@ window that turns the project into a public, self-contained web map:
   domain. Only then does it switch the stable link, so the previous map stays online if
   anything fails. *History* rolls back to an earlier release or removes old ones.
 - Only the fields you approve become public; every tile is checked before upload.
+- **Raster layers** (orthophotos, scanned plans, rendered DEMs) are drawn by QGIS into their own
+  image tile archive (PNG, WebP or JPEG); vector layers always stay vector tiles.
+- An optional **OpenStreetMap vector basemap** (Protomaps) is bundled into the release in
+  several styles (light, dark, grayscale…); visitors switch it or turn it off.
+- **QGIS map themes** can select the published layers and become one-click views in the web
+  map; layers and groups can be marked as *always shown*; many rows can be changed at once.
+- A modern viewer: floating panels on desktop, a bottom sheet on phones, light and dark
+  appearance, your accent colour.
 
 The Processing algorithm is unchanged; it gained an optional *Tile archive format*
 (MBTiles, PMTiles or both).

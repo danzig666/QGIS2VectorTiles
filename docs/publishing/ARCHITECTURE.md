@@ -11,7 +11,12 @@ publishing.controller.export_local            (QGIS main thread, NoThreading kep
   RECORDS     qgis_model.collect_records: published features (extent x exported rule filters),
               keys validated, label/terms/anchor/bounds/approved attributes (private JSONL)
   LEGEND      QGIS-rendered swatches of the original legend items; logical model
-              (groups / layers / rules / components from flattener provenance)
+              (groups / layers / rules / components from flattener provenance), locked
+              layers/groups, QGIS map themes as presets
+  RASTER      QGIS raster layers rendered by QGIS into their own image PMTiles
+              (raster_tiles.py; vector layers never go here)
+  BASEMAP     optional OpenStreetMap extract (Protomaps schema) by HTTP ranges or from a
+              file, flavor styles, glyphs for its labels (basemap.py)
   BUILD       web_builder.build_release -> releases/<id>/ (staging, validation, rename),
               pmtiles_builder (same MVT payloads), search/feature indexes, disclosure check,
               current.json atomically
@@ -31,6 +36,9 @@ publishing.deployments.publish                (QgsTask: files + network only)
 | `src/publishing/search_index.py`, `feature_index.py` | Publication-wide search shards and exact lookup shards. |
 | `src/publishing/providers/`, `public_verify.py`, `deployments.py`, `credentials.py` | Hosting providers, public checks, activation protocol, QGIS auth adapter. |
 | `src/publishing/preview_server.py` | Loopback HTTP server with byte ranges. |
+| `src/publishing/raster_tiles.py` | QGIS raster layers → PNG/JPEG/WebP tiles in their own PMTiles archive. |
+| `src/publishing/basemap.py` | Vector basemap: build discovery, range reader, region extract, flavors, glyphs. |
+| `resources/basemaps/protomaps/` | Vendored `@protomaps/basemaps` 5.7.2 layer definitions (hu/en × 5 flavors). |
 | `src/gui/` | Publish window, project-saved profiles, release history. |
 | `resources/web_viewer/` | Static MapLibre viewer (ES modules, no framework, no CDN). |
 | `resources/ml_viewer/visible_labels.mjs` | The single maintained visible-polygon label helper (also used by the legacy viewer). |
@@ -38,8 +46,15 @@ publishing.deployments.publish                (QgsTask: files + network only)
 
 ## Invariants
 
-* Map data is MVT in PMTiles v3 (or XYZ MVT for the legacy package). Raster, image, video,
-  canvas and persisted GeoJSON sources are refused before writing and again in the browser.
+* Map data is MVT in PMTiles v3 (or XYZ MVT for the legacy package). Vector layers are never
+  rasterized. The only raster sources are the QGIS *raster* layers' own image archives
+  (`q2vt_raster_*`, `data/raster-<id>.pmtiles`, listed in the manifest, no URL in the style);
+  any other raster, image, video, canvas or persisted GeoJSON source is refused before writing
+  and again in the browser. (Owner decision of 1 Oct 2026: raster layers are published as
+  image tiles in separate files; this extends, not replaces, the vector-only rule.)
+* The basemap is vector tiles too: its own archive (`data/basemap.pmtiles`), flavor styles in
+  `basemaps/*.json` added by the viewer under every project layer at runtime; `style.json`
+  never references it.
   Runtime GeoJSON is limited to visible-polygon label points (derived from loaded tiles), the
   search marker and measurement drawings.
 * Packaging is transport-only: `bundle.style_semantic_diff` must be empty (only tile URLs,

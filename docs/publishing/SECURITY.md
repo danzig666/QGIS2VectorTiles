@@ -11,6 +11,10 @@ archive; what is not approved is simply not written.
 * Fields approved in the Interaction tab: popup fields (feature-lookup files), search fields
   (search index), filter fields (also written to the tiles of that layer).
 * With *Publish ALL attribute fields* (not recommended): every attribute.
+* Published **raster layers**: their image inside the export extent at the chosen zooms, as
+  QGIS draws it. For online services (WMS, XYZ, ArcGIS) check that their licence allows
+  republishing; the review lists them.
+* The optional basemap is OpenStreetMap data (ODbL); its attribution is shown automatically.
 
 The Review tab lists this per layer; the first publication and every change of this scope
 need an explicit approval (stored with the settings as a fingerprint).
@@ -37,8 +41,10 @@ need an explicit approval (stored with the settings as a fingerprint).
 
 ## Viewer
 
-* No third-party requests (no CDN, no fonts, no telemetry); external basemaps are not
-  offered in this release.
+* No third-party requests (no CDN, no fonts, no telemetry). The basemap is copied into the
+  release when exporting (only the export machine contacts the Protomaps build server, and
+  only when that source is chosen); visitors never load it from elsewhere.
+* Attribution is plain text (not MapLibre's HTML attribution control).
 * Content-Security-Policy meta tag: scripts only from the release, no `eval`, no inline
   scripts.
 * All titles, descriptions, attribution and attribute values are inserted as text
