@@ -146,3 +146,21 @@ drawn label matches the written point (max 0.6 px at z19), no page errors.
 | Run | Result |
 |---|---|
 | `pytest tests/browser/test_visible_labels.py tests/browser/test_web_viewer_features.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_parity.py tests/unit/test_publishing_web_builder.py` | **59 passed** (2 new: labels in advance with the edge guard; wanted tile level) |
+
+## 4.4.3: visible-polygon labels stay glued to the map while it moves
+
+Owner feedback on 4.4.2: labels no longer late, "but not feels right". Cause: 4.4.2 recomputed
+labels while the map moved and applied the edge / visible-part rule each time, so labels near
+the screen edge were re-centred again and again during a drag. Now, while `map.isMoving()`,
+placed labels keep their position and only polygons without a label get one; the rule is
+applied once when the map stops (as before 4.4.2).
+
+Measured during three smooth 2-second mouse drags on the owner project (headless Chromium,
+label sampled every 60 ms): jumps of a placed label / blinks (vanish and come back) **during
+the drag**: 4.4.1 1+1+13 / 0+1+8, 4.4.2 24+17+34 / 4+0+6, **4.4.3 0+0+0 / 0+0+0**; after
+release at most one settling move (the visible-part rule). Pan lag median stays 0 ms; drawn
+labels still match the written points (max 0.6 px at z19), no page errors.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py tests/browser/test_web_viewer_features.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_parity.py tests/unit/test_publishing_web_builder.py tests/integration/test_plugin_package.py` | **61 passed** (new: labels do not move while the map moves) |

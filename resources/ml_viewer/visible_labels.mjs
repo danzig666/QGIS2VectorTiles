@@ -13,7 +13,10 @@
 // the centroid of the visible area when that lies inside the polygon, else to
 // an interior point (the GEOS / QGIS rule). A label stays where it is while
 // that point is still on the visible part of its polygon (and not at the
-// screen edge), so panning does not make labels jump. Polygons in the
+// screen edge), so panning does not make labels jump. While the map moves
+// (drag, zoom animation) placed labels do not move at all - only polygons
+// without a label get one - and the rule above is applied once the map
+// stops: labels stay glued to the map like the other labels. Polygons in the
 // loaded tiles just outside the screen get their label in advance (the
 // centroid of what is loaded of them), so panning reveals labels that are
 // already placed instead of waiting for a new round.
@@ -122,7 +125,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         return;
       }
       const data = labelPoints(features, view, maplibregl, {
-        state: states.get(polygons), margin, reach, tileZoom, guard: GUARD_PX * perPx,
+        state: states.get(polygons), margin, reach, tileZoom, freeze: map.isMoving(), guard: GUARD_PX * perPx,
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
       write(map.getSource(group.source), data, polygons);
@@ -220,6 +223,8 @@ function viewRect(map, maplibregl) {
 // options.reach (world rectangle around view): polygons there that are not
 // on the screen get the label point of what is loaded of them in advance,
 // unless it lies within options.guard (world units) of the screen.
+// options.freeze (the map is moving): labels already placed stay where they
+// are; only polygons without one get a label.
 export function labelPoints(features, view, maplibregl, options = {}) {
   const state = options.state || newLabelState();
   const margin = options.margin || 0;
@@ -271,6 +276,11 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
   const points = new Map();
   for (const [key, { properties, rings: loaded }] of byFeature) {
+    const old = state.points.get(key);
+    if (old && options.freeze) {
+      points.set(key, { point: old.point, properties });
+      continue;
+    }
     const rings = reach === view ? loaded
       : loaded.map((ring) => clipRing(ring, view)).filter((ring) => ring.length >= 3);
     if (!rings.length) {  // off the screen: in advance, away from the screen edge
@@ -278,13 +288,12 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       if (point && !within(guarded, point)) points.set(key, { point, properties });
       continue;
     }
-    const old = state.points.get(key);
     const keep = old && within(inner, old.point) && (unchecked(old.point) || inside(rings, old.point));
     const point = keep ? old.point : labelPoint(rings);
     if (point) points.set(key, { point, properties });
   }
   for (const [key, old] of state.points) {
-    if (!points.has(key) && !excluded.has(key) && within(inner, old.point) && unchecked(old.point)
+    if (!points.has(key) && !excluded.has(key) && (options.freeze || within(inner, old.point)) && unchecked(old.point)
         && (!options.eligible || options.eligible(old.properties))) points.set(key, old);
   }
   state.points = points;
