@@ -1516,6 +1516,17 @@ class PublishDialog(QDialog):
                 profile.basemap.source or "build.protomaps.com")]
         if profile.themes.names:
             lines.append(tr("Views (map themes): ") + ", ".join(profile.themes.names))
+        info = profile.parcel_info
+        if info.enabled:
+            lines += ["", tr("Parcel report (public for every parcel in the extent): area, parts by zone, "
+                             "restrictions touching it.")]
+            if info.fields:
+                lines.append("   " + tr("Parcel fields: ") + ", ".join(f.field for f in info.fields))
+            if info.zoning_fields:
+                lines.append("   " + tr("Zone fields: ") + ", ".join(f.field for f in info.zoning_fields))
+            names = [r.name_field for r in info.restrictions if r.name_field]
+            if names:
+                lines.append("   " + tr("Restriction name fields: ") + ", ".join(names))
         lines += ["", tr("External resources for visitors: none (no CDN, no third-party tiles, no telemetry)."),
                   tr("Cost: storage of the archive and retained releases plus requests; R2 has no "
                      "egress fees but limits above the free tier are billed — see "

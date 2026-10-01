@@ -79,3 +79,43 @@ the only raster sources a release may contain are those archives.
 | `pytest` (full suite) | 466 passed, 1 failed, 5 skipped (9 min 12 s). The failure was `test_local_publication_end_to_end`: it compares the group entry exactly, and the entry now has the new `toggleable`/`initialVisibility` fields. After updating the expectation: `tests/integration/test_publishing_pipeline.py` → 4 passed. |
 | The 5 opt-in skips with the tools enabled (go-pmtiles CLI, moto) | 22 passed |
 | Owner project `arlowebtest.qgs` with 3 map themes as views | exported in 175 s (15 889 searchable features); opened in Chromium (desktop, theme applied, phone sheet) with 0 errors and 0 third-party requests. The project has no raster layers, so raster export was tested on fixtures only. |
+
+
+## 4.4.0 additions: parcel report (telekinformáció)
+
+| Item | Status | Behaviour | Tests (executed) | Limits |
+|---|---|---|---|---|
+| Settings | **Done** | `ParcelInfoConfig` in the profile, saved in the project: parcel layer and unique id, data fields shown, zone layer and code field (its style gives the zone graphics), zone values per part, cut-line layers, restriction layers (title, explanation, legal reference, approved name field, protection distance for lines/points), an optional regulation table joined by zone code (for the local building code later), thresholds, notice. Edited on the new *Parcel report* tab. `interaction.legendVisibleOnly`. | `tests/unit/test_publishing_profile.py` (round trip, schema); `tests/integration/test_publish_dialog*.py` (window still saves/restores). | — |
+| Export-time computation | **Done** | `parcel_report.py`, stage PARCELS, QGIS main thread. Per parcel inside the extent: area in the parcel layer's projected CRS (EOV), parts = parcel × zone polygons split by the cut lines (GEOS polygonize), cut lines bounding a part *inside* the parcel (its own edge excluded), restrictions by overlap (polygons, buffered lines/points) with area and share. Slivers < `minArea` and overlaps < `minShare` are ignored. Legend graphics are rendered from the symbols QGIS actually draws for the feature (rule, category and data-defined colours; scale-dependent rules evaluated at several scales; deduplicated by image). Labels come from the most specific active legend entry. The parcel key uses the same expression as the tiles' `q2vt_feature_key`. Output is sharded JSON (`parcels/`, FNV-1a like the feature lookup) without geometry. | `pytest tests/integration/test_publishing_parcel_report.py` → 4 passed: exact areas (2240/960/800 m² of 4000), regulation-line and zone-boundary flags, an own edge is not a cut, polygon/line-buffer/point-buffer overlaps (circle segment within 5 %), edge-only contact ignored, graphics exist, keys = tile keys, unapproved values (owner, other fields) never public, manifest schema. Owner project: 2815 parcels in 7.8 s, 22 graphics, 1.2 MB. | Planar areas only for projected CRS (geographic data uses a UTM zone). The project's land-registry area field is not used; the area is computed from the geometry. |
+| Viewer card | **Done** | Clicking a parcel opens its report in the panel (*Telek* tab; bottom sheet on phones) instead of a popup: total area (ha + m²), parcel data, numbered parts (marker per part on the map) with zone graphic, share bar, cutting lines and zone values (+ regulation table rows), restrictions with graphics, overlap, names, explanation, reference, protection distance, the notice, link and print. Text only. | `pytest tests/browser/test_web_viewer_parcel.py` → 2 passed (click → card without popup, 3 numbered parts and markers, graphics loaded, notice; the link reopens it; legend "only visible" empties far away and returns when switched off). Screenshots on the owner project reviewed (desktop, phone, restrictions). | — |
+| Legend: only visible | **Done** | Publisher default (Interaction tab) + visitor switch on the legend; lists only rules/layers with features drawn in the view (rendered-feature query), raster layers by area and zoom; recomputed when the map is idle. | browser test above. | Labels alone do not make a rule "visible". |
+| Accuracy check (owner project) | **Done** | 20 parcels (10 with several parts, 10 random) compared with an independent QGIS Processing `native:intersection` (parcels × zone layer, parcels × Natura 2000). Largest difference: **0.045 m²**. | See the table. | — |
+
+| Hrsz | Area m² | Parts | Report: zone m² | Processing: zone m² | Max diff m² | Natura report / processing m² |
+|---|---|---|---|---|---|---|
+| 1298/2 | 2 259.78 | 2 | Lf-1 2124.5  Ut-2 135.3 | Lf-1 2124.5  Ut-2 135.3 | 0.001 | 0.0 / 0.0 |
+| 034/2 | 37 036.22 | 2 | Má 24815.2  Ut-1 12221.0 | Má 24815.2  Ut-1 12221.0 | 0.002 | 0.0 / 0.0 |
+| 1407 | 2 008.52 | 2 | Lf-1 1697.7  Ut-1 310.8 | Lf-1 1697.7  Ut-1 310.8 | 0.005 | 0.0 / 0.0 |
+| 303 | 469.38 | 2 | Ut-1 187.1  Z 282.3 | Ut-1 187.1  Z 282.3 | 0.001 | 0.0 / 0.0 |
+| 0148/1 | 21 483.41 | 2 | Ev 19270.5  Mt 2212.9 | Ev 19270.5  Mt 2212.9 | 0.045 | 21483.4 / 21483.4 |
+| 026/8 | 14 130.13 | 3 | Ev 9215.4  Má 4914.8 | Ev 9215.4  Má 4914.8 | 0.004 | 0.0 / 0.0 |
+| 1476 | 5 045.26 | 2 | Lf-1 4611.9  Ut-1 433.4 | Lf-1 4611.9  Ut-1 433.4 | 0.005 | 0.0 / 0.0 |
+| 030/1 | 18 050.63 | 3 | Má 16351.9  Ut-1 1698.7 | Má 16351.9  Ut-1 1698.7 | 0.006 | 0.0 / 0.0 |
+| 1391 | 1 322.41 | 2 | Ut-1 1245.0  Vt-2 77.5 | Ut-1 1245.0  Vt-2 77.4 | 0.003 | 0.0 / 0.0 |
+| 1599 | 708.47 | 2 | Lf-1 652.8  Ut-2 55.7 | Lf-1 652.8  Ut-2 55.7 | 0.004 | 0.0 / 0.0 |
+| 017/7 | 36 813.13 | 1 | Má 36813.1 | Má 36813.1 | 0.0 | 0.0 / 0.0 |
+| 655 | 1 851.71 | 1 | Lf-1 1851.7 | Lf-1 1851.7 | 0.0 | 0.0 / 0.0 |
+| 1273 | 1 486.94 | 1 | Lf-1 1486.9 | Lf-1 1486.9 | 0.005 | 0.0 / 0.0 |
+| 0131/3 | 187 625.43 | 1 | Ev 187625.4 | Ev 187625.4 | 0.003 | 0.0 / 0.0 |
+| 04/5 | 7 751.92 | 1 | Má 7751.9 | Má 7751.9 | 0.003 | 0.0 / 0.0 |
+| 2274 | 300.48 | 1 | Lf-2 300.5 | Lf-2 300.5 | 0.0 | 0.0 / 0.0 |
+| 2202 | 206.39 | 1 | Lf-2 206.4 | Lf-2 206.4 | 0.003 | 0.0 / 0.0 |
+| 02/14 | 5 070.99 | 1 | Má 5071.0 | Má 5071.0 | 0.001 | 0.0 / 0.0 |
+| 1381 | 734.21 | 1 | Lf-1 734.2 | Lf-1 734.2 | 0.005 | 0.0 / 0.0 |
+| 043/14 | 734.36 | 1 | Má 734.4 | Má 734.4 | 0.004 | 0.0 / 0.0 |
+
+### Regression (4.4.0)
+
+| Run | Result |
+|---|---|
+| `pytest` (full suite) | **473 passed, 5 skipped** (the opt-in go-pmtiles/moto tests), 0 failed, 9 min 13 s |

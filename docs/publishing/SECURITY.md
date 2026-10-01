@@ -15,6 +15,9 @@ archive; what is not approved is simply not written.
   QGIS draws it. For online services (WMS, XYZ, ArcGIS) check that their licence allows
   republishing; the review lists them.
 * The optional basemap is OpenStreetMap data (ODbL); its attribution is shown automatically.
+* **Parcel report**: per parcel its computed areas, zone codes, the chosen parcel/zone fields,
+  restriction titles/explanations/references and the chosen restriction name field. Owner
+  names or other fields are only published if you tick them; the review lists the report.
 
 The Review tab lists this per layer; the first publication and every change of this scope
 need an explicit approval (stored with the settings as a fingerprint).

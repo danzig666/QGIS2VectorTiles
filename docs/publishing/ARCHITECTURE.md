@@ -13,6 +13,8 @@ publishing.controller.export_local            (QGIS main thread, NoThreading kep
   LEGEND      QGIS-rendered swatches of the original legend items; logical model
               (groups / layers / rules / components from flattener provenance), locked
               layers/groups, QGIS map themes as presets
+  PARCELS     optional parcel report: parts (zones x cut lines), restrictions, legend
+              graphics, sharded JSON without geometry (parcel_report.py)
   RASTER      QGIS raster layers rendered by QGIS into their own image PMTiles
               (raster_tiles.py; vector layers never go here)
   BASEMAP     optional OpenStreetMap extract (Protomaps schema) by HTTP ranges or from a
@@ -37,6 +39,7 @@ publishing.deployments.publish                (QgsTask: files + network only)
 | `src/publishing/providers/`, `public_verify.py`, `deployments.py`, `credentials.py` | Hosting providers, public checks, activation protocol, QGIS auth adapter. |
 | `src/publishing/preview_server.py` | Loopback HTTP server with byte ranges. |
 | `src/publishing/raster_tiles.py` | QGIS raster layers → PNG/JPEG/WebP tiles in their own PMTiles archive. |
+| `src/publishing/parcel_report.py` | Parcel report (telekinformáció) computed at export time. |
 | `src/publishing/basemap.py` | Vector basemap: build discovery, range reader, region extract, flavors, glyphs. |
 | `resources/basemaps/protomaps/` | Vendored `@protomaps/basemaps` 5.7.2 layer definitions (hu/en × 5 flavors). |
 | `src/gui/` | Publish window, project-saved profiles, release history. |

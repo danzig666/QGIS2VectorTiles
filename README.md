@@ -72,6 +72,9 @@ window that turns the project into a public, self-contained web map:
   several styles (light, dark, grayscale…); visitors switch it or turn it off.
 - **QGIS map themes** can select the published layers and become one-click views in the web
   map; layers and groups can be marked as *always shown*; many rows can be changed at once.
+- **Parcel report**: clicking a parcel shows its area, its parts cut by the zoning and the
+  regulation lines, its zones and every restriction touching it, with legend graphics
+  (computed in QGIS from the exact geometry when exporting).
 - A modern viewer: floating panels on desktop, a bottom sheet on phones, light and dark
   appearance, your accent colour.
 
