@@ -124,6 +124,7 @@ now has a regression test.
 | 66 | Map-unit line offsets crossing at sharp corners (Gyorsforgalmi út) | MapLibre `line-offset` | the offset line itself (mitred offset curve, as QGIS); `test_map_unit_line_offset_is_the_offset_line` |
 | 67 | Wide pattern strokes overshooting the polygon edge in steps (Csíkozás) | a data-defined stroke colour sent the markers to sprites drawn whole | stroke colour carried to the line work; map-unit strokes exported as polygons, merged and clipped at the edge; `test_wide_map_unit_pattern_strokes_are_cut_at_the_edge` |
 | 68 | Dimension styles showing "A" and arrows at the corners (Measure Meters, Polygon méretezés) | geometry-dependent properties of a generator's sub-symbol were evaluated on the source feature; screen offsets applied to the markers | line generators are applied first and their layers exported like line layers, properties evaluated per generated part; screen-unit marker-line offsets placed on the offset line per zoom; `test_generator_marker_text_is_evaluated_per_generated_part` |
+| 69 | Dashes running over the marker text (Felszín alatti vízbázis védőidom) | a zero-length dash rejected the pattern; MapLibre's own dashes restart at tile edges | zero-length dashes merged into the gap (Qt draws nothing for them), the pattern exported as its dashes; `test_zero_length_dash_is_merged_into_the_gap` |
 
 ### Resolved suspicions
 

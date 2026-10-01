@@ -443,6 +443,22 @@ class SymbolMaterializer:
     # period reaches this many CSS px (below that MapLibre dashes are used).
     DASH_MIN_PERIOD_PX = 6.0
 
+    @staticmethod
+    def _merge_empty_dashes(pattern):
+        """Zero-length dashes merged into the gap before them: Qt draws
+        nothing for them (Felszín alatti vízbázis védőidom: "6;4;...;6;4;0;20"
+        leaves a 24 m gap for its text). A pattern starting with one is kept
+        as is."""
+        if len(pattern) < 4 or len(pattern) % 2 or not pattern[0]:
+            return pattern
+        merged = pattern[:2]
+        for dash, gap in zip(pattern[2::2], pattern[3::2]):
+            if dash == 0:
+                merged[-1] += gap
+            else:
+                merged += [dash, gap]
+        return merged
+
     def _dash_segments(self, flat_rule: FlattenedRule, layer):
         """Map-unit custom dashes as their dashes: Qt starts the pattern on
         every line and ring and runs it across vertices, while MapLibre
@@ -463,14 +479,17 @@ class SymbolMaterializer:
                 layer.trimDistanceStart() or layer.trimDistanceEnd():
             return None
         pattern = [float(v) for v in layer.customDashVector()]
-        if not pattern or min(pattern) < 0 or sum(pattern[0::2]) <= 0 or \
-                any(v <= 0 for v in pattern[0::2]):
-            return None
         dash_offset = 0.0
         if layer.dashPatternOffset():
             if normalize_unit(layer.dashPatternOffsetUnit()) != "map":
                 return None
             dash_offset = float(layer.dashPatternOffset())
+        # Qt draws nothing for a zero-length dash (measured, square caps too):
+        # merged into the gap before it.
+        pattern = self._merge_empty_dashes(pattern)
+        if not pattern or min(pattern) < 0 or sum(pattern[0::2]) <= 0 or \
+                any(v <= 0 for v in pattern[0::2]):
+            return None
         offset = 0.0
         if abs(layer.offset()) > 1e-9:
             if normalize_unit(layer.offsetUnit()) != "map":

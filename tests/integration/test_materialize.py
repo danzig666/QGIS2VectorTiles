@@ -877,3 +877,23 @@ def test_generator_marker_text_is_evaluated_per_generated_part(plugin, tmp_path)
         names = [f.name() for f in output.fields() if f.name().startswith("q2vt_property_char")]
         texts |= {feature[name] for feature in output.getFeatures() for name in names}
     assert texts == {"140.0", "198.0"}  # two 140 m legs and the hypotenuse
+
+
+def test_zero_length_dash_is_merged_into_the_gap(plugin, tmp_path):
+    """Felszín alatti vízbázis védőidom: "6;4;6;4;6;4;6;4;0;20" leaves a gap
+    for the text markers; the zero dash rejected the whole pattern, and
+    MapLibre's dashes (restarting at tile edges) ran over the text. Qt draws
+    nothing for the zero dash."""
+    layer = _layer("LineString", LINES, str(tmp_path / "zd.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 3.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector([6, 4, 6, 4, 0, 20])
+    line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    dashed = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert dashed and dashed[0][1].recipe.param("pattern") == (6.0, 4.0, 6.0, 24.0)
+    ours = ink_mask(render([o for o, _ in dashed], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
