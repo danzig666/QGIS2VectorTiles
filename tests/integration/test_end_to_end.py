@@ -119,6 +119,38 @@ def test_vector_first_export(export, tmp_path):
     assert type(layer.renderer()).__name__ == "QgsSingleSymbolRenderer"
     assert layer.labeling().settings().isExpression
 
+    # The export log survives a crash: every step, flushed, and closed after.
+    log = open(os.path.join(result, "export_log.txt"), encoding="utf-8").read()
+    assert "Crash tracebacks are written to this file." in log
+    assert ". Exporting rules to datasets..." in log
+    assert ". Process completed successfully" in log
+    assert "native:" in log  # each processing step of the workers
+
+
+def test_algorithm_runs_on_the_main_thread(plugin):
+    """The export changes the project (result layer), which QGIS only allows
+    from the main thread: from a background task QGIS can close silently."""
+    from qgis.core import QgsProcessingAlgorithm
+    from q2vt_plugin.src.processing.algorithms import (  # pylint: disable=import-error
+        QGIS2VectorTilesAlgorithm)
+    flags = QGIS2VectorTilesAlgorithm().flags()
+    assert flags & QgsProcessingAlgorithm.FlagNoThreading
+
+
+def test_other_processing_temp_outputs_are_kept(plugin):
+    """Only the plugin's own old working folders are removed from the
+    Processing temp folder: temporary layers of the project live there."""
+    from qgis.core import QgsProcessingUtils
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    temp = QgsProcessingUtils.tempFolder()
+    other = os.path.join(temp, "other_tool_output")
+    stale = os.path.join(temp, "q2styledtiles_stale")
+    os.makedirs(other, exist_ok=True)
+    os.makedirs(stale, exist_ok=True)
+    QGIS2VectorTiles(extent=EXTENT, output_dir=temp, serve=False)
+    assert os.path.isdir(other)
+    assert not os.path.exists(stale)
+
 
 def test_strict_mode_fails_before_publication(export, tmp_path):
     layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))

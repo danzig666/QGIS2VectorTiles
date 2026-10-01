@@ -103,6 +103,7 @@ from qgis.core import (
     QgsProject,
 )
 
+from ..utils import crash_log, main_thread
 from ..utils.config import _DATA_SIMPLIFICATION_TOLERANCE, _EPSG_CRS, _FIELD_PREFIX
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
@@ -628,6 +629,7 @@ class RulesExporter:
     def _build_one_base_layer(self, src_path: str, dst_path: str) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
         self._check_cancel()
+        crash_log.note(f"Base layer {dst_path}")
         transform_extent = self.transform_extent(src_path)
         clipped = self._run_alg_safe(
             "extractbyextent", "native",
@@ -764,6 +766,7 @@ class RulesExporter:
     ) -> Optional[str]:
         """Worker: run the rule-export chain entirely from local files."""
         self._check_cancel()
+        crash_log.note(f"Rule group {grp.output_dataset}: {grp.description}")
         output_path = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")
         if exists(output_path):
             return output_path
@@ -1148,6 +1151,8 @@ class RulesExporter:
             params["OUTPUT"] = self._temp_path("temp")
 
         full_name = f"{algorithm_type}:{algorithm}"
+        crash_log.note(f"  {full_name} " + ", ".join(
+            f"{k}={str(v)[:300]}" for k, v in params.items() if k not in ("INPUT", "OUTPUT")))
         # pylint: disable=E1111
         result = run_processing(
             full_name, params, context=context, feedback=feedback
@@ -1488,8 +1493,9 @@ class RulesExporter:
         pending = set(futures.keys())
         while pending:
             done, pending = wait(
-                pending, timeout=1.0, return_when=FIRST_COMPLETED
+                pending, timeout=0.2, return_when=FIRST_COMPLETED
             )
+            main_thread.keep_responsive()
             for fut in done:
                 yield fut
             if self._is_cancelled():

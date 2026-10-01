@@ -19,6 +19,7 @@ written to ``fidelity_report.json`` / ``fidelity_report.html`` either way.
 """
 
 import json
+import traceback
 from datetime import datetime
 from os import makedirs, listdir
 from os.path import join, exists
@@ -46,6 +47,7 @@ from qgis.core import (
 from qgis.PyQt.QtXml import QDomDocument
 
 from .utils.config import _EPSG_CRS
+from .utils import crash_log
 from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
 from .core.fidelity import zoom as fidelity_zoom
@@ -120,6 +122,7 @@ class QGIS2VectorTiles:
             self._clear_project()
             fingerprint_before = self._project_style_fingerprint()
             temp_dir = self._create_temp_directory()
+            crash_log.start(temp_dir, self._log_header())
             self._log(". Starting conversion process...")
             start_time = perf_counter()
             if self.profile.mode == FidelityMode.HYBRID:
@@ -183,6 +186,18 @@ class QGIS2VectorTiles:
             self._log(f". Processing failed: {str(e)}")
             self._clear_project()
             return None
+        except BaseException:
+            crash_log.note("Export failed:\n" + traceback.format_exc())
+            raise
+        finally:
+            crash_log.stop()
+
+    def _log_header(self) -> str:
+        crs = QgsProject.instance().crs().authid()
+        layers = len(QgsProject.instance().mapLayers())
+        return (f"QGIS {Qgis.version()}, zooms {self.min_zoom + self.viewer}-"
+                f"{self.max_zoom + self.viewer}, project CRS {crs}, {layers} layers, "
+                f"extent {self.extent.toString(2)}, CPU limit {self.cpu_percent}%")
 
     # --- fidelity helpers -------------------------------------------------
     def _reference_latitude(self) -> float:
@@ -315,11 +330,18 @@ class QGIS2VectorTiles:
                 QgsProject.instance().removeMapLayer(layer_id)
 
     def _get_utils_dir(self) -> str:
-        """Clear the QGIS temp folder and create a fresh working directory."""
+        """Remove this plugin's old working directories and create a fresh one.
+
+        Only ``q2styledtiles_*`` folders: the rest of the Processing temp
+        folder holds other tools' outputs, such as temporary layers that are
+        still open in the project.
+        """
         for entry in listdir(QgsProcessingUtils.tempFolder()):
+            if not entry.startswith("q2styledtiles_"):
+                continue
             try:
                 rmtree(join(QgsProcessingUtils.tempFolder(), entry))
-            except (PermissionError, NotADirectoryError):
+            except OSError:
                 continue
         utils_dir = join(QgsProcessingUtils.tempFolder(), f"q2styledtiles_{uuid4().hex}")
         makedirs(utils_dir, exist_ok=True)
@@ -447,6 +469,7 @@ class QGIS2VectorTiles:
         return exporter
 
     def _log(self, message: str):
+        crash_log.note(message)
         if __name__ != "__console__":
             self.feedback.pushInfo(message)
         else:

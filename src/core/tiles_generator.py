@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple
 from osgeo import ogr
 from qgis.core import QgsVectorLayer, QgsProcessingFeedback, QgsProcessingUtils
 
+from ..utils import main_thread
 from ..utils.config import _EPSG_CRS, _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM
 from .fidelity.dependencies import prunable_fields, style_field_dependencies
 
@@ -179,7 +180,8 @@ class GDALTilesGenerator:
                     if os.path.exists(output):
                         os.remove(output)  # partial archive in the new output dir only
                     raise TilesGenerationCancelled("Tile generation cancelled")
-                time.sleep(0.2)
+                time.sleep(0.1)
+                main_thread.keep_responsive()
             _, stderr = proc.communicate()
             if proc.returncode != 0:
                 error_msg = f"ogr2ogr failed.\nError: {stderr}"

@@ -449,9 +449,30 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 
   <div class="cl-entry featured latest">
     <div class="cl-header">
-      <div class="cl-version">v4.1.1</div>
+      <div class="cl-version">v4.1.2</div>
       <div class="cl-date">01 Oct 2026</div>
       <div class="cl-badge">Latest</div>
+    </div>
+    <div class="cl-body">
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Fixed <strong>QGIS closing without a message</strong> during an export: the export runs on QGIS's main thread (the work itself stays parallel), as QGIS requires for adding the result layer to the project.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>The Processing temp folder is no longer emptied: only the plugin's own old working folders are removed.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Every export writes <strong>export_log.txt</strong>: each step as it happens, plus a traceback of every thread if QGIS crashes.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="cl-entry">
+    <div class="cl-header">
+      <div class="cl-version">v4.1.1</div>
+      <div class="cl-date">01 Oct 2026</div>
     </div>
     <div class="cl-body">
       <div class="cl-item">

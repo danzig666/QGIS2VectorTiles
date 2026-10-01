@@ -4,6 +4,7 @@ from os.path import join
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
+    Qgis,
     QgsProcessingAlgorithm,
     QgsProcessingParameterNumber,
     QgsProcessingParameterExtent,
@@ -70,6 +71,19 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         user-visible display of the algorithm name.
         """
         return self.tr("QGIS2VectorTiles (fork)")
+
+    def flags(self):
+        """
+        Runs on QGIS's main thread: the export reads the project and adds the
+        result layer to it, which QGIS only allows from the main thread (from
+        a background thread QGIS can close without a message). The heavy work
+        still runs in worker threads.
+        """
+        flag_enum = getattr(Qgis, "ProcessingAlgorithmFlag", None)
+        no_threading = getattr(flag_enum, "NoThreading", None)
+        if no_threading is None:  # QGIS < 3.36
+            no_threading = QgsProcessingAlgorithm.FlagNoThreading
+        return super().flags() | no_threading
 
     def group(self):
         """
