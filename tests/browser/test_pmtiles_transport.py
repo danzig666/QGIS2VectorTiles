@@ -117,11 +117,12 @@ def test_stable_entry_routes_to_the_release_with_state(published):
     server = published["server"]
     root = os.path.dirname(os.path.dirname(published["pm"].release_dir))
     rel = os.path.relpath(root, server.root).replace(os.sep, "/")
-    url = server.url(f"{rel}/index.html") + "?layers=a#map=12/47.5/19"
+    url = server.url(f"{rel}/index.html") + "?layers=a#v=1&map=12.00/47.481352/19.053267"
     state = _node("open_viewer.mjs", url, "", 800, 600)
     assert state["ready"] and not state["errors"], state
-    assert f"/releases/{published['pm'].release_id}/index.html?layers=a#map=12/47.5/19" in \
-        urllib.parse.unquote(state["url"])
+    assert f"/releases/{published['pm'].release_id}/index.html?layers=a#v=1&map=12.00/47.481352/19.053267" in \
+        urllib.parse.unquote(state["url"])  # routed with query and hash; camera state applied
+    assert abs(state["zoom"] - 12) < 1e-6
     assert state["external"] == []  # A23: no third-party requests
     assert not [c for c in state["console"] if "Content Security Policy" in c]
 

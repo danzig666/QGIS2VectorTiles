@@ -88,14 +88,16 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     const margin = EDGE_PX * (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
     for (const [polygons, group] of groups) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
-      let features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
+      const features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
       if (features.length && !features.some((f) => f._vectorTileFeature && Number.isInteger(f._z))) {
         unsupported = true;  // private tile fields gone (MapLibre upgrade)
         if (options.onUnsupported) options.onUnsupported("tile feature fields unavailable");
         return;
       }
-      if (eligible) features = features.filter((f) => eligible(f.properties, polygons));
-      const data = labelPoints(features, view, maplibregl, { state: states.get(polygons), margin });
+      const data = labelPoints(features, view, maplibregl, {
+        state: states.get(polygons), margin,
+        eligible: eligible ? (properties) => eligible(properties, polygons) : null,
+      });
       // Unchanged labels: no setData (it would trigger another idle ->
       // update round trip forever).
       const signature = JSON.stringify(data.features.map((f) => [f.id, f.geometry.coordinates]));
@@ -150,6 +152,8 @@ function viewRect(map, maplibregl) {
 // options.state (newLabelState()): keep each label where it was while that
 // point is still on the visible part of its polygon and options.margin
 // (world units) inside the screen; options.margin defaults to 0.
+// options.eligible(properties): polygons that may have a label (toggles,
+// filters); the others lose their label even where tiles are still loading.
 export function labelPoints(features, view, maplibregl, options = {}) {
   const state = options.state || newLabelState();
   const margin = options.margin || 0;
@@ -160,9 +164,14 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   for (const f of features) if (f._z > deepest) deepest = f._z;
   const loaded = new Set(); // deepest tiles with data
   const byFeature = new Map();
+  const excluded = new Set();
   for (const f of features) {
     if (f._z !== deepest || !f._vectorTileFeature) continue;
     loaded.add(`${f._x}/${f._y}`);
+    if (options.eligible && !options.eligible(f.properties)) {
+      excluded.add(String(f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties)));
+      continue;
+    }
     const key = String(f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties));
     const tile = f._vectorTileFeature;
     const scale = 1 / (tile.extent * 2 ** f._z);
@@ -192,7 +201,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     if (point) points.set(key, { point, properties });
   }
   for (const [key, old] of state.points) {
-    if (!points.has(key) && within(inner, old.point) && unchecked(old.point)) points.set(key, old);
+    if (!points.has(key) && !excluded.has(key) && within(inner, old.point) && unchecked(old.point)
+        && (!options.eligible || options.eligible(old.properties))) points.set(key, old);
   }
   state.points = points;
   const out = [];

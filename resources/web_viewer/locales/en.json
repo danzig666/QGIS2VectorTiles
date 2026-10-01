@@ -71,5 +71,6 @@
   "tools.print": "Print",
   "tools.printNote": "Prints the current view with the legend.",
   "legend.empty": "No legend",
-  "layers.group": "Group"
+  "layers.group": "Group",
+  "search.typeMore": "Type a few more characters"
 }

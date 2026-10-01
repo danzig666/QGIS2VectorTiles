@@ -71,5 +71,6 @@
   "tools.print": "Nyomtatás",
   "tools.printNote": "Az aktuális nézetet nyomtatja jelmagyarázattal.",
   "legend.empty": "Nincs jelmagyarázat",
-  "layers.group": "Csoport"
+  "layers.group": "Csoport",
+  "search.typeMore": "Írjon be még néhány karaktert"
 }
