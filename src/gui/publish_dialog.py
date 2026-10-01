@@ -21,30 +21,47 @@ import os
 import traceback
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
-                       QgsProcessingFeedback, QgsProject, QgsRectangle, QgsTask, QgsVectorLayer)
+                       QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
+                       QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsTask,
+                       QgsVectorLayer)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                  QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
                                  QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                                 QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
-                                 QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
-                                 QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                                 QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+                                 QRadioButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+                                 QTableWidgetItem, QTabWidget, QTextBrowser, QToolButton, QTreeWidget,
+                                 QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..publishing.errors import PublishingError
-from ..publishing.models import (FIELD_TYPES, FilterField, LayerConfig, PopupField,
-                                 PublicationProfile, ReleaseState, slugify)
+from ..publishing.models import (BASEMAP_FLAVORS, FIELD_TYPES, FilterField, GroupConfig, LayerConfig,
+                                 PopupField, PublicationProfile, ReleaseState, slugify)
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
 from . import publication_profiles as store
 
 TAG = "QGIS2VectorTiles"
 CHECKED = Qt.CheckState.Checked
 UNCHECKED = Qt.CheckState.Unchecked
+PARTIAL = Qt.CheckState.PartiallyChecked
+LAYER_ROLE = Qt.ItemDataRole.UserRole
+GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
+COL_PUBLISH, COL_VISIBLE, COL_TOGGLE = 1, 2, 3
+
+
+def publishable(layer) -> bool:
+    """Vector layers with geometry (MVT) and raster layers (own image archive)."""
+    return (isinstance(layer, QgsVectorLayer) and layer.isSpatial()) or isinstance(layer, QgsRasterLayer)
 
 
 def tr(text: str) -> str:
     return QCoreApplication.translate("PublishDialog", text)
+
+
+def _note(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    return label
 
 
 def _check(value: bool):
@@ -133,7 +150,7 @@ class PublishDialog(QDialog):
         profile = PublicationProfile(title=title, slug=slugify(title))
         for node in self.project.layerTreeRoot().findLayers():
             layer = node.layer()
-            if isinstance(layer, QgsVectorLayer) and layer.isSpatial():
+            if publishable(layer):
                 profile.layers.append(LayerConfig(layer.id(), included=node.isVisible(),
                                                   initially_visible=node.isVisible()))
         if self.iface is not None:
@@ -160,7 +177,7 @@ class PublishDialog(QDialog):
         known = {c.layer_id for c in profile.layers}
         for node in self.project.layerTreeRoot().findLayers():
             layer = node.layer()
-            if isinstance(layer, QgsVectorLayer) and layer.isSpatial() and layer.id() not in known:
+            if publishable(layer) and layer.id() not in known:
                 profile.layers.append(LayerConfig(layer.id(), included=False, initially_visible=False))
         return profile
 
@@ -178,6 +195,7 @@ class PublishDialog(QDialog):
         layout.addWidget(self.tabs, 1)
         self.tabs.addTab(self._map_tab(), tr("Map"))
         self.tabs.addTab(self._interaction_tab(), tr("Interaction"))
+        self.tabs.addTab(self._basemap_tab(), tr("Basemap"))
         self.tabs.addTab(self._output_tab(), tr("Output"))
         self.tabs.addTab(self._destination_tab(), tr("Destination"))
         self.tabs.addTab(self._review_tab(), tr("Review"))
@@ -269,15 +287,124 @@ class PublishDialog(QDialog):
         extent_row.addWidget(self.extent_label, 1)
         extent_row.addWidget(extent_button)
         form.addRow(tr("Extent"), extent_row)
-        layout.addWidget(form_box, 1)
+        try:
+            from qgis.gui import QgsColorButton  # pylint: disable=import-outside-toplevel
+            self.e_accent = QgsColorButton()
+            self.e_accent.setAllowOpacity(False)
+        except ImportError:
+            self.e_accent = QLineEdit()
+        form.addRow(tr("Accent colour of the viewer"), self.e_accent)
+        layout.addWidget(form_box, 2)
         layers_box = QGroupBox(tr("Layers (publishing does not change the project's layer visibility)"))
         layers_layout = QVBoxLayout(layers_box)
+        theme_row = QHBoxLayout()
+        self.theme_pick = QComboBox()
+        self.theme_pick.setToolTip(tr("A QGIS map theme (View → Map Themes)"))
+        publish_theme = QPushButton(tr("Publish its layers"))
+        publish_theme.setToolTip(tr("Publish exactly the layers visible in this map theme"))
+        publish_theme.clicked.connect(lambda: self._apply_theme(publish=True))
+        start_theme = QPushButton(tr("Use as start view"))
+        start_theme.setToolTip(tr("Visible at start: the layers visible in this map theme"))
+        start_theme.clicked.connect(lambda: self._apply_theme(publish=False))
+        theme_row.addWidget(QLabel(tr("Map theme:")))
+        theme_row.addWidget(self.theme_pick, 1)
+        theme_row.addWidget(publish_theme)
+        theme_row.addWidget(start_theme)
+        layers_layout.addLayout(theme_row)
+        bulk_row = QHBoxLayout()
+        self.bulk = QToolButton()
+        self.bulk.setText(tr("Selected layers"))
+        self.bulk.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.bulk.setMenu(self._bulk_menu())
+        bulk_row.addWidget(QLabel(tr("Select several rows (Ctrl/Shift + click) to change them together:")), 1)
+        bulk_row.addWidget(self.bulk)
+        layers_layout.addLayout(bulk_row)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("Visible at start")])
+        self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("Visible at start"), tr("Can be switched off")])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        layers_layout.addWidget(self.tree)
-        layout.addWidget(layers_box, 1)
+        for column in (COL_PUBLISH, COL_VISIBLE, COL_TOGGLE):
+            self.tree.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(
+            lambda pos: self._bulk_menu().exec(self.tree.viewport().mapToGlobal(pos)))
+        self.tree.itemChanged.connect(self._tree_changed)
+        layers_layout.addWidget(self.tree, 1)
+        themes_row = QHBoxLayout()
+        self.themes_list = QListWidget()
+        self.themes_list.setMaximumHeight(84)
+        self.themes_list.itemChanged.connect(lambda *_: self._refresh_initial_theme())
+        self.theme_initial = QComboBox()
+        themes_box = QVBoxLayout()
+        themes_box.addWidget(QLabel(tr("Map themes offered as views in the web map:")))
+        themes_box.addWidget(self.themes_list)
+        initial_box = QVBoxLayout()
+        initial_box.addWidget(QLabel(tr("Start with:")))
+        initial_box.addWidget(self.theme_initial)
+        initial_box.addStretch(1)
+        themes_row.addLayout(themes_box, 2)
+        themes_row.addLayout(initial_box, 1)
+        layers_layout.addLayout(themes_row)
+        layout.addWidget(layers_box, 3)
         return widget
+
+    # ------------------------------------------------------------------ layer tree
+    def _bulk_menu(self):
+        menu = QMenu(self)
+        for text, column, value in (
+                (tr("Publish"), COL_PUBLISH, True), (tr("Do not publish"), COL_PUBLISH, False),
+                (tr("Visible at start"), COL_VISIBLE, True), (tr("Hidden at start"), COL_VISIBLE, False),
+                (tr("Can be switched off by visitors"), COL_TOGGLE, True),
+                (tr("Always shown (cannot be switched off)"), COL_TOGGLE, False)):
+            menu.addAction(text, lambda c=column, v=value: self.apply_to_selection(c, v))
+        return menu
+
+    def _descendants(self, item):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            yield child
+            yield from self._descendants(child)
+
+    def apply_to_selection(self, column: int, value: bool):
+        """Set a column for the selected rows; a selected group also applies
+        to every layer (and group) inside it."""
+        targets = []
+        for item in self.tree.selectedItems():
+            targets.append(item)
+            if item.data(0, GROUP_ROLE):
+                targets.extend(self._descendants(item))
+        seen = set()
+        for item in targets:
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable and item.data(column, Qt.ItemDataRole.CheckStateRole) is not None:
+                item.setCheckState(column, _check(value))
+
+    def _apply_theme(self, publish: bool):
+        name = self.theme_pick.currentText()
+        if not name:
+            return
+        visible = set(self.project.mapThemeCollection().mapThemeVisibleLayerIds(name))
+        for item in self._tree_items():
+            shown = item.data(0, LAYER_ROLE) in visible
+            if publish:
+                item.setCheckState(COL_PUBLISH, _check(shown))
+            if shown or not publish:
+                item.setCheckState(COL_VISIBLE, _check(shown))
+        self.status.setText(tr('Map theme "{}" applied to the layer list.').format(name))
+
+    def _refresh_initial_theme(self):
+        current = self.theme_initial.currentData()
+        self.theme_initial.blockSignals(True)
+        self.theme_initial.clear()
+        self.theme_initial.addItem(tr("(the layer settings above)"), "")
+        for i in range(self.themes_list.count()):
+            item = self.themes_list.item(i)
+            if item.checkState() == CHECKED:
+                self.theme_initial.addItem(item.text(), item.text())
+        self.theme_initial.setCurrentIndex(max(0, self.theme_initial.findData(current or "")))
+        self.theme_initial.blockSignals(False)
 
     def _choose_logo(self):
         path, _ = QFileDialog.getOpenFileName(self, tr("Logo"), "", "Images (*.png *.jpg *.jpeg *.webp)")
@@ -294,35 +421,88 @@ class PublishDialog(QDialog):
                                   "EPSG:3857 " + ", ".join(f"{v:.0f}" for v in extent))
 
     def _fill_tree(self, profile):
+        self.tree.blockSignals(True)
         self.tree.clear()
         configs = {c.layer_id: c for c in profile.layers}
 
-        def add(group, parent):
+        def add(group, parent, path):
             for child in group.children():
                 if isinstance(child, QgsLayerTreeGroup):
+                    sub = path + (child.name(),)
+                    config = profile.group(sub) or GroupConfig(list(sub))
                     item = QTreeWidgetItem(parent, [child.name()])
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-                    add(child, item)
+                    item.setData(0, GROUP_ROLE, list(sub))
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(COL_PUBLISH, UNCHECKED)
+                    item.setCheckState(COL_VISIBLE, _check(config.initially_visible))
+                    item.setCheckState(COL_TOGGLE, _check(config.toggleable))
+                    font = item.font(0)
+                    font.setBold(True)
+                    item.setFont(0, font)
+                    add(child, item, sub)
                     item.setExpanded(True)
                 elif isinstance(child, QgsLayerTreeLayer):
                     layer = child.layer()
-                    if not isinstance(layer, QgsVectorLayer) or not layer.isSpatial():
+                    if not publishable(layer):
                         continue
                     config = configs.get(layer.id()) or LayerConfig(layer.id(), included=False,
                                                                      initially_visible=False)
-                    item = QTreeWidgetItem(parent, [layer.name()])
-                    item.setData(0, Qt.ItemDataRole.UserRole, layer.id())
+                    raster = isinstance(layer, QgsRasterLayer)
+                    item = QTreeWidgetItem(parent, [layer.name() + (tr(" (raster)") if raster else "")])
+                    try:
+                        item.setIcon(0, QgsIconUtils.iconForLayer(layer))
+                    except (AttributeError, TypeError):
+                        pass
+                    item.setData(0, LAYER_ROLE, layer.id())
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(1, _check(config.included))
-                    item.setCheckState(2, _check(config.initially_visible))
-        add(self.project.layerTreeRoot(), self.tree.invisibleRootItem())
-        self.tree.itemChanged.connect(self._tree_changed)
+                    item.setCheckState(COL_PUBLISH, _check(config.included))
+                    item.setCheckState(COL_VISIBLE, _check(config.initially_visible))
+                    item.setCheckState(COL_TOGGLE, _check(config.toggleable))
+        add(self.project.layerTreeRoot(), self.tree.invisibleRootItem(), ())
+        self._sync_group_publish(self.tree.invisibleRootItem())
+        self.tree.blockSignals(False)
+
+    def _sync_group_publish(self, item):
+        """Group "Publish" boxes show their layers: all, some or none."""
+        states = []
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.data(0, GROUP_ROLE):
+                states.append(self._sync_group_publish(child))
+            elif child.data(0, LAYER_ROLE):
+                states.append(child.checkState(COL_PUBLISH))
+        if not item.data(0, GROUP_ROLE):
+            return None
+        states = [x for x in states if x is not None]
+        state = CHECKED if states and all(x == CHECKED for x in states) else \
+            UNCHECKED if all(x == UNCHECKED for x in states) else PARTIAL
+        item.setCheckState(COL_PUBLISH, state)
+        return state
 
     def _tree_changed(self, item, column):
-        if column == 2 and item.checkState(2) == CHECKED:
-            item.setCheckState(1, CHECKED)
-        if column == 1 and item.checkState(1) == UNCHECKED:
-            item.setCheckState(2, UNCHECKED)
+        self.tree.blockSignals(True)
+        try:
+            if item.data(0, GROUP_ROLE) and column == COL_PUBLISH and item.checkState(column) != PARTIAL:
+                for child in self._descendants(item):
+                    if child.data(0, LAYER_ROLE):
+                        child.setCheckState(COL_PUBLISH, item.checkState(column))
+                        if item.checkState(column) == UNCHECKED:
+                            child.setCheckState(COL_VISIBLE, UNCHECKED)
+            if item.data(0, LAYER_ROLE):
+                if column == COL_VISIBLE and item.checkState(COL_VISIBLE) == CHECKED:
+                    item.setCheckState(COL_PUBLISH, CHECKED)
+                if column == COL_PUBLISH and item.checkState(COL_PUBLISH) == UNCHECKED:
+                    item.setCheckState(COL_VISIBLE, UNCHECKED)
+            # Something that cannot be switched off must be visible at start.
+            if column == COL_TOGGLE and item.checkState(COL_TOGGLE) == UNCHECKED:
+                item.setCheckState(COL_VISIBLE, CHECKED)
+                if item.data(0, LAYER_ROLE):
+                    item.setCheckState(COL_PUBLISH, CHECKED)
+            if column == COL_VISIBLE and item.checkState(COL_VISIBLE) == UNCHECKED:
+                item.setCheckState(COL_TOGGLE, CHECKED)
+            self._sync_group_publish(self.tree.invisibleRootItem())
+        finally:
+            self.tree.blockSignals(False)
 
     def _tree_items(self):
         stack = [self.tree.invisibleRootItem()]
@@ -331,7 +511,17 @@ class PublishDialog(QDialog):
             for i in range(item.childCount()):
                 child = item.child(i)
                 stack.append(child)
-                if child.data(0, Qt.ItemDataRole.UserRole):
+                if child.data(0, LAYER_ROLE):
+                    yield child
+
+    def _group_items(self):
+        stack = [self.tree.invisibleRootItem()]
+        while stack:
+            item = stack.pop()
+            for i in range(item.childCount()):
+                child = item.child(i)
+                stack.append(child)
+                if child.data(0, GROUP_ROLE):
                     yield child
 
     def _interaction_tab(self):
@@ -381,10 +571,140 @@ class PublishDialog(QDialog):
                                          "parcel number; without one, feature links only work in the "
                                          "same version of the map.")))
         right_layout.addWidget(self.i_fields, 1)
-        split.addWidget(right)
+        self.i_stack = QStackedWidget()
+        self.i_stack.addWidget(right)
+        self.i_stack.addWidget(self._raster_page())
+        split.addWidget(self.i_stack)
         split.setStretchFactor(1, 3)
         layout.addWidget(split, 1)
         return widget
+
+    def _raster_page(self):
+        page = QWidget()
+        form = QFormLayout(page)
+        self.r_title = QLineEdit()
+        self.r_format = QComboBox()
+        self.r_format.addItem(tr("PNG (sharp, transparent; larger)"), "png")
+        self.r_format.addItem(tr("WebP (photos and plans; small, transparent)"), "webp")
+        self.r_format.addItem(tr("JPEG (photos; no transparency)"), "jpeg")
+        self.r_min = QSpinBox()
+        self.r_max = QSpinBox()
+        for box in (self.r_min, self.r_max):
+            box.setRange(-1, 22)
+            box.setSpecialValueText(tr("as the map"))
+            box.valueChanged.connect(self._raster_estimate)
+        self.r_quality = QSpinBox()
+        self.r_quality.setRange(1, 100)
+        self.r_hidpi = QCheckBox(tr("Sharp on high-resolution screens (512 px tiles, about 4× larger)"))
+        self.r_opacity = QDoubleSpinBox()
+        self.r_opacity.setRange(0, 1)
+        self.r_opacity.setSingleStep(0.1)
+        self.r_legend = QCheckBox(tr("Show in the legend"))
+        self.r_estimate = QLabel()
+        self.r_estimate.setWordWrap(True)
+        form.addRow(tr("Title in the viewer"), self.r_title)
+        form.addRow(tr("Image format"), self.r_format)
+        form.addRow(tr("Minimum zoom"), self.r_min)
+        form.addRow(tr("Maximum zoom"), self.r_max)
+        form.addRow(tr("Quality (JPEG/WebP)"), self.r_quality)
+        form.addRow("", self.r_hidpi)
+        form.addRow(tr("Initial opacity"), self.r_opacity)
+        form.addRow("", self.r_legend)
+        form.addRow("", self.r_estimate)
+        form.addRow("", _note(tr("Raster layers are drawn by QGIS exactly as on the canvas into their own "
+                                  "image tile archive (data/raster-….pmtiles). Vector layers always stay "
+                                  "vector tiles. Above the maximum zoom the last images are enlarged.")))
+        return page
+
+    def _raster_estimate(self):
+        if not self.current_layer_id or self.i_stack.currentIndex() != 1:
+            return
+        from ..publishing.raster_tiles import plan_layer  # pylint: disable=import-outside-toplevel
+        layer = self.project.mapLayer(self.current_layer_id)
+        config = LayerConfig(self.current_layer_id,
+                             raster_min_zoom=self.r_min.value() if self.r_min.value() >= 0 else None,
+                             raster_max_zoom=self.r_max.value() if self.r_max.value() >= 0 else None)
+        profile = PublicationProfile()
+        profile.view.min_zoom, profile.view.max_zoom = self.e_min_zoom.value(), self.e_max_zoom.value()
+        try:
+            plan = plan_layer(self.project, layer, config, profile, self._extent())
+        except Exception:  # noqa: BLE001 - no extent yet
+            self.r_estimate.setText("")
+            return
+        self.r_estimate.setText(tr("At most {} tiles at zooms {}–{} in the export extent.").format(
+            plan.tiles, plan.min_zoom, plan.max_zoom) + ("\n⚠ " + "; ".join(plan.warnings) if plan.warnings else ""))
+
+    def _basemap_tab(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+        self.b_kind = QComboBox()
+        self.b_kind.addItem(tr("No basemap (only the project's layers)"), "none")
+        self.b_kind.addItem(tr("OpenStreetMap vector basemap (Protomaps)"), "protomaps")
+        self.b_latest = QRadioButton(tr("Download the area from the latest Protomaps daily build (internet "
+                                        "needed while exporting)"))
+        self.b_custom = QRadioButton(tr("Use this PMTiles file or URL (Protomaps schema):"))
+        source_row = QHBoxLayout()
+        self.b_source = QLineEdit()
+        self.b_source.setPlaceholderText("https://…/planet.pmtiles  |  C:/maps/hungary.pmtiles")
+        browse = QPushButton("…")
+        browse.clicked.connect(self._choose_basemap_file)
+        source_row.addWidget(self.b_source, 1)
+        source_row.addWidget(browse)
+        self.b_flavors = {}
+        flavors_row = QHBoxLayout()
+        titles = {"light": tr("Light"), "dark": tr("Dark"), "white": tr("White"), "grayscale": tr("Grayscale"),
+                  "black": tr("Black")}
+        for flavor in BASEMAP_FLAVORS:
+            box = QCheckBox(titles[flavor])
+            box.toggled.connect(self._refresh_basemap_initial)
+            self.b_flavors[flavor] = box
+            flavors_row.addWidget(box)
+        flavors_row.addStretch(1)
+        self.b_initial = QComboBox()
+        self.b_max = QSpinBox()
+        self.b_max.setRange(0, 15)
+        self.b_padding = QSpinBox()
+        self.b_padding.setRange(0, 1000)
+        self.b_padding.setSuffix(" %")
+        self.b_overview_zoom = QSpinBox()
+        self.b_overview_zoom.setRange(0, 15)
+        self.b_overview_km = QSpinBox()
+        self.b_overview_km.setRange(0, 5000)
+        self.b_overview_km.setSuffix(" km")
+        form.addRow(tr("Basemap"), self.b_kind)
+        form.addRow("", self.b_latest)
+        form.addRow("", self.b_custom)
+        form.addRow("", source_row)
+        form.addRow(tr("Styles offered"), flavors_row)
+        form.addRow(tr("Shown at start"), self.b_initial)
+        form.addRow(tr("Most detailed zoom"), self.b_max)
+        form.addRow(tr("Area around the extent"), self.b_padding)
+        form.addRow(tr("Overview zooms (0 to)"), self.b_overview_zoom)
+        form.addRow(tr("Overview area"), self.b_overview_km)
+        form.addRow("", _note(tr(
+            "The basemap is vector tiles like the map: only the tiles of your area are copied into the "
+            "release (data/basemap.pmtiles) with fonts generated for its labels, so visitors never load "
+            "anything from another site. Visitors can switch styles or turn it off. Map data © "
+            "OpenStreetMap contributors (ODbL), shown automatically in the attribution.")))
+        return widget
+
+    def _choose_basemap_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, tr("Basemap"), "", "PMTiles (*.pmtiles)")
+        if path:
+            self.b_source.setText(path)
+            self.b_custom.setChecked(True)
+
+    def _refresh_basemap_initial(self, *_):
+        current = self.b_initial.currentData()
+        self.b_initial.blockSignals(True)
+        self.b_initial.clear()
+        self.b_initial.addItem(tr("None (switched off)"), "none")
+        for flavor, box in self.b_flavors.items():
+            if box.isChecked():
+                self.b_initial.addItem(box.text(), flavor)
+        index = self.b_initial.findData(current) if current else -1
+        self.b_initial.setCurrentIndex(index if index >= 0 else min(1, self.b_initial.count() - 1))
+        self.b_initial.blockSignals(False)
 
     def _output_tab(self):
         widget = QWidget()
@@ -423,9 +743,10 @@ class PublishDialog(QDialog):
         form.addRow(tr("Beyond the maximum zoom"), self.o_overzoom)
         form.addRow(tr("Polygon labels"), self.o_labels)
         form.addRow("", self.o_all_fields)
-        form.addRow("", QLabel(tr("Publishing never uses raster tiles: the map is vector tiles (MVT) "
-                                  "in a PMTiles archive. Sprites, patterns, legend swatches and fonts "
-                                  "are styling assets.")))
+        form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
+                                  "PMTiles archive, never as images. Only QGIS raster layers become image "
+                                  "tiles, each in its own archive. Sprites, patterns, legend swatches and "
+                                  "fonts are styling assets.")))
         return widget
 
     def _choose_dir(self):
@@ -490,7 +811,7 @@ class PublishDialog(QDialog):
         buttons.addWidget(history)
         buttons.addStretch(1)
         form.addRow("", buttons)
-        form.addRow("", QLabel(tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
+        form.addRow("", _note(tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
                                   "address: connect a custom domain to the bucket (r2.dev is rate "
                                   "limited and meant for development). Nothing is created, made "
                                   "public or deleted in your account automatically.")))
@@ -525,6 +846,36 @@ class PublishDialog(QDialog):
         self.e_max_view.setValue(profile.view.max_view_zoom)
         self._show_extent()
         self._fill_tree(profile)  # extent label refreshed by _use_canvas_extent
+        if hasattr(self.e_accent, "setColor"):
+            from qgis.PyQt.QtGui import QColor  # pylint: disable=import-outside-toplevel
+            self.e_accent.setColor(QColor(profile.accent_color))
+        else:
+            self.e_accent.setText(profile.accent_color)
+        themes = self.project.mapThemeCollection().mapThemes()
+        self.theme_pick.clear()
+        self.theme_pick.addItems(themes)
+        self.themes_list.blockSignals(True)
+        self.themes_list.clear()
+        for name in themes:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(_check(name in profile.themes.names))
+            self.themes_list.addItem(item)
+        self.themes_list.blockSignals(False)
+        self._refresh_initial_theme()
+        self.theme_initial.setCurrentIndex(max(0, self.theme_initial.findData(profile.themes.initial)))
+        basemap = profile.basemap
+        self.b_kind.setCurrentIndex(max(0, self.b_kind.findData(basemap.kind)))
+        (self.b_custom if basemap.source else self.b_latest).setChecked(True)
+        self.b_source.setText(basemap.source)
+        for flavor, box in self.b_flavors.items():
+            box.setChecked(flavor in basemap.flavors)
+        self._refresh_basemap_initial()
+        self.b_initial.setCurrentIndex(max(0, self.b_initial.findData(basemap.initial)))
+        self.b_max.setValue(basemap.max_zoom)
+        self.b_padding.setValue(int(round(basemap.padding * 100)))
+        self.b_overview_zoom.setValue(basemap.overview_zoom)
+        self.b_overview_km.setValue(int(basemap.overview_km))
         for key, box in self.i_flags.items():
             box.setChecked(bool(getattr(profile.interaction, key)))
         self.layer_configs = {c.layer_id: c for c in profile.layers}
@@ -556,8 +907,8 @@ class PublishDialog(QDialog):
             self.refresh_review()
 
     def _included_ids(self):
-        return [item.data(0, Qt.ItemDataRole.UserRole) for item in self._tree_items()
-                if item.checkState(1) == CHECKED]
+        return [item.data(0, LAYER_ROLE) for item in self._tree_items()
+                if item.checkState(COL_PUBLISH) == CHECKED]
 
     def _fill_interaction_layers(self):
         self._store_layer_fields()
@@ -580,6 +931,19 @@ class PublishDialog(QDialog):
             return
         layer = self.project.mapLayer(self.current_layer_id)
         config = self.layer_configs.setdefault(self.current_layer_id, LayerConfig(self.current_layer_id))
+        if isinstance(layer, QgsRasterLayer):
+            self.i_stack.setCurrentIndex(1)
+            self.r_title.setText(config.title)
+            self.r_format.setCurrentIndex(max(0, self.r_format.findData(config.raster_format)))
+            self.r_min.setValue(-1 if config.raster_min_zoom is None else config.raster_min_zoom)
+            self.r_max.setValue(-1 if config.raster_max_zoom is None else config.raster_max_zoom)
+            self.r_quality.setValue(config.raster_quality)
+            self.r_hidpi.setChecked(config.raster_hidpi)
+            self.r_opacity.setValue(config.opacity)
+            self.r_legend.setChecked(config.legend)
+            self._raster_estimate()
+            return
+        self.i_stack.setCurrentIndex(0)
         self.i_title.setText(config.title)
         self.i_display.setText(config.display_expression)
         self.i_opacity.setValue(config.opacity)
@@ -629,6 +993,16 @@ class PublishDialog(QDialog):
         if not self.current_layer_id:
             return
         config = self.layer_configs.setdefault(self.current_layer_id, LayerConfig(self.current_layer_id))
+        if isinstance(self.project.mapLayer(self.current_layer_id), QgsRasterLayer):
+            config.title = self.r_title.text().strip()
+            config.raster_format = self.r_format.currentData()
+            config.raster_min_zoom = self.r_min.value() if self.r_min.value() >= 0 else None
+            config.raster_max_zoom = self.r_max.value() if self.r_max.value() >= 0 else None
+            config.raster_quality = self.r_quality.value()
+            config.raster_hidpi = self.r_hidpi.isChecked()
+            config.opacity = float(self.r_opacity.value())
+            config.legend = self.r_legend.isChecked()
+            return
         config.title = self.i_title.text().strip()
         config.display_expression = self.i_display.text().strip()
         config.opacity = float(self.i_opacity.value())
@@ -664,12 +1038,42 @@ class PublishDialog(QDialog):
         profile.view.max_view_zoom = max(self.e_max_view.value(), profile.view.max_zoom)
         layers = []
         for item in self._tree_items():
-            layer_id = item.data(0, Qt.ItemDataRole.UserRole)
+            layer_id = item.data(0, LAYER_ROLE)
             config = self.layer_configs.get(layer_id) or LayerConfig(layer_id)
-            config.included = item.checkState(1) == CHECKED
-            config.initially_visible = config.included and item.checkState(2) == CHECKED
+            config.included = item.checkState(COL_PUBLISH) == CHECKED
+            config.initially_visible = config.included and item.checkState(COL_VISIBLE) == CHECKED
+            config.toggleable = not config.included or item.checkState(COL_TOGGLE) == CHECKED
+            if config.included and not config.toggleable:
+                config.initially_visible = True
             layers.append(config)
         profile.layers = layers
+        groups = []
+        for item in self._group_items():
+            toggleable = item.checkState(COL_TOGGLE) == CHECKED
+            visible = item.checkState(COL_VISIBLE) == CHECKED or not toggleable
+            if not toggleable or not visible:  # only groups that differ from the defaults
+                groups.append(GroupConfig(list(item.data(0, GROUP_ROLE)), toggleable=toggleable,
+                                          initially_visible=visible))
+        profile.groups = groups
+        names = [self.themes_list.item(i).text() for i in range(self.themes_list.count())
+                 if self.themes_list.item(i).checkState() == CHECKED]
+        profile.themes.names = names
+        profile.themes.initial = self.theme_initial.currentData() if self.theme_initial.currentData() in names else ""
+        if hasattr(self.e_accent, "color"):
+            profile.accent_color = self.e_accent.color().name()
+        else:
+            profile.accent_color = self.e_accent.text().strip() or "#2563eb"
+        basemap = profile.basemap
+        basemap.kind = self.b_kind.currentData()
+        basemap.source = self.b_source.text().strip() if self.b_custom.isChecked() else ""
+        basemap.flavors = [f for f, box in self.b_flavors.items() if box.isChecked()] or ["light"]
+        basemap.initial = self.b_initial.currentData() or "none"
+        if basemap.initial != "none" and basemap.initial not in basemap.flavors:
+            basemap.initial = basemap.flavors[0]
+        basemap.max_zoom = self.b_max.value()
+        basemap.padding = self.b_padding.value() / 100.0
+        basemap.overview_zoom = min(self.b_overview_zoom.value(), basemap.max_zoom)
+        basemap.overview_km = float(self.b_overview_km.value())
         for key, box in self.i_flags.items():
             setattr(profile.interaction, key, box.isChecked())
         out = profile.output
@@ -848,9 +1252,20 @@ class PublishDialog(QDialog):
             layer = self.project.mapLayer(config.layer_id)
             if layer is None:
                 continue
+            if isinstance(layer, QgsRasterLayer):
+                lines.append(f"■ {config.title or layer.name()} — " + tr(
+                    "raster layer: its image as QGIS draws it, inside the extent ({} format)").format(
+                    config.raster_format.upper()))
+                if (layer.providerType() or "").lower() in ("wms", "xyz", "arcgismapserver", "wcs"):
+                    lines.append("   ⚠ " + tr("Online map service: check that its licence allows republishing."))
+                if not config.toggleable:
+                    lines.append("   " + tr("Always shown (visitors cannot switch it off)"))
+                continue
             lines.append(f"■ {config.title or layer.name()} — {layer.featureCount()} "
                          + tr("features in the layer (published: those inside the extent drawn by "
                               "the exported rules)"))
+            if not config.toggleable:
+                lines.append("   " + tr("Always shown (visitors cannot switch it off)"))
             lines.append("   " + tr("Geometry and generated label/style values: public"))
             if config.popup_fields:
                 lines.append("   " + tr("Popup fields: ") + ", ".join(p.field for p in config.popup_fields))
@@ -866,7 +1281,13 @@ class PublishDialog(QDialog):
         if profile.output.include_all_fields:
             lines += ["", tr("WARNING: all attribute fields are written to the tiles and can be "
                              "downloaded by anyone.")]
-        lines += ["", tr("External resources: none (no CDN, no basemap, no telemetry)."),
+        if profile.basemap.kind == "protomaps":
+            lines += ["", tr("Basemap: OpenStreetMap vector tiles of the area, bundled into the release; "
+                             "downloaded from {} while exporting.").format(
+                profile.basemap.source or "build.protomaps.com")]
+        if profile.themes.names:
+            lines.append(tr("Views (map themes): ") + ", ".join(profile.themes.names))
+        lines += ["", tr("External resources for visitors: none (no CDN, no third-party tiles, no telemetry)."),
                   tr("Cost: storage of the archive and retained releases plus requests; R2 has no "
                      "egress fees but limits above the free tier are billed — see "
                      "https://developers.cloudflare.com/r2/pricing/ (checked 1 Oct 2026).")]
@@ -894,7 +1315,7 @@ class PublishDialog(QDialog):
                 self.btn_open.setEnabled(True)
             return
         if needs_review(profile) and not self.approve.isChecked():
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setCurrentIndex(self.tabs.count() - 1)
             self.refresh_review()
             QMessageBox.information(self, tr("Review"), tr("Review what becomes public and tick the "
                                                            "approval before publishing."))
