@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/search-v1.schema.json",
+  "title": "Search / feature-lookup index manifest (search/manifest.json, features/manifest.json)",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "mode", "records", "shards", "coverage"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"enum": ["search", "features"]},
+    "mode": {"enum": ["single", "prefix", "hash"]},
+    "prefixLength": {"type": "integer", "minimum": 0},
+    "records": {"type": "integer", "minimum": 0},
+    "normalization": {"type": "string"},
+    "coverage": {
+      "type": "object", "additionalProperties": {
+        "type": "object", "required": ["records", "fields"], "additionalProperties": false,
+        "properties": {"records": {"type": "integer", "minimum": 0},
+                       "fields": {"type": "array", "items": {"type": "string"}}}
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["key", "path", "records", "bytes", "sha256"], "additionalProperties": false,
+        "properties": {
+          "key": {"type": "string"}, "path": {"type": "string"},
+          "records": {"type": "integer", "minimum": 0}, "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

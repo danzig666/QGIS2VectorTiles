@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/current-v1.schema.json",
+  "title": "Mutable pointer to the active release (current.json)",
+  "type": "object",
+  "required": ["schemaVersion", "publicationId", "releaseId", "entry", "manifest", "activatedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "publicationId": {"type": "string", "format": "uuid"},
+    "releaseId": {"$ref": "#/$defs/releaseId"},
+    "entry": {"type": "string", "pattern": "^releases/r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}/index\\.html$"},
+    "manifest": {"type": "string", "pattern": "^releases/r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}/manifest\\.json$"},
+    "activatedAt": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {"releaseId": {"type": "string", "pattern": "^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"}}
+}

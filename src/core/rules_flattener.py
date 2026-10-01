@@ -51,11 +51,13 @@ class RulesFlattener:
     RULE_TYPES = {0: "renderer", 1: "labeling"}
 
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
-                 diagnostics: Optional[DiagnosticCollector] = None):
+                 diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None):
         self.min_zoom = min_zoom
         self.max_zoom = max_zoom
         self.utils_dir = utils_dir
         self.layer_tree_root = QgsProject.instance().layerTreeRoot()
+        # Publishing: exactly these layers, visible or not (None: visible layers).
+        self.layer_ids = None if layer_ids is None else set(layer_ids)
         self.flattened_rules: List[FlattenedRule] = []
         self.feedback = feedback
         self.diagnostics = diagnostics or DiagnosticCollector()
@@ -130,6 +132,8 @@ class RulesFlattener:
     def _is_valid_layer(self, layer) -> bool:
         """Return True if the layer is a visible non-geometry-collection vector layer."""
         is_vector = layer.type() == 0 and layer.geometryType() != 4
+        if self.layer_ids is not None:
+            return is_vector and layer.id() in self.layer_ids
         node = self.layer_tree_root.findLayer(layer.id())
         is_visible = node.isVisible() if node is not None else False
         return is_vector and is_visible

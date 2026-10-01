@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/release-v1.schema.json",
+  "title": "Allowlisted file inventory of one immutable release (release.json)",
+  "type": "object",
+  "required": ["schemaVersion", "publicationId", "releaseId", "createdAt", "files", "versions"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "publicationId": {"type": "string", "format": "uuid"},
+    "releaseId": {"type": "string", "pattern": "^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "buildId": {"type": "string"},
+    "configFingerprint": {"type": "string"},
+    "versions": {"type": "object", "additionalProperties": {"type": "string"}},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["path", "size", "sha256", "contentType"], "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "not": {"pattern": "(^/|\\.\\.|\\\\|^[A-Za-z]:)"}},
+          "size": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "contentType": {"type": "string"},
+          "cacheControl": {"type": "string"}
+        }
+      }
+    }
+  }
+}

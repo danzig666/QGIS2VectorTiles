@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/manifest-v1.schema.json",
+  "title": "Public web-map manifest (manifest.json)",
+  "type": "object",
+  "required": ["schemaVersion", "publicationId", "releaseId", "title", "vectorOnly", "style", "sources", "view", "groups", "layers", "rules", "components"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "publicationId": {"type": "string", "format": "uuid"},
+    "releaseId": {"type": "string", "pattern": "^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+    "locale": {"enum": ["en", "hu"]},
+    "attribution": {"type": "string"},
+    "logo": {"type": ["string", "null"]},
+    "vectorOnly": {"const": true},
+    "style": {"$ref": "#/$defs/relPath"},
+    "sources": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["id", "kind", "tileType", "href", "minTileZoom", "maxTileZoom"], "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string"}, "kind": {"enum": ["pmtiles", "xyz"]}, "tileType": {"const": "mvt"},
+          "href": {"$ref": "#/$defs/relPath"},
+          "minTileZoom": {"type": "integer", "minimum": 0}, "maxTileZoom": {"type": "integer", "minimum": 0},
+          "bounds": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+          "sha256": {"type": "string"}, "sizeBytes": {"type": "integer"}
+        }
+      }
+    },
+    "view": {
+      "type": "object", "required": ["center", "zoom"], "additionalProperties": false,
+      "properties": {
+        "center": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+        "zoom": {"type": "number"}, "bearing": {"const": 0}, "pitch": {"const": 0},
+        "minZoom": {"type": "number"}, "maxZoom": {"type": "number"},
+        "bounds": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}
+      }
+    },
+    "groups": {"type": "array", "items": {
+      "type": "object", "required": ["id", "title", "parentId"], "additionalProperties": false,
+      "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "parentId": {"type": ["string", "null"]},
+                     "order": {"type": "integer"}, "expanded": {"type": "boolean"}}}},
+    "layers": {"type": "array", "items": {
+      "type": "object", "required": ["id", "title", "groupId", "initialVisibility", "componentIds"], "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"}, "groupId": {"type": ["string", "null"]}, "title": {"type": "string"},
+        "order": {"type": "integer"}, "geometry": {"enum": ["point", "line", "polygon", "unknown"]},
+        "initialVisibility": {"type": "boolean"}, "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+        "legend": {"type": "boolean"}, "featureKeyProperty": {"type": ["string", "null"]},
+        "identityScope": {"enum": ["persistent", "export"]},
+        "popupFields": {"type": "array", "items": {"type": "object", "required": ["field", "title", "type"],
+          "properties": {"field": {"type": "string"}, "title": {"type": "string"}, "type": {"type": "string"}}}},
+        "filterFields": {"type": "array", "items": {"type": "object"}},
+        "searchable": {"type": "boolean"}, "deepLinks": {"type": "boolean"},
+        "minZoom": {"type": "number"}, "maxZoom": {"type": "number"},
+        "ruleIds": {"type": "array", "items": {"type": "string"}},
+        "componentIds": {"type": "array", "items": {"type": "string"}},
+        "swatch": {"type": ["string", "null"]}
+      }}},
+    "rules": {"type": "array", "items": {
+      "type": "object", "required": ["id", "layerId", "title"], "additionalProperties": false,
+      "properties": {"id": {"type": "string"}, "layerId": {"type": "string"}, "parentId": {"type": ["string", "null"]},
+                     "title": {"type": "string"}, "swatch": {"type": ["string", "null"]},
+                     "minZoom": {"type": "number"}, "maxZoom": {"type": "number"}, "order": {"type": "integer"},
+                     "componentIds": {"type": "array", "items": {"type": "string"}}}}},
+    "components": {"type": "array", "items": {
+      "type": "object", "required": ["id", "role", "layerId", "styleLayerIds", "sourceId"], "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"}, "role": {"enum": ["geometry", "decoration", "label", "callout", "helper"]},
+        "layerId": {"type": "string"}, "ruleIds": {"type": "array", "items": {"type": "string"}},
+        "styleLayerIds": {"type": "array", "items": {"type": "string"}},
+        "sourceId": {"type": "string"}, "sourceLayer": {"type": ["string", "null"]},
+        "dependsOnSourceLayers": {"type": "array", "items": {"type": "string"}},
+        "interactive": {"type": "boolean"}
+      }}},
+    "search": {"type": ["object", "null"]},
+    "featureLookup": {"type": ["object", "null"]},
+    "interaction": {"type": "object"},
+    "tools": {"type": "object"},
+    "diagnostics": {"type": ["string", "null"]},
+    "generator": {"type": "object"}
+  },
+  "$defs": {
+    "relPath": {"type": "string", "minLength": 1, "not": {"pattern": "(^/|\\.\\.|\\\\|^[A-Za-z]:|://)"}}
+  }
+}

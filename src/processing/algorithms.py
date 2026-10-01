@@ -12,6 +12,8 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsProcessingParameterEnum,
     QgsProcessingParameterBoolean,
+    QgsProcessingOutputFile,
+    QgsProcessingOutputFolder,
 )
 from qgis.utils import iface
 from ..qgis2vectortiles import QGIS2VectorTiles
@@ -42,6 +44,8 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
     OVERZOOM = "OVERZOOM"
     STATIC_PACKAGE = "STATIC_PACKAGE"
     PARALLEL = "PARALLEL"
+    TILE_ARCHIVE_FORMAT = "TILE_ARCHIVE_FORMAT"
+    ARCHIVE_FORMATS = ("mbtiles", "pmtiles", "both")
 
     def __init__(self):
         """Initialize the algorithm"""
@@ -245,12 +249,31 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        archive = QgsProcessingParameterEnum(
+            self.TILE_ARCHIVE_FORMAT,
+            self.tr("Tile archive format"),
+            options=[
+                "MBTiles (as before; opens in QGIS)",
+                "PMTiles (same vector tiles for static web hosting; QGIS 3.34 cannot open it, "
+                "so no result layer is added)",
+                "Both MBTiles and PMTiles",
+            ],
+            defaultValue=0,
+            optional=True,
+        )
+        self.addParameter(archive)
         # Output directory parameter
         self.addParameter(
             QgsProcessingParameterFolderDestination(
                 self.OUTPUT_DIR, self.tr("Output Directory"), optional=False
             )
         )
+
+        self.addOutput(QgsProcessingOutputFolder("OUTPUT_FOLDER", self.tr("Export folder")))
+        self.addOutput(QgsProcessingOutputFile("MBTILES", self.tr("MBTiles archive")))
+        self.addOutput(QgsProcessingOutputFile("PMTILES", self.tr("PMTiles archive")))
+        self.addOutput(QgsProcessingOutputFile("STYLE", self.tr("MapLibre style")))
+        self.addOutput(QgsProcessingOutputFile("REPORT", self.tr("Fidelity report")))
 
     def checkParameterValues(self, parameters, context):
         """
@@ -300,6 +323,10 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         overzoom = self.parameterAsInt(parameters, self.OVERZOOM, context)
         static_package = self.parameterAsBool(parameters, self.STATIC_PACKAGE, context)
         parallel = self.parameterAsBool(parameters, self.PARALLEL, context)
+        archive_format = self.ARCHIVE_FORMATS[0]
+        if parameters.get(self.TILE_ARCHIVE_FORMAT) is not None:
+            archive_format = self.ARCHIVE_FORMATS[
+                self.parameterAsEnum(parameters, self.TILE_ARCHIVE_FORMAT, context)]
         try:
             # Your existing vector tile generator class would be called here
             tiles_generator = QGIS2VectorTiles(
@@ -317,12 +344,21 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
                 overzoom=overzoom,
                 static_package=static_package,
                 parallel=parallel,
+                archive_format=archive_format,
             )
 
             # Run the generation process
             output_path = tiles_generator.convert_project_to_vector_tiles()
             if output_path:
                 feedback.pushInfo(". Vector tiles package generation completed successfully")
+                results = {"OUTPUT_FOLDER": output_path, self.OUTPUT_DIR: output_dir}
+                from os.path import exists  # pylint: disable=import-outside-toplevel
+                for key, name in (("MBTILES", "tiles.mbtiles"), ("PMTILES", "tiles.pmtiles"),
+                                  ("STYLE", join("style", "style.json")),
+                                  ("REPORT", "fidelity_report.json")):
+                    if exists(join(output_path, name)):
+                        results[key] = join(output_path, name)
+                return results
 
         except (NameError, ValueError, AttributeError, TypeError) as e:
             feedback.reportError(f"Error during Vector tiles package generation: {str(e)}")

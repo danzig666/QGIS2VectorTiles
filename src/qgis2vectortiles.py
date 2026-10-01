@@ -88,7 +88,17 @@ class QGIS2VectorTiles:
         serve: bool = True,
         static_package: bool = False,
         parallel: bool = False,
+        layer_ids=None,
+        archive_format: str = "mbtiles",
+        add_result_layer: bool = True,
     ):
+        """``layer_ids``: export exactly these vector layers (also hidden
+        ones; the layer tree is not touched); None = the visible layers, as
+        before. ``archive_format``: "mbtiles" (default, as before), "pmtiles"
+        or "both" (the same MVT tiles repackaged as PMTiles v3).
+        ``add_result_layer``: add the "Vector Tiles" result layer and the
+        local viewer files (the publishing workflow turns this off so the
+        project is not changed)."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -103,6 +113,17 @@ class QGIS2VectorTiles:
         self.serve = serve
         self.static_package = static_package
         self.parallel = parallel
+        self.layer_ids = None if layer_ids is None else set(layer_ids)
+        if archive_format not in ("mbtiles", "pmtiles", "both"):
+            raise ValueError(f"archive_format must be mbtiles, pmtiles or both, not {archive_format!r}")
+        self.archive_format = archive_format
+        self.add_result_layer = add_result_layer
+        # Results of the last run (the publishing workflow builds its
+        # ExportBundle from them; see export_bundle()).
+        self.rules: List[FlattenedRule] = []
+        self.style: dict = {}
+        self.style_exporter = None
+        self.pmtiles = None
         self.diagnostics = DiagnosticCollector()
         self.profile = ExportProfile(
             mode=FidelityMode.from_index(fidelity_mode),
@@ -178,6 +199,9 @@ class QGIS2VectorTiles:
                 self.diagnostics.add("Q2VT_PROJECT_MUTATED")
             if archive is not None and self.static_package:
                 self._write_static_package(temp_dir, style, exporter.source_name)
+            if archive is not None and self.archive_format in ("pmtiles", "both"):
+                self._write_pmtiles(temp_dir)
+            self.rules, self.style, self.style_exporter = rules, style, exporter
             self._write_report(temp_dir, style, archive, rules)
             self._enforce_strict(temp_dir)
             self.feedback.setProgress(100)
@@ -185,7 +209,11 @@ class QGIS2VectorTiles:
                       f"({self._elapsed_minutes(start_time)} minutes).")
             self._clear_project()
             self.output_path = temp_dir
-            self.serve_tiles(temp_dir)
+            if self.archive_format == "pmtiles" and self.pmtiles is not None:
+                # QGIS cannot open PMTiles: no result layer / MBTiles viewer.
+                self._remove_mbtiles(temp_dir)
+            elif self.add_result_layer:
+                self.serve_tiles(temp_dir)
             return temp_dir
 
         except StrictModeError as e:
@@ -364,7 +392,8 @@ class QGIS2VectorTiles:
 
     def _flatten_rules(self) -> List[FlattenedRule]:
         return RulesFlattener(
-            self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics
+            self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
+            layer_ids=self.layer_ids,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).
@@ -511,6 +540,60 @@ class QGIS2VectorTiles:
         path = write_static_package(temp_dir, style, source_name, viewer_dir,
                                     (center.x(), center.y()), zoom)
         self._log(f". Static web package: {path}")
+
+    def _write_pmtiles(self, temp_dir: str) -> None:
+        """``tiles.pmtiles``: the validated MBTiles tiles repackaged (PUB-05)."""
+        from .publishing.pmtiles_builder import build_pmtiles  # pylint: disable=import-outside-toplevel
+        self._log(". Packaging the vector tiles as PMTiles...")
+        self.pmtiles = build_pmtiles(join(temp_dir, "tiles.mbtiles"), join(temp_dir, "tiles.pmtiles"),
+                                     feedback=self.feedback)
+        for warning in self.pmtiles.warnings:
+            self._log(f". PMTiles: {warning}")
+        self._log(f". PMTiles archive: tiles.pmtiles ({self.pmtiles.addressed_tiles} tiles, "
+                  f"{self.pmtiles.size_bytes} bytes, validated).")
+
+    def _remove_mbtiles(self, temp_dir: str) -> None:
+        from os import remove  # pylint: disable=import-outside-toplevel
+        try:
+            remove(join(temp_dir, "tiles.mbtiles"))
+            self._log(". PMTiles only: tiles.mbtiles removed (QGIS cannot open PMTiles; "
+                      "choose 'Both' to keep the QGIS result layer).")
+        except OSError as error:
+            self._log(f". Could not remove tiles.mbtiles: {error}")
+
+    def export_bundle(self, publication_id: str = ""):
+        """The private ExportBundle of the last successful run (paths, style,
+        zooms, view). The logical layer/rule model is added by
+        ``publishing.qgis_model``."""
+        from .publishing.models import ExportBundle  # pylint: disable=import-outside-toplevel
+        if not self.output_path:
+            raise RuntimeError("No successful export to describe.")
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
+            QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance().transformContext())
+        box = transform.transformBoundingBox(self.extent)
+        center = transform.transform(self.extent.center())
+        zoom = fit_zoom(self.extent.width(), self.extent.height(),
+                        max(0, self.min_zoom), self.max_zoom)
+        style_dir = join(self.output_path, "style")
+        return ExportBundle(
+            export_dir=self.output_path,
+            mbtiles_path=join(self.output_path, "tiles.mbtiles"),
+            style_path=join(style_dir, "style.json"),
+            style=self.style,
+            source_name=getattr(self.style_exporter, "source_name", "q2vt_tiles"),
+            sprite_dir=join(style_dir, "sprite") if exists(join(style_dir, "sprite")) else "",
+            glyphs_dir=join(style_dir, "glyphs") if exists(join(style_dir, "glyphs")) else "",
+            report_path=join(self.output_path, "fidelity_report.json"),
+            log_path=join(self.output_path, "export_log.txt"),
+            publication_id=publication_id,
+            runtime_versions=self._environment(),
+            bounds_wgs84=(box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()),
+            view={"center": [center.x(), center.y()], "zoom": zoom,
+                  "minZoom": max(0, self.min_zoom), "maxZoom": self.max_zoom},
+            tile_zooms=self._expected_zooms,
+            diagnostics_summary=self.diagnostics.counts(),
+        )
 
     def serve_tiles(self, temp_dir: str):
         """Serve the generated tiles via a local HTTP server."""
