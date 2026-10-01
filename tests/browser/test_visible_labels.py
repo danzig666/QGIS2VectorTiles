@@ -145,3 +145,26 @@ def test_the_wanted_tile_level_wins_over_deeper_leftovers():
                (1, 1, 0, 0, (1024, 1024, 2048, 2048))]
     assert set(_points(squares, [0, 0, 1, 1], {"tileZoom": 0})) == {1, 2}
     assert set(_points(squares, [0, 0, 1, 1], {})) == {1}  # deepest only (zooming in)
+
+
+def test_labels_do_not_move_while_the_map_moves():
+    # A label at the screen edge would move in (test above), but not while
+    # the map is moving: it stays put until the map stops.
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const ring = [[512, 512], [3584, 512], [3584, 3584], [512, 3584]].map(([x, y]) => ({{x, y}}));
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 7 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring] }} }};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const state = newLabelState();
+const at = (view, freeze) => labelPoints([feature], view, maplibregl, {{ state, margin: 0.02, freeze }})
+  .features.map((f) => f.geometry.coordinates)[0];
+console.log(JSON.stringify([at([0, 0, 1, 1], false), at([0.49, 0.49, 1, 1], true), at([0.49, 0.49, 1, 1], false)]));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    first, moving, stopped = json.loads(run.stdout)
+    assert moving == pytest.approx(first)       # dragging: glued to the map
+    assert stopped[0] > 0.6                     # stopped: moved onto the visible part
