@@ -169,3 +169,77 @@ def lonlat_tile(lon: float, lat: float, z: int):
     x = int((lon + 180) / 360 * n)
     y = int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)
     return x, y
+
+
+PNG_1X1 = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00"
+           b"\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff"
+           b"\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82")
+
+
+def fixture_style(source="q2vt_tiles"):
+    """A compiled-style stand-in with the features the packaging must keep:
+    expressions, sprite pattern, fonts, per-zoom layers, a raster basemap
+    (removed for vector-only publishing) and visible-polygon label metadata."""
+    return {
+        "version": 8, "name": "fixture",
+        "sources": {
+            source: {"type": "vector", "tiles": ["http://localhost:9000/tiles/{z}/{x}/{y}.pbf"],
+                     "minzoom": 0, "maxzoom": 4},
+            "osm": {"type": "raster", "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+                    "tileSize": 256},
+        },
+        "sprite": "http://localhost:9000/style/sprite/sprite",
+        "glyphs": "http://localhost:9000/style/glyphs/{fontstack}/{range}.pbf",
+        "layers": [
+            {"id": "osm-background", "type": "raster", "source": "osm"},
+            {"id": "polygons_fill", "type": "fill", "source": source, "source-layer": "polygons",
+             "paint": {"fill-color": ["match", ["get", "parcel"], "00123/4", "#ffcc00", "#3366cc"],
+                       "fill-opacity": ["interpolate", ["linear"], ["zoom"], 0, 0.4, 4, 0.8]}},
+            {"id": "polygons_hatch_z2", "type": "fill", "source": source, "source-layer": "polygons",
+             "minzoom": 2, "maxzoom": 3, "paint": {"fill-pattern": "hatch_1"}},
+            {"id": "lines_line", "type": "line", "source": source, "source-layer": "lines",
+             "paint": {"line-color": "#aa0000", "line-width": ["interpolate", ["exponential", 2],
+                                                               ["zoom"], 0, 1, 4, 6]}},
+            {"id": "points_circle", "type": "circle", "source": source, "source-layer": "points",
+             "paint": {"circle-radius": 4, "circle-color": "#007700"}},
+            {"id": "polygons_label", "type": "symbol", "source": source, "source-layer": "points",
+             "metadata": {"q2vt:visible-polygons": "polygons", "q2vt:label-per-part": False},
+             "layout": {"text-field": ["get", "parcel"], "text-font": ["Noto Sans Regular"],
+                        "text-size": 12}},
+        ],
+    }
+
+
+def write_style_assets(folder):
+    """sprite/ and glyphs/ folders like the exporter writes them."""
+    import os  # pylint: disable=import-outside-toplevel
+    sprite = os.path.join(folder, "sprite")
+    os.makedirs(sprite)
+    index = json.dumps({"hatch_1": {"x": 0, "y": 0, "width": 1, "height": 1, "pixelRatio": 1}})
+    for name in ("sprite", "sprite@2x"):
+        with open(os.path.join(sprite, f"{name}.json"), "w", encoding="utf-8") as handle:
+            handle.write(index)
+        with open(os.path.join(sprite, f"{name}.png"), "wb") as handle:
+            handle.write(PNG_1X1)
+    glyphs = os.path.join(folder, "glyphs", "Noto Sans Regular")
+    os.makedirs(glyphs)
+    with open(os.path.join(glyphs, "0-255.pbf"), "wb") as handle:
+        handle.write(b"\x0a\x14\x0a\x11Noto Sans Regular\x12\x05\x30\x2d\x32\x35\x35")
+    return sprite, os.path.dirname(glyphs)
+
+
+def fixture_bundle(folder, max_zoom=4):
+    """An ExportBundle over synthetic MBTiles + style assets (no QGIS)."""
+    import os  # pylint: disable=import-outside-toplevel
+    from publishing.models import ExportBundle  # pylint: disable=import-outside-toplevel
+    os.makedirs(folder, exist_ok=True)
+    mbtiles = make_mbtiles(os.path.join(folder, "tiles.mbtiles"), pyramid(max_zoom))
+    sprite, glyphs = write_style_assets(folder)
+    style = fixture_style()
+    with open(os.path.join(folder, "style.json"), "w", encoding="utf-8") as handle:
+        json.dump(style, handle)
+    return ExportBundle(export_dir=folder, mbtiles_path=mbtiles,
+                        style_path=os.path.join(folder, "style.json"), style=style,
+                        source_name="q2vt_tiles", sprite_dir=sprite, glyphs_dir=glyphs,
+                        bounds_wgs84=(-180.0, -85.0, 180.0, 85.0),
+                        view={"center": [0.0, 0.0], "zoom": 1, "minZoom": 0, "maxZoom": max_zoom})

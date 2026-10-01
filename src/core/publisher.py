@@ -11,13 +11,13 @@ a sub-directory of one) can host, with no tile server.
       sprite*.json|png, glyphs/...
       maplibre-gl.mjs, maplibre-gl-shared.mjs, maplibre-gl-worker.mjs, maplibre-gl.css
 
-The package is first written to a temporary sibling folder and renamed into
-place, so an interrupted export never leaves a half-written package, and a
-previous package is only replaced by a complete one.
+The package is first written to a temporary sibling folder; a previous
+package is moved to a backup, the new one renamed into place and the backup
+removed (restored if the rename fails; ``recover_static_package`` repairs an
+interrupted swap). The versioned, pointer-activated layout of the web
+publishing workflow is in ``src/publishing/web_builder.py``.
 """
 
-import copy
-import gzip
 import json
 import os
 import shutil
@@ -25,39 +25,15 @@ import sqlite3
 import uuid
 from typing import Optional
 
-TILES_TEMPLATE = "tiles/{z}/{x}/{y}.pbf"
+# Shared with the web publishing package (one implementation of each).
+from ..publishing.bundle import TILES_TEMPLATE  # noqa: E402,F401  pylint: disable=wrong-import-position
+from ..publishing.bundle import portable_style as _portable_style  # noqa: E402
+from ..publishing.bundle import write_xyz_tiles  # noqa: E402,F401  pylint: disable=wrong-import-position
 
 
 def portable_style(style: dict, source_name: str) -> dict:
     """``style`` with URLs relative to the style document."""
-    result = copy.deepcopy(style)
-    source = result.get("sources", {}).get(source_name)
-    if source is not None:
-        source["tiles"] = [TILES_TEMPLATE]
-    if "sprite" in result:
-        result["sprite"] = "sprite/sprite"
-    if "glyphs" in result:
-        result["glyphs"] = "glyphs/{fontstack}/{range}.pbf"
-    return result
-
-
-def write_xyz_tiles(mbtiles: str, out_dir: str) -> int:
-    """Extract an MBTiles archive to ``out_dir/{z}/{x}/{y}.pbf`` (XYZ rows,
-    gzip removed so that plain static hosting works). Returns the tile count."""
-    count = 0
-    with sqlite3.connect(f"file:{mbtiles}?mode=ro", uri=True) as conn:
-        rows = conn.execute("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles")
-        for zoom, column, row, data in rows:
-            data = bytes(data)
-            if data[:2] == b"\x1f\x8b":
-                data = gzip.decompress(data)
-            y = (1 << zoom) - 1 - row
-            folder = os.path.join(out_dir, str(zoom), str(column))
-            os.makedirs(folder, exist_ok=True)
-            with open(os.path.join(folder, f"{y}.pbf"), "wb") as handle:
-                handle.write(data)
-            count += 1
-    return count
+    return _portable_style(style, source_name, TILES_TEMPLATE)
 
 
 def _archive_bounds(mbtiles: str):
@@ -134,10 +110,45 @@ def write_static_package(export_dir: str, style: dict, source_name: str,
         with open(os.path.join(staging, "index.html"), "w", encoding="utf-8") as handle:
             handle.write(_VIEWER.format(center=json.dumps([float(c) for c in center]),
                                         zoom=float(zoom)))
-        if os.path.isdir(target):
-            shutil.rmtree(target)
-        os.replace(staging, target)
+        _swap_in(staging, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return target
+
+
+def _swap_in(staging: str, target: str) -> None:
+    """Replace ``target`` by ``staging`` so that a crash leaves either the
+    old or the new package (plus a recoverable ``.old-*`` backup), never a
+    half-deleted one: old -> backup, staging -> target, backup removed; the
+    backup is put back if the second rename fails."""
+    backup = None
+    if os.path.isdir(target):
+        backup = f"{target}.old-{uuid.uuid4().hex[:8]}"
+        os.replace(target, backup)
+    try:
+        os.replace(staging, target)
+    except BaseException:
+        if backup is not None:
+            os.replace(backup, target)
+        raise
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
+    recover_static_package(target)
+
+
+def recover_static_package(target: str) -> None:
+    """Startup recovery of interrupted swaps: restore a backup when the
+    package is missing, else delete leftover backups/staging folders."""
+    parent, name = os.path.split(os.path.abspath(target))
+    if not os.path.isdir(parent):
+        return
+    leftovers = sorted(n for n in os.listdir(parent)
+                       if n.startswith(f"{name}.old-") or n.startswith(f"{name}.tmp-"))
+    if not os.path.isdir(target):
+        backups = [n for n in leftovers if n.startswith(f"{name}.old-")]
+        if backups:
+            os.replace(os.path.join(parent, backups[-1]), target)
+            leftovers.remove(backups[-1])
+    for leftover in leftovers:
+        shutil.rmtree(os.path.join(parent, leftover), ignore_errors=True)
