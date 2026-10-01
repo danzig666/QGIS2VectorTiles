@@ -12,7 +12,7 @@ import pytest
 
 from publishing import mvt
 from publishing.errors import Cancelled, PublishingError
-from publishing.pmtiles_builder import PmtilesOptions, build_pmtiles, preflight_mbtiles
+from publishing.pmtiles_builder import PmtilesOptions, build_pmtiles
 from publishing.validation import (compare_archives, open_pmtiles, validate_pmtiles)
 from publishing.vendor.pmtiles.tile import Compression, TileType, zxy_to_tileid
 from publishing_fixtures import encode_tile, make_mbtiles, pyramid, sample_tile
