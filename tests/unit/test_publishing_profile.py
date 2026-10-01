@@ -139,3 +139,13 @@ def test_all_schemas_are_valid_draft_2020_12():
     for name in os.listdir(SCHEMAS):
         with open(os.path.join(SCHEMAS, name), encoding="utf-8") as handle:
             jsonschema.Draft202012Validator.check_schema(json.load(handle))
+
+
+def test_plain_http_only_for_local_test_servers():
+    data = _profile().to_dict()
+    data["destination"].update(kind="s3", endpoint="http://127.0.0.1:9000", bucket="maps",
+                               publicBaseUrl="http://localhost:9001")
+    assert load_profile(data).destination.endpoint == "http://127.0.0.1:9000"
+    data["destination"]["publicBaseUrl"] = "http://maps.example.com"
+    with pytest.raises(PublishingError, match="https"):
+        load_profile(data)

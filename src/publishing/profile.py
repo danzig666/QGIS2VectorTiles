@@ -157,8 +157,11 @@ def validate(profile: PublicationProfile) -> List[str]:
             errors.append("destination.endpoint: required")
         for key in ("endpoint", "public_base_url"):
             value = getattr(dest, key)
-            if value and urlparse(value).scheme != "https":
-                errors.append(f"destination.{key}: must be an https:// URL")
+            parsed = urlparse(value) if value else None
+            loopback = parsed is not None and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+            if value and parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+                errors.append(f"destination.{key}: must be an https:// URL "
+                              "(plain http only for local test servers on this computer)")
         if not dest.public_base_url:
             errors.append("destination.publicBaseUrl: required (the public custom domain)")
     if dest.prefix:
