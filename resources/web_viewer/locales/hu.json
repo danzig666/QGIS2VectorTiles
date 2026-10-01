@@ -80,5 +80,21 @@
   "basemap.title": "Alaptérkép",
   "basemap.none": "Nincs",
   "error.basemap": "Az alaptérkép nem tölthető be; a térkép nélküle látszik.",
-  "layers.locked": "Mindig látható"
+  "layers.locked": "Mindig látható",
+  "app.parcel": "Telek",
+  "parcel.hint": "Kattints egy telekre a térképen: megjelennek az adatai, telekrészei, övezetei és korlátozásai.",
+  "parcel.notFound": "Ehhez a telekhez nincs adat.",
+  "parcel.title": "Telek",
+  "parcel.hrsz": "Hrsz.",
+  "parcel.totalArea": "teljes terület",
+  "parcel.parts": "{n} telekrész (övezethatárral, szabályozási vonallal vágva)",
+  "parcel.zone": "Övezet",
+  "parcel.cutBy": "határolja: {line}",
+  "parcel.restrictions": "Korlátozások ({n})",
+  "parcel.noRestrictions": "A telket nem érinti korlátozás.",
+  "parcel.touches": "érinti",
+  "parcel.distance": "Védőtávolság: {m} m",
+  "parcel.print": "Telekinformáció nyomtatása",
+  "legend.visibleOnly": "Csak a nézetben látható elemek",
+  "legend.noneVisible": "Ebben a nézetben nincs megjelenített elem."
 }

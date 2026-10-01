@@ -80,5 +80,21 @@
   "basemap.title": "Basemap",
   "basemap.none": "None",
   "error.basemap": "The basemap could not be loaded; the map is shown without it.",
-  "layers.locked": "Always shown"
+  "layers.locked": "Always shown",
+  "app.parcel": "Parcel",
+  "parcel.hint": "Click a parcel on the map to see its data, parts, zones and restrictions.",
+  "parcel.notFound": "No report for this parcel.",
+  "parcel.title": "Parcel",
+  "parcel.hrsz": "Parcel no.",
+  "parcel.totalArea": "total area",
+  "parcel.parts": "{n} parts (cut by zoning and regulation lines)",
+  "parcel.zone": "Zone",
+  "parcel.cutBy": "cut by: {line}",
+  "parcel.restrictions": "Restrictions ({n})",
+  "parcel.noRestrictions": "No restriction touches this parcel.",
+  "parcel.touches": "touches",
+  "parcel.distance": "Protection distance: {m} m",
+  "parcel.print": "Print parcel report",
+  "legend.visibleOnly": "Only what is visible in the view",
+  "legend.noneVisible": "Nothing is drawn in this view."
 }

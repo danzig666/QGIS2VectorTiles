@@ -14,15 +14,18 @@ import { Search, goTo } from "./search.mjs";
 import { Permalink, decodeState } from "./permalink.mjs";
 import { Tools } from "./tools.mjs";
 import { Basemap } from "./basemap.mjs";
+import { ParcelReport } from "./parcel_report.mjs";
 import { warn } from "./diagnostics.mjs";
 import { button, el, icon } from "./icons.mjs";
 
 const MOBILE = "(max-width: 760px)";
 const THEME_KEY = "q2vt:ui-theme";
-const PANES = { layers: "layers", legend: "legend", filters: "filter", tools: "tools", share: "share" };
+const PANES = { layers: "layers", parcel: "pin", legend: "legend", filters: "filter", tools: "tools", share: "share" };
 
 function panes(manifest) {
-  const list = [["layers", "app.layers"], ["legend", "app.legend"]];
+  const list = [["layers", "app.layers"]];
+  if (manifest.parcelInfo) list.push(["parcel", "app.parcel"]);
+  list.push(["legend", "app.legend"]);
   if (manifest.interaction?.filters !== false && manifest.layers.some((l) => (l.filterFields || []).length)) list.push(["filters", "app.filters"]);
   const tools = manifest.tools || {};
   if (tools.coordinates || tools.measure || tools.print) list.push(["tools", "app.tools"]);
@@ -323,6 +326,21 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     : new Identify({ map, manifest, maplibregl, control, state, lookup, viewer });
   const parts = { state, control, permalink, lookup, identify, panel, basemap };
   parts.layers = new LayerControls({ map, manifest, state, control, container: panel.panes.layers, releaseBase });
+  if (panel.panes.parcel) {
+    const report = new ParcelReport({ map, manifest, manifestUrl, releaseBase, maplibregl,
+      container: panel.panes.parcel, panel, permalink });
+    parts.parcel = report;
+    viewer.parcel = report;
+    if (identify) {
+      // A parcel opens its report in the panel instead of a popup.
+      identify.intercept = (layerId, key) => {
+        if (layerId !== report.layerId) return false;
+        report.show(key).catch((error) => warn("feature.notFound", String(error)));
+        return true;
+      };
+      identify.onEmpty = () => report.clearMarkers();
+    }
+  }
   parts.legend = new Legend({ map, manifest, state, control, container: panel.panes.legend, releaseBase });
   if (panel.panes.filters) parts.filters = new Filters({ manifest, state, container: panel.panes.filters });
   if (panel.panes.tools) parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });

@@ -50,6 +50,12 @@ def layer(kind, name, fields, rows, path=None):
 
 @pytest.fixture
 def site(plugin, tmp_path):
+    return build_site(tmp_path)
+
+
+def build_site(tmp_path, **profile_changes):
+    """Two parcels in EOV, three zones, regulation line, zone boundary and
+    four restriction layers, published with the parcel report."""
     project = reset_project()
     parcels = layer("Polygon", "Földrészletek", ["hrsz", "kivett", "tulaj"],
                     [(("100/1", "lakóház", "Kovács János"), box(0, 0, 100, 40)),
@@ -87,6 +93,8 @@ def site(plugin, tmp_path):
         RestrictionConfig(monument.id(), "Műemlék környezete", name_field="NEV", buffer_m=5),
         RestrictionConfig(neighbour.id(), "Szomszéd terület")]
     info.min_share = 0.1
+    for key, value in profile_changes.items():
+        setattr(profile.interaction, key, value)
     to_web = QgsCoordinateTransform(QgsCoordinateReferenceSystem(EOV), QgsCoordinateReferenceSystem("EPSG:3857"),
                                     project.transformContext())
     extent = to_web.transformBoundingBox(QgsRectangle(X - 50, Y - 50, X + 200, Y + 100))

@@ -78,6 +78,7 @@ export class Identify {
     const hits = this.hits(event.point);
     if (!hits.length) {
       this.popup.remove();
+      if (this.onEmpty) this.onEmpty();
       return;
     }
     if (hits.length === 1) {
@@ -102,6 +103,11 @@ export class Identify {
   }
 
   async open(layerId, key, lngLat, feature = null) {
+    if (this.intercept && this.intercept(layerId, key, lngLat)) {
+      this.popup.remove();
+      this.select({ layerId, key });
+      return;
+    }
     const layer = this.layers.get(layerId);
     let record = null;
     try { record = await this.lookup.get(layerId, key); } catch { record = null; }
