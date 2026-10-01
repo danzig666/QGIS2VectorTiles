@@ -106,7 +106,8 @@ def test_local_publication_end_to_end(project, tmp_path):
     lid = layer_logical_id(parcels.id())
     # Logical model: group, layer (hidden but included), categories as rules.
     assert manifest["groups"] == [{"id": manifest["groups"][0]["id"], "title": "Szabályozás",
-                                   "parentId": None, "order": 0, "expanded": True}]
+                                   "parentId": None, "order": 0, "expanded": True,
+                                   "toggleable": True, "initialVisibility": True}]
     [layer] = manifest["layers"]
     assert layer["id"] == lid and layer["initialVisibility"] is False
     assert layer["groupId"] == manifest["groups"][0]["id"] and layer["title"] == "Földrészletek"

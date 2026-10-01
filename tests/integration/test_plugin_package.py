@@ -73,6 +73,9 @@ def test_release_zip_installs_and_loads(tmp_path):
                          "resources/ml_viewer/visible_labels.mjs",
                          "src/gui/publish_dialog.py",
                          "src/publishing/vendor/pmtiles/writer.py",
+                         "src/publishing/raster_tiles.py", "src/publishing/basemap.py",
+                         "resources/basemaps/protomaps/hu-light.json",
+                         "resources/web_viewer/basemap.mjs", "resources/web_viewer/icons.mjs",
                          "src/publishing/vendor/s3/boto3/__init__.py",
                          "src/publishing/vendor/s3/botocore/data/s3/2006-03-01/service-2.json.gz"):
             assert f"{FOLDER}/{required}" in names, required
