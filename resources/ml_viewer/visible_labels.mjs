@@ -23,7 +23,13 @@ export const LOADER_PREFIX = "q2vt_visible_loader_";
 export const OVERLAP_SUFFIX = "_q2vt_overlap";
 const EDGE_PX = 24; // a kept label must stay this far inside the screen
 
-export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
+// options (all optional):
+//   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
+//     get a label (layer/rule toggles, attribute filters);
+//   onUnsupported(reason): MapLibre no longer exposes the tile fields this
+//     helper reads (_x/_y/_z/_vectorTileFeature) - labels stay static.
+// Returns {update, sync, groups, setEligibility, pause, resume, destroy}.
+export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", options = {}) {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
   const style = map.getStyle();
   const tileSource = style.sources[sourceId] || {};
@@ -34,9 +40,11 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
     const before = style.layers.slice(index + 1).find((l) => !(l.metadata && l.metadata["q2vt:visible-polygons"]));
     groups.get(polygons).layers.push({ def: layer, before: before ? before.id : undefined });
   });
+  const noop = () => {};
   if (!groups.size) {
     const overlap = enableOverlapFallback(map);
-    return { update: () => {}, sync: overlap.sync, groups };
+    return { update: noop, sync: overlap.sync, groups, setEligibility: noop, pause: noop,
+             resume: noop, destroy: overlap.destroy };
   }
 
   const firstLayer = style.layers.length ? style.layers[0].id : undefined;
@@ -68,24 +76,61 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
   const overlap = enableOverlapFallback(map);
 
   let pending = null;
+  let paused = false;
+  let unsupported = false;
+  let eligible = options.eligible || null;
   const states = new Map(); // polygon source layer -> label positions kept
+  const signatures = new Map(); // polygon source layer -> last data written
   const update = () => {
     pending = null;
+    if (paused || unsupported) return;
     const view = viewRect(map, maplibregl);
     const margin = EDGE_PX * (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
     for (const [polygons, group] of groups) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
-      const features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
-      map.getSource(group.source).setData(
-        labelPoints(features, view, maplibregl, { state: states.get(polygons), margin }));
+      let features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
+      if (features.length && !features.some((f) => f._vectorTileFeature && Number.isInteger(f._z))) {
+        unsupported = true;  // private tile fields gone (MapLibre upgrade)
+        if (options.onUnsupported) options.onUnsupported("tile feature fields unavailable");
+        return;
+      }
+      if (eligible) features = features.filter((f) => eligible(f.properties, polygons));
+      const data = labelPoints(features, view, maplibregl, { state: states.get(polygons), margin });
+      // Unchanged labels: no setData (it would trigger another idle ->
+      // update round trip forever).
+      const signature = JSON.stringify(data.features.map((f) => [f.id, f.geometry.coordinates]));
+      if (signatures.get(polygons) === signature) continue;
+      signatures.set(polygons, signature);
+      map.getSource(group.source).setData(data);
     }
   };
-  const schedule = () => { if (!pending) pending = setTimeout(update, 60); };
+  const schedule = () => { if (!pending && !paused) pending = setTimeout(update, 60); };
+  const onSourceData = (e) => { if (e.sourceId === sourceId && e.isSourceLoaded) schedule(); };
   map.on("moveend", schedule);
-  map.on("sourcedata", (e) => { if (e.sourceId === sourceId && e.isSourceLoaded) schedule(); });
+  map.on("sourcedata", onSourceData);
   map.on("idle", schedule);
   update();
-  return { update, sync: overlap.sync, groups };
+  return {
+    update, sync: overlap.sync, groups,
+    // New eligibility (toggles/filters): positions of polygons that stay
+    // eligible are kept; the others lose their label at the next update.
+    setEligibility(fn) { eligible = fn || null; signatures.clear(); schedule(); },
+    pause() { paused = true; if (pending) { clearTimeout(pending); pending = null; } },
+    resume() { paused = false; signatures.clear(); schedule(); },
+    destroy() {
+      paused = true;
+      if (pending) clearTimeout(pending);
+      pending = null;
+      map.off("moveend", schedule);
+      map.off("sourcedata", onSourceData);
+      map.off("idle", schedule);
+      overlap.destroy();
+      for (const group of groups.values()) {
+        const source = map.getSource(group.source);
+        if (source) source.setData({ type: "FeatureCollection", features: [] });
+      }
+    },
+  };
 }
 
 // Label positions kept between updates, and stable feature ids (for the
@@ -286,17 +331,23 @@ export function enableOverlapFallback(map) {
     }
     marked = placed;
   };
+  let last = 0, pending = null;
+  const throttled = () => {
+    if (pending) return;
+    const wait = Math.max(0, 150 - (Date.now() - last));
+    pending = setTimeout(() => { pending = null; last = Date.now(); sync(); }, wait);
+  };
   if (primaries.length) {
-    let last = 0, pending = null;
-    const throttled = () => {
-      if (pending) return;
-      const wait = Math.max(0, 150 - (Date.now() - last));
-      pending = setTimeout(() => { pending = null; last = Date.now(); sync(); }, wait);
-    };
     map.on("render", throttled);
     map.on("idle", sync);
   }
-  return { sync, layers: primaries };
+  const destroy = () => {
+    if (pending) clearTimeout(pending);
+    pending = null;
+    map.off("render", throttled);
+    map.off("idle", sync);
+  };
+  return { sync, layers: primaries, destroy };
 }
 
 // opacity -> 0 where the label was placed by its primary layer; zoom curves

@@ -369,7 +369,7 @@ def scan_bundle(root: str, files: Iterable[str], secrets: Iterable[str] = (),
                 text = handle.read()
             # Third-party bundles may contain generic strings: secrets only.
             scan = scan_text_for_leaks(text, secrets)
-            if relative.startswith(("assets/vendor/",)):
+            if relative.startswith(("assets/vendor/", "assets/maplibre-gl")):
                 scan = [p for p in scan if p == "credential value"]
             problems.extend(f"{relative}: {p}" for p in scan)
             for canary in canaries:

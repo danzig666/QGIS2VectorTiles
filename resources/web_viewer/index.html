@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; child-src 'self' blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'__Q2VT_CONNECT__; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>__Q2VT_TITLE__</title>
+<link rel="stylesheet" href="assets/maplibre-gl.css">
+<link rel="stylesheet" href="assets/styles.css">
+<script src="assets/vendor/pmtiles.js"></script>
+<script type="module" src="assets/app.mjs"></script>
+</head>
+<body>
+<div id="q2vt-app">
+  <header id="q2vt-header">
+    <button id="q2vt-menu" type="button" aria-controls="q2vt-panel" aria-expanded="false" aria-label="Menu"><span aria-hidden="true">☰</span></button>
+    <h1 id="q2vt-title">__Q2VT_TITLE__</h1>
+    <div id="q2vt-searchbox"></div>
+  </header>
+  <aside id="q2vt-panel" aria-label="Map panel" hidden>
+    <nav id="q2vt-tabs" role="tablist"></nav>
+    <div id="q2vt-panes"></div>
+    <section id="q2vt-about">
+      <p id="q2vt-description"></p>
+      <p id="q2vt-release" class="q2vt-muted"></p>
+    </section>
+  </aside>
+  <main id="q2vt-map" aria-label="Map"><p id="q2vt-loading" class="q2vt-loading">Loading…</p></main>
+  <div id="q2vt-warning" role="status" hidden></div>
+  <div id="q2vt-error" role="alert" hidden></div>
+</div>
+<noscript>This map needs JavaScript and WebGL.</noscript>
+</body>
+</html>
