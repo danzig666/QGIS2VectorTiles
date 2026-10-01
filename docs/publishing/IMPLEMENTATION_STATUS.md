@@ -44,3 +44,15 @@ To close Milestone C:
 1. Publish once to an authorised sandbox prefix on the owner's R2 bucket (see `HOSTING.md`).
 2. Check the result in a second browser.
 3. Repeat the clean install on QGIS 3.44 or later and on Windows.
+
+## Regression (4.2.0)
+
+| Run | Result |
+|---|---|
+| Baseline before publishing work (`BASELINE.md`) | 292 passed, 0 skipped |
+| `pytest` (full suite, after PUB-16) | **429 passed, 5 skipped**, 0 failed, 7 min 49 s |
+| The 5 skips are opt-in tools, run separately: `Q2VT_PMTILES_CLI=… Q2VT_MOTO_PATH=… Q2VT_MOTO_PYTHON=python3.11 pytest tests/unit/test_publishing_pmtiles.py tests/unit/test_publishing_s3_moto.py` | 22 passed (go-pmtiles 1.28.0 `verify`, moto S3 server) |
+
+A first full run failed 6 browser tests: a tile server leaked by the Processing test held
+port 9000. The test now stops the server from launching, and the result above is from the
+second run.
