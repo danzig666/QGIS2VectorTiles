@@ -2,13 +2,7 @@
 // original rules (UI images), layers in tree order. Used on screen and in
 // print. Rules not drawn at the current zoom are listed as out of scale.
 import { t } from "./i18n.mjs";
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
+import { el, icon } from "./icons.mjs";
 
 export class Legend {
   constructor({ map, manifest, state, control, container, releaseBase }) {
@@ -27,30 +21,34 @@ export class Legend {
     const layers = [...this.manifest.layers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const layer of layers) {
       if (layer.legend === false || !this.control.layerEnabled(layer.id, state)) continue;
-      const block = el("div", "q2vt-legend-layer");
+      const block = el("section", "q2vt-legend-layer");
       block.append(el("h3", "", layer.title));
       const rules = this.manifest.rules.filter((r) => r.layerId === layer.id && this.control.ruleEnabled(r.id, state));
       const items = rules.length ? rules : [{ title: layer.title, swatch: layer.swatch, componentIds: layer.componentIds }];
+      const list = el("ul", "q2vt-legend-items");
       for (const rule of items) {
         if (!rule.swatch && rules.length) continue;
-        const item = el("div", "q2vt-legend-item");
+        const item = el("li", "q2vt-legend-item");
         if (rule.swatch) {
           const img = document.createElement("img");
           img.alt = "";
           img.src = new URL(rule.swatch, this.releaseBase).href;
           item.append(img);
+        } else if (layer.geometry === "raster") {
+          item.append(icon("image", 22));
         }
         item.append(el("span", "", rule.title));
         if (!this.control.availableAt(rule.componentIds, zoom)) {
           item.classList.add("q2vt-muted");
           item.title = t("app.outOfScale");
         }
-        block.append(item);
+        list.append(item);
       }
+      block.append(list);
       this.container.append(block);
       shown++;
     }
-    if (!shown) this.container.append(el("p", "q2vt-muted", t("legend.empty")));
+    if (!shown) this.container.append(el("p", "q2vt-empty", t("legend.empty")));
   }
 
   destroy() {

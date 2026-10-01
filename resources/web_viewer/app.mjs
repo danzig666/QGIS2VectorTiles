@@ -59,6 +59,26 @@ function setText(id, text) {
   if (node) node.textContent = text;
 }
 
+// Accent colour, logo and subtitle from the manifest (validated values only).
+function applyBranding(manifest, pageUrl) {
+  const accent = manifest.ui && manifest.ui.accent;
+  if (typeof accent === "string" && /^#[0-9a-fA-F]{6}$/.test(accent)) {
+    document.documentElement.style.setProperty("--q2vt-accent", accent);
+  }
+  const logo = document.getElementById("q2vt-logo");
+  if (logo && typeof manifest.logo === "string" && /^assets\/logo\.(png|jpe?g|webp)$/.test(manifest.logo)) {
+    logo.src = new URL(manifest.logo, pageUrl).href;
+    logo.hidden = false;
+  }
+  const subtitle = document.getElementById("q2vt-subtitle");
+  if (subtitle && manifest.description) {
+    subtitle.textContent = manifest.description.split("\n")[0].slice(0, 140);
+    subtitle.hidden = false;
+    const full = document.getElementById("q2vt-description");
+    if (full && full.textContent.trim() === subtitle.textContent.trim()) full.hidden = true;
+  }
+}
+
 async function start() {
   const pageUrl = new URL(".", location.href);
   const assetsUrl = new URL("./", import.meta.url);  // locales, legend code, workers
@@ -78,7 +98,8 @@ async function start() {
   setText("q2vt-title", manifest.title || "");
   setText("q2vt-description", manifest.description || "");
   setText("q2vt-release", `${t("app.release")}: ${manifest.releaseId}`);
-  setText("q2vt-loading", t("app.loading"));
+  setText("q2vt-loading-text", t("app.loading"));
+  applyBranding(manifest, pageUrl);
   viewer.manifest = manifest;
   if (maplibregl.getVersion() !== EXPECTED_MAPLIBRE) {
     warn("error.labels", `MapLibre ${maplibregl.getVersion()} is not the tested ${EXPECTED_MAPLIBRE}`);
@@ -109,10 +130,12 @@ async function start() {
     });
     map.touchZoomRotate.disableRotation();
     viewer.map = map;
-    map.addControl(new maplibregl.AttributionControl({ compact: true, customAttribution: manifest.attribution || undefined }));
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.FullscreenControl(), "top-right");
-    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+    if (window.isSecureContext && navigator.geolocation) {
+      map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: false, showAccuracyCircle: true }), "top-right");
+    }
     map.on("error", (event) => {
       const message = String(event && event.error && event.error.message || event);
       diagnostics.warnings.push({ key: "map", detail: message.slice(0, 500) });

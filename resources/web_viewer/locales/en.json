@@ -72,5 +72,13 @@
   "tools.printNote": "Prints the current view with the legend.",
   "legend.empty": "No legend",
   "layers.group": "Group",
-  "search.typeMore": "Type a few more characters"
+  "search.typeMore": "Type a few more characters",
+  "app.resetShort": "Reset",
+  "app.resize": "Resize the panel",
+  "app.darkMode": "Light / dark appearance",
+  "app.themes": "Views",
+  "basemap.title": "Basemap",
+  "basemap.none": "None",
+  "error.basemap": "The basemap could not be loaded; the map is shown without it.",
+  "layers.locked": "Always shown"
 }

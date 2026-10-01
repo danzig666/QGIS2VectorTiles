@@ -4,15 +4,9 @@
 // moves to its bounds/anchor, marks it, selects the feature and opens its
 // popup (offering to switch a hidden layer on; filters are not overridden).
 import { t, formatNumber } from "./i18n.mjs";
+import { button, el, icon } from "./icons.mjs";
 
 const MARKER = "q2vt_search_marker";
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
 
 export class Search {
   constructor({ map, manifest, manifestUrl, assetsUrl, container, identify }) {
@@ -38,7 +32,13 @@ export class Search {
     this.list.id = "q2vt-results";
     this.list.setAttribute("role", "listbox");
     this.list.hidden = true;
-    container.append(this.input, this.list);
+    const field = el("div", "q2vt-search-field");
+    const clear = button("q2vt-icon-btn q2vt-search-clear", t("app.close"), "close");
+    clear.hidden = true;
+    clear.addEventListener("click", () => { this.input.value = ""; clear.hidden = true; this.close(); this.marker(null); this.input.focus(); });
+    this.input.addEventListener("input", () => { clear.hidden = !this.input.value; });
+    field.append(icon("search", 18), this.input, clear);
+    container.append(field, this.list);
     this.input.addEventListener("focus", () => this.start(), { once: true });
     this.input.addEventListener("input", () => this.debounce());
     this.input.addEventListener("keydown", (e) => this.key(e));
@@ -95,9 +95,12 @@ export class Search {
       const item = el("li");
       item.id = `q2vt-result-${index}`;
       item.setAttribute("role", "option");
-      item.append(el("span", "", result.label || result.key));
       const layer = this.layers.get(result.layerId);
-      item.append(el("span", "q2vt-layer-name", layer ? layer.title : ""));
+      item.append(icon("pin", 18));
+      const text = el("span", "q2vt-result-text");
+      text.append(el("span", "q2vt-result-label", result.label || result.key),
+        el("span", "q2vt-layer-name", layer ? layer.title : ""));
+      item.append(text);
       item.addEventListener("click", () => this.choose(index));
       this.list.append(item);
     });
@@ -133,7 +136,8 @@ export class Search {
     if (!this.map.getSource(MARKER)) {
       this.map.addSource(MARKER, { type: "geojson", data });
       this.map.addLayer({ id: MARKER, type: "circle", source: MARKER, paint: {
-        "circle-radius": 6, "circle-color": "#00a2ff", "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } });
+        "circle-radius": 7, "circle-color": getComputedStyle(document.documentElement).getPropertyValue("--q2vt-accent").trim() || "#2563eb",
+        "circle-stroke-color": "#ffffff", "circle-stroke-width": 3 } });
     } else {
       this.map.getSource(MARKER).setData(data);
     }

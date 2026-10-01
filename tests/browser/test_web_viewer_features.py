@@ -167,7 +167,7 @@ def test_search_finds_offscreen_features(site, tmp_path):
                     return { title: p && p.textContent, zoom: q2vtViewer.map.getZoom(), lng: c.lng };"""},
         {"type": ["#q2vt-search", "1234567890123"]},
         {"wait": 1000},
-        {"eval": "return [...document.querySelectorAll('#q2vt-results li[role=option]')].map((li) => li.firstChild.textContent);"},
+        {"eval": "return [...document.querySelectorAll('#q2vt-results li[role=option]')].map((li) => li.querySelector('.q2vt-result-label').textContent);"},
     ], tmp_path)
     assert results[1] and results[1][0].startswith("00123/5")
     assert results[3]["title"] == "00123/5" and results[3]["zoom"] > 10 and abs(results[3]["lng"] - 19.06) < 0.05

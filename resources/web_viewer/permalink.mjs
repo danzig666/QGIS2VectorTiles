@@ -33,6 +33,7 @@ export function encodeState(manifest, value, camera, defaults) {
     if (off.length) params.set(`${short}-`, off.join(","));
   }
   if (!value.labels) params.set("lab", "0");
+  if (value.basemap && value.basemap !== defaults.basemap) params.set("bm", value.basemap);
   const opacity = Object.entries(value.opacity).filter(([id, v]) => v !== defaults.opacity[id])
     .map(([id, v]) => `${id}:${Math.round(v * 100)}`);
   if (opacity.length) params.set("o", opacity.join(","));
@@ -60,6 +61,9 @@ export function decodeState(manifest, hash) {
     }
   }
   if (params.get("lab") === "0") out.labels = false;
+  const basemap = params.get("bm");
+  const flavors = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id)]);
+  if (basemap && flavors.has(basemap)) out.basemap = basemap;
   for (const pair of (params.get("o") || "").split(",")) {
     const [id, percent] = pair.split(":");
     const value = Number(percent);

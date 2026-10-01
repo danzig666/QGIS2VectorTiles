@@ -72,5 +72,13 @@
   "tools.printNote": "Az aktuális nézetet nyomtatja jelmagyarázattal.",
   "legend.empty": "Nincs jelmagyarázat",
   "layers.group": "Csoport",
-  "search.typeMore": "Írjon be még néhány karaktert"
+  "search.typeMore": "Írjon be még néhány karaktert",
+  "app.resetShort": "Alaphelyzet",
+  "app.resize": "Panel méretezése",
+  "app.darkMode": "Világos / sötét megjelenés",
+  "app.themes": "Nézetek",
+  "basemap.title": "Alaptérkép",
+  "basemap.none": "Nincs",
+  "error.basemap": "Az alaptérkép nem tölthető be; a térkép nélküle látszik.",
+  "layers.locked": "Mindig látható"
 }

@@ -89,7 +89,7 @@ export class Identify {
     const list = element("div", "q2vt-choices");
     for (const hit of hits.slice(0, 12)) {
       const layer = this.layers.get(hit.layerId);
-      const button = element("button", "", `${layer ? layer.title : ""}: ${hit.key}`);
+      const button = element("button", "q2vt-choice", `${layer ? layer.title : ""}: ${hit.key}`);
       button.type = "button";
       button.addEventListener("click", () => this.open(hit.layerId, hit.key, event.lngLat, hit.feature));
       list.append(button);
@@ -107,7 +107,7 @@ export class Identify {
     try { record = await this.lookup.get(layerId, key); } catch { record = null; }
     const box = element("div", "q2vt-popup");
     box.append(element("h3", "", (record && record.t) || (layer ? layer.title : key)));
-    if (layer) box.append(element("div", "q2vt-note", layer.title));
+    if (layer) box.append(element("div", "q2vt-popup-layer", layer.title));
     const fields = layer ? layer.popupFields || [] : [];
     if (record && fields.length) {
       const table = element("table");
@@ -136,7 +136,7 @@ export class Identify {
     const state = this.state.value;
     if (layer && !this.control.layerEnabled(layerId, state)) {
       box.append(element("p", "q2vt-note", t("popup.layerHidden")));
-      const show = element("button", "", t("popup.showLayer"));
+      const show = element("button", "q2vt-chip", t("popup.showLayer"));
       show.type = "button";
       show.addEventListener("click", () => {
         this.state.setIn("layers", layerId, true);
@@ -154,7 +154,7 @@ export class Identify {
     }
     if (layer && layer.identityScope === "export") box.append(element("p", "q2vt-note", t("feature.exportScoped")));
     if (layer && layer.deepLinks && this.viewer.permalink) {
-      const link = element("button", "", t("popup.link"));
+      const link = element("button", "q2vt-chip q2vt-chip-ghost", t("popup.link"));
       link.type = "button";
       link.addEventListener("click", () => this.viewer.permalink.copy({ selected: { layerId, key } }));
       box.append(link);
@@ -164,6 +164,11 @@ export class Identify {
     this.select({ layerId, key });
   }
 
+  accent() {
+    const value = getComputedStyle(document.documentElement).getPropertyValue("--q2vt-accent").trim();
+    return /^#[0-9a-f]{6}$/i.test(value) ? value : "#2563eb";
+  }
+
   ensureOverlay(sourceLayer, sourceId, kind) {
     const id = `${HL}${kind}_${sourceLayer}`;
     if (this.map.getLayer(id)) return id;
@@ -171,9 +176,9 @@ export class Identify {
     const hover = kind.startsWith("hover");
     if (kind.endsWith("point")) {
       this.map.addLayer({ ...base, type: "circle", paint: { "circle-radius": hover ? 7 : 9, "circle-color": "rgba(0,0,0,0)",
-        "circle-stroke-color": hover ? "#ffb000" : "#00a2ff", "circle-stroke-width": hover ? 2 : 3 } });
+        "circle-stroke-color": hover ? "#f59e0b" : this.accent(), "circle-stroke-width": hover ? 2 : 3 } });
     } else {
-      this.map.addLayer({ ...base, type: "line", paint: { "line-color": hover ? "#ffb000" : "#00a2ff",
+      this.map.addLayer({ ...base, type: "line", paint: { "line-color": hover ? "#f59e0b" : this.accent(),
         "line-width": hover ? 2 : 3.5, "line-opacity": 0.95 } });
     }
     this.overlays.add(id);

@@ -1,21 +1,16 @@
 // Layer tree: QGIS groups (tri-state), layers, legend rules with swatches,
 // per-layer opacity and the labels switch. Checked state and "not shown at
 // this zoom" are separate: a rule switched on stays checked when the zoom
-// hides it and comes back when zooming in again. Helper datasets never
+// hides it and comes back when zooming in again. Layers and groups the
+// publisher locked show a lock instead of a switch. Helper datasets never
 // appear here.
 import { t } from "./i18n.mjs";
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
+import { button, el, icon, toggle } from "./icons.mjs";
 
 export class LayerControls {
-  constructor({ map, manifest, state, control, container, assetsBase, releaseBase }) {
-    Object.assign(this, { map, manifest, state, control, container, assetsBase, releaseBase });
-    this.inputs = { layers: new Map(), groups: new Map(), rules: new Map() };
+  constructor({ map, manifest, state, control, container, releaseBase }) {
+    Object.assign(this, { map, manifest, state, control, container, releaseBase });
+    this.inputs = { layers: new Map(), groups: new Map(), rules: new Map(), opacity: new Map() };
     this.nodes = { layers: new Map(), rules: new Map() };
     this.render();
     this.unsubscribe = state.onChange(() => this.sync());
@@ -24,58 +19,84 @@ export class LayerControls {
     this.sync();
   }
 
-  checkbox(section, id, label, swatch) {
-    const row = el("div", "q2vt-row");
-    const labelEl = el("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.addEventListener("change", () => this.state.setIn(section, id, input.checked));
-    labelEl.append(input);
-    if (swatch) {
+  swatch(path, layer) {
+    if (path) {
       const img = document.createElement("img");
       img.className = "q2vt-swatch";
       img.alt = "";
-      img.src = new URL(swatch, this.releaseBase).href;
-      labelEl.append(img);
+      img.loading = "lazy";
+      img.src = new URL(path, this.releaseBase).href;
+      return img;
     }
-    labelEl.append(el("span", "q2vt-name", label));
-    row.append(labelEl);
-    this.inputs[section].set(id, input);
+    if (layer && layer.geometry === "raster") {
+      const box = el("span", "q2vt-swatch q2vt-swatch-icon");
+      box.append(icon("image", 18));
+      return box;
+    }
+    return null;
+  }
+
+  // A row: [expander] [switch | lock] [swatch] [title + scale note] [actions]
+  row(section, id, title, { swatch, locked, kind, expander, actions } = {}) {
+    const row = el("div", `q2vt-row q2vt-row-${kind || section}`);
+    if (expander) row.append(expander);
+    else row.append(el("span", "q2vt-expander-space"));
+    if (locked) {
+      const lock = el("span", "q2vt-lock");
+      lock.append(icon("lock", 16));
+      lock.title = t("layers.locked");
+      lock.setAttribute("aria-label", t("layers.locked"));
+      row.append(lock);
+    } else {
+      const { wrap, input } = toggle(title, (checked) => this.state.setIn(section, id, checked));
+      this.inputs[section].set(id, input);
+      row.append(wrap);
+    }
+    if (swatch) row.append(swatch);
+    const name = el("span", "q2vt-name");
+    name.append(el("span", "q2vt-title", title), el("span", "q2vt-scale-note"));
+    row.append(name);
+    if (actions) row.append(...actions);
     return row;
   }
 
+  expander(item, label, expanded = true) {
+    const toggleButton = button("q2vt-expander", `${label}`, "chevron");
+    toggleButton.setAttribute("aria-expanded", String(expanded));
+    if (!expanded) item.classList.add("q2vt-collapsed");
+    toggleButton.addEventListener("click", () => {
+      const collapsed = item.classList.toggle("q2vt-collapsed");
+      toggleButton.setAttribute("aria-expanded", String(!collapsed));
+    });
+    return toggleButton;
+  }
+
   render() {
+    const top = el("div", "q2vt-pane-head");
+    const labels = el("div", "q2vt-row q2vt-row-labels");
+    const { wrap, input } = toggle(t("app.labels"), (checked) => this.state.set({ labels: checked }));
+    this.labelsInput = input;
+    const labelName = el("span", "q2vt-name");
+    labelName.append(icon("tag", 18), el("span", "q2vt-title", t("app.labels")));
+    labels.append(wrap, labelName);
+    const reset = button("q2vt-chip q2vt-chip-ghost", t("app.reset"), "reset", { text: t("app.resetShort") });
+    reset.addEventListener("click", () => this.state.reset());
+    top.append(labels, reset);
     const root = el("ul", "q2vt-tree");
     root.setAttribute("role", "tree");
-    const labels = el("div", "q2vt-row");
-    const labelToggle = el("label");
-    this.labelsInput = document.createElement("input");
-    this.labelsInput.type = "checkbox";
-    this.labelsInput.addEventListener("change", () => this.state.set({ labels: this.labelsInput.checked }));
-    labelToggle.append(this.labelsInput, el("span", "q2vt-name", t("app.labels")));
-    labels.append(labelToggle);
-    const reset = el("button", "", t("app.reset"));
-    reset.type = "button";
-    reset.addEventListener("click", () => this.state.reset());
-    this.container.append(labels, root, reset);
+    root.setAttribute("aria-label", t("app.layers"));
+    this.container.append(top, root);
 
     const groupNodes = new Map();
-    const containerFor = (groupId) => (groupId && groupNodes.get(groupId)) || root;
     const groups = [...this.manifest.groups].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const group of groups) {
-      const item = el("li", "q2vt-node");
+      const item = el("li", "q2vt-node q2vt-group");
       item.setAttribute("role", "treeitem");
-      const row = this.checkbox("groups", group.id, group.title);
-      const toggle = el("button", "q2vt-toggle", "▾");
-      toggle.type = "button";
-      toggle.setAttribute("aria-expanded", "true");
-      toggle.setAttribute("aria-label", `${t("layers.group")}: ${group.title}`);
-      toggle.addEventListener("click", () => {
-        const collapsed = item.classList.toggle("q2vt-collapsed");
-        toggle.textContent = collapsed ? "▸" : "▾";
-        toggle.setAttribute("aria-expanded", String(!collapsed));
-      });
-      row.prepend(toggle);
+      const expander = this.expander(item, `${t("layers.group")}: ${group.title}`, group.expanded !== false);
+      const folder = el("span", "q2vt-swatch q2vt-swatch-icon");
+      folder.append(icon("folder", 18));
+      const row = this.row("groups", group.id, group.title,
+        { swatch: folder, locked: group.toggleable === false, kind: "group", expander });
       const children = el("ul");
       children.setAttribute("role", "group");
       item.append(row, children);
@@ -88,32 +109,53 @@ export class LayerControls {
       rulesByLayer.get(rule.layerId).push(rule);
     }
     const layers = [...this.manifest.layers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const opacityAllowed = this.manifest.interaction?.opacityControls !== false;
     for (const layer of layers) {
-      const item = el("li", "q2vt-node");
+      const item = el("li", "q2vt-node q2vt-layer");
       item.setAttribute("role", "treeitem");
       const rules = rulesByLayer.get(layer.id) || [];
-      const swatch = rules.length === 1 ? rules[0].swatch : layer.swatch && rules.length === 0 ? layer.swatch : null;
-      const row = this.checkbox("layers", layer.id, layer.title, swatch);
-      item.append(row);
-      this.nodes.layers.set(layer.id, item);
-      if (this.manifest.interaction?.opacityControls !== false) {
+      const locked = layer.toggleable === false;
+      const swatch = this.swatch(rules.length === 1 ? rules[0].swatch : rules.length === 0 ? layer.swatch : null, layer);
+      const actions = [];
+      let drawer = null;
+      if (opacityAllowed) {
+        drawer = el("div", "q2vt-drawer");
+        drawer.hidden = true;
         const slider = document.createElement("input");
         slider.type = "range";
-        slider.min = "0";
+        slider.min = locked ? "10" : "0";
         slider.max = "100";
         slider.className = "q2vt-opacity";
         slider.setAttribute("aria-label", `${t("app.opacity")}: ${layer.title}`);
-        slider.addEventListener("input", () => this.state.setIn("opacity", layer.id, Number(slider.value) / 100));
-        this.inputs.opacity = this.inputs.opacity || new Map();
+        const value = el("output", "q2vt-opacity-value");
+        slider.addEventListener("input", () => {
+          value.textContent = `${slider.value}%`;
+          this.state.setIn("opacity", layer.id, Number(slider.value) / 100);
+        });
         this.inputs.opacity.set(layer.id, slider);
-        item.append(slider);
+        this.inputs.opacityValue = this.inputs.opacityValue || new Map();
+        this.inputs.opacityValue.set(layer.id, value);
+        drawer.append(el("span", "q2vt-drawer-label", t("app.opacity")), slider, value);
+        const more = button("q2vt-icon-btn q2vt-more", `${t("app.opacity")}: ${layer.title}`, "sliders");
+        more.setAttribute("aria-expanded", "false");
+        more.addEventListener("click", () => {
+          drawer.hidden = !drawer.hidden;
+          more.setAttribute("aria-expanded", String(!drawer.hidden));
+        });
+        actions.push(more);
       }
+      const expander = rules.length > 1 ? this.expander(item, layer.title, false) : null;
+      const row = this.row("layers", layer.id, layer.title, { swatch, locked, kind: "layer", expander, actions });
+      item.append(row);
+      if (drawer) item.append(drawer);
+      this.nodes.layers.set(layer.id, item);
       if (rules.length > 1) {
-        const list = el("ul");
+        const list = el("ul", "q2vt-rules");
         const ruleNodes = new Map();
         for (const rule of rules) {
-          const ruleItem = el("li", "q2vt-node");
-          ruleItem.append(this.checkbox("rules", rule.id, rule.title, rule.swatch));
+          const ruleItem = el("li", "q2vt-node q2vt-rule");
+          ruleItem.append(this.row("rules", rule.id, rule.title,
+            { swatch: this.swatch(rule.swatch), locked: false, kind: "rule" }));
           const children = el("ul");
           ruleItem.append(children);
           ruleNodes.set(rule.id, children);
@@ -122,7 +164,7 @@ export class LayerControls {
         }
         item.append(list);
       }
-      containerFor(layer.groupId).append(item);
+      (layer.groupId && groupNodes.get(layer.groupId) ? groupNodes.get(layer.groupId) : root).append(item);
     }
   }
 
@@ -131,13 +173,22 @@ export class LayerControls {
     this.labelsInput.checked = state.labels;
     for (const [id, input] of this.inputs.layers) input.checked = state.layers[id] !== false;
     for (const [id, input] of this.inputs.rules) input.checked = state.rules[id] !== false;
-    for (const [id, input] of this.inputs.opacity || []) input.value = String(Math.round((state.opacity[id] ?? 1) * 100));
+    for (const [id, input] of this.inputs.opacity) {
+      const percent = Math.round((state.opacity[id] ?? 1) * 100);
+      input.value = String(percent);
+      input.style.setProperty("--q2vt-fill", `${percent}%`);
+      const out = this.inputs.opacityValue && this.inputs.opacityValue.get(id);
+      if (out) out.textContent = `${percent}%`;
+    }
     // Groups: tri-state from their layers.
     for (const [id, input] of this.inputs.groups) {
       input.checked = state.groups[id] !== false;
       const members = this.manifest.layers.filter((l) => this.inGroup(l.groupId, id));
       const on = members.filter((l) => state.layers[l.id] !== false).length;
       input.indeterminate = input.checked && on > 0 && on < members.length;
+    }
+    for (const [id, item] of this.nodes.layers) {
+      item.classList.toggle("q2vt-off", !this.control.layerEnabled(id, state));
     }
     this.syncScale();
   }
@@ -153,17 +204,18 @@ export class LayerControls {
 
   syncScale() {
     const zoom = this.map.getZoom();
+    const mark = (item, available) => {
+      item.classList.toggle("q2vt-out-of-scale", !available);
+      const note = item.querySelector(":scope > .q2vt-row .q2vt-scale-note");
+      if (note) note.textContent = available ? "" : t("app.outOfScale");
+    };
     for (const [id, item] of this.nodes.layers) {
       const layer = this.control.layers.get(id);
-      const available = this.control.availableAt(layer.componentIds, zoom);
-      item.classList.toggle("q2vt-out-of-scale", !available);
-      item.querySelector(".q2vt-name").dataset.scaleNote = available ? "" : t("app.outOfScale");
+      mark(item, this.control.availableAt(layer.componentIds, zoom));
     }
     for (const [id, item] of this.nodes.rules) {
       const rule = this.control.rules.get(id);
-      const available = this.control.availableAt(rule.componentIds, zoom);
-      item.classList.toggle("q2vt-out-of-scale", !available);
-      item.querySelector(".q2vt-name").dataset.scaleNote = available ? "" : t("app.outOfScale");
+      mark(item, this.control.availableAt(rule.componentIds, zoom));
     }
   }
 

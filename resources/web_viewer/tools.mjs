@@ -4,15 +4,9 @@
 // runtime helper); it is never saved or published.
 import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
+import { button as iconButton, el } from "./icons.mjs";
 
 const SOURCE = "q2vt_measure";
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
 
 export function formatDistance(metres) {
   return metres >= 1000 ? `${formatNumber(metres / 1000, 3)} km` : `${formatNumber(metres, 1)} m`;
@@ -40,11 +34,11 @@ export class Tools {
   }
 
   renderCoordinates() {
-    const block = el("section");
+    const block = el("section", "q2vt-card");
     block.append(el("h3", "", t("tools.coordinates")));
     const wgs = el("div", "q2vt-tool-output");
     const eov = el("div", "q2vt-tool-output");
-    block.append(el("div", "q2vt-muted", t("tools.wgs84")), wgs, el("div", "q2vt-muted", t("tools.eov")), eov);
+    block.append(el("div", "q2vt-field-label", t("tools.wgs84")), wgs, el("div", "q2vt-field-label", t("tools.eov")), eov);
     this.container.append(block);
     const show = (lngLat) => {
       wgs.textContent = `${lngLat.lng.toFixed(6)}, ${lngLat.lat.toFixed(6)}`;
@@ -60,20 +54,20 @@ export class Tools {
   }
 
   renderMeasure() {
-    const block = el("section");
+    const block = el("section", "q2vt-card");
     block.append(el("h3", "", t("tools.measure")));
-    const row = el("div", "q2vt-range");
+    const row = el("div", "q2vt-chips");
     const result = el("div", "q2vt-tool-output");
     result.setAttribute("aria-live", "polite");
     this.result = result;
-    for (const mode of ["distance", "area"]) {
-      const button = el("button", "", t(`tools.${mode}`));
-      button.type = "button";
+    this.modeButtons = {};
+    for (const [mode, iconName] of [["distance", "ruler"], ["area", "area"]]) {
+      const button = iconButton("q2vt-chip", null, iconName, { text: t(`tools.${mode}`) });
       button.addEventListener("click", () => this.start(mode));
+      this.modeButtons[mode] = button;
       row.append(button);
     }
-    const clear = el("button", "", t("tools.clear"));
-    clear.type = "button";
+    const clear = iconButton("q2vt-chip q2vt-chip-ghost", null, "close", { text: t("tools.clear") });
     clear.addEventListener("click", () => this.stop(true));
     row.append(clear);
     block.append(row, result, el("p", "q2vt-muted", t("tools.measureHelp")), el("p", "q2vt-muted", t("tools.measureMethod")));
@@ -94,7 +88,7 @@ export class Tools {
     if (this.map.getSource(SOURCE)) return;
     this.map.addSource(SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     this.map.addLayer({ id: `${SOURCE}_fill`, type: "fill", source: SOURCE, filter: ["==", ["geometry-type"], "Polygon"],
-      paint: { "fill-color": "#ff3b30", "fill-opacity": 0.15 } });
+      paint: { "fill-color": "#ff3b30", "fill-opacity": 0.12 } });
     this.map.addLayer({ id: `${SOURCE}_line`, type: "line", source: SOURCE,
       paint: { "line-color": "#ff3b30", "line-width": 2, "line-dasharray": [2, 1] } });
     this.map.addLayer({ id: `${SOURCE}_points`, type: "circle", source: SOURCE, filter: ["==", ["geometry-type"], "Point"],
@@ -108,6 +102,7 @@ export class Tools {
     this.viewer.measuring = true;
     this.map.doubleClickZoom.disable();
     this.map.getCanvas().style.cursor = "crosshair";
+    for (const [name, node] of Object.entries(this.modeButtons || {})) node.setAttribute("aria-pressed", String(name === mode));
     this.draw();
   }
 
@@ -116,6 +111,7 @@ export class Tools {
     this.viewer.measuring = false;
     this.map.doubleClickZoom.enable();
     this.map.getCanvas().style.cursor = "";
+    for (const node of Object.values(this.modeButtons || {})) node.setAttribute("aria-pressed", "false");
   }
 
   stop(clear) {
@@ -147,10 +143,9 @@ export class Tools {
   }
 
   renderPrint() {
-    const block = el("section");
+    const block = el("section", "q2vt-card");
     block.append(el("h3", "", t("tools.print")));
-    const button = el("button", "", t("tools.print"));
-    button.type = "button";
+    const button = iconButton("q2vt-chip", null, "print", { text: t("tools.print") });
     button.addEventListener("click", () => this.print());
     block.append(button, el("p", "q2vt-muted", t("tools.printNote")));
     this.container.append(block);

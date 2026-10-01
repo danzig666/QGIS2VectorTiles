@@ -35,44 +35,59 @@ export class Filters {
     this.container.replaceChildren();
     const current = this.state.value.filters || {};
     for (const layer of this.layers) {
-      const block = el("section", "q2vt-filter");
+      const block = el("section", "q2vt-card q2vt-filter");
       block.append(el("h3", "", layer.title));
       for (const config of layer.filterFields) {
         const value = (current[layer.id] || {})[config.field];
-        const wrap = el("div", "q2vt-filter");
+        const wrap = el("div", "q2vt-filter-field");
         const id = `q2vt-f-${layer.id}-${config.field}`.replace(/[^A-Za-z0-9_-]/g, "_");
         const label = el("label", "", config.title || config.field);
         label.htmlFor = id;
         wrap.append(label);
         if (config.kind === "values") {
-          const select = document.createElement("select");
-          select.id = id;
-          select.multiple = true;
-          select.size = Math.min(6, (config.values || []).length + (config.nulls ? 1 : 0)) || 2;
-          for (const [option, count] of config.values || []) {
-            const opt = el("option", "", `${option} (${formatNumber(count)})`);
-            opt.value = option;
-            opt.selected = !!value && (value.values || []).includes(option);
-            select.append(opt);
-          }
-          if (config.nulls) {
-            const opt = el("option", "", `${t("filter.nulls")} (${formatNumber(config.nulls)})`);
-            opt.value = "\u0000null";
-            opt.selected = !!value && value.nulls;
-            select.append(opt);
-          }
-          select.addEventListener("change", () => {
-            const chosen = [...select.selectedOptions].map((o) => o.value);
+          const options = [...(config.values || []).map(([option, count]) => [option, option, count])];
+          if (config.nulls) options.push(["\u0000null", t("filter.nulls"), config.nulls]);
+          const list = el("div", "q2vt-checklist");
+          list.id = id;
+          list.setAttribute("role", "group");
+          list.setAttribute("aria-label", config.title || config.field);
+          const boxes = [];
+          const changed = () => {
+            const chosen = boxes.filter((b) => b.checked).map((b) => b.value);
             const values = chosen.filter((v) => v !== "\u0000null");
             const nulls = chosen.includes("\u0000null");
             this.update(layer.id, config.field, values.length || nulls ? { values, nulls } : null);
-          });
-          wrap.append(select);
+          };
+          for (const [optionValue, text, count] of options) {
+            const row = el("label", "q2vt-check");
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.value = optionValue;
+            box.checked = !!value && (optionValue === "\u0000null" ? !!value.nulls : (value.values || []).includes(optionValue));
+            box.addEventListener("change", changed);
+            boxes.push(box);
+            row.append(box, el("span", "q2vt-check-text", text), el("span", "q2vt-count", formatNumber(count)));
+            list.append(row);
+          }
+          if (options.length > 10) {
+            const find = document.createElement("input");
+            find.type = "search";
+            find.className = "q2vt-input q2vt-input-small";
+            find.placeholder = t("filter.contains");
+            find.setAttribute("aria-label", `${config.title || config.field}: ${t("filter.contains")}`);
+            find.addEventListener("input", () => {
+              const needle = find.value.trim().toLowerCase();
+              for (const row of list.children) row.hidden = !!needle && !row.textContent.toLowerCase().includes(needle);
+            });
+            wrap.append(find);
+          }
+          wrap.append(list);
         } else if (config.kind === "range") {
           const range = el("div", "q2vt-range");
           const inputs = ["min", "max"].map((side) => {
             const input = document.createElement("input");
             input.type = "number";
+            input.className = "q2vt-input";
             input.placeholder = `${t(`filter.${side}`)} ${config[side] ?? ""}`;
             input.setAttribute("aria-label", `${config.title || config.field} ${t(`filter.${side}`)}`);
             if (value && value[side] !== null && value[side] !== undefined) input.value = String(value[side]);
@@ -89,6 +104,7 @@ export class Filters {
         } else {
           const input = document.createElement("input");
           input.type = "search";
+          input.className = "q2vt-input";
           input.id = id;
           input.placeholder = t("filter.contains");
           if (value && value.text) input.value = value.text;
@@ -100,7 +116,7 @@ export class Filters {
       this.container.append(block);
     }
     if (this.layers.length) {
-      const clear = el("button", "", t("filter.clear"));
+      const clear = el("button", "q2vt-chip", t("filter.clear"));
       clear.type = "button";
       clear.addEventListener("click", () => { this.state.set({ filters: {} }, "reset"); });
       this.container.append(clear, el("p", "q2vt-muted", t("filter.loadedOnly")));

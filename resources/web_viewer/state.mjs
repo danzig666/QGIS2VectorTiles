@@ -6,24 +6,80 @@
 
 const STORAGE_VERSION = 1;
 
+// Layers and groups the publisher locked (cannot be switched off).
+export function lockedIds(manifest) {
+  return {
+    layers: new Set(manifest.layers.filter((l) => l.toggleable === false).map((l) => l.id)),
+    groups: new Set(manifest.groups.filter((g) => g.toggleable === false).map((g) => g.id)),
+  };
+}
+
+export function presets(manifest) {
+  return (manifest.themes && Array.isArray(manifest.themes.presets)) ? manifest.themes.presets : [];
+}
+
+// A theme preset over a state value (locked layers and groups stay on).
+export function applyPreset(manifest, value, preset) {
+  const locked = lockedIds(manifest);
+  const pick = (section, ids) => {
+    const out = { ...value[section] };
+    for (const [id, enabled] of Object.entries(preset[section] || {})) {
+      if (id in out && typeof enabled === "boolean") out[id] = enabled || (ids ? ids.has(id) : false);
+    }
+    return out;
+  };
+  return { ...value, layers: pick("layers", locked.layers), groups: pick("groups", locked.groups),
+    rules: { ...Object.fromEntries(manifest.rules.map((r) => [r.id, true])), ...pick("rules") }, theme: preset.id };
+}
+
+export function presetMatches(manifest, value, preset) {
+  const same = (section) => Object.entries(preset[section] || {}).every(([id, on]) => !(id in value[section]) || value[section][id] === on);
+  return same("layers") && same("rules");
+}
+
 export function defaults(manifest) {
   const layers = {};
   const opacity = {};
   for (const layer of manifest.layers) {
-    layers[layer.id] = layer.initialVisibility !== false;
+    layers[layer.id] = layer.initialVisibility !== false || layer.toggleable === false;
     opacity[layer.id] = typeof layer.opacity === "number" ? layer.opacity : 1;
   }
-  const groups = Object.fromEntries(manifest.groups.map((g) => [g.id, true]));
+  const groups = Object.fromEntries(manifest.groups.map((g) => [g.id, g.initialVisibility !== false || g.toggleable === false]));
   const rules = Object.fromEntries(manifest.rules.map((r) => [r.id, true]));
-  return { layers, groups, rules, labels: true, opacity, filters: {}, selected: null };
+  const basemap = manifest.basemap && manifest.basemap.flavors && manifest.basemap.flavors.length
+    ? (manifest.basemap.initial || "none") : "none";
+  let value = { layers, groups, rules, labels: true, opacity, filters: {}, selected: null, basemap, theme: null };
+  const initial = manifest.themes && manifest.themes.initial;
+  const preset = presets(manifest).find((p) => p.id === initial);
+  if (preset) value = applyPreset(manifest, value, preset);
+  return value;
 }
 
 export class ViewerState {
   constructor(manifest) {
     this.manifest = manifest;
     this.key = `q2vt:${manifest.publicationId}:v${STORAGE_VERSION}`;
+    this.locked = lockedIds(manifest);
+    this.basemaps = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id)]);
     this.value = defaults(manifest);
     this.listeners = new Set();
+  }
+
+  // Locked layers and groups are always on, whatever a link or saved state says.
+  guard(value) {
+    const layers = { ...value.layers };
+    const groups = { ...value.groups };
+    for (const id of this.locked.layers) if (id in layers) layers[id] = true;
+    for (const id of this.locked.groups) if (id in groups) groups[id] = true;
+    return { ...value, layers, groups };
+  }
+
+  applyTheme(id) {
+    const preset = presets(this.manifest).find((p) => p.id === id);
+    if (!preset) return;
+    this.value = this.guard(applyPreset(this.manifest, this.value, preset));
+    this.save();
+    this.emit("theme");
   }
 
   onChange(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -33,13 +89,13 @@ export class ViewerState {
   }
 
   set(patch, reason = "change") {
-    this.value = { ...this.value, ...patch };
+    this.value = this.guard({ ...this.value, ...patch });
     this.save();
     this.emit(reason);
   }
 
   setIn(section, id, value, reason = section) {
-    this.value = { ...this.value, [section]: { ...this.value[section], [id]: value } };
+    this.value = this.guard({ ...this.value, [section]: { ...this.value[section], [id]: value } });
     this.save();
     this.emit(reason);
   }
@@ -69,7 +125,10 @@ export class ViewerState {
       labels: typeof partial?.labels === "boolean" ? partial.labels : base.labels,
       filters: partial?.filters && typeof partial.filters === "object" ? sanitizeFilters(this.manifest, partial.filters) : base.filters,
       selected: partial?.selected !== undefined ? partial.selected : base.selected,
+      basemap: typeof partial?.basemap === "string" && this.basemaps.has(partial.basemap) ? partial.basemap : base.basemap,
+      theme: null,
     };
+    this.value = this.guard(this.value);
   }
 
   load() {
@@ -81,9 +140,9 @@ export class ViewerState {
 
   save() {
     try {
-      const { layers, groups, rules, labels, opacity, filters } = this.value;
+      const { layers, groups, rules, labels, opacity, filters, basemap } = this.value;
       // No attribute records or selections: only presentation preferences.
-      localStorage.setItem(this.key, JSON.stringify({ layers, groups, rules, labels, opacity, filters }));
+      localStorage.setItem(this.key, JSON.stringify({ layers, groups, rules, labels, opacity, filters, basemap }));
     } catch { /* storage unavailable */ }
   }
 }
