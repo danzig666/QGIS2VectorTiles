@@ -194,10 +194,13 @@ class LengthConverter:
                 out.append((zoom, ex.clamp(px, min_px, max_px) if (min_px or max_px) else px))
             return ex.exponential_zoom_curve(out)
 
-        # Feature-dependent value: multiply inside stop outputs. Clamp knees
-        # depend on the value, so sample every integer zoom to bound the error.
-        if min_px or max_px:
-            stops |= {float(z) for z in range(int(CURVE_MIN_ZOOM), int(CURVE_MAX_ZOOM) + 1)}
+        # Feature-dependent value: multiply inside stop outputs, with a stop at
+        # every integer zoom. Clamp knees depend on the value; and MapLibre
+        # lays out a data-driven text-size/icon-size at the stops around the
+        # tile zoom, packed into 16 bits (at most 512 px): with stops at 0 and
+        # 24 only, the zoom-24 size was clipped to 512 px and map-unit labels
+        # came out ~4x too small at zoom 17 (Földrészletek).
+        stops |= {float(z) for z in range(int(CURVE_MIN_ZOOM), int(CURVE_MAX_ZOOM) + 1)}
         out = []
         for zoom in sorted(stops):
             px = ex.mul(value, raw(zoom))

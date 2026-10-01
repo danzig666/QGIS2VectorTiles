@@ -110,3 +110,17 @@ A random fill of one point per 10 m² on the 16 polygons (458 000 points) takes 
 Patterns above `SymbolMaterializer.MAX_PATTERN_ELEMENTS` (2 000 000 features per rule,
 estimated from the layer's area or length) are drawn as textures at every zoom and
 reported as `Q2VT_PATTERN_BUDGET`.
+
+
+## Comparing a real project
+
+`tools/gallery/project_compare.py` exports chosen layers of a QGIS project (or
+the whole map with `--layers "*"`), renders QGIS in the project CRS at the
+ground resolution of each browser zoom and the exported package in the
+browser, and writes `compare.html` (side by side, overlay, swipe, blink):
+
+    python3 tools/gallery/project_compare.py project.qgs --out /tmp/cmp \
+        --layers "*" --center-layer Épületek --zooms 16,17.5,19.5 --max-zoom 18
+
+The browser page runs the viewer's visible-polygon labels
+(`resources/ml_viewer/visible_labels.mjs`), as the MapLibre viewer does.

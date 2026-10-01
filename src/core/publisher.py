@@ -85,6 +85,7 @@ _VIEWER = """<!doctype html>
 // MapLibre GL JS 6 is an ES module: the web server must send .mjs files as
 // JavaScript (text/javascript), as current servers do.
 import * as maplibregl from "./maplibre-gl.mjs";
+import {{ enableVisibleLabels }} from "./visible_labels.mjs";
 window.maplibregl = maplibregl;
 // URLs in style.json are relative to it; resolve them against this page so
 // the package works from any folder of any static web server.
@@ -100,6 +101,7 @@ fetch("style.json").then((r) => r.json()).then((style) => {{
   const map = window.map = new maplibregl.Map({{container: "map", style, center: {center}, zoom: {zoom}}});
   map.on("error", (e) => (window.mapErrors = (window.mapErrors || []).concat([String(e.error && e.error.message || e)])));
   map.addControl(new maplibregl.NavigationControl());
+  map.once("load", () => {{ window.q2vtVisibleLabels = enableVisibleLabels(map, maplibregl); }});
 }});
 </script>
 </body>
@@ -127,7 +129,7 @@ def write_static_package(export_dir: str, style: dict, source_name: str,
             if os.path.isdir(os.path.join(style_dir, name)):
                 shutil.copytree(os.path.join(style_dir, name), os.path.join(staging, name))
         for name in ("maplibre-gl.mjs", "maplibre-gl-shared.mjs", "maplibre-gl-worker.mjs",
-                     "maplibre-gl.css", "MAPLIBRE-LICENSE.txt"):
+                     "maplibre-gl.css", "MAPLIBRE-LICENSE.txt", "visible_labels.mjs"):
             shutil.copy2(os.path.join(viewer_dir, name), os.path.join(staging, name))
         with open(os.path.join(staging, "index.html"), "w", encoding="utf-8") as handle:
             handle.write(_VIEWER.format(center=json.dumps([float(c) for c in center]),

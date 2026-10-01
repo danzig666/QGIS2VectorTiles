@@ -226,14 +226,17 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
 
     edge = max(stroke_px, 0.0)
     radius = max(radius_px, 0.0)
-    logical = size_px or int(max(32, 2 * (radius + edge) + 16))
+    logical = size_px or int(max(32, 2 * math.ceil(radius + edge) + 16))
     ss = 4  # supersampling for anti-aliased edges
     scale = pixel_ratio * ss
     big = max(1, round(logical * scale))
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    inset = edge * scale / 2.0
-    box = [inset, inset, big - 1 - inset, big - 1 - inset]
+    # PIL draws an outline inside the box: the stroke covers [0, edge] from
+    # the image edge, inside the fixed (non-stretched) border below. An inset
+    # of half the stroke pushed thick map-unit strokes into the stretched
+    # middle, which then filled the whole frame.
+    box = [0, 0, big - 1, big - 1]
     width = max(0, round(edge * scale))
     fill = tuple(fill_rgba)
     outline = tuple(stroke_rgba) if width else None
@@ -245,7 +248,7 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.LANCZOS)
     metadata = {}
     if shape != "ellipse" and not size_px:
-        fixed = radius + edge + 1
+        fixed = math.ceil(radius + edge) + 1
         metadata = {"stretchX": [[fixed, logical - fixed]],
                     "stretchY": [[fixed, logical - fixed]],
                     "content": [edge, edge, logical - edge, logical - edge]}

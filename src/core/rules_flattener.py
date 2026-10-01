@@ -12,6 +12,7 @@ Depends on: config, zoom_levels, flattened_rule
 from typing import List, Optional, Union
 
 from qgis.core import (
+    Qgis,
     QgsProject,
     QgsVectorLayer,
     QgsRuleBasedRenderer,
@@ -140,6 +141,7 @@ class RulesFlattener:
             if not rule_system:
                 continue
             self._rule_systems.append(rule_system)
+            self._drop_missing_field_properties(rule_system, layer, rule_type)
             root_rule = self._prepare_root_rule(rule_system, layer)
             if rule_type == 0:
                 self._draw_seq = 0
@@ -149,6 +151,80 @@ class RulesFlattener:
                 # because FlattenedRule.set_attr formats as 2 digits.
                 self._unique_counter = 0
                 self._flatten_rule(layer, layer_idx, root_rule, rule_type, 0, 0)
+
+    def _drop_missing_field_properties(self, rule_system, layer, rule_type: int) -> None:
+        """Switch off data-defined properties that read a field the layer does
+        not have. QGIS cannot prepare such a property and draws the static
+        value (Szabályozás övezetkódok: a colour rule on "beep_szant" leaves
+        the labels dark grey in QGIS; the export evaluated it to blue).
+
+        Works on the cloned rule system: the project is not changed."""
+        fields = {field.name().lower() for field in layer.fields()}
+        # Qgis.PropertyType (3.36+) or QgsProperty.Type (older).
+        kinds = getattr(Qgis, "PropertyType", None)
+        field_kind = getattr(kinds, "Field", None) if kinds else QgsProperty.FieldBasedProperty
+        expression_kind = getattr(kinds, "Expression", None) if kinds else \
+            QgsProperty.ExpressionBasedProperty
+
+        def missing(prop) -> List[str]:
+            if prop.propertyType() == field_kind:
+                names = [prop.field()]
+            elif prop.propertyType() == expression_kind:
+                names = list(QgsExpression(prop.asExpression()).referencedColumns())
+            else:
+                return []
+            return [name for name in names if name and not name.startswith("#!")
+                    and name.lower() not in fields]
+
+        def clean(collection, where: str) -> bool:
+            changed = False
+            for key in collection.propertyKeys():
+                prop = collection.property(key)
+                if not prop.isActive():
+                    continue
+                absent = missing(prop)
+                if absent:
+                    prop.setActive(False)
+                    collection.setProperty(key, prop)
+                    changed = True
+                    self.diagnostics.add(
+                        "Q2VT_DDP_MISSING_FIELD",
+                        f'Layer "{layer.name()}", {where}: field(s) {", ".join(sorted(set(absent)))} '
+                        f"not found; the static value is used, as in QGIS.",
+                        layer_id=layer.id(), detail=prop.asExpression())
+            return changed
+
+        def clean_symbol(symbol, where: str) -> None:
+            if symbol is None:
+                return
+            properties = symbol.dataDefinedProperties()
+            if clean(properties, where):
+                symbol.setDataDefinedProperties(properties)
+            for layer_index in range(symbol.symbolLayerCount()):
+                symbol_layer = symbol.symbolLayer(layer_index)
+                properties = symbol_layer.dataDefinedProperties()
+                if clean(properties, f"{where}, symbol layer {layer_index + 1}"):
+                    symbol_layer.setDataDefinedProperties(properties)
+                clean_symbol(symbol_layer.subSymbol(), where)
+
+        for rule in rule_system.rootRule().descendants():
+            if rule_type == 0:
+                clean_symbol(rule.symbol(), f"symbol of rule '{rule.label() or rule.description()}'")
+                continue
+            settings = rule.settings()
+            if settings is None:
+                continue
+            where = f"labels of rule '{rule.description()}'" if rule.description() else "labels"
+            properties = settings.dataDefinedProperties()
+            changed = clean(properties, where)
+            text_format = settings.format()
+            format_properties = text_format.dataDefinedProperties()
+            if clean(format_properties, where):
+                text_format.setDataDefinedProperties(format_properties)
+                settings.setFormat(text_format)
+                changed = True
+            if changed:  # in place: setSettings() would delete these very settings
+                settings.setDataDefinedProperties(properties)
 
     @staticmethod
     def _renderer_honors_passes(renderer) -> bool:
@@ -962,7 +1038,7 @@ class RulesFlattener:
         max_zoom = min(self.max_zoom, flat_rule.get_attr("i"))
         split_rules = []
         for zoom in range(min_zoom, max_zoom + 1):
-            clone = self._create_zoom_specific_rule(flat_rule, zoom)
+            clone = self._create_zoom_specific_rule(flat_rule, zoom, last=zoom == max_zoom)
             if flat_rule.get_attr("t") == 1 or self._symbol_layer_visible_at_zoom(clone):
                 split_rules.append(clone)
         return split_rules
@@ -1004,7 +1080,8 @@ class RulesFlattener:
         doc.appendChild(elem)
         return "@map_scale" in doc.toString()
 
-    def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, zoom: int) -> FlattenedRule:
+    def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, zoom: int,
+                                   last: bool = False) -> FlattenedRule:
         """Clone a rule with @map_scale replaced by the exact scale for the given zoom."""
         rule_clone = flat_rule.derive()
         scale = ZoomLevels.zoom_to_scale(zoom)
@@ -1023,8 +1100,11 @@ class RulesFlattener:
 
         rule_clone.set_attr("o", zoom)
         rule_clone.set_attr("i", zoom)
-        if flat_rule.visibility is not None:
-            rule_clone.visibility = flat_rule.visibility.intersect(
-                ZoomInterval(float(zoom), float(zoom + 1))
-            )
+        # The last zoom keeps the rule's own upper limit: closed at zoom + 1,
+        # Övezethatár disappeared beyond the export's maximum zoom + 1
+        # instead of following the overzoom setting.
+        upper = None if last else float(zoom + 1)
+        base = flat_rule.visibility if flat_rule.visibility is not None else \
+            ZoomInterval(float(zoom), None if last else float(zoom + 1))
+        rule_clone.visibility = base.intersect(ZoomInterval(float(zoom), upper))
         return rule_clone

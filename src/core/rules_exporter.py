@@ -73,6 +73,7 @@ QgsTask. This is intentional:
    * No QCoreApplication.processEvents() polling loop.
 """
 
+import dataclasses
 import os
 import queue
 import re
@@ -189,6 +190,9 @@ class _SourceSnapshot:
     # Renderer feature order ("Control feature rendering order"):
     # ((expression, ascending, nulls_first), ...); empty when disabled.
     order_by: Tuple[Tuple[str, bool, bool], ...] = ()
+    # The layer's CRS as the project has it (WKT). A data source without a
+    # .prj, or with its CRS overridden in the project, reopens without it.
+    crs_wkt: str = ""
 
     @property
     def needs_serial_read(self) -> bool:
@@ -227,6 +231,9 @@ class _RuleGroupSnapshot:
     generated_fields: List[Tuple[int, str, str]] = field(default_factory=list)
     # For messages (workers must not read the live layer).
     layer_name: str = ""
+    # The polygons of a "visible polygon" label (see _visible_polygon_group):
+    # every part is kept; the viewer places the label in the visible part.
+    visible_polygons: bool = False
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -441,6 +448,7 @@ class RulesExporter:
                 source_uri=r.layer.source(),
                 provider=r.layer.providerType(),
                 order_by=self._order_by(r.layer),
+                crs_wkt=r.layer.crs().toWkt(),
             )
 
         # Snapshot rule groups.
@@ -507,6 +515,8 @@ class RulesExporter:
                 generated_fields=generated_fields,
                 layer_name=primary.layer.name(),
             ))
+            if self._labels_visible_polygon(primary, geom_target):
+                rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
 
         return sources, rule_groups
 
@@ -601,6 +611,13 @@ class RulesExporter:
                 # here we deliberately don't reuse it. The newly constructed
                 # layer is owned by this thread.
                 layer = QgsVectorLayer(src.source_uri, src.name, src.provider)
+                if layer.isValid() and src.crs_wkt:
+                    # Épületek (a shapefile without .prj, EPSG:23700 set in the
+                    # project) reopened without a CRS: the extent filter then
+                    # dropped all its features without a message.
+                    crs = QgsCoordinateReferenceSystem.fromWkt(src.crs_wkt)
+                    if crs.isValid() and crs != layer.crs():
+                        layer.setCrs(crs)
                 if not layer.isValid():
                     self._post("pushWarning",
                         f"Cannot open source '{src.name}' "
@@ -905,7 +922,7 @@ class RulesExporter:
         self._check_cancel()
         transbase = refactored
         keep_biggest_part = False
-        if grp.rule_type == 1:
+        if grp.rule_type == 1 and not grp.visible_polygons:
             settings = grp.flat_rules[0].rule.settings()
             if settings and not settings.labelPerPart:
                 keep_biggest_part = True
@@ -1333,6 +1350,8 @@ class RulesExporter:
             if not settings.isExpression
             else f"({label_exp})"
         )
+        if settings.useSubstitutions:
+            filter_exp = self._substituted(filter_exp, settings.substitutions)
         wrap = settings.wrapChar
         if wrap:  # QGIS breaks the line at every wrap character
             quoted = wrap.replace("'", "''")
@@ -1350,6 +1369,41 @@ class RulesExporter:
         settings.fieldName = field_name
         return fields
 
+    @staticmethod
+    def _substituted(expression: str, substitutions) -> str:
+        """The label text with QGIS's text replacements applied, in order
+        (``QgsStringReplacement::process``): plain replacements honour the
+        case option; whole-word ones are regular expressions with QGIS's
+        (ASCII) word boundaries."""
+        def literal(text: str) -> str:
+            return "'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
+
+        def regex_escape(text: str) -> str:  # QRegularExpression::escape
+            return "".join(c if c.isalnum() or c == "_" else "\\" + c for c in text)
+
+        for replacement in substitutions.replacements():
+            match, target = replacement.match(), replacement.replacement()
+            if not match:
+                continue
+            if not replacement.wholeWordOnly() and replacement.caseSensitive():
+                expression = f"replace({expression}, {literal(match)}, {literal(target)})"
+                continue
+            if replacement.wholeWordOnly():
+                # QGIS builds QRegularExpression("\\b%1\\b") from the match
+                # unescaped (it is a pattern), and its \\b knows only ASCII word
+                # characters ("Zöld" has a boundary after the Z). regexp_replace's
+                # \\b is Unicode-aware, so QGIS's boundary is spelt out.
+                word = "[A-Za-z0-9_]"
+                boundary = (f"(?:(?<={word})(?!{word})|(?<!{word})(?={word}))")
+                pattern = f"{boundary}(?:{match}){boundary}"
+            else:
+                pattern = regex_escape(match)
+            if not replacement.caseSensitive():
+                pattern = "(?i)" + pattern
+            # A regex replacement reads \1 as a group: QString::replace does too.
+            expression = f"regexp_replace({expression}, {literal(pattern)}, {literal(target)})"
+        return expression
+
     def _get_geometry_transformation(
         self, flat_rule: FlattenedRule
     ) -> Optional[Tuple[int, str]]:
@@ -1362,19 +1416,22 @@ class RulesExporter:
             return None
         if not transformation:
             return None
+        transformation[1] = self._clip_to_extent(transformation[1])
+        return tuple(transformation)
+
+    def _clip_to_extent(self, expression: str) -> str:
+        """``expression`` cut to the export extent. Geometries inside it are
+        kept as they are: intersection() nodes a self-crossing line into
+        pieces (a label then sits on a fragment) and can move a ring's start
+        vertex."""
         extent_wkt = self.extent.asWktPolygon()
-        # Geometries inside the extent are kept as they are: intersection()
-        # nodes a self-crossing line into pieces (a label then sits on a
-        # fragment) and can move a ring's start vertex.
-        clipped = (
-            f"with_variable('q2vt_t', {transformation[1]}, "
+        return (
+            f"with_variable('q2vt_t', {expression}, "
             f"with_variable('q2vt_ext', geom_from_wkt('{extent_wkt}'), "
             f"with_variable('clip', if(within(@q2vt_t, @q2vt_ext), @q2vt_t, "
             f"intersection(@q2vt_t, @q2vt_ext)), "
             f"if(not is_empty_or_null(@clip), @clip, NULL))))"
         )
-        transformation[1] = clipped
-        return tuple(transformation)
 
     @staticmethod
     def _layer_point_expression(x: str, y: str, layer_crs: str) -> str:
@@ -1551,6 +1608,40 @@ class RulesExporter:
             generator_exp, f"transform(@geometry, 'EPSG:{_EPSG_CRS}', '{layer_crs}')"
         )
         return f"transform({bound}, '{layer_crs}', 'EPSG:{_EPSG_CRS}')"
+
+    # Suffix of the dataset holding a polygon label's polygons.
+    VISIBLE_POLYGONS_SUFFIX = "_vp"
+
+    def _labels_visible_polygon(self, flat_rule: FlattenedRule, geom_target: int) -> bool:
+        """A polygon label placed on the *visible part* of its polygon, as
+        QGIS's "Centroid: visible polygon" (QgsPalLayerSettings.centroidWhole
+        False, the QGIS default): the viewer recomputes the position on every
+        move. Only labels exported as polygon centroids (not pinned, generated
+        or line-placed ones)."""
+        if flat_rule.get_attr("t") != 1 or flat_rule.get_attr("g") != 2 or geom_target != 0:
+            return False
+        settings = flat_rule.rule.settings()
+        if settings is None or self._pinned_position(settings) is not None \
+                or getattr(flat_rule, "line_label_midpoint", False):
+            return False
+        if self.cent_source == 0:
+            return False
+        if self.cent_source == 1:
+            return True
+        return not settings.centroidWhole
+
+    def _visible_polygon_group(self, label: "_RuleGroupSnapshot",
+                               flat_rule: FlattenedRule) -> "_RuleGroupSnapshot":
+        """The label's polygons with the label's fields: the viewer clips them
+        to the screen and places one label per feature (see viewer.html)."""
+        name = label.output_dataset + self.VISIBLE_POLYGONS_SUFFIX
+        for rule in label.flat_rules:
+            rule.visible_polygons = name
+            rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
+        return dataclasses.replace(
+            label, output_dataset=name, geometry_target=2,
+            geometry_expression=self._clip_to_extent("@geometry"),
+            description=label.description, flat_rules=[], visible_polygons=True)
 
     def _get_polygon_centroids_expression(self) -> str:
         if self.cent_source == 1:

@@ -62,6 +62,7 @@
 // MapLibre GL JS 6 is an ES module (it loads maplibre-gl-shared.mjs and its
 // worker maplibre-gl-worker.mjs from this folder).
 import * as maplibregl from './maplibre-gl.mjs';
+import { enableVisibleLabels } from './visible_labels.mjs';
 window.maplibregl = maplibregl;
 
 const map = window.map = new maplibregl.Map({
@@ -72,6 +73,8 @@ const map = window.map = new maplibregl.Map({
 });
 
 map.addControl(new maplibregl.NavigationControl());
+// Polygon labels on the visible part of their polygon, as in QGIS.
+map.once('load', () => { window.q2vtVisibleLabels = enableVisibleLabels(map, maplibregl); });
 // Start on the exported area (within the exported zooms), not at the
 // minimum zoom: with zoom 0 that showed the whole earth.
 map.fitBounds(_Q2VT_BOUNDS, {animate: false, padding: 20, maxZoom: _Q2VT_MAXZOOM});

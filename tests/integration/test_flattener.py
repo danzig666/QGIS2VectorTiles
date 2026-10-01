@@ -148,3 +148,24 @@ def test_upper_layer_draws_above_lower_layer(flattener):
     colors = _draw_colors(rules)
     expected = {"top": "#0000ff", "bottom": "#ff0000"}
     assert colors == [expected[n] for n in reversed(names)]
+
+
+def test_last_zoom_of_a_map_scale_split_stays_open(flattener):
+    """Övezethatár disappeared beyond the export's maximum zoom + 1: the rule
+    split per zoom for @map_scale closed its last zoom too."""
+    from qgis.core import (QgsFillSymbol, QgsProperty, QgsSingleSymbolRenderer,
+                           QgsSymbolLayer)
+    layer = zoning_layer()
+    symbol = QgsFillSymbol.createSimple({"color": "red", "outline_width": "0.5"})
+    symbol.symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyStrokeWidth,
+        QgsProperty.fromExpression("if(@map_scale > 5000, 0.2, 0.6)"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reset_project(layer)
+    rules, _ = flattener(min_zoom=12, max_zoom=15)
+    split = [r for r in rules if r.get_attr("o") == r.get_attr("i")]
+    assert split, [r.output_dataset for r in rules]
+    last = max(split, key=lambda r: r.get_attr("o"))
+    assert last.get_attr("o") == 15 and last.visibility.max_zoom is None
+    assert all(r.visibility.max_zoom == r.get_attr("o") + 1 for r in split if r is not last
+               and r.get_attr("o") == r.get_attr("i") and r.get_attr("o") < 15)

@@ -61,6 +61,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_DDP_NO_EMITTER": CodeInfo(
         Severity.WARNING, "Data-defined property has no MapLibre equivalent",
         "The static value is used in the browser style."),
+    "Q2VT_DDP_MISSING_FIELD": CodeInfo(
+        Severity.WARNING, "Data-defined property uses a field the layer does not have",
+        "QGIS ignores such a property and draws the static value; so does the export. "
+        "Fix the field name to use the property."),
     "Q2VT_DDP_EVAL_ERROR": CodeInfo(
         Severity.ERROR, "Data-defined expression could not be evaluated",
         "Fix the expression; it must be valid for every exported feature."),

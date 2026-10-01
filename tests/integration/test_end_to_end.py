@@ -388,3 +388,79 @@ def test_export_runs_processing_on_the_main_thread_by_default(export, tmp_path, 
     algorithm = QGIS2VectorTilesAlgorithm()
     algorithm.initAlgorithm()
     assert algorithm.parameterDefinition("PARALLEL").defaultValue() is False
+
+
+def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path):
+    """QGIS's default "Centroid: visible polygon": the viewer places the label
+    on the visible part, so the export ships the polygons (``_vp``) and marks
+    the style layer; "whole polygon" labels stay static centroids."""
+    layer = zoning_layer(path=str(tmp_path / "vp.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.centroidWhole = False
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    polygons = labels[0]["metadata"]["q2vt:visible-polygons"]
+    assert polygons.endswith("_vp") and labels[0]["source-layer"] + "_vp" == polygons
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    assert polygons in archive["vector_layers"]
+    assert "q2vt_label" in archive["vector_layers"][polygons]["fields"]
+
+    layer = zoning_layer(path=str(tmp_path / "vp_whole.gpkg"))  # the project owned the first
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings.centroidWhole = True
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
+
+
+def test_properties_on_missing_fields_are_ignored_as_in_qgis(export, tmp_path):
+    """Szabályozás övezetkódok: a colour rule on a field the layer does not
+    have is ignored by QGIS (static colour); the export evaluated it."""
+    layer = zoning_layer(path=str(tmp_path / "mf.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    fmt = QgsTextFormat()
+    fmt.setColor(QColor("#232323"))
+    settings.setFormat(fmt)
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.Color, QgsProperty.fromExpression(
+            "-- note\ncase when beep_szant=1 then color_rgba(255,0,0,255) else color_rgba(0,0,255,255) end"))
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    label = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+    assert label["paint"]["text-color"] == "rgba(35, 35, 35, 1.0)"
+    assert exporter.diagnostics.by_code("Q2VT_DDP_MISSING_FIELD")
+    # Only the export's copy is changed, never the project's labels.
+    assert not exporter.diagnostics.by_code("Q2VT_PROJECT_MUTATED")
+
+
+def test_source_without_prj_uses_the_project_crs(export, tmp_path):
+    """Épületek: a shapefile without .prj (CRS set in the project) reopened
+    without a CRS; the extent filter then dropped every feature."""
+    from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransformContext,
+                           QgsVectorFileWriter, QgsVectorLayer)
+    source = zoning_layer()
+    path = str(tmp_path / "noprj.shp")
+    options = QgsVectorFileWriter.SaveVectorOptions()
+    options.driverName = "ESRI Shapefile"
+    QgsVectorFileWriter.writeAsVectorFormatV3(source, path, QgsCoordinateTransformContext(), options)
+    os.remove(str(tmp_path / "noprj.prj"))
+    layer = QgsVectorLayer(path, "noprj", "ogr")
+    layer.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    exporter, result = export(layer)
+    assert result
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    assert archive["vector_layers"], archive

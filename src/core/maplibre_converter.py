@@ -5,7 +5,7 @@ import json
 import math
 import os
 from os.path import join
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from qgis.PyQt.QtGui import QColor, QFont, QFontInfo
 from ..utils.config import Qt
@@ -1566,6 +1566,7 @@ class QgisMapLibreStyleExporter:
         visibility: Optional[Dict[str, ZoomInterval]] = None,
         lengths: Optional[LengthConverter] = None,
         ordered_styles: Optional[set] = None,
+        visible_polygons: Optional[Dict[str, Tuple[str, bool]]] = None,
     ):
         """Initialise the exporter.
 
@@ -1587,7 +1588,11 @@ class QgisMapLibreStyleExporter:
             lengths:         Unit converter (map-unit context of the project).
             ordered_styles:  Style names whose features carry a QGIS
                              drawing rank (renderer order-by) to sort by.
+            visible_polygons: Style name -> (polygon source layer, label per
+                             part) of labels placed on the visible part of
+                             their polygon by the viewer.
         """
+        self.visible_polygons = visible_polygons or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -3024,6 +3029,15 @@ class QgisMapLibreStyleExporter:
         else:
             self._apply_default_icon_props(layer_def)
 
+        polygons = self.visible_polygons.get(style_name)
+        if polygons:
+            # The viewer moves these labels to the visible part of their
+            # polygon (QGIS "Centroid: visible polygon"); other clients draw
+            # the static whole-polygon centroids.
+            layer_def.setdefault("metadata", {}).update({
+                "q2vt:visible-polygons": polygons[0],
+                "q2vt:label-per-part": polygons[1],
+            })
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
     # MapLibre checks that a line label fits along its line with the
@@ -3045,6 +3059,7 @@ class QgisMapLibreStyleExporter:
           sawtooth curve for all zooms stays at 0.5 and the frame did not
           grow between integer zooms).
         """
+        frame = layer_def.pop("_q2vt_frame", None)  # not JSON (and not deep-copyable)
         layout = layer_def["layout"]
         size = layout.get("text-size")
         if not ex.is_zoom_curve(size) or size[0] != "interpolate":
@@ -3082,12 +3097,24 @@ class QgisMapLibreStyleExporter:
             if framed:
                 part["layout"]["icon-size"] = ["interpolate", ["exponential", 2], ["zoom"],
                                                zoom, 0.5, zoom + 1, 1.0]
+                if frame is not None:
+                    part["layout"]["icon-image"] = self._map_unit_frame(frame, zoom)
             out.append(part)
         if high > top:
             rest = copy.deepcopy(layer_def)
             rest["minzoom"] = max(low, top)
+            if frame is not None:
+                rest["layout"]["icon-image"] = self._map_unit_frame(frame, top)
             out.append(rest)
         return out
+
+    def _map_unit_frame(self, background, zoom: int) -> Optional[str]:
+        """Frame image with the map-unit stroke of ``zoom``: drawn at
+        icon-size 0.5 -> 1 over the zoom, so the image stroke is doubled."""
+        stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
+                                                 background.strokeWidthUnit(),
+                                                 reference_zoom=zoom)
+        return self._background_image(background, stroke_px=2.0 * stroke)
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:
@@ -3126,8 +3153,9 @@ class QgisMapLibreStyleExporter:
                             (parts[0], "|", parts[1])]
         return ["match", key] + cases + ["bottom-left"]
 
-    def _background_image(self, background) -> Optional[str]:
-        """Sprite for a label background shape (rectangle/ellipse/SVG/marker)."""
+    def _background_image(self, background, stroke_px: Optional[float] = None) -> Optional[str]:
+        """Sprite for a label background shape (rectangle/ellipse/SVG/marker).
+        ``stroke_px`` overrides the frame stroke (per-zoom map-unit frames)."""
         from .fidelity.patterns import frame_image  # pylint: disable=import-outside-toplevel
         shape = _enum_int(background.type(), 0)
         names = {0: "rectangle", 1: "rectangle", 2: "ellipse", 3: "ellipse", 4: "svg", 5: "marker"}
@@ -3155,8 +3183,9 @@ class QgisMapLibreStyleExporter:
                                 "(width and height may differ).")
         fill = background.fillColor()
         stroke = background.strokeColor()
-        stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
-                                                    background.strokeWidthUnit())
+        if stroke_px is None:
+            stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
+                                                        background.strokeWidthUnit())
         radii = background.radii()
         radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
                                                     background.radiiUnit()) if kind == "rectangle" else 0
@@ -3290,6 +3319,12 @@ class QgisMapLibreStyleExporter:
         if is_frame:
             layer_def["layout"]["icon-allow-overlap"] = True
             layer_def["layout"]["icon-ignore-placement"] = True
+            if isinstance(image, str) and _enum_int(background.strokeWidthUnit(), 0) == 1 \
+                    and background.strokeWidth() > 0:
+                # Map-unit frame stroke: one frame image per zoom
+                # (_line_label_zoom_split); one image drew a hairline.
+                from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+                layer_def["_q2vt_frame"] = QgsTextBackgroundSettings(background)
             if ex.is_zoom_curve(layer_def["layout"].get("text-size")):
                 layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
                 padding = self._text_fit_padding_curve(background)

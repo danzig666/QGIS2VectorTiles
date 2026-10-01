@@ -209,3 +209,26 @@ def test_single_line_label_placement(mc):
     assert mc.TextPropertyExtractor.get_text_anchor(settings) == "bottom"
     settings.multilineAlign = Qgis.LabelMultiLineAlignment.Left
     assert mc.TextPropertyExtractor.get_text_justify(settings) == "left"
+
+
+def test_label_text_replacements_match_qgis(plugin):
+    """Szabályozás övezetkódok: the layer's text replacements ("Ut" -> "Köu",
+    whole-word "Z" -> "Zkp", ...) were not applied to the exported labels."""
+    from qgis.core import (QgsExpression, QgsExpressionContext, QgsStringReplacement,
+                           QgsStringReplacementCollection)
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
+    collection = QgsStringReplacementCollection([
+        QgsStringReplacement("Vasut", "Kök", False, False),
+        QgsStringReplacement("Ut", "Köu", False, False),
+        QgsStringReplacement("Z", "Zkp", False, True),
+        QgsStringReplacement("Gip", "Gipe", False, False),
+        QgsStringReplacement("Eg", "Ee", False, True),
+        QgsStringReplacement("a.b", "x'y", True, False),
+        QgsStringReplacement("(1)", "[1]", False, True),
+    ])
+    for text in ["Ut-4", "Vasut", "ut", "Z", "Zöld", "Z-1", "Eg", "Egy", "eg 2", "Gip-x",
+                 "a.b axb", "Lk (1)", "", "Mt"]:
+        literal = "'" + text.replace("'", "''") + "'"
+        expression = QgsExpression(RulesExporter._substituted(literal, collection))
+        assert not expression.hasParserError(), expression.parserErrorString()
+        assert expression.evaluate(QgsExpressionContext()) == collection.process(text), text

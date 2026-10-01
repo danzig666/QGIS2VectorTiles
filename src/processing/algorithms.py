@@ -175,8 +175,12 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterEnum(
                 self.POLYGONS_LABELS_BASE,
                 self.tr("Polygon Labels Base"),
-                options=["Whole Polygon", "Visible Polygon"],
-                defaultValue=0,  # Default to Required Fields Only
+                options=[
+                    "Whole Polygon",
+                    "Visible Polygon (the MapLibre viewer places labels on the visible part)",
+                    "As set in each layer's labels (QGIS 'Centroid: whole / visible polygon')",
+                ],
+                defaultValue=2,
                 optional=False,
             )
         )

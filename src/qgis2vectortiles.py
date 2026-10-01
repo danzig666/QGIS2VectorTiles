@@ -79,7 +79,7 @@ class QGIS2VectorTiles:
         output_dir: str = None,
         include_required_fields_only=0,
         cpu_percent: int = 100,
-        cent_source: int = 0,
+        cent_source: int = 2,
         background_type: int = 0,
         viewer: int = 0,
         feedback: QgsProcessingFeedback = None,
@@ -441,6 +441,10 @@ class QGIS2VectorTiles:
                 old_low, old_high = zooms[rule.output_dataset]
                 low, high = min(low, old_low), max(high, old_high)
             zooms[rule.output_dataset] = (low, high)
+            polygons = getattr(rule, "visible_polygons", None)
+            if polygons:  # a visible-polygon label's polygons: the label's zooms
+                old_low, old_high = zooms.get(polygons, (low, high))
+                zooms[polygons] = (min(low, old_low), max(high, old_high))
         return zooms
 
     def _generate_tiles(self, layers: List[QgsVectorLayer], temp_dir: str, style: dict,
@@ -472,6 +476,9 @@ class QGIS2VectorTiles:
             self.min_zoom, self.max_zoom,
             diagnostics=self.diagnostics, profile=self.profile,
             visibility=self._visibility_by_style(rules or []),
+            visible_polygons={rule.rule.description(): (rule.visible_polygons,
+                                                        rule.label_per_part)
+                              for rule in rules or [] if getattr(rule, "visible_polygons", None)},
             lengths=self.lengths,
             ordered_styles={rule.rule.description() for rule in rules or []
                             if RulesExporter._order_by(rule.layer)},

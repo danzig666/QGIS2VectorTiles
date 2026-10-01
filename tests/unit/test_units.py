@@ -70,6 +70,18 @@ def test_data_defined_map_units_multiply_inside_stops():
     assert all(isinstance(out, list) and out[0] == "*" for out in curve[4::2])
 
 
+def test_data_defined_map_units_have_a_stop_at_every_zoom():
+    """MapLibre lays out a data-driven text-size at the stops around the tile
+    zoom, packed to at most 512 px: stops at 0 and 24 only clipped the z24
+    size and made map-unit labels ~4x too small at zoom 17 (Földrészletek)."""
+    curve = u.LengthConverter().convert(["get", "size"], "map")
+    zooms = curve[3::2]
+    assert zooms == [float(z) for z in range(0, 25)]
+    # Neighbouring stops differ by exactly 2x (exponential base 2 is exact).
+    factors = [out[2] for out in curve[4::2]]
+    assert all(b == pytest.approx(2 * a) for a, b in zip(factors, factors[1:]))
+
+
 def test_projected_crs_uses_reference_latitude():
     ctx = u.MapUnitContext.for_project(False, "meters", 47.5)
     assert not ctx.exact
