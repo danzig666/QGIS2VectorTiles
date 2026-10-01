@@ -76,8 +76,11 @@ def test_pmtiles_only_keeps_no_mbtiles_and_adds_no_layer(plugin, tmp_path):
     assert len(project.mapLayers()) == count
 
 
-def test_processing_algorithm_returns_archive_outputs(plugin, tmp_path):
+def test_processing_algorithm_returns_archive_outputs(plugin, tmp_path, monkeypatch):
     from qgis.core import QgsProcessingFeedback  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.server_initializer import ServerInitializer  # noqa  pylint: disable=import-error
+    # The algorithm always starts the local tile server (port 9000, used by the browser tests).
+    monkeypatch.setattr(ServerInitializer, "_launch_server", lambda *args, **kwargs: None)
     _layers(tmp_path)
     provider_id = "QGIS2VectorTilesFork"
     registry = QgsApplication.processingRegistry()

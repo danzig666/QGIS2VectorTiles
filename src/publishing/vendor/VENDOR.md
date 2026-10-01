@@ -23,3 +23,31 @@ The adapter subclasses `writer.Writer` only to deduplicate tile payloads by SHA-
 (upstream keys on Python's 64-bit `hash()` without comparing bytes) and to place its
 temporary file next to the output; headers, directories and metadata are written by the
 upstream code.
+
+## S3 SDK — `s3/` (used only when QGIS's Python has no boto3)
+
+Unpacked from pinned PyPI wheels by `tools/publishing/vendor_s3.py`, which checks
+each wheel against `tools/publishing/vendor_s3.sha256`. botocore and boto3 data are
+trimmed to the S3 service, endpoints, partitions, default configuration and retry
+rules. Tests and `.dist-info` are not shipped; licences and notices are in
+`s3/licenses/`.
+
+| Package | Version | License |
+|---|---|---|
+| boto3 | 1.43.106 | Apache-2.0 |
+| botocore (incl. its `cacert.pem`, MPL-2.0) | 1.43.106 | Apache-2.0 |
+| s3transfer | 0.19.2 | Apache-2.0 |
+| jmespath | 1.1.0 | MIT |
+| python-dateutil | 2.9.0.post0 | Apache-2.0 / BSD-3-Clause |
+| six | 1.17.0 | MIT |
+| urllib3 | 2.8.0 | MIT |
+
+## Web viewer (`resources/`)
+
+| Component | Version | License | Files |
+|---|---|---|---|
+| MapLibre GL JS | 6.11.2 (unchanged from the existing viewer, not upgraded) | BSD-3-Clause | `resources/ml_viewer/maplibre-gl*.{mjs,css}`, `MAPLIBRE-LICENSE.txt` |
+| pmtiles (JavaScript) | 4.5.0 browser build `dist/pmtiles.js`, unmodified (SHA-256 `caf981bc46f6327ee7e65d5dc964d89d38a69f60edca2bd4c5c890c21b554c6c`) | BSD-3-Clause | `resources/web_viewer/vendor/pmtiles.js`, `PMTILES-LICENSE.txt` |
+
+Every web release copies these licences into `licenses/`. The go-pmtiles CLI that
+`tools/publishing/fetch_pmtiles_cli.py` downloads is used by tests only and is not shipped.
