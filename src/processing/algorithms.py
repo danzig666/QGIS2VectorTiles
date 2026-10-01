@@ -41,6 +41,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
     FIDELITY_MODE = "FIDELITY_MODE"
     OVERZOOM = "OVERZOOM"
     STATIC_PACKAGE = "STATIC_PACKAGE"
+    PARALLEL = "PARALLEL"
 
     def __init__(self):
         """Initialize the algorithm"""
@@ -153,7 +154,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.CPU_PERCENT,
-                self.tr("CPU Usage Limit (%)"),
+                self.tr("CPU Usage Limit for parallel export (%)"),
                 type=QgsProcessingParameterNumber.Type.Integer,
                 defaultValue=100,
                 minValue=0,
@@ -232,6 +233,14 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.PARALLEL,
+                self.tr("Parallel export (faster; can crash QGIS, seen on QGIS 3.44 / Windows)"),
+                defaultValue=False,
+            )
+        )
+
         # Output directory parameter
         self.addParameter(
             QgsProcessingParameterFolderDestination(
@@ -286,6 +295,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
         fidelity_mode = self.parameterAsInt(parameters, self.FIDELITY_MODE, context)
         overzoom = self.parameterAsInt(parameters, self.OVERZOOM, context)
         static_package = self.parameterAsBool(parameters, self.STATIC_PACKAGE, context)
+        parallel = self.parameterAsBool(parameters, self.PARALLEL, context)
         try:
             # Your existing vector tile generator class would be called here
             tiles_generator = QGIS2VectorTiles(
@@ -302,6 +312,7 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
                 fidelity_mode=fidelity_mode,
                 overzoom=overzoom,
                 static_package=static_package,
+                parallel=parallel,
             )
 
             # Run the generation process

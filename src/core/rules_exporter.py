@@ -239,6 +239,41 @@ _RING_CLOCKWISE_EXPRESSION = (
 )
 
 
+class _InlineFuture(Future):
+    """A job of the serial executor: run on the main thread when its turn
+    comes in _iter_completed (no worker thread at all)."""
+
+    def __init__(self, fn, args):
+        super().__init__()
+        self._call = (fn, args)
+
+    def execute(self) -> None:
+        if not self.set_running_or_notify_cancel():
+            return
+        fn, args = self._call
+        try:
+            self.set_result(fn(*args))
+        except BaseException as error:  # noqa: BLE001 - re-raised by result()
+            self.set_exception(error)
+
+
+class _InlineExecutor:
+    """Drop-in for ThreadPoolExecutor that runs every job on the calling
+    (main) thread, one after another. QGIS Processing is not safe to run in
+    parallel Python threads: on QGIS 3.44 / Windows it corrupted the heap
+    (0xc0000374) and QGIS closed without a message."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @staticmethod
+    def submit(fn, *args) -> _InlineFuture:
+        return _InlineFuture(fn, args)
+
+
 class _Cancelled(Exception):
     """Raised inside workers when the caller has signalled cancellation."""
 
@@ -273,6 +308,7 @@ class RulesExporter:
         cpu_percent: int = 100,
         diagnostics: Optional[DiagnosticCollector] = None,
         progress_range: Tuple[float, float] = (0.0, 100.0),
+        parallel: bool = False,
     ):
         self.flattened_rules = flattened_rules
         # Share of the Processing progress bar this export fills.
@@ -289,6 +325,8 @@ class RulesExporter:
         self.utils_dir = utils_dir
         self.feedback = feedback
         self.cpu_percent = cpu_percent
+        # Parallel worker threads are opt-in (see _InlineExecutor).
+        self.parallel = parallel
         self.diagnostics = diagnostics or DiagnosticCollector()
         # Measurement settings of the project (caller thread snapshot): QGIS
         # measures $area/$length ellipsoidally when an ellipsoid is set and
@@ -618,9 +656,7 @@ class RulesExporter:
 
         max_workers = self._compute_pool_size(len(todo))
 
-        with ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="rules-base"
-        ) as pool:
+        with self._executor(max_workers, "rules-base") as pool:
             futures: Dict[Future, str] = {
                 pool.submit(
                     self._build_one_base_layer, src_path, target_paths[lid]
@@ -730,9 +766,7 @@ class RulesExporter:
 
         max_workers = self._compute_pool_size(len(rule_groups))
 
-        with ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="rules-export"
-        ) as pool:
+        with self._executor(max_workers, "rules-export") as pool:
             futures: Dict[Future, _RuleGroupSnapshot] = {}
             for grp in rule_groups:
                 src_path = base_layers.get(grp.layer_id)
@@ -1535,8 +1569,13 @@ class RulesExporter:
     # -------------------------------------------------------------------
     # Pool sizing, future iteration, temp tracking
     # -------------------------------------------------------------------
+    def _executor(self, max_workers: int, prefix: str):
+        if max_workers <= 1:
+            return _InlineExecutor()
+        return ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=prefix)
+
     def _compute_pool_size(self, num_jobs: int) -> int:
-        if num_jobs <= 0:
+        if num_jobs <= 0 or not self.parallel:
             return 1
         cpu_n = os.cpu_count() or 1
         from_user = max(1, int(cpu_n * self.cpu_percent / 100))
@@ -1578,6 +1617,15 @@ class RulesExporter:
         between waits so an external cancellation request is responsive even
         when current futures are still running.
         """
+        if all(isinstance(fut, _InlineFuture) for fut in futures):
+            for fut in futures:  # serial: run each job now, in order
+                if self._is_cancelled():
+                    return
+                fut.execute()
+                self._flush_messages()
+                main_thread.keep_responsive()
+                yield fut
+            return
         pending = set(futures.keys())
         while pending:
             done, pending = wait(

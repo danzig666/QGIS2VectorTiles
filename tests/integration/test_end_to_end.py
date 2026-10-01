@@ -337,7 +337,7 @@ def test_workers_never_touch_the_live_project(export, tmp_path, monkeypatch):
     reset_project(layer)
     QgsExpressionContextUtils.setProjectVariable(QgsProject.instance(), "q2vt_test_prefix", "Z-")
     try:
-        exporter, result = export(layer, keep_project=True)
+        exporter, result = export(layer, keep_project=True, parallel=True)
     finally:
         QgsExpressionContextUtils.removeProjectVariable(QgsProject.instance(), "q2vt_test_prefix")
     assert result and not calls, calls
@@ -365,3 +365,26 @@ def test_viewer_starts_on_the_exported_area(export, tmp_path):
     viewer = open(os.path.join(result, "utils", "viewer", "viewer.html"), encoding="utf-8").read()
     assert "_Q2VT_" not in viewer
     assert "map.fitBounds([[" in viewer and "maxZoom: 14" in viewer
+
+
+def test_export_runs_processing_on_the_main_thread_by_default(export, tmp_path, monkeypatch):
+    """Parallel worker threads still crashed QGIS 3.44 / Windows with heap
+    corruption after the project scope fix: by default every processing
+    algorithm now runs on the main thread, one after another."""
+    import threading
+    import q2vt_plugin.src.core.rules_exporter as rules_exporter  # pylint: disable=import-error
+    threads = set()
+    original = rules_exporter.run_processing
+
+    def recording(*args, **kwargs):
+        threads.add(threading.current_thread().name)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(rules_exporter, "run_processing", recording)
+    layer = _hatched_labelled_layer(str(tmp_path / "serial.gpkg"))
+    exporter, result = export(layer)
+    assert result and threads == {threading.main_thread().name}, threads
+    from q2vt_plugin.src.processing.algorithms import (  # pylint: disable=import-error
+        QGIS2VectorTilesAlgorithm)
+    algorithm = QGIS2VectorTilesAlgorithm()
+    algorithm.initAlgorithm()
+    assert algorithm.parameterDefinition("PARALLEL").defaultValue() is False

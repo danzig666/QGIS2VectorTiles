@@ -87,6 +87,7 @@ class QGIS2VectorTiles:
         overzoom: int = 0,
         serve: bool = True,
         static_package: bool = False,
+        parallel: bool = False,
     ):
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
@@ -101,6 +102,7 @@ class QGIS2VectorTiles:
         self.feedback = feedback or QgsProcessingFeedback()
         self.serve = serve
         self.static_package = static_package
+        self.parallel = parallel
         self.diagnostics = DiagnosticCollector()
         self.profile = ExportProfile(
             mode=FidelityMode.from_index(fidelity_mode),
@@ -204,7 +206,8 @@ class QGIS2VectorTiles:
         layers = len(QgsProject.instance().mapLayers())
         return (f"QGIS {Qgis.version()}, zooms {self.min_zoom + self.viewer}-"
                 f"{self.max_zoom + self.viewer}, project CRS {crs}, {layers} layers, "
-                f"extent {self.extent.toString(2)}, CPU limit {self.cpu_percent}%")
+                f"extent {self.extent.toString(2)}, CPU limit {self.cpu_percent}%, "
+                f"{'parallel' if self.parallel else 'serial'} export")
 
     # --- fidelity helpers -------------------------------------------------
     def _reference_latitude(self) -> float:
@@ -422,7 +425,7 @@ class QGIS2VectorTiles:
             rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
-            progress_range=(5.0, 70.0),
+            progress_range=(5.0, 70.0), parallel=self.parallel,
         ).export()
 
     def _has_features(self, layers: List[QgsVectorLayer]) -> bool:
