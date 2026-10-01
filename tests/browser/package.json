@@ -4,7 +4,7 @@
   "description": "Development-only browser rendering checks. Not needed to run the plugin.",
   "type": "module",
   "devDependencies": {
-    "@maplibre/maplibre-gl-style-spec": "24.3.1",
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
     "playwright-core": "1.56.1"
   }
 }

@@ -18,8 +18,8 @@ The fork had no changes relative to the upstream baseline, so no reconciliation 
 | GDAL | 3.8.4 (MVT + MBTiles drivers) |
 | Pillow / NumPy / SciPy | 10.2.0 / 1.26.4 / 1.11.4 |
 | Browser | Chromium build 1194 (Playwright 1.56.1), SwiftShader WebGL, device-pixel ratio 1 |
-| MapLibre GL JS | 5.11.0 — the build bundled in `resources/ml_viewer/maplibre-gl.js` |
-| Style validator | `@maplibre/maplibre-gl-style-spec` 24.3.1 (the dependency floor of maplibre-gl 5.11.0) |
+| MapLibre GL JS | 6.11.2 — the ES module build bundled in `resources/ml_viewer/` (`maplibre-gl.mjs`, `maplibre-gl-shared.mjs`, `maplibre-gl-worker.mjs`); 5.11.0 (`maplibre-gl.js`) before plugin 4.1.6 |
+| Style validator | `@maplibre/maplibre-gl-style-spec` 26.4.4 (the dependency of maplibre-gl 6.11.2; was 24.3.1 with 5.11.0 before plugin 4.1.6) |
 | Node | 22.22.2 |
 | Fonts | System DejaVu/Free fonts (fontconfig); the default QGIS label font resolves to *DejaVu Sans Book* |
 

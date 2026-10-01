@@ -9,7 +9,7 @@ a sub-directory of one) can host, with no tile server.
       style.json            relative tile, sprite and glyph URLs
       tiles/{z}/{x}/{y}.pbf  uncompressed Mapbox Vector Tiles (XYZ rows)
       sprite*.json|png, glyphs/...
-      maplibre-gl.js|css
+      maplibre-gl.mjs, maplibre-gl-shared.mjs, maplibre-gl-worker.mjs, maplibre-gl.css
 
 The package is first written to a temporary sibling folder and renamed into
 place, so an interrupted export never leaves a half-written package, and a
@@ -76,13 +76,16 @@ _VIEWER = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vector tiles</title>
-<script src="maplibre-gl.js"></script>
 <link href="maplibre-gl.css" rel="stylesheet">
 <style>html,body{{margin:0;height:100%}}#map{{position:absolute;inset:0}}</style>
 </head>
 <body>
 <div id="map"></div>
-<script>
+<script type="module">
+// MapLibre GL JS 6 is an ES module: the web server must send .mjs files as
+// JavaScript (text/javascript), as current servers do.
+import * as maplibregl from "./maplibre-gl.mjs";
+window.maplibregl = maplibregl;
 // URLs in style.json are relative to it; resolve them against this page so
 // the package works from any folder of any static web server.
 const base = new URL("./", window.location.href).href;
@@ -123,7 +126,8 @@ def write_static_package(export_dir: str, style: dict, source_name: str,
         for name in ("sprite", "glyphs"):
             if os.path.isdir(os.path.join(style_dir, name)):
                 shutil.copytree(os.path.join(style_dir, name), os.path.join(staging, name))
-        for name in ("maplibre-gl.js", "maplibre-gl.css"):
+        for name in ("maplibre-gl.mjs", "maplibre-gl-shared.mjs", "maplibre-gl-worker.mjs",
+                     "maplibre-gl.css", "MAPLIBRE-LICENSE.txt"):
             shutil.copy2(os.path.join(viewer_dir, name), os.path.join(staging, name))
         with open(os.path.join(staging, "index.html"), "w", encoding="utf-8") as handle:
             handle.write(_VIEWER.format(center=json.dumps([float(c) for c in center]),

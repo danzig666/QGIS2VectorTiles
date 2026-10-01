@@ -10,9 +10,11 @@ const views = JSON.parse(readFileSync(viewsPath, "utf8"));
 const executablePath = process.env.Q2VT_CHROMIUM || "/opt/pw-browsers/chromium";
 const w = views[0].width, h = views[0].height;
 const html = `<!doctype html><html><head><meta charset="utf-8">
-<script src="maplibre-gl.js"></script><link href="maplibre-gl.css" rel="stylesheet">
+<link href="maplibre-gl.css" rel="stylesheet">
 <style>html,body{margin:0}#map{width:${w}px;height:${h}px}</style></head><body><div id="map"></div>
-<script>
+<script type="module">
+import * as maplibregl from "./maplibre-gl.mjs";
+window.maplibregl = maplibregl;
 window.q2vt = { errors: [], missing: [] };
 window.map = new maplibregl.Map({ container: "map", style: "http://localhost:${port}/style/style.json",
   center: [0, 0], zoom: 1, fadeDuration: 0, attributionControl: false, pixelRatio: 1,

@@ -11,9 +11,11 @@ const [exportDir, port, lon, lat, zoom, shot] = process.argv.slice(2);
 const executablePath = process.env.Q2VT_CHROMIUM || "/opt/pw-browsers/chromium";
 
 const html = `<!doctype html><html><head><meta charset="utf-8">
-<script src="maplibre-gl.js"></script><link href="maplibre-gl.css" rel="stylesheet">
+<link href="maplibre-gl.css" rel="stylesheet">
 <style>html,body,#map{margin:0;width:800px;height:600px}</style></head><body><div id="map"></div>
-<script>
+<script type="module">
+import * as maplibregl from "./maplibre-gl.mjs";
+window.maplibregl = maplibregl;
 window.q2vt = { mapErrors: [], missingImages: [] };
 const map = new maplibregl.Map({
   container: "map", style: "http://localhost:${port}/style/style.json",

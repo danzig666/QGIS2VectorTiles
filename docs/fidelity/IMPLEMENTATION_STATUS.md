@@ -7,7 +7,7 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 
 | ID | Deliverable | Status | What exists / what is missing |
 |---|---|---|---|
-| PR-01 | Baseline, fixtures, environment lock, smoke browser test | **Done** (3.34) | Baseline record; programmatic fixtures; unit / PyQGIS / browser levels; pinned MapLibre 5.11.0 + style-spec 24.3.1 + Chromium 1194; QGIS-vs-browser gallery (`tools/gallery`) and parity tests. *Missing:* runs on QGIS 3.44 and 4.x. |
+| PR-01 | Baseline, fixtures, environment lock, smoke browser test | **Done** (3.34) | Baseline record; programmatic fixtures; unit / PyQGIS / browser levels; pinned MapLibre 6.11.2 (ES module build) + style-spec 26.4.4 + Chromium 1194; QGIS-vs-browser gallery (`tools/gallery`) and parity tests. *Missing:* runs on QGIS 3.44 and 4.x. |
 | PR-02 | Falsy values, expression arithmetic, sprite errors, enums | **Done** | Typed property evaluation, typed expression builder, sprite error reporting, named marker-line flags, Qt5/Qt6 enum adapters, enum-based data-defined property names. |
 | PR-03 | Typed bindings, diagnostics, strict mode, capability registry | **Done** | Stable `Q2VT_*` diagnostics (JSON + HTML), strict mode, generated capability table, per-layer field dependencies, data/zoom-driven property bindings in the report, empty-output diagnostics. |
 | PR-04 | Context-aware units, valid camera/data expressions | **Mostly done** | One unit service, map-unit zoom curves with clamp knees, zoom-curve arithmetic (`mul`, `add`), hairlines. *Missing:* `@map_scale` properties still split datasets per zoom (now written only to their own zoom's tiles). |

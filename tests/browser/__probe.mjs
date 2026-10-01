@@ -1,8 +1,11 @@
 import { chromium } from "playwright-core";
 import { writeFileSync } from "node:fs";
 const [dir, lon, lat, zoom, variant, shot] = process.argv.slice(2);
-const html = `<!doctype html><html><head><meta charset="utf-8"><script src="maplibre-gl.js"></script>
-<style>html,body{margin:0}#map{width:400px;height:400px}</style></head><body><div id="map"></div><script>
+const html = `<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0}#map{width:400px;height:400px}</style></head><body><div id="map"></div><script type="module">
+import * as maplibregl from "./maplibre-gl.mjs";
+window.maplibregl = maplibregl;
+
 fetch('/style/style.json').then(r=>r.json()).then(style=>{
   style.layers = style.layers.filter(l => l.type==='background' || l.id.startsWith('l00t00d01r00g01c01o16'));
   const v = ${JSON.stringify(variant)};

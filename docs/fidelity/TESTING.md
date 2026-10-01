@@ -8,7 +8,7 @@ the plugin.
 |---|---|---|---|
 | Pure Python | `tests/unit` | Python ≥ 3.10, `pytest`, Pillow (pattern/atlas tests skip without it) | typed expressions, units and zoom curves, visibility intervals, diagnostics/redaction, capability registry, dependency tracking, validation, periodic hatch cells, atlas packing |
 | PyQGIS integration | `tests/integration` | QGIS Python bindings + Processing, GDAL | property evaluation (falsy values, typing, units, opacity), enums/placement flags, sprite rendering failures and anchors, rule flattening (ELSE, scale intervals, project non-mutation), full exports incl. strict mode and archive inspection |
-| Browser | `tests/browser` | the above + Node ≥ 18, `npm install` in `tests/browser`, Chromium | style-spec validation (pinned 24.3.1), headless render with the bundled MapLibre 5.11.0, console/map errors, missing images, per-layer rendering at zoom 13 and in overzoom (15.5); screenshots in `tests/browser/artifacts/` |
+| Browser | `tests/browser` | the above + Node ≥ 18, `npm install` in `tests/browser`, Chromium | style-spec validation (pinned 26.4.4), headless render with the bundled MapLibre 6.11.2 (ES modules: `maplibre-gl.mjs` + `-shared.mjs` + `-worker.mjs`), console/map errors, missing images, per-layer rendering at zoom 13 and in overzoom (15.5); screenshots in `tests/browser/artifacts/` |
 
 Levels whose requirements are missing are skipped automatically.
 
