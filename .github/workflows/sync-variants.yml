@@ -1,0 +1,52 @@
+# Keeps the variant branches up to date with the generic branch: after every
+# push to main, main is merged into each variant branch (see
+# docs/BRANCHES.md). Variant branches only add files, so the merge is
+# normally automatic. On a conflict nothing is pushed and an issue is opened
+# for a person to resolve it.
+name: Sync variant branches
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [hu-hesz]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge main into ${{ matrix.branch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          if ! git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null; then
+            echo "No branch ${BRANCH}; nothing to sync."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          problem=""
+          if git merge --no-edit origin/main; then
+            # The Actions token may not push changes of .github/workflows files.
+            git push origin "${BRANCH}" || problem="the push was refused (main changed a workflow file; the Actions token cannot push those)"
+          else
+            git merge --abort
+            problem="the merge has conflicts"
+          fi
+          if [ -n "${problem}" ]; then
+            gh issue create --title "Sync: merging main into ${BRANCH} needs a person" \
+              --body "Merging main (${GITHUB_SHA}) into ${BRANCH} did not complete: ${problem}. Merge it by hand: git checkout ${BRANCH} && git merge main && git push. Keep variant changes in new files (docs/BRANCHES.md)."
+            exit 1
+          fi

@@ -143,8 +143,6 @@ class RestrictionConfig:
     buffer_m: float = 0.0              # lines/points: protection distance in metres
 
 
-DEFAULT_DISCLAIMER = ("Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat "
-                      "a hatályos rendelet tartalmazza.")
 
 
 @dataclass
@@ -168,7 +166,7 @@ class ParcelInfoConfig:
     regulation_fields: List[PopupField] = field(default_factory=list)
     min_area: float = 1.0              # m²: smaller slivers are ignored
     min_share: float = 0.5             # %: smaller restriction overlaps are ignored
-    disclaimer: str = DEFAULT_DISCLAIMER
+    disclaimer: str = ""               # "" = the viewer's own notice in its language
 
 
 @dataclass

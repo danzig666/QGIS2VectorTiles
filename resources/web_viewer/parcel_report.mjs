@@ -209,7 +209,7 @@ export class ParcelReport {
     });
     actions.append(print);
     card.append(actions);
-    if (c.disclaimer) card.append(el("p", "q2vt-pr-disclaimer", c.disclaimer));
+    card.append(el("p", "q2vt-pr-disclaimer", c.disclaimer || t("parcel.disclaimer")));
     this.container.append(card);
     this.container.scrollTop = 0;
     // Numbered markers of the parts on the map.

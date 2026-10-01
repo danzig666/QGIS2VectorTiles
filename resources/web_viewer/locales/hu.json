@@ -96,5 +96,6 @@
   "parcel.distance": "Védőtávolság: {m} m",
   "parcel.print": "Telekinformáció nyomtatása",
   "legend.visibleOnly": "Csak a nézetben látható elemek",
-  "legend.noneVisible": "Ebben a nézetben nincs megjelenített elem."
+  "legend.noneVisible": "Ebben a nézetben nincs megjelenített elem.",
+  "parcel.disclaimer": "Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat a hatályos rendelet tartalmazza."
 }

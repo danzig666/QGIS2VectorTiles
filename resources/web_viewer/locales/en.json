@@ -96,5 +96,6 @@
   "parcel.distance": "Protection distance: {m} m",
   "parcel.print": "Print parcel report",
   "legend.visibleOnly": "Only what is visible in the view",
-  "legend.noneVisible": "Nothing is drawn in this view."
+  "legend.noneVisible": "Nothing is drawn in this view.",
+  "parcel.disclaimer": "Information only, not an official certificate. The regulations in force are those of the adopted decree."
 }

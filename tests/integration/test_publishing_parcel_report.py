@@ -151,7 +151,7 @@ def test_restrictions(site):
         assert label and os.path.exists(os.path.join(site["rel"], path))
     meta = next(r for r in site["catalog"]["restrictions"] if r["title"] == "Régészeti lelőhely")
     assert meta["note"] == "Földmunka előtt egyeztetni kell." and meta["reference"] == "Kötv. 7. §"
-    assert site["catalog"]["disclaimer"].startswith("Tájékoztató")
+    assert site["catalog"]["disclaimer"] == ""  # the viewer shows its localized notice
 
 
 def test_keys_match_the_tiles_and_nothing_private_is_public(site):

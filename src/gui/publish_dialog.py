@@ -227,6 +227,20 @@ class PublishDialog(QDialog):
         for button in (self.btn_save, self.btn_export, self.btn_preview, self.btn_publish,
                        self.btn_open, self.btn_copy, self.btn_folder):
             buttons.addWidget(button)
+        # Presets (domain conventions, e.g. a national zoning plan): only when a
+        # variant of the plugin ships some (publishing/presets).
+        from ..publishing import presets  # pylint: disable=import-outside-toplevel
+        self.presets = presets.available()
+        self.btn_preset = QToolButton()
+        self.btn_preset.setText(tr("Preset…"))
+        self.btn_preset.setToolTip(tr("Fill the settings from a preset; review them before publishing."))
+        self.btn_preset.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self)
+        for module in self.presets:
+            menu.addAction(module.TITLE, lambda m=module: self.apply_preset(m))
+        self.btn_preset.setMenu(menu)
+        self.btn_preset.setVisible(bool(self.presets))
+        buttons.addWidget(self.btn_preset)
         buttons.addStretch(1)
         buttons.addWidget(self.btn_cancel)
         buttons.addWidget(self.btn_close)
@@ -819,6 +833,8 @@ class PublishDialog(QDialog):
         self.p_min_share.setSuffix(" %")
         self.p_disclaimer = QPlainTextEdit()
         self.p_disclaimer.setMaximumHeight(70)
+        self.p_disclaimer.setPlaceholderText(tr("Empty: the viewer's standard notice ('Information only, not an "
+                                                "official certificate…') in the viewer's language"))
         form.addRow(tr("Ignore parts smaller than"), self.p_min_area)
         form.addRow(tr("Ignore restriction overlaps below"), self.p_min_share)
         form.addRow(tr("Notice shown on every report"), self.p_disclaimer)
@@ -1327,6 +1343,18 @@ class PublishDialog(QDialog):
         return profile
 
     # ------------------------------------------------------------------ actions
+    def apply_preset(self, module):
+        """Fill the settings from ``module`` (a publishing.presets module)."""
+        profile = self.collect()
+        notes = module.apply(self.project, profile)
+        self.profile = profile
+        self._populate(profile)
+        for note in notes:
+            self.log(note)
+        self.status.setText(tr("Preset applied: {}. Review the settings before publishing.").format(module.TITLE))
+        if notes:
+            QMessageBox.information(self, module.TITLE, "\n".join(notes[:30]))
+
     def log(self, text: str):
         self.logbox.appendPlainText(str(text))
         QgsMessageLog.logMessage(str(text), TAG, Qgis.MessageLevel.Info)

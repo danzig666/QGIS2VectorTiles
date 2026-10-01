@@ -1,16 +1,20 @@
 # Publishes a GitHub Release from the plugin zip committed in releases/.
-# Run it from the Actions tab (or the API) with the version, e.g. 4.0: it tags
-# the selected commit v<version> and attaches releases/QGIS2VectorTilesFork-<version>.zip
-# (built with tools/build_release.py) with releases/RELEASE_NOTES_<version>.md
-# as the release notes. "replace" first deletes an existing release and tag
-# of that version.
+# Run it from the Actions tab (or the API) on a branch with the version, e.g.
+# 4.4.1. On the generic branch (main) it tags the commit v<version> and
+# attaches releases/QGIS2VectorTilesFork-<version>.zip. On a variant branch
+# (a variant.json at the root, e.g. hu-hesz, see docs/BRANCHES.md) the tag
+# and zip carry the variant suffix: v<version>-<suffix>,
+# QGIS2VectorTilesFork-<version>-<suffix>.zip. Notes:
+# releases/RELEASE_NOTES_<version>[-<suffix>].md (the variant file if it
+# exists, else the generic one). "replace" first deletes an existing release
+# and tag of that version.
 name: Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Plugin version (e.g. 4.0)"
+        description: "Plugin version (e.g. 4.4.1), as in metadata.txt"
         required: true
       replace:
         description: "Replace an existing release and tag of this version"
@@ -25,27 +29,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check the version, zip and notes
+      - name: Resolve the variant, zip and notes
         env:
           VERSION: ${{ inputs.version }}
         run: |
           grep -qx "version=${VERSION}" metadata.txt
-          test -f "releases/QGIS2VectorTilesFork-${VERSION}.zip"
-          test -f "releases/RELEASE_NOTES_${VERSION}.md"
-          unzip -p "releases/QGIS2VectorTilesFork-${VERSION}.zip" QGIS2VectorTilesFork/metadata.txt \
-            | cmp - metadata.txt
+          SUFFIX=""
+          TITLE="QGIS2VectorTiles ${VERSION} (fork)"
+          if [ -f variant.json ]; then
+            SUFFIX="-$(python3 -c 'import json; print(json.load(open("variant.json"))["suffix"])')"
+            TITLE="$(python3 -c 'import json; print(json.load(open("variant.json")).get("name", "QGIS2VectorTiles (fork)"))') ${VERSION}${SUFFIX}"
+          fi
+          ZIP="releases/QGIS2VectorTilesFork-${VERSION}${SUFFIX}.zip"
+          NOTES="releases/RELEASE_NOTES_${VERSION}${SUFFIX}.md"
+          [ -f "${NOTES}" ] || NOTES="releases/RELEASE_NOTES_${VERSION}.md"
+          test -f "${ZIP}"
+          test -f "${NOTES}"
+          # The zipped metadata is this commit's (only the variant name may differ).
+          unzip -p "${ZIP}" QGIS2VectorTilesFork/metadata.txt | grep -v '^name=' > zipped.txt
+          grep -v '^name=' metadata.txt | cmp - zipped.txt
+          {
+            echo "TAG=v${VERSION}${SUFFIX}"
+            echo "ZIP=${ZIP}"
+            echo "NOTES=${NOTES}"
+            echo "TITLE=${TITLE}"
+          } >> "${GITHUB_ENV}"
       - name: Remove the previous release
         if: ${{ inputs.replace }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: gh release delete "v${VERSION}" --cleanup-tag --yes || true
+        run: gh release delete "${TAG}" --cleanup-tag --yes || true
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
         run: |
-          gh release create "v${VERSION}" "releases/QGIS2VectorTilesFork-${VERSION}.zip" \
+          gh release create "${TAG}" "${ZIP}" \
             --target "${GITHUB_SHA}" \
-            --title "QGIS2VectorTiles ${VERSION} (fork)" \
-            --notes-file "releases/RELEASE_NOTES_${VERSION}.md"
+            --title "${TITLE}" \
+            --notes-file "${NOTES}"
