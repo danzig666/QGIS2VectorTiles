@@ -122,6 +122,9 @@
         },
         "print": {
           "type": "boolean"
+        },
+        "legendVisibleOnly": {
+          "type": "boolean"
         }
       }
     },
@@ -303,6 +306,177 @@
     "accentColor": {
       "type": "string",
       "pattern": "^#[0-9a-fA-F]{6}$"
+    },
+    "parcelInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "parcelLayerId": {
+          "type": "string"
+        },
+        "keyField": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "alias": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "string",
+                  "integer",
+                  "number",
+                  "boolean",
+                  "date",
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "zoningLayerId": {
+          "type": "string"
+        },
+        "zoningCodeField": {
+          "type": "string"
+        },
+        "zoningFields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "alias": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "string",
+                  "integer",
+                  "number",
+                  "boolean",
+                  "date",
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "cutLines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "layerId": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "restrictions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "layerId": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              },
+              "reference": {
+                "type": "string"
+              },
+              "nameField": {
+                "type": "string"
+              },
+              "bufferM": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            }
+          }
+        },
+        "regulationLayerId": {
+          "type": "string"
+        },
+        "regulationCodeField": {
+          "type": "string"
+        },
+        "regulationFields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "alias": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "string",
+                  "integer",
+                  "number",
+                  "boolean",
+                  "date",
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "minArea": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "minShare": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "disclaimer": {
+          "type": "string"
+        }
+      }
     }
   },
   "$defs": {

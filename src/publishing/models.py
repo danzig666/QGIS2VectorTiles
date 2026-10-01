@@ -124,6 +124,54 @@ class BasemapConfig:
     overview_km: float = 300.0         # side of the wide overview area
 
 @dataclass
+class CutLineConfig:
+    """A line layer that cuts parcels into parts (regulation line, zone boundary)."""
+
+    layer_id: str = ""
+    title: str = ""
+
+
+@dataclass
+class RestrictionConfig:
+    """A layer whose features restrict the parcels they touch."""
+
+    layer_id: str = ""
+    title: str = ""
+    note: str = ""                     # one-sentence explanation
+    reference: str = ""                # legal reference, e.g. "Étv. 23. §"
+    name_field: str = ""               # optional feature name shown (approved field)
+    buffer_m: float = 0.0              # lines/points: protection distance in metres
+
+
+DEFAULT_DISCLAIMER = ("Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat "
+                      "a hatályos rendelet tartalmazza.")
+
+
+@dataclass
+class ParcelInfoConfig:
+    """Parcel report: clicking a parcel shows its area, its parts cut by the
+    zoning (and the regulation / zone boundary lines), its zones, the
+    restrictions touching it and the zone regulations. Computed at export
+    time in QGIS from exact geometry; only the result becomes public."""
+
+    enabled: bool = False
+    parcel_layer_id: str = ""
+    key_field: str = ""                # unique parcel id, e.g. hrsz
+    fields: List[PopupField] = field(default_factory=list)          # parcel data shown
+    zoning_layer_id: str = ""
+    zoning_code_field: str = ""        # e.g. szab_ov
+    zoning_fields: List[PopupField] = field(default_factory=list)   # zone values per part
+    cut_lines: List[CutLineConfig] = field(default_factory=list)
+    restrictions: List[RestrictionConfig] = field(default_factory=list)
+    regulation_layer_id: str = ""      # optional table joined by zone code (e.g. HÉSZ)
+    regulation_code_field: str = ""
+    regulation_fields: List[PopupField] = field(default_factory=list)
+    min_area: float = 1.0              # m²: smaller slivers are ignored
+    min_share: float = 0.5             # %: smaller restriction overlaps are ignored
+    disclaimer: str = DEFAULT_DISCLAIMER
+
+
+@dataclass
 class ViewConfig:
     extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857; None = canvas
     min_zoom: int = 0
@@ -142,6 +190,7 @@ class InteractionConfig:
     coordinates: bool = True
     measure: bool = False
     print: bool = True
+    legend_visible_only: bool = False  # legend lists only what is drawn in the current view
 
 
 @dataclass
@@ -195,6 +244,7 @@ class PublicationProfile:
     themes: ThemeConfig = field(default_factory=ThemeConfig)
     basemap: BasemapConfig = field(default_factory=BasemapConfig)
     accent_color: str = "#2563eb"      # viewer accent colour
+    parcel_info: ParcelInfoConfig = field(default_factory=ParcelInfoConfig)
     view: ViewConfig = field(default_factory=ViewConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

@@ -35,8 +35,9 @@ from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialo
                                  QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..publishing.errors import PublishingError
-from ..publishing.models import (BASEMAP_FLAVORS, FIELD_TYPES, FilterField, GroupConfig, LayerConfig,
-                                 PopupField, PublicationProfile, ReleaseState, slugify)
+from ..publishing.models import (BASEMAP_FLAVORS, FIELD_TYPES, CutLineConfig, FilterField, GroupConfig,
+                                 LayerConfig, PopupField, PublicationProfile, ReleaseState,
+                                 RestrictionConfig, slugify)
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
 from . import publication_profiles as store
 
@@ -196,6 +197,7 @@ class PublishDialog(QDialog):
         self.tabs.addTab(self._map_tab(), tr("Map"))
         self.tabs.addTab(self._interaction_tab(), tr("Interaction"))
         self.tabs.addTab(self._basemap_tab(), tr("Basemap"))
+        self.tabs.addTab(self._parcel_tab(), tr("Parcel report"))
         self.tabs.addTab(self._output_tab(), tr("Output"))
         self.tabs.addTab(self._destination_tab(), tr("Destination"))
         self.tabs.addTab(self._review_tab(), tr("Review"))
@@ -535,7 +537,8 @@ class PublishDialog(QDialog):
                 ("search", tr("Search")), ("filters", tr("Attribute filters")),
                 ("popups", tr("Popups")), ("permalinks", tr("Shareable links")),
                 ("coordinates", tr("Coordinates (WGS84 / EOV)")), ("measure", tr("Measurement")),
-                ("print", tr("Print"))]):
+                ("print", tr("Print")),
+                ("legend_visible_only", tr("Legend: only what is visible in the current view"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)
@@ -687,6 +690,230 @@ class PublishDialog(QDialog):
             "anything from another site. Visitors can switch styles or turn it off. Map data © "
             "OpenStreetMap contributors (ODbL), shown automatically in the attribution.")))
         return widget
+
+    # ------------------------------------------------------------------ parcel report
+    def _layer_combo(self, geometry=None, allow_empty=False):
+        from qgis.gui import QgsMapLayerComboBox  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsMapLayerProxyModel  # pylint: disable=import-outside-toplevel
+        combo = QgsMapLayerComboBox()
+        flags = {"polygon": "PolygonLayer", "line": "LineLayer", None: "VectorLayer"}[geometry]
+        try:
+            combo.setFilters(getattr(QgsMapLayerProxyModel.Filter, flags))
+        except AttributeError:
+            combo.setFilters(getattr(Qgis.LayerFilter, flags))
+        combo.setAllowEmptyLayer(allow_empty)
+        combo.setProject(self.project)
+        return combo
+
+    @staticmethod
+    def _field_combo(layer_combo, allow_empty=False):
+        from qgis.gui import QgsFieldComboBox  # pylint: disable=import-outside-toplevel
+        combo = QgsFieldComboBox()
+        combo.setAllowEmptyFieldName(allow_empty)
+        combo.setLayer(layer_combo.currentLayer())
+        layer_combo.layerChanged.connect(combo.setLayer)
+        return combo
+
+    @staticmethod
+    def _fields_table():
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels([tr("Field (tick to show)"), tr("Title")])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setMinimumHeight(110)
+        return table
+
+    @staticmethod
+    def _fill_fields_table(table, layer, chosen):
+        chosen = {p.field: p for p in chosen}
+        names = [f.name() for f in layer.fields()] if layer is not None else []
+        table.setRowCount(len(names))
+        for row, name in enumerate(names):
+            item = QTableWidgetItem(name)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(_check(name in chosen))
+            table.setItem(row, 0, item)
+            table.setItem(row, 1, QTableWidgetItem(chosen[name].alias if name in chosen else ""))
+
+    @staticmethod
+    def _read_fields_table(table):
+        out = []
+        for row in range(table.rowCount()):
+            if table.item(row, 0).checkState() == CHECKED:
+                title = table.item(row, 1).text().strip() if table.item(row, 1) else ""
+                out.append(PopupField(table.item(row, 0).text(), title))
+        return out
+
+    def _parcel_tab(self):
+        from qgis.PyQt.QtWidgets import QScrollArea  # pylint: disable=import-outside-toplevel
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        widget = QWidget()
+        scroll.setWidget(widget)
+        layout = QVBoxLayout(widget)
+        self.p_enabled = QCheckBox(tr("Clicking a parcel shows its report: area, parts cut by the zoning "
+                                      "and the regulation lines, zones and restrictions"))
+        layout.addWidget(self.p_enabled)
+        top = QHBoxLayout()
+        parcel_box = QGroupBox(tr("Parcels"))
+        form = QFormLayout(parcel_box)
+        self.p_layer = self._layer_combo("polygon")
+        self.p_key = self._field_combo(self.p_layer)
+        self.p_fields = self._fields_table()
+        self.p_layer.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_fields, layer, []))
+        form.addRow(tr("Parcel layer"), self.p_layer)
+        form.addRow(tr("Parcel id (unique, e.g. hrsz)"), self.p_key)
+        form.addRow(tr("Parcel data shown"), self.p_fields)
+        top.addWidget(parcel_box, 1)
+        zoning_box = QGroupBox(tr("Zoning (parts of the parcel)"))
+        form = QFormLayout(zoning_box)
+        self.p_zoning = self._layer_combo("polygon")
+        self.p_code = self._field_combo(self.p_zoning)
+        self.p_zone_fields = self._fields_table()
+        self.p_zoning.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_zone_fields, layer, []))
+        self.p_cuts = QListWidget()
+        self.p_cuts.setMaximumHeight(90)
+        form.addRow(tr("Zone layer (its style gives the zone colours)"), self.p_zoning)
+        form.addRow(tr("Zone code field"), self.p_code)
+        form.addRow(tr("Zone values shown per part"), self.p_zone_fields)
+        form.addRow(tr("Lines that cut parcels"), self.p_cuts)
+        top.addWidget(zoning_box, 1)
+        layout.addLayout(top)
+        restrictions_box = QGroupBox(tr("Restrictions (shown with their legend symbol when they touch the parcel)"))
+        rlayout = QVBoxLayout(restrictions_box)
+        self.p_restrictions = QTableWidget(0, 6)
+        self.p_restrictions.setHorizontalHeaderLabels([tr("Layer"), tr("Title"), tr("Name field"),
+                                                       tr("Distance (m)"), tr("Explanation"), tr("Legal reference")])
+        header = self.p_restrictions.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for column in (1, 4, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        self.p_restrictions.verticalHeader().setVisible(False)
+        self.p_restrictions.setMinimumHeight(220)
+        rlayout.addWidget(self.p_restrictions)
+        rlayout.addWidget(_note(tr("Tick the layers that restrict building. Lines and points need a "
+                                   "distance (protection zone); polygons count where they overlap. Only "
+                                   "the title, explanation, reference and the chosen name field become "
+                                   "public.")))
+        layout.addWidget(restrictions_box)
+        bottom = QHBoxLayout()
+        regulation_box = QGroupBox(tr("Zone regulations table (optional, e.g. the local building code)"))
+        form = QFormLayout(regulation_box)
+        self.p_regulation = self._layer_combo(None, allow_empty=True)
+        self.p_regulation_code = self._field_combo(self.p_regulation, allow_empty=True)
+        self.p_regulation_fields = self._fields_table()
+        self.p_regulation.layerChanged.connect(
+            lambda layer: self._fill_fields_table(self.p_regulation_fields, layer, []))
+        form.addRow(tr("Table"), self.p_regulation)
+        form.addRow(tr("Zone code field"), self.p_regulation_code)
+        form.addRow(tr("Fields shown"), self.p_regulation_fields)
+        bottom.addWidget(regulation_box, 1)
+        other_box = QGroupBox(tr("Accuracy and notice"))
+        form = QFormLayout(other_box)
+        self.p_min_area = QDoubleSpinBox()
+        self.p_min_area.setRange(0, 1000)
+        self.p_min_area.setSuffix(" m²")
+        self.p_min_share = QDoubleSpinBox()
+        self.p_min_share.setRange(0, 50)
+        self.p_min_share.setSuffix(" %")
+        self.p_disclaimer = QPlainTextEdit()
+        self.p_disclaimer.setMaximumHeight(70)
+        form.addRow(tr("Ignore parts smaller than"), self.p_min_area)
+        form.addRow(tr("Ignore restriction overlaps below"), self.p_min_share)
+        form.addRow(tr("Notice shown on every report"), self.p_disclaimer)
+        bottom.addWidget(other_box, 1)
+        layout.addLayout(bottom)
+        return scroll
+
+    def _fill_parcel_tab(self, profile):
+        info = profile.parcel_info
+        project_layer = self.project.mapLayer
+        self.p_enabled.setChecked(info.enabled)
+        for combo, layer_id in ((self.p_layer, info.parcel_layer_id), (self.p_zoning, info.zoning_layer_id),
+                                (self.p_regulation, info.regulation_layer_id)):
+            if layer_id and project_layer(layer_id) is not None:
+                combo.setLayer(project_layer(layer_id))
+            elif combo is self.p_regulation:
+                combo.setLayer(None)
+        self._fill_fields_table(self.p_fields, self.p_layer.currentLayer(), info.fields)
+        self._fill_fields_table(self.p_zone_fields, self.p_zoning.currentLayer(), info.zoning_fields)
+        self._fill_fields_table(self.p_regulation_fields, self.p_regulation.currentLayer(), info.regulation_fields)
+        if info.key_field:
+            self.p_key.setField(info.key_field)
+        if info.zoning_code_field:
+            self.p_code.setField(info.zoning_code_field)
+        if info.regulation_code_field:
+            self.p_regulation_code.setField(info.regulation_code_field)
+        cuts = {c.layer_id: c for c in info.cut_lines}
+        restrictions = {r.layer_id: r for r in info.restrictions}
+        self.p_cuts.clear()
+        self.p_restrictions.setRowCount(0)
+        for node in self.project.layerTreeRoot().findLayers():
+            layer = node.layer()
+            if not isinstance(layer, QgsVectorLayer) or not layer.isSpatial():
+                continue
+            if layer.geometryType() == 1 or getattr(layer.geometryType(), "value", None) == 1:
+                item = QListWidgetItem(layer.name())
+                item.setData(LAYER_ROLE, layer.id())
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(_check(layer.id() in cuts))
+                self.p_cuts.addItem(item)
+            config = restrictions.get(layer.id())
+            row = self.p_restrictions.rowCount()
+            self.p_restrictions.insertRow(row)
+            name = QTableWidgetItem(layer.name())
+            name.setData(LAYER_ROLE, layer.id())
+            name.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            name.setCheckState(_check(config is not None))
+            self.p_restrictions.setItem(row, 0, name)
+            self.p_restrictions.setItem(row, 1, QTableWidgetItem(config.title if config else layer.name()))
+            fields = QComboBox()
+            fields.addItem("", "")
+            for field in layer.fields():
+                fields.addItem(field.name(), field.name())
+            fields.setCurrentIndex(max(0, fields.findData(config.name_field if config else "")))
+            self.p_restrictions.setCellWidget(row, 2, fields)
+            distance = QDoubleSpinBox()
+            distance.setRange(0, 1000)
+            distance.setValue(config.buffer_m if config else 0)
+            self.p_restrictions.setCellWidget(row, 3, distance)
+            self.p_restrictions.setItem(row, 4, QTableWidgetItem(config.note if config else ""))
+            self.p_restrictions.setItem(row, 5, QTableWidgetItem(config.reference if config else ""))
+        self.p_min_area.setValue(info.min_area)
+        self.p_min_share.setValue(info.min_share)
+        self.p_disclaimer.setPlainText(info.disclaimer)
+
+    def _collect_parcel_tab(self, profile):
+        info = profile.parcel_info
+        info.enabled = self.p_enabled.isChecked()
+        info.parcel_layer_id = self.p_layer.currentLayer().id() if self.p_layer.currentLayer() else ""
+        info.key_field = self.p_key.currentField()
+        info.fields = self._read_fields_table(self.p_fields)
+        info.zoning_layer_id = self.p_zoning.currentLayer().id() if self.p_zoning.currentLayer() else ""
+        info.zoning_code_field = self.p_code.currentField()
+        info.zoning_fields = self._read_fields_table(self.p_zone_fields)
+        regulation = self.p_regulation.currentLayer()
+        info.regulation_layer_id = regulation.id() if regulation else ""
+        info.regulation_code_field = self.p_regulation_code.currentField() if regulation else ""
+        info.regulation_fields = self._read_fields_table(self.p_regulation_fields) if regulation else []
+        info.cut_lines = [CutLineConfig(self.p_cuts.item(i).data(LAYER_ROLE), self.p_cuts.item(i).text())
+                          for i in range(self.p_cuts.count()) if self.p_cuts.item(i).checkState() == CHECKED]
+        restrictions = []
+        for row in range(self.p_restrictions.rowCount()):
+            item = self.p_restrictions.item(row, 0)
+            if item.checkState() != CHECKED:
+                continue
+            restrictions.append(RestrictionConfig(
+                layer_id=item.data(LAYER_ROLE), title=self.p_restrictions.item(row, 1).text().strip(),
+                name_field=self.p_restrictions.cellWidget(row, 2).currentData() or "",
+                buffer_m=float(self.p_restrictions.cellWidget(row, 3).value()),
+                note=self.p_restrictions.item(row, 4).text().strip(),
+                reference=self.p_restrictions.item(row, 5).text().strip()))
+        info.restrictions = restrictions
+        info.min_area = float(self.p_min_area.value())
+        info.min_share = float(self.p_min_share.value())
+        info.disclaimer = self.p_disclaimer.toPlainText().strip()
 
     def _choose_basemap_file(self):
         path, _ = QFileDialog.getOpenFileName(self, tr("Basemap"), "", "PMTiles (*.pmtiles)")
@@ -864,6 +1091,7 @@ class PublishDialog(QDialog):
         self.themes_list.blockSignals(False)
         self._refresh_initial_theme()
         self.theme_initial.setCurrentIndex(max(0, self.theme_initial.findData(profile.themes.initial)))
+        self._fill_parcel_tab(profile)
         basemap = profile.basemap
         self.b_kind.setCurrentIndex(max(0, self.b_kind.findData(basemap.kind)))
         (self.b_custom if basemap.source else self.b_latest).setChecked(True)
@@ -1063,6 +1291,7 @@ class PublishDialog(QDialog):
             profile.accent_color = self.e_accent.color().name()
         else:
             profile.accent_color = self.e_accent.text().strip() or "#2563eb"
+        self._collect_parcel_tab(profile)
         basemap = profile.basemap
         basemap.kind = self.b_kind.currentData()
         basemap.source = self.b_source.text().strip() if self.b_custom.isChecked() else ""

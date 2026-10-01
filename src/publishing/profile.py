@@ -12,7 +12,8 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from .errors import PublishingError
-from .models import (ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
+from .models import (CutLineConfig, ParcelInfoConfig, RestrictionConfig,
+                     ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
                      FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
                      SECRET_KEYS, SLUG, Approval, BasemapConfig, DestinationConfig, FilterField,
                      GroupConfig, InteractionConfig, LayerConfig, OutputConfig, PopupField,
@@ -71,7 +72,7 @@ def load_profile(data) -> PublicationProfile:
         "destination": DestinationConfig, "approval": Approval, "themes": ThemeConfig,
         "basemap": BasemapConfig,
     }
-    top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups")}
+    top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups", "parcel_info")}
     profile = build(PublicationProfile, top, errors, "profile")
     for key, cls in nested.items():
         setattr(profile, key, build(cls, data.get(key), errors, key))
@@ -89,11 +90,25 @@ def load_profile(data) -> PublicationProfile:
     profile.layers = layers
     profile.groups = [build(GroupConfig, raw, errors, f"groups[{index}]")
                       for index, raw in enumerate(data.get("groups") or [])]
+    profile.parcel_info = _parcel_info(data.get("parcel_info"), errors)
     errors.extend(validate(profile))
     if errors:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "; ".join(errors[:12]),
                               detail="\n".join(errors))
     return profile
+
+
+def _parcel_info(raw, errors: List[str]) -> ParcelInfoConfig:
+    raw = dict(raw) if isinstance(raw, dict) else {}
+    lists = {key: raw.pop(key, []) or [] for key in
+             ("fields", "zoning_fields", "regulation_fields", "cut_lines", "restrictions")}
+    config = build(ParcelInfoConfig, raw, errors, "parcelInfo")
+    for key in ("fields", "zoning_fields", "regulation_fields"):
+        setattr(config, key, [build(PopupField, item, errors, f"parcelInfo.{key}") for item in lists[key]])
+    config.cut_lines = [build(CutLineConfig, item, errors, "parcelInfo.cutLines") for item in lists["cut_lines"]]
+    config.restrictions = [build(RestrictionConfig, item, errors, "parcelInfo.restrictions")
+                           for item in lists["restrictions"]]
+    return config
 
 
 def validate(profile: PublicationProfile) -> List[str]:
@@ -183,6 +198,22 @@ def validate(profile: PublicationProfile) -> List[str]:
             loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1")
             if parsed.scheme != "https" and not loopback:
                 errors.append("basemap.source: https:// URL (http only on this computer) or a local file")
+    info = profile.parcel_info
+    if info.enabled:
+        for key in ("parcel_layer_id", "key_field", "zoning_layer_id", "zoning_code_field"):
+            if not getattr(info, key):
+                errors.append(f"parcelInfo.{key}: required when the parcel report is on")
+        if not 0 <= float(info.min_area) <= 1000 or not 0 <= float(info.min_share) <= 50:
+            errors.append("parcelInfo: minArea 0-1000 m², minShare 0-50 %")
+        seen_ids = set()
+        for item in info.restrictions:
+            if not item.layer_id or item.layer_id in seen_ids:
+                errors.append("parcelInfo.restrictions: a layer id once per layer")
+            seen_ids.add(item.layer_id)
+            if not 0 <= float(item.buffer_m) <= 1000:
+                errors.append("parcelInfo.restrictions.bufferM: 0-1000 m")
+        if bool(info.regulation_layer_id) != bool(info.regulation_code_field):
+            errors.append("parcelInfo: regulation table needs both a layer and its zone code field")
     if not re.match(r"^#[0-9a-fA-F]{6}$", profile.accent_color or ""):
         errors.append("accentColor: #rrggbb")
     view = profile.view
@@ -264,6 +295,7 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
              layer.deep_links]
             for layer in profile.layers if layer.included),
         "allFields": profile.output.include_all_fields,
+        "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,
         "destination": [profile.destination.kind, profile.destination.public_base_url,
                         profile.destination.bucket, publication_prefix(profile)],
         "extra": extra or {},

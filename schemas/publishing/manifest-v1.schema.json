@@ -656,6 +656,32 @@
           "pattern": "^#[0-9a-fA-F]{6}$"
         }
       }
+    },
+    "parcelInfo": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "catalog",
+        "layerId"
+      ],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/relPath"
+        },
+        "catalog": {
+          "$ref": "#/$defs/relPath"
+        },
+        "layerId": {
+          "type": "string"
+        },
+        "records": {
+          "type": "integer"
+        }
+      }
     }
   },
   "$defs": {

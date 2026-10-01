@@ -26,7 +26,7 @@ from .progress import Progress
 from .search_index import build_search_index
 from .web_builder import ReleaseResult, build_release, write_zip
 
-STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "RASTER", "BASEMAP", "BUILD_RELEASE",
+STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "BUILD_RELEASE",
           "UPLOAD", "VERIFY_PUBLIC", "ACTIVATE", "COMPLETE"]
 
 
@@ -110,6 +110,13 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     if problems:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", " ".join(problems[:6]),
                               detail="\n".join(problems))
+    info = profile.parcel_info
+    if info.enabled:  # the clicked parcel's tile key must be its parcel id
+        config = profile.layer(info.parcel_layer_id)
+        if config is None or not config.included:
+            raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
+                                  "Parcel report: publish the parcel layer (Map tab).")
+        config.key_fields = [info.key_field]
     # Vector layers: MVT compiler; QGIS raster layers: their own raster archives.
     vector_profile, raster_configs = qgis_model.split_profile(profile, project)
     if not vector_profile.included_layer_ids():
@@ -195,6 +202,21 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         archive = os.path.join(staging, "data", "map.pmtiles")
         assert_disclosure(archive, approved, allow_all=profile.output.include_all_fields)
 
+    parcel_manifest = None
+    if info.enabled:
+        stage("PARCELS")
+        from .parcel_report import build_parcel_report  # pylint: disable=import-outside-toplevel
+        parcel_dir = os.path.join(exporter.output_path, "parcels")
+        report = build_parcel_report(project, profile, extent_3857, parcel_dir, legend_dir,
+                                     progress.sub(0.0, 1.0))
+        bundle.warnings.extend(report.warnings)
+        for name in os.listdir(parcel_dir):
+            extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)
+        extra_files.update(report.swatches)
+        parcel_manifest = {"manifest": "parcels/manifest.json", "catalog": "parcels/catalog.json",
+                           "layerId": report.manifest["layerId"], "records": report.records}
+        progress.check()
+
     stage("RASTER")
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
                                              work_dir, progress, bundle.warnings)
@@ -217,7 +239,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         bundle, profile, publication_dir, transport="pmtiles", activate=activate,
         feedback=progress, canaries=canaries, extra_files=extra_files, extra_builders=[indexes],
         extra_validators=[disclosure], manifest_extra={
-            "themes": themes, "ui": {"accent": profile.accent_color}})
+            "themes": themes, "ui": {"accent": profile.accent_color}, "parcelInfo": parcel_manifest})
     result = LocalResult(ReleaseState.LOCAL_READY, release, publication_dir, exporter.output_path,
                          records.path, dict(records.counts), list(release.warnings))
     if profile.output.archive == "both":
