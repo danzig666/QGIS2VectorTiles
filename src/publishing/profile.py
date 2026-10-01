@@ -12,10 +12,11 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from .errors import PublishingError
-from .models import (ARCHIVE_FORMATS, DESTINATION_KINDS, FIELD_TYPES, FILTER_KINDS, LOCALES,
-                     PROFILE_SCHEMA_VERSION, SECRET_KEYS, SLUG, Approval, DestinationConfig,
-                     FilterField, InteractionConfig, LayerConfig, OutputConfig, PopupField,
-                     PublicationProfile, ViewConfig, build, snake)
+from .models import (ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
+                     FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
+                     SECRET_KEYS, SLUG, Approval, BasemapConfig, DestinationConfig, FilterField,
+                     GroupConfig, InteractionConfig, LayerConfig, OutputConfig, PopupField,
+                     PublicationProfile, ThemeConfig, ViewConfig, build, snake)
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -67,9 +68,10 @@ def load_profile(data) -> PublicationProfile:
     errors: List[str] = []
     nested = {
         "view": ViewConfig, "interaction": InteractionConfig, "output": OutputConfig,
-        "destination": DestinationConfig, "approval": Approval,
+        "destination": DestinationConfig, "approval": Approval, "themes": ThemeConfig,
+        "basemap": BasemapConfig,
     }
-    top = {k: v for k, v in data.items() if k not in nested and k != "layers"}
+    top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups")}
     profile = build(PublicationProfile, top, errors, "profile")
     for key, cls in nested.items():
         setattr(profile, key, build(cls, data.get(key), errors, key))
@@ -85,6 +87,8 @@ def load_profile(data) -> PublicationProfile:
         layer.popup_fields, layer.filter_fields = popup, filters
         layers.append(layer)
     profile.layers = layers
+    profile.groups = [build(GroupConfig, raw, errors, f"groups[{index}]")
+                      for index, raw in enumerate(data.get("groups") or [])]
     errors.extend(validate(profile))
     if errors:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "; ".join(errors[:12]),
@@ -120,6 +124,19 @@ def validate(profile: PublicationProfile) -> List[str]:
             errors.append(f"{where}.opacity: between 0 and 1")
         if layer.initially_visible and not layer.included:
             errors.append(f"{where}: an excluded layer cannot be initially visible")
+        if layer.included and not layer.toggleable and not layer.initially_visible:
+            errors.append(f"{where}: a layer that cannot be switched off must be visible at start")
+        if layer.raster_format not in RASTER_FORMATS:
+            errors.append(f"{where}.rasterFormat: one of {RASTER_FORMATS}")
+        for key in ("raster_min_zoom", "raster_max_zoom"):
+            value = getattr(layer, key)
+            if value is not None and (not isinstance(value, int) or not 0 <= value <= 22):
+                errors.append(f"{where}.{key}: 0-22 or empty")
+        if layer.raster_min_zoom is not None and layer.raster_max_zoom is not None \
+                and layer.raster_min_zoom > layer.raster_max_zoom:
+            errors.append(f"{where}: rasterMinZoom > rasterMaxZoom")
+        if not 1 <= int(layer.raster_quality) <= 100:
+            errors.append(f"{where}.rasterQuality: 1-100")
         for popup in layer.popup_fields:
             if popup.type not in FIELD_TYPES:
                 errors.append(f"{where}.popupFields: type '{popup.type}' not in {FIELD_TYPES}")
@@ -131,6 +148,43 @@ def validate(profile: PublicationProfile) -> List[str]:
         if any(not isinstance(name, str) or not name for name in
                layer.search_fields + layer.key_fields):
             errors.append(f"{where}: field names must be non-empty strings")
+    paths = set()
+    for index, group in enumerate(profile.groups):
+        where = f"groups[{index}]"
+        if not group.path or not all(isinstance(p, str) and p for p in group.path):
+            errors.append(f"{where}.path: a list of group names")
+        elif tuple(group.path) in paths:
+            errors.append(f"{where}.path: duplicate {'/'.join(group.path)}")
+        paths.add(tuple(group.path or ()))
+        if not group.toggleable and not group.initially_visible:
+            errors.append(f"{where}: a group that cannot be switched off must be visible at start")
+    themes = profile.themes
+    if any(not isinstance(name, str) or not name for name in themes.names) \
+            or len(set(themes.names)) != len(themes.names):
+        errors.append("themes.names: distinct theme names")
+    if themes.initial and themes.initial not in themes.names:
+        errors.append("themes.initial: one of the published themes")
+    basemap = profile.basemap
+    if basemap.kind not in BASEMAP_KINDS:
+        errors.append(f"basemap.kind: one of {BASEMAP_KINDS}")
+    if basemap.kind != "none":
+        if not basemap.flavors or any(f not in BASEMAP_FLAVORS for f in basemap.flavors) \
+                or len(set(basemap.flavors)) != len(basemap.flavors):
+            errors.append(f"basemap.flavors: distinct values of {BASEMAP_FLAVORS}")
+        if basemap.initial != "none" and basemap.initial not in basemap.flavors:
+            errors.append("basemap.initial: one of the flavors or 'none'")
+        if not 0 <= basemap.overview_zoom <= basemap.max_zoom <= 15:
+            errors.append("basemap: 0 <= overviewZoom <= maxZoom <= 15")
+        if not 0 <= float(basemap.padding) <= 10 or not 0 <= float(basemap.overview_km) <= 5000:
+            errors.append("basemap: padding 0-10, overviewKm 0-5000")
+        source = basemap.source or ""
+        if source.startswith(("http://", "https://")):
+            parsed = urlparse(source)
+            loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1")
+            if parsed.scheme != "https" and not loopback:
+                errors.append("basemap.source: https:// URL (http only on this computer) or a local file")
+    if not re.match(r"^#[0-9a-fA-F]{6}$", profile.accent_color or ""):
+        errors.append("accentColor: #rrggbb")
     view = profile.view
     if not 0 <= view.min_zoom <= view.max_zoom <= 22:
         errors.append("view: 0 <= minZoom <= maxZoom <= 22")

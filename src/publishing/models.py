@@ -25,6 +25,9 @@ DESTINATION_KINDS = ("local", "r2", "s3")
 LOCALES = ("en", "hu")
 FILTER_KINDS = ("values", "range", "text")
 FIELD_TYPES = ("string", "integer", "number", "boolean", "date", "url")
+RASTER_FORMATS = ("png", "jpeg", "webp")
+BASEMAP_KINDS = ("none", "protomaps")
+BASEMAP_FLAVORS = ("light", "dark", "white", "grayscale", "black")
 SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 SECRET_KEYS = re.compile(r"(?i)(secret|password|passwd|token|accesskey|access_key|privatekey)")
 
@@ -79,7 +82,46 @@ class LayerConfig:
     legend: bool = True
     opacity: float = 1.0
     deep_links: bool = True
+    toggleable: bool = True            # the viewer's user may switch it off
+    # Raster layers only (rendered by QGIS into their own raster PMTiles archive):
+    raster_format: str = "png"         # RASTER_FORMATS; png keeps transparency
+    raster_min_zoom: Optional[int] = None   # None = the publication's tile zooms
+    raster_max_zoom: Optional[int] = None
+    raster_quality: int = 85           # jpeg / webp
+    raster_hidpi: bool = False         # 512 px images for sharp high-DPI screens
 
+
+@dataclass
+class GroupConfig:
+    """A QGIS layer-tree group, identified by its path of names."""
+
+    path: List[str] = field(default_factory=list)
+    toggleable: bool = True
+    initially_visible: bool = True
+    expanded: bool = True
+
+
+@dataclass
+class ThemeConfig:
+    """QGIS map themes offered as presets ("views") in the web map."""
+
+    names: List[str] = field(default_factory=list)
+    initial: str = ""                  # theme applied at start ("" = layer settings)
+
+
+@dataclass
+class BasemapConfig:
+    """Optional vector basemap: an OpenStreetMap extract (Protomaps schema)
+    bundled into the release as its own PMTiles archive."""
+
+    kind: str = "none"                 # BASEMAP_KINDS
+    source: str = ""                   # "" = latest Protomaps daily build; URL or local .pmtiles
+    flavors: List[str] = field(default_factory=lambda: ["light"])
+    initial: str = "light"             # a flavor, or "none" (switched off at start)
+    max_zoom: int = 15                 # detail zoom of the extract (Protomaps data ends at 15)
+    padding: float = 0.5               # detail area = extent grown by this fraction per side
+    overview_zoom: int = 7             # zooms 0..overview_zoom cover a wide area
+    overview_km: float = 300.0         # side of the wide overview area
 
 @dataclass
 class ViewConfig:
@@ -149,6 +191,10 @@ class PublicationProfile:
     publication_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     vector_only: bool = True
     layers: List[LayerConfig] = field(default_factory=list)
+    groups: List[GroupConfig] = field(default_factory=list)
+    themes: ThemeConfig = field(default_factory=ThemeConfig)
+    basemap: BasemapConfig = field(default_factory=BasemapConfig)
+    accent_color: str = "#2563eb"      # viewer accent colour
     view: ViewConfig = field(default_factory=ViewConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -162,6 +208,10 @@ class PublicationProfile:
 
     def included_layer_ids(self) -> List[str]:
         return [layer.layer_id for layer in self.layers if layer.included]
+
+    def group(self, path) -> Optional[GroupConfig]:
+        path = list(path)
+        return next((group for group in self.groups if list(group.path) == path), None)
 
     def to_dict(self) -> dict:
         return _camel(asdict(self))
@@ -207,6 +257,9 @@ class ExportBundle:
     config_fingerprint: str = ""
     diagnostics_summary: Dict[str, int] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    raster_archives: List[dict] = field(default_factory=list)  # {layerId, path, ...} (private paths)
+    basemap: Optional[dict] = None                            # extract + style templates (private)
+    themes: List[dict] = field(default_factory=list)          # viewer presets
 
 
 # --- serialization helpers ----------------------------------------------------------

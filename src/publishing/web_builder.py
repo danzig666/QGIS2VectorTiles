@@ -284,14 +284,23 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
 
 def validate_release_dir(staging: str, style: dict, archive_layers: Optional[Iterable[str]],
                          secrets: Iterable[str] = (), canaries: Iterable[str] = (),
-                         pmtiles_sample: int = 64) -> List[str]:
-    """Raise PublishingError for an invalid release folder; return warnings."""
+                         pmtiles_sample: int = 64,
+                         raster_sources: Optional[Dict[str, str]] = None) -> List[str]:
+    """Raise PublishingError for an invalid release folder; return warnings.
+
+    ``raster_sources``: {source id: release path} of the QGIS raster
+    layers' image archives (the only raster sources a style may have)."""
     warnings = []
     files = walk_files(staging)
     for rel in files:
         safe_relative_path(rel)
         check_public_file(rel)
-    assert_vector_only(style)
+    raster_sources = raster_sources or {}
+    assert_vector_only(style, raster_sources=set(raster_sources))
+    for source_id, href in raster_sources.items():
+        if href not in files:
+            raise PublishingError("Q2VT_PUB_BUNDLE_INVALID", f"{href} missing")
+        validate_pmtiles(os.path.join(staging, *href.split("/")), sample=pmtiles_sample, kind="image")
     if archive_layers is not None:
         missing = set(required_source_layers(style)) - set(archive_layers)
         if missing:  # datasets with no feature in the extent: nothing to draw
@@ -358,7 +367,9 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
             archive, manifest, style = result
             progress.update(0.9, "Validating the web release...", force=True)
             warnings = validate_release_dir(
-                staging, style, archive.vector_layers if archive else None, secrets, canaries)
+                staging, style, archive.vector_layers if archive else None, secrets, canaries,
+                raster_sources={s["id"]: s["href"] for s in manifest["sources"]
+                                if s.get("role") == "raster"})
             for validator in extra_validators or []:  # e.g. field disclosure
                 validator(staging, manifest)
             files = [rel for rel in walk_files(staging)]
@@ -431,6 +442,7 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     if problems:
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "Packaging changed the style: " + "; ".join(problems[:5]))
+    raster_sources = _add_raster_layers(style, bundle, staging, progress)
     write_json_atomic(os.path.join(staging, "style.json"), style)
     # 3. Styling assets.
     if bundle.sprite_dir and os.path.isdir(bundle.sprite_dir) and "sprite" in style:
@@ -459,6 +471,7 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         _copy(src, os.path.join(staging, *rel.split("/")))
     # 6. Manifest + public diagnostics.
     manifest = build_manifest(bundle, profile, release_id, source, manifest_extra)
+    manifest["sources"].extend(raster_sources)
     manifest["logo"] = manifest_logo
     for builder in extra_builders:
         builder(staging, manifest)
@@ -470,6 +483,52 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         "tiles": archive.addressed_tiles if archive else None,
     })
     return archive, manifest, style
+
+
+def _add_raster_layers(style: dict, bundle: ExportBundle, staging: str, progress) -> List[dict]:
+    """Copy the raster layers' image archives into ``data/`` and draw them in
+    the style at their QGIS layer-tree position: under every vector layer
+    that is above them in the tree and under all labels (QGIS draws labels
+    last). Returns the manifest sources."""
+    if not bundle.raster_archives:
+        return []
+    order = {layer["id"]: layer.get("order", 0) for layer in bundle.layers}
+    owner = {}  # style layer id -> (tree order, role)
+    for component in bundle.components:
+        for style_id in component["styleLayerIds"]:
+            owner[style_id] = (order.get(component["layerId"], 0), component["role"])
+    entries = {layer["id"]: layer for layer in bundle.layers}
+    sources = []
+    for raster in sorted(bundle.raster_archives, key=lambda r: -order.get(r["layerId"], 0)):
+        d = raster["descriptor"]
+        href = f"data/raster-{raster['layerId']}.pmtiles"
+        _copy(raster["path"], os.path.join(staging, *href.split("/")))
+        sid, rank = raster["sourceId"], order.get(raster["layerId"], 0)
+        style["sources"][sid] = {"type": "raster", "tileSize": raster.get("tileSize", 256),
+                                 "minzoom": d.min_zoom, "maxzoom": d.max_zoom,
+                                 "bounds": [round(v, 7) for v in d.bounds]}
+        layer_def = {"id": raster["styleLayerId"], "type": "raster", "source": sid,
+                     "paint": {"raster-opacity": 1, "raster-fade-duration": 150},
+                     "metadata": {"q2vt:raster-layer": raster["layerId"]}}
+        entry = entries.get(raster["layerId"], {})
+        if entry.get("minZoom") is not None:
+            layer_def["minzoom"] = entry["minZoom"]
+        if entry.get("maxZoom") is not None:
+            layer_def["maxzoom"] = entry["maxZoom"]
+        position = len(style["layers"])
+        for index, existing in enumerate(style["layers"]):
+            above = owner.get(existing.get("id"))
+            if above and (above[0] < rank or above[1] in ("label", "callout")):
+                position = index
+                break
+        style["layers"].insert(position, layer_def)
+        owner[layer_def["id"]] = (rank, "raster")
+        sources.append({"id": sid, "kind": "pmtiles", "role": "raster", "tileType": d.tile_type,
+                        "href": href, "minTileZoom": d.min_zoom, "maxTileZoom": d.max_zoom,
+                        "bounds": [round(v, 7) for v in d.bounds], "tileSize": raster.get("tileSize", 256),
+                        "sha256": d.sha256, "sizeBytes": d.size_bytes, "layerId": raster["layerId"]})
+        progress.check()
+    return sources
 
 
 def _describe_pmtiles(path: str) -> ArchiveDescriptor:

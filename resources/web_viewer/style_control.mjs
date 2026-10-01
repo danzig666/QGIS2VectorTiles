@@ -13,6 +13,7 @@ const OPACITY = {
   circle: ["circle-opacity", "circle-stroke-opacity"],
   symbol: ["text-opacity", "icon-opacity"],
   "fill-extrusion": ["fill-extrusion-opacity"],
+  raster: ["raster-opacity"],
 };
 const RUNTIME_SUFFIXES = ["_q2vt_overlap"];
 export const LOADER_PREFIX = "q2vt_visible_loader_";

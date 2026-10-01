@@ -437,3 +437,116 @@ def copy_mbtiles(input_mbtiles: str, output: str) -> ArchiveDescriptor:
         size_bytes=os.path.getsize(output), sha256=sha256_file(output),
         vector_layers=[layer.get("id", "") for layer in layers if isinstance(layer, dict)],
         zoom_counts=info.zoom_counts, warnings=info.warnings)
+
+
+# --- image tiles (QGIS raster layers) and copied extracts ---------------------------
+
+IMAGE_TILE_TYPES = {"png": TileType.PNG, "jpeg": TileType.JPEG, "webp": TileType.WEBP}
+
+
+class TileSink:
+    """Collects tiles in any order in a temporary on-disk SQLite store and
+    writes them as a clustered PMTiles v3 archive (tile-id order) with the
+    official writer. Nothing is kept in RAM; ``close()`` removes the store."""
+
+    def __init__(self, output: str, temp_dir: Optional[str] = None):
+        self.output = os.path.abspath(output)
+        if os.path.exists(self.output):
+            raise PublishingError("Q2VT_PUB_PATH_UNSAFE",
+                                  f"{os.path.basename(self.output)} already exists; archives are immutable.")
+        self.temp_dir = temp_dir or os.path.dirname(self.output) or "."
+        os.makedirs(self.temp_dir, exist_ok=True)
+        self.store_path = os.path.join(self.temp_dir, f".q2vt_tiles_{uuid.uuid4().hex[:8]}.sqlite")
+        self.db = sqlite3.connect(self.store_path)
+        self.db.execute("PRAGMA journal_mode = OFF")
+        self.db.execute("PRAGMA synchronous = OFF")
+        self.db.execute("CREATE TABLE t (tile_id INTEGER PRIMARY KEY, data BLOB)")
+        self.count = 0
+        self.zooms: Dict[int, int] = {}
+        self.extent: Dict[int, List[int]] = {}   # z -> [minx, miny, maxx, maxy]
+
+    def add(self, z: int, x: int, y: int, data: bytes) -> None:
+        self.db.execute("INSERT OR REPLACE INTO t VALUES (?, ?)", (zxy_to_tileid(z, x, y), data))
+        self.count += 1
+        self.zooms[z] = self.zooms.get(z, 0) + 1
+        box = self.extent.setdefault(z, [x, y, x, y])
+        box[0], box[1] = min(box[0], x), min(box[1], y)
+        box[2], box[3] = max(box[2], x), max(box[3], y)
+        if self.count % 2000 == 0:
+            self.db.commit()
+
+    def write(self, tile_type, compression, metadata: dict, bounds=None,
+              progress: Optional[Progress] = None, validate_kind: str = "image") -> ArchiveDescriptor:
+        progress = progress or Progress()
+        self.db.commit()
+        if not self.count:
+            raise PublishingError("Q2VT_PUB_EMPTY_ARCHIVE")
+        min_zoom, max_zoom = min(self.zooms), max(self.zooms)
+        if bounds is None:
+            minx, miny, maxx, maxy = self.extent[max_zoom]
+            west, _, _, north = _tile_bounds(max_zoom, minx, miny)
+            _, south, east, _ = _tile_bounds(max_zoom, maxx, maxy)
+            bounds = (west, south, east, north)
+        center = ((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2, min_zoom)
+        partial = os.path.join(os.path.dirname(self.output),
+                               f".{os.path.basename(self.output)}.{uuid.uuid4().hex[:8]}.partial")
+        try:
+            with open(partial, "wb") as handle:
+                writer = _DigestWriter(handle, self.temp_dir)
+                try:
+                    for done, (tile_id, data) in enumerate(
+                            self.db.execute("SELECT tile_id, data FROM t ORDER BY tile_id")):
+                        writer.write_tile(tile_id, bytes(data))
+                        if done % 512 == 0:
+                            progress.check()
+                            progress.update(0.8 * done / self.count)
+                    header = {
+                        "tile_type": tile_type, "tile_compression": compression,
+                        "min_lon_e7": int(round(bounds[0] * 1e7)), "min_lat_e7": int(round(bounds[1] * 1e7)),
+                        "max_lon_e7": int(round(bounds[2] * 1e7)), "max_lat_e7": int(round(bounds[3] * 1e7)),
+                        "center_lon_e7": int(round(center[0] * 1e7)),
+                        "center_lat_e7": int(round(center[1] * 1e7)), "center_zoom": center[2],
+                    }
+                    meta = dict(metadata)
+                    meta.setdefault("generator",
+                                    f"QGIS2VectorTiles (fork) via pmtiles-python {PMTILES_LIBRARY_VERSION}")
+                    writer.finalize(header, meta)
+                finally:
+                    if not writer.tile_f.closed:
+                        writer.tile_f.close()
+                handle.flush()
+                os.fsync(handle.fileno())
+            from .validation import validate_pmtiles  # pylint: disable=import-outside-toplevel
+            validate_pmtiles(partial, expected_tiles=self.count, sample=64, kind=validate_kind,
+                             progress=progress.sub(0.85, 0.99))
+            descriptor = ArchiveDescriptor(
+                path=self.output, format="pmtiles",
+                tile_type={TileType.MVT: "mvt", TileType.PNG: "png", TileType.JPEG: "jpeg",
+                           TileType.WEBP: "webp"}[tile_type],
+                tile_compression="gzip" if compression == Compression.GZIP else "none",
+                min_zoom=min_zoom, max_zoom=max_zoom, bounds=tuple(bounds), center=center,
+                addressed_tiles=writer.addressed_tiles, tile_contents=len(writer.hash_to_offset),
+                vector_layers=[layer.get("id", "") for layer in metadata.get("vector_layers", [])
+                               if isinstance(layer, dict)],
+                zoom_counts=dict(self.zooms), size_bytes=os.path.getsize(partial),
+                sha256=sha256_file(partial))
+            os.replace(partial, self.output)
+            return descriptor
+        except OSError as error:
+            raise PublishingError("Q2VT_PUB_DISK", str(error)) from error
+        finally:
+            if os.path.exists(partial):
+                os.remove(partial)
+
+    def close(self) -> None:
+        try:
+            self.db.close()
+        finally:
+            if os.path.exists(self.store_path):
+                os.remove(self.store_path)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

@@ -149,3 +149,42 @@ def test_plain_http_only_for_local_test_servers():
     data["destination"]["publicBaseUrl"] = "http://maps.example.com"
     with pytest.raises(PublishingError, match="https"):
         load_profile(data)
+
+
+def test_locked_layers_groups_themes_basemap_and_raster_settings():
+    from publishing.models import GroupConfig
+    profile = _profile()
+    profile.layers[0].toggleable = False
+    profile.layers[0].raster_format, profile.layers[0].raster_max_zoom = "webp", 18
+    profile.groups = [GroupConfig(["Alaptérkép"], toggleable=False), GroupConfig(["Szabályozás", "Övezet"])]
+    profile.themes.names, profile.themes.initial = ["Terv", "Alaptérkép"], "Terv"
+    profile.basemap.kind, profile.basemap.flavors, profile.basemap.initial = "protomaps", ["light", "dark"], "dark"
+    profile.accent_color = "#0f766e"
+    again = load_profile(dumps(profile))
+    assert dumps(again) == dumps(profile)
+    assert again.group(["Alaptérkép"]).toggleable is False and again.layers[0].raster_format == "webp"
+    assert again.basemap.flavors == ["light", "dark"] and again.themes.initial == "Terv"
+    jsonschema = pytest.importorskip("jsonschema")
+    with open(os.path.join(SCHEMAS, "profile-v1.schema.json"), encoding="utf-8") as handle:
+        jsonschema.validate(profile.to_dict(), json.load(handle))
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda d: d["layers"][1].update(toggleable=False), "switched off"),
+    (lambda d: d.update(groups=[{"path": ["A"], "toggleable": False, "initiallyVisible": False}]), "switched off"),
+    (lambda d: d.update(groups=[{"path": ["A"]}, {"path": ["A"]}]), "duplicate"),
+    (lambda d: d["layers"][0].update(rasterFormat="tiff"), "rasterFormat"),
+    (lambda d: d["layers"][0].update(rasterMinZoom=15, rasterMaxZoom=12), "rasterMinZoom"),
+    (lambda d: d["themes"].update(names=["A"], initial="B"), "themes.initial"),
+    (lambda d: d["basemap"].update(kind="protomaps", flavors=["neon"]), "basemap.flavors"),
+    (lambda d: d["basemap"].update(kind="protomaps", initial="dark"), "basemap.initial"),
+    (lambda d: d["basemap"].update(kind="protomaps", source="http://example.com/x.pmtiles"), "basemap.source"),
+    (lambda d: d.update(accentColor="blue"), "accentColor"),
+])
+def test_new_settings_fail_clearly(change, message):
+    data = _profile().to_dict()
+    data["layers"][1]["initiallyVisible"] = False
+    change(data)
+    with pytest.raises(PublishingError) as error:
+        load_profile(data)
+    assert message in error.value.message

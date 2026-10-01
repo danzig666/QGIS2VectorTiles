@@ -15,6 +15,7 @@ and legend swatches. Runs on QGIS's main thread (reads the live project).
   filter domains; they never hold geometry.
 """
 
+import copy
 import datetime as _dt
 import json
 import math
@@ -23,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsExpression,
                        QgsExpressionContext, QgsExpressionContextUtils, QgsFeatureRequest,
-                       QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject, QgsRectangle,
+                       QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject, QgsRasterLayer, QgsRectangle,
                        QgsRuleBasedRenderer, QgsSymbolLayerUtils, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QSize
 
@@ -90,6 +91,19 @@ def tile_fields(profile: PublicationProfile) -> Dict[str, List[str]]:
             for layer in profile.layers if layer.included and layer.filter_fields}
 
 
+def split_profile(profile: PublicationProfile, project: QgsProject):
+    """(profile with only its vector layers, [included raster layer configs]).
+
+    Vector layers go through the MVT compiler, records and legend; QGIS
+    raster layers are rendered into their own raster archives."""
+    vector = copy.copy(profile)
+    vector.layers = [c for c in profile.layers
+                     if not isinstance(project.mapLayer(c.layer_id), QgsRasterLayer)]
+    rasters = [c for c in profile.layers if c.included
+               and isinstance(project.mapLayer(c.layer_id), QgsRasterLayer)]
+    return vector, rasters
+
+
 def check_profile_against_project(profile: PublicationProfile, project: QgsProject) -> List[str]:
     """Profile problems that need the project (missing layers/fields)."""
     problems = list(validate_profile(profile))
@@ -97,8 +111,12 @@ def check_profile_against_project(profile: PublicationProfile, project: QgsProje
         if not config.included:
             continue
         layer = project.mapLayer(config.layer_id)
+        if isinstance(layer, QgsRasterLayer):
+            if not layer.isValid():
+                problems.append(f'Raster layer "{layer.name()}" cannot be read (invalid data source).')
+            continue
         if layer is None or not isinstance(layer, QgsVectorLayer):
-            problems.append(f"Layer {config.layer_id} is not a vector layer of this project.")
+            problems.append(f"Layer {config.layer_id} is not a vector or raster layer of this project.")
             continue
         names = {field.name() for field in layer.fields()}
         used = ([p.field for p in config.popup_fields] + config.search_fields + config.key_fields
@@ -155,9 +173,13 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
         for depth in range(1, len(path) + 1):
             sub = path[:depth]
             if sub not in groups:
+                group_config = profile.group(sub)
                 groups[sub] = {"id": group_logical_id(sub), "title": sub[-1],
                                "parentId": group_logical_id(sub[:-1]) if depth > 1 else None,
-                               "order": len(groups), "expanded": True}
+                               "order": len(groups),
+                               "expanded": group_config.expanded if group_config else True,
+                               "toggleable": group_config.toggleable if group_config else True,
+                               "initialVisibility": group_config.initially_visible if group_config else True}
 
     by_style: Dict[str, object] = {}
     for rule in rules:
@@ -171,11 +193,15 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
         layer = project.mapLayer(config.layer_id)
         lid = layer_logical_id(layer.id())
         path = paths.get(layer.id(), ((), 0))[0]
+        if isinstance(layer, QgsRasterLayer):
+            layers.append(_raster_entry(layer, config, lid, path, paths, components))
+            continue
         entry = {
             "id": lid, "groupId": group_logical_id(path) if path else None,
             "title": config.title or layer.name(), "order": paths.get(layer.id(), ((), 0))[1],
             "geometry": GEOMETRY.get(_enum(layer.geometryType()), "unknown"),
             "initialVisibility": bool(config.initially_visible),
+            "toggleable": bool(config.toggleable),
             "opacity": float(config.opacity), "legend": bool(config.legend),
             "featureKeyProperty": "q2vt_feature_key",
             "identityScope": key_expression(config.key_fields)[1],
@@ -266,6 +292,31 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
             component["dependsOnSourceLayers"].append(helper)
     return {"groups": list(groups.values()), "layers": layers, "rules": rule_entries,
             "components": components}
+
+
+def _raster_entry(layer, config, lid: str, path, paths, components: List[dict]) -> dict:
+    """A QGIS raster layer: one ``raster`` component drawn from its own
+    raster archive (``q2vt_raster_*`` source, bound by the viewer)."""
+    from .raster_tiles import raster_source_id, raster_style_layer_id  # pylint: disable=import-outside-toplevel
+    cid = f"c-raster-{lid}"
+    entry = {
+        "id": lid, "groupId": group_logical_id(path) if path else None,
+        "title": config.title or layer.name(), "order": paths.get(layer.id(), ((), 0))[1],
+        "geometry": "raster", "initialVisibility": bool(config.initially_visible),
+        "toggleable": bool(config.toggleable), "opacity": float(config.opacity),
+        "legend": bool(config.legend), "popupFields": [], "filterFields": [], "searchable": False,
+        "deepLinks": False, "ruleIds": [], "componentIds": [cid], "swatch": None,
+    }
+    if layer.hasScaleBasedVisibility():
+        low, high = _zoom_of_scale(layer.minimumScale()), _zoom_of_scale(layer.maximumScale())
+        if low is not None and layer.minimumScale() > 0:
+            entry["minZoom"] = low
+        if high is not None and layer.maximumScale() > 0:
+            entry["maxZoom"] = high
+    components.append({"id": cid, "role": "raster", "layerId": lid, "ruleIds": [],
+                       "styleLayerIds": [raster_style_layer_id(lid)], "sourceId": raster_source_id(lid),
+                       "sourceLayer": None, "dependsOnSourceLayers": [], "interactive": False})
+    return entry
 
 
 # --- membership and records ------------------------------------------------------------

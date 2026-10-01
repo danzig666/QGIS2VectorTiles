@@ -26,8 +26,8 @@ from .progress import Progress
 from .search_index import build_search_index
 from .web_builder import ReleaseResult, build_release, write_zip
 
-STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "BUILD_RELEASE", "UPLOAD",
-          "VERIFY_PUBLIC", "ACTIVATE", "COMPLETE"]
+STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "RASTER", "BASEMAP", "BUILD_RELEASE",
+          "UPLOAD", "VERIFY_PUBLIC", "ACTIVATE", "COMPLETE"]
 
 
 @dataclass
@@ -110,11 +110,16 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     if problems:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", " ".join(problems[:6]),
                               detail="\n".join(problems))
-    if not profile.included_layer_ids():
-        raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "Select at least one layer to publish.")
+    # Vector layers: MVT compiler; QGIS raster layers: their own raster archives.
+    vector_profile, raster_configs = qgis_model.split_profile(profile, project)
+    if not vector_profile.included_layer_ids():
+        raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
+                              "Select at least one vector layer to publish (raster layers and the "
+                              "basemap are drawn under the vector map).")
     publication_dir, work_dir = publication_dirs(profile, base_dir)
     os.makedirs(work_dir, exist_ok=True)
-    keys, _ = qgis_model.feature_keys(profile)
+    raster_plans = _plan_rasters(project, profile, raster_configs, extent_3857)
+    keys, _ = qgis_model.feature_keys(vector_profile)
 
     stage("EXPORT_MVT")
     exporter = QGIS2VectorTiles(
@@ -125,9 +130,9 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         viewer=0, feedback=processing_feedback, fidelity_mode=profile.output.fidelity_mode,
         overzoom=profile.output.overzoom, serve=False,
         static_package=profile.output.xyz_package, parallel=False,
-        layer_ids=profile.included_layer_ids(), archive_format="mbtiles",
+        layer_ids=vector_profile.included_layer_ids(), archive_format="mbtiles",
         add_result_layer=False, feature_keys=keys,
-        extra_tile_fields=qgis_model.tile_fields(profile))
+        extra_tile_fields=qgis_model.tile_fields(vector_profile))
     progress.check()
     if not exporter.convert_project_to_vector_tiles():
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
@@ -137,7 +142,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 
     stage("RECORDS")
     records = qgis_model.collect_records(
-        project, profile, exporter.rules, extent_3857,
+        project, vector_profile, exporter.rules, extent_3857,
         os.path.join(exporter.output_path, "q2vt_records.jsonl"), progress,
         max_zoom=profile.view.max_view_zoom)
     qgis_model.raise_identity_problems(records)
@@ -145,7 +150,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 
     stage("LEGEND")
     legend_dir = os.path.join(exporter.output_path, "legend")
-    swatches = qgis_model.render_swatches(project, profile, legend_dir)
+    swatches = qgis_model.render_swatches(project, vector_profile, legend_dir)
     model = qgis_model.logical_model(project, profile, exporter.rules, bundle.style, swatches)
     bundle.groups, bundle.layers = model["groups"], model["layers"]
     bundle.rules, bundle.components = model["rules"], model["components"]
@@ -189,6 +194,16 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         archive = os.path.join(staging, "data", "map.pmtiles")
         assert_disclosure(archive, approved, allow_all=profile.output.include_all_fields)
 
+    stage("RASTER")
+    bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
+                                             work_dir, progress, bundle.warnings)
+    progress.check()
+    published = {r["layerId"] for r in bundle.raster_archives}
+    dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
+    if dropped:  # raster layers that draw nothing in the extent
+        bundle.layers = [layer for layer in bundle.layers if layer["id"] not in dropped]
+        bundle.components = [c for c in bundle.components if c["layerId"] not in dropped]
+
     stage("BUILD_RELEASE")
     release = build_release(
         bundle, profile, publication_dir, transport="pmtiles", activate=activate,
@@ -206,3 +221,52 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     for warning in bundle.warnings:
         result.warnings.append(warning)
     return result
+
+
+def _plan_rasters(project, profile, configs, extent_3857) -> Dict[str, object]:
+    """Zooms and tile estimates of the raster layers (fails early on runaway sizes)."""
+    from .raster_tiles import MAX_TILES_PER_LAYER, plan_layer  # pylint: disable=import-outside-toplevel
+    plans = {}
+    for config in configs:
+        layer = project.mapLayer(config.layer_id)
+        plan = plan_layer(project, layer, config, profile, extent_3857)
+        if plan.tiles > MAX_TILES_PER_LAYER:
+            raise PublishingError(
+                "Q2VT_PUB_PROFILE_INVALID",
+                f'Raster layer "{layer.name()}": about {plan.tiles} tiles at zooms {plan.min_zoom}-'
+                f"{plan.max_zoom}; lower its maximum zoom (Interaction tab) or the extent.")
+        plans[config.layer_id] = plan
+    return plans
+
+
+def _render_rasters(project, profile, configs, plans, work_dir, progress, warnings) -> List[dict]:
+    """Render each raster layer into ``<work>/rasters/<id>.pmtiles``."""
+    from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
+    from .raster_tiles import raster_source_id, raster_style_layer_id, render_layer  # pylint: disable=import-outside-toplevel
+    out = []
+    folder = os.path.join(work_dir, "rasters")
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    os.makedirs(folder)
+    total = max(1, sum(plans[c.layer_id].tiles for c in configs))
+    done = 0
+    for config in configs:
+        layer = project.mapLayer(config.layer_id)
+        plan = plans[config.layer_id]
+        warnings.extend(plan.warnings)
+        lid = layer_logical_id(layer.id())
+        start = done / total
+        done += plan.tiles
+        descriptor = render_layer(project, layer, config, plan,
+                                  os.path.join(folder, f"{lid}.pmtiles"),
+                                  progress.sub(start, done / total), title=config.title or layer.name())
+        if descriptor is None:
+            warnings.append(f'Raster layer "{layer.name()}" draws nothing in the export extent; '
+                            "it is not published.")
+            continue
+        progress.info(f'Raster layer "{layer.name()}": {descriptor.addressed_tiles} tiles, '
+                      f"{descriptor.size_bytes / 1e6:.1f} MB ({config.raster_format})")
+        out.append({"layerId": lid, "sourceId": raster_source_id(lid),
+                    "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
+                    "descriptor": descriptor, "tileSize": 256})
+    return out

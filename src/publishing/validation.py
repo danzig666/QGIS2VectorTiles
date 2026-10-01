@@ -34,19 +34,31 @@ RASTER_SOURCE_TYPES = {"raster", "raster-dem", "image", "video", "canvas"}
 RASTER_LAYER_TYPES = {"raster", "hillshade", "color-relief"}
 # Runtime-only source ids the viewer may add (never in a published style).
 RUNTIME_SOURCE_PREFIXES = ("q2vt_visible_", "q2vt_search_marker", "q2vt_measure")
+# QGIS raster layers rendered into the release's own image archives.
+RASTER_LAYER_SOURCE_PREFIX = "q2vt_raster_"
 
 
 # --- vector-only style ---------------------------------------------------------
 
-def vector_only_violations(style: dict, runtime: bool = False) -> List[str]:
+def vector_only_violations(style: dict, runtime: bool = False,
+                           raster_sources: Iterable[str] = ()) -> List[str]:
     """Problems that make ``style`` not vector-only (empty list: fine).
 
     ``runtime=True`` accepts the viewer's bounded in-memory GeoJSON helper
     sources (``RUNTIME_SOURCE_PREFIXES``); a published file never has them.
+    ``raster_sources``: ids of the QGIS raster layers' own image archives
+    (``q2vt_raster_*``). Those — and only those — may be ``raster`` sources,
+    without any URL (the viewer binds them to the release's archive); vector
+    layers are never rasterized.
     """
     problems = []
+    allowed = {sid for sid in raster_sources if sid.startswith(RASTER_LAYER_SOURCE_PREFIX)}
     for source_id, source in (style.get("sources") or {}).items():
         kind = (source or {}).get("type")
+        if kind == "raster" and source_id in allowed:
+            if source.get("url") or source.get("tiles"):
+                problems.append(f"raster source '{source_id}' must not carry its own URL")
+            continue
         if kind in RASTER_SOURCE_TYPES:
             problems.append(f"source '{source_id}' is a {kind} source")
         elif kind == "geojson":
@@ -55,13 +67,15 @@ def vector_only_violations(style: dict, runtime: bool = False) -> List[str]:
         elif kind != "vector":
             problems.append(f"source '{source_id}' has unsupported type '{kind}'")
     for layer in style.get("layers") or []:
+        if layer.get("type") == "raster" and layer.get("source") in allowed:
+            continue
         if layer.get("type") in RASTER_LAYER_TYPES:
             problems.append(f"layer '{layer.get('id')}' is a {layer.get('type')} layer")
     return problems
 
 
-def assert_vector_only(style: dict) -> None:
-    problems = vector_only_violations(style)
+def assert_vector_only(style: dict, raster_sources: Iterable[str] = ()) -> None:
+    problems = vector_only_violations(style, raster_sources=raster_sources)
     if problems:
         raise PublishingError("Q2VT_PUB_RASTER_SOURCE", "; ".join(problems[:5]))
 
@@ -182,14 +196,24 @@ class PmtilesFile:
             yield tileid_to_zxy(tile_id), self.tile(offset, length)
 
 
-def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: int = 64,
-                     progress: Optional[Progress] = None) -> dict:
-    """Structural + MVT validation; raises PublishingError, returns a summary.
+IMAGE_TILE_TYPES = (TileType.PNG, TileType.JPEG, TileType.WEBP)
+_IMAGE_MAGIC = {TileType.PNG: b"\x89PNG\r\n\x1a\n", TileType.JPEG: b"\xff\xd8\xff",
+                TileType.WEBP: b"RIFF"}
 
-    ``sample``: tile payloads decoded as MVT (0 = every tile), chosen
-    deterministically across zooms (first/last tiles and a fixed-seed draw).
+
+def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: int = 64,
+                     progress: Optional[Progress] = None, kind: str = "mvt") -> dict:
+    """Structural + payload validation; raises PublishingError, returns a summary.
+
+    ``kind``: ``"mvt"`` (vector tiles, decoded as MVT; the map data) or
+    ``"image"`` (PNG / JPEG / WebP tiles of a QGIS raster layer, checked by
+    their signature). ``sample``: tile payloads checked (0 = every tile),
+    chosen deterministically across zooms (first/last tiles and a
+    fixed-seed draw).
     """
     progress = progress or Progress()
+    if kind == "image":
+        return _validate_image_pmtiles(path, expected_tiles, sample, progress)
     with open_pmtiles(path) as archive:
         h = archive.header
         if h["tile_type"] != TileType.MVT:
@@ -253,6 +277,59 @@ def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: in
         return {"tiles": len(entries), "minZoom": h["min_zoom"], "maxZoom": h["max_zoom"],
                 "decoded": len(chosen), "layersSeen": sorted(found_layers),
                 "vectorLayers": sorted(i for i in layer_ids if i)}
+
+
+def _check_structure(archive: "PmtilesFile", expected_tiles: Optional[int]) -> list:
+    h = archive.header
+    for part in ("root", "metadata", "leaf_directory", "tile_data"):
+        if h[f"{part}_offset"] + h[f"{part}_length"] > archive.size:
+            raise PublishingError("Q2VT_PUB_PMTILES_INVALID", f"{part} section beyond the file end.")
+    if h["root_offset"] + h["root_length"] > 16384:
+        raise PublishingError("Q2VT_PUB_PMTILES_INVALID", "Root directory is not within the first 16 KiB.")
+    entries = list(archive.entries())
+    if not entries:
+        raise PublishingError("Q2VT_PUB_EMPTY_ARCHIVE")
+    ids = [e[0] for e in entries]
+    if ids != sorted(ids) or len(set(ids)) != len(ids):
+        raise PublishingError("Q2VT_PUB_PMTILES_INVALID", "Tile ids are not unique and sorted.")
+    if h["addressed_tiles_count"] and h["addressed_tiles_count"] != len(entries):
+        raise PublishingError("Q2VT_PUB_PMTILES_INVALID",
+                              f"Header says {h['addressed_tiles_count']} tiles, directories hold {len(entries)}.")
+    if expected_tiles is not None and expected_tiles != len(entries):
+        raise PublishingError("Q2VT_PUB_TRANSPORT_MISMATCH", f"{len(entries)} tiles instead of {expected_tiles}.")
+    for _, offset, length in entries:
+        if offset + length > h["tile_data_length"]:
+            raise PublishingError("Q2VT_PUB_PMTILES_INVALID", "Tile beyond the tile data section.")
+    zooms = [tileid_to_zxy(i)[0] for i in (ids[0], ids[-1])]
+    if zooms[0] != h["min_zoom"] or zooms[1] != h["max_zoom"]:
+        raise PublishingError("Q2VT_PUB_PMTILES_INVALID",
+                              f"Header zooms {h['min_zoom']}-{h['max_zoom']} != tiles {zooms}.")
+    return entries
+
+
+def _validate_image_pmtiles(path: str, expected_tiles: Optional[int], sample: int,
+                            progress: Progress) -> dict:
+    with open_pmtiles(path) as archive:
+        h = archive.header
+        if h["tile_type"] not in IMAGE_TILE_TYPES:
+            raise PublishingError("Q2VT_PUB_RASTER_SOURCE",
+                                  f"Raster layer archive tile type is {h['tile_type']}, not PNG/JPEG/WebP.")
+        if h["tile_compression"] != Compression.NONE:
+            raise PublishingError("Q2VT_PUB_PMTILES_INVALID", "Image tiles must not be compressed again.")
+        archive.metadata()
+        entries = _check_structure(archive, expected_tiles)
+        magic = _IMAGE_MAGIC[h["tile_type"]]
+        chosen = _sample_indices(entries, sample)
+        for done, index in enumerate(chosen):
+            tile_id, offset, length = entries[index]
+            data = archive.tile(offset, length)
+            if not data.startswith(magic) or (h["tile_type"] == TileType.WEBP and data[8:12] != b"WEBP"):
+                raise PublishingError("Q2VT_PUB_PMTILES_INVALID",
+                                      f"Tile {tileid_to_zxy(tile_id)} is not a {h['tile_type'].name} image.")
+            if done % 64 == 0:
+                progress.check()
+        return {"tiles": len(entries), "minZoom": h["min_zoom"], "maxZoom": h["max_zoom"],
+                "decoded": len(chosen), "tileType": h["tile_type"].name.lower()}
 
 
 def _sample_indices(entries: Sequence, sample: int) -> List[int]:

@@ -7,7 +7,7 @@
 // mounts the interactive controls described by the manifest.
 import * as maplibregl from "./maplibre-gl.mjs";
 import { enableVisibleLabels } from "./visible_labels.mjs";
-import { ViewerError, bindStyle, checkRelative, openArchives, resolveUrl } from "./transport.mjs";
+import { RASTER_TILE_TYPES, ViewerError, bindStyle, checkRelative, openArchives, resolveUrl } from "./transport.mjs";
 import { loadLocale, t } from "./i18n.mjs";
 import { fetchChecked, showError, state as diagnostics, warn } from "./diagnostics.mjs";
 
@@ -23,8 +23,14 @@ function validateManifest(manifest) {
   if (manifest.vectorOnly !== true) throw new ViewerError("Q2VT_PUB_RASTER_SOURCE", "manifest is not vector-only");
   if (!RELEASE_ID.test(manifest.releaseId || "")) throw new ViewerError("Q2VT_PUB_MANIFEST", "bad releaseId");
   if (!Array.isArray(manifest.sources) || !manifest.sources.length) throw new ViewerError("Q2VT_PUB_MANIFEST", "no sources");
-  for (const source of manifest.sources) {
-    if (source.tileType !== "mvt") throw new ViewerError("Q2VT_PUB_NOT_MVT", `source ${source.id} tileType ${source.tileType}`);
+  for (const [index, source] of manifest.sources.entries()) {
+    // The map data is MVT; QGIS raster layers have their own image archives.
+    const raster = source.role === "raster";
+    if (index === 0 && raster) throw new ViewerError("Q2VT_PUB_NOT_MVT", "the first source must be the vector map");
+    if (raster ? !RASTER_TILE_TYPES.includes(source.tileType) || source.kind !== "pmtiles"
+        || !String(source.id).startsWith("q2vt_raster_") : source.tileType !== "mvt") {
+      throw new ViewerError("Q2VT_PUB_NOT_MVT", `source ${source.id} tileType ${source.tileType}`);
+    }
     if (!["pmtiles", "xyz"].includes(source.kind)) throw new ViewerError("Q2VT_PUB_MANIFEST", `source kind ${source.kind}`);
     checkRelative(source.href, "source");
   }

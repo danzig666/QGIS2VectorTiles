@@ -8,6 +8,8 @@
 // {placeholders}. Only vector sources are accepted.
 
 export const MVT_TILE_TYPE = 1; // pmtiles TileType.Mvt
+export const RASTER_TILE_TYPES = ["png", "jpeg", "webp"];
+const IMAGE_TILE_TYPE = { png: 2, jpeg: 3, webp: 4 }; // pmtiles TileType
 
 const NON_VECTOR = new Set(["raster", "raster-dem", "image", "video", "canvas"]);
 
@@ -78,8 +80,11 @@ export async function openArchives(manifest, manifestUrl, maplibregl) {
       }
       throw new ViewerError("Q2VT_PUB_FETCH", "The map data could not be loaded (network, CORS or missing file).", text);
     }
-    if (header.tileType !== MVT_TILE_TYPE) {
-      throw new ViewerError("Q2VT_PUB_NOT_MVT", "The map data archive does not contain vector tiles.", `tileType ${header.tileType}`);
+    const expected = source.role === "raster" ? IMAGE_TILE_TYPE[source.tileType] : MVT_TILE_TYPE;
+    if (header.tileType !== expected) {
+      throw new ViewerError("Q2VT_PUB_NOT_MVT", source.role === "raster"
+        ? `The raster layer archive ${source.id} does not hold ${source.tileType} images.`
+        : "The map data archive does not contain vector tiles.", `tileType ${header.tileType}`);
     }
     proto.add(archive);
     archives[source.id] = { archive, header, url };
@@ -93,15 +98,19 @@ export function bindStyle(style, manifest, manifestUrl, styleUrl) {
   if (!style || style.version !== 8 || typeof style.sources !== "object") {
     throw new ViewerError("Q2VT_PUB_STYLE", "The map style is not a valid MapLibre style.");
   }
+  // Raster sources only for the QGIS raster layers' own image archives.
+  const rasterIds = new Set(manifest.sources.filter((s) => s.role === "raster").map((s) => s.id));
   for (const [id, source] of Object.entries(style.sources)) {
+    if (source.type === "raster" && rasterIds.has(id)) continue;
     if (NON_VECTOR.has(source.type) || source.type === "geojson") {
       throw new ViewerError("Q2VT_PUB_RASTER_SOURCE", `Source "${id}" is not a vector tile source; this viewer only draws vector tiles.`);
     }
   }
   for (const binding of manifest.sources) {
     const source = style.sources[binding.id];
-    if (!source || source.type !== "vector") {
-      throw new ViewerError("Q2VT_PUB_STYLE", `The style has no vector source "${binding.id}".`);
+    const type = binding.role === "raster" ? "raster" : "vector";
+    if (!source || source.type !== type) {
+      throw new ViewerError("Q2VT_PUB_STYLE", `The style has no ${type} source "${binding.id}".`);
     }
     delete source.tiles;
     delete source.url;

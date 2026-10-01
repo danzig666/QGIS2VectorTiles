@@ -3,86 +3,472 @@
   "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/profile-v1.schema.json",
   "title": "QGIS2VectorTiles publication profile (non-secret)",
   "type": "object",
-  "required": ["schemaVersion", "profileId", "publicationId", "title", "slug", "vectorOnly"],
+  "required": [
+    "schemaVersion",
+    "profileId",
+    "publicationId",
+    "title",
+    "slug",
+    "vectorOnly"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": {"const": 1},
-    "profileId": {"type": "string", "format": "uuid"},
-    "publicationId": {"type": "string", "format": "uuid"},
-    "title": {"type": "string", "minLength": 1},
-    "description": {"type": "string"},
-    "slug": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
-    "locale": {"enum": ["en", "hu"]},
-    "attribution": {"type": "string"},
-    "logoPath": {"type": "string"},
-    "vectorOnly": {"const": true},
-    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+    "schemaVersion": {
+      "const": 1
+    },
+    "profileId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    },
+    "locale": {
+      "enum": [
+        "en",
+        "hu"
+      ]
+    },
+    "attribution": {
+      "type": "string"
+    },
+    "logoPath": {
+      "type": "string"
+    },
+    "vectorOnly": {
+      "const": true
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/layer"
+      }
+    },
     "view": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "extent": {"oneOf": [{"type": "null"}, {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}]},
-        "minZoom": {"type": "integer", "minimum": 0, "maximum": 22},
-        "maxZoom": {"type": "integer", "minimum": 0, "maximum": 22},
-        "maxViewZoom": {"type": "integer", "minimum": 0, "maximum": 24}
+        "extent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
+        },
+        "minZoom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 22
+        },
+        "maxZoom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 22
+        },
+        "maxViewZoom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        }
       }
     },
     "interaction": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "labelsToggle": {"type": "boolean"}, "opacityControls": {"type": "boolean"},
-        "search": {"type": "boolean"}, "filters": {"type": "boolean"}, "popups": {"type": "boolean"},
-        "permalinks": {"type": "boolean"}, "coordinates": {"type": "boolean"},
-        "measure": {"type": "boolean"}, "print": {"type": "boolean"}
+        "labelsToggle": {
+          "type": "boolean"
+        },
+        "opacityControls": {
+          "type": "boolean"
+        },
+        "search": {
+          "type": "boolean"
+        },
+        "filters": {
+          "type": "boolean"
+        },
+        "popups": {
+          "type": "boolean"
+        },
+        "permalinks": {
+          "type": "boolean"
+        },
+        "coordinates": {
+          "type": "boolean"
+        },
+        "measure": {
+          "type": "boolean"
+        },
+        "print": {
+          "type": "boolean"
+        }
       }
     },
     "output": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "archive": {"enum": ["pmtiles", "mbtiles", "both"]},
-        "xyzPackage": {"type": "boolean"}, "localDirectory": {"type": "string"},
-        "zip": {"type": "boolean"}, "cpuPercent": {"type": "integer", "minimum": 0, "maximum": 100},
-        "fidelityMode": {"type": "integer"}, "overzoom": {"type": "integer"},
-        "polygonLabelsBase": {"type": "integer"}, "includeAllFields": {"type": "boolean"}
+        "archive": {
+          "enum": [
+            "pmtiles",
+            "mbtiles",
+            "both"
+          ]
+        },
+        "xyzPackage": {
+          "type": "boolean"
+        },
+        "localDirectory": {
+          "type": "string"
+        },
+        "zip": {
+          "type": "boolean"
+        },
+        "cpuPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "fidelityMode": {
+          "type": "integer"
+        },
+        "overzoom": {
+          "type": "integer"
+        },
+        "polygonLabelsBase": {
+          "type": "integer"
+        },
+        "includeAllFields": {
+          "type": "boolean"
+        }
       }
     },
     "destination": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "kind": {"enum": ["local", "r2", "s3"]},
-        "accountId": {"type": "string"}, "endpoint": {"type": "string"},
-        "region": {"type": "string"}, "bucket": {"type": "string"},
-        "prefix": {"type": "string"}, "publicBaseUrl": {"type": "string"},
-        "credentialRef": {"type": "string", "description": "QGIS auth configuration id; never a secret"},
-        "retention": {"type": "integer", "minimum": 1, "maximum": 100},
-        "conditionalWrites": {"type": "boolean"}
+        "kind": {
+          "enum": [
+            "local",
+            "r2",
+            "s3"
+          ]
+        },
+        "accountId": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "publicBaseUrl": {
+          "type": "string"
+        },
+        "credentialRef": {
+          "type": "string",
+          "description": "QGIS auth configuration id; never a secret"
+        },
+        "retention": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "conditionalWrites": {
+          "type": "boolean"
+        }
       }
     },
     "approval": {
-      "type": "object", "additionalProperties": false,
-      "properties": {"fingerprint": {"type": "string"}, "approvedAt": {"type": "string"}}
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "approvedAt": {
+          "type": "string"
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/group"
+      }
+    },
+    "themes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "initial": {
+          "type": "string"
+        }
+      }
+    },
+    "basemap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "none",
+            "protomaps"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "flavors": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "light",
+              "dark",
+              "white",
+              "grayscale",
+              "black"
+            ]
+          }
+        },
+        "initial": {
+          "enum": [
+            "none",
+            "light",
+            "dark",
+            "white",
+            "grayscale",
+            "black"
+          ]
+        },
+        "maxZoom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "padding": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "overviewZoom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "overviewKm": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5000
+        }
+      }
+    },
+    "accentColor": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$"
     }
   },
   "$defs": {
     "layer": {
-      "type": "object", "required": ["layerId"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "layerId"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "layerId": {"type": "string", "minLength": 1},
-        "included": {"type": "boolean"}, "initiallyVisible": {"type": "boolean"},
-        "title": {"type": "string"},
-        "popupFields": {"type": "array", "items": {
-          "type": "object", "required": ["field"], "additionalProperties": false,
-          "properties": {"field": {"type": "string", "minLength": 1}, "alias": {"type": "string"},
-                         "type": {"enum": ["string", "integer", "number", "boolean", "date", "url"]}}}},
-        "searchFields": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "keyFields": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "displayExpression": {"type": "string"},
-        "filterFields": {"type": "array", "items": {
-          "type": "object", "required": ["field"], "additionalProperties": false,
-          "properties": {"field": {"type": "string", "minLength": 1},
-                         "kind": {"enum": ["values", "range", "text"]}, "alias": {"type": "string"}}}},
-        "legend": {"type": "boolean"},
-        "opacity": {"type": "number", "minimum": 0, "maximum": 1},
-        "deepLinks": {"type": "boolean"}
+        "layerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "included": {
+          "type": "boolean"
+        },
+        "initiallyVisible": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "popupFields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "alias": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "string",
+                  "integer",
+                  "number",
+                  "boolean",
+                  "date",
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "searchFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "keyFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "displayExpression": {
+          "type": "string"
+        },
+        "filterFields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "enum": [
+                  "values",
+                  "range",
+                  "text"
+                ]
+              },
+              "alias": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "legend": {
+          "type": "boolean"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "deepLinks": {
+          "type": "boolean"
+        },
+        "toggleable": {
+          "type": "boolean"
+        },
+        "rasterFormat": {
+          "enum": [
+            "png",
+            "jpeg",
+            "webp"
+          ]
+        },
+        "rasterMinZoom": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 22
+        },
+        "rasterMaxZoom": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 22
+        },
+        "rasterQuality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "rasterHidpi": {
+          "type": "boolean"
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "toggleable": {
+          "type": "boolean"
+        },
+        "initiallyVisible": {
+          "type": "boolean"
+        },
+        "expanded": {
+          "type": "boolean"
+        }
       }
     }
   }
