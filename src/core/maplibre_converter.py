@@ -1405,9 +1405,15 @@ class TextPropertyExtractor:
 
     @staticmethod
     def get_text_variable_anchor(label_settings: QgsPalLayerSettings = None) -> Optional[List[str]]:
-        """Return ``text-variable-anchor`` for "around point" placements only."""
-        if label_settings is not None and TextPropertyExtractor.placement_name(label_settings) \
-                not in ("AroundPoint", "OrderedPositionsAroundPoint"):
+        """Return ``text-variable-anchor``: the candidate positions around a
+        point, or, for horizontal / free polygon labels, the middle first
+        and then shifted (QGIS tries positions all over the polygon), so a
+        label can move aside instead of overlapping another."""
+        placement = None if label_settings is None else \
+            TextPropertyExtractor.placement_name(label_settings)
+        if placement in ("Horizontal", "Free"):
+            return ["center", "top", "bottom", "left", "right"]
+        if placement is not None and placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
             return None
         return ["bottom",  "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"]
 
@@ -1434,9 +1440,15 @@ class TextPropertyExtractor:
 
     @staticmethod
     def get_text_allow_overlap(label_settings: QgsPalLayerSettings = None) -> bool:
-        """Return ``text-allow-overlap``: QGIS labels that may overlap
-        ("show all labels", overlap if required / at no cost) are always
-        drawn; MapLibre has no "only if required" mode."""
+        """Return ``text-allow-overlap``: ``False``, labels avoid each other.
+        QGIS labels that may overlap ("show all labels", overlap if required
+        / at no cost) are drawn by the viewer even where they collide
+        (``overlap_if_required``); MapLibre alone has no such mode."""
+        return False
+
+    @staticmethod
+    def overlap_if_required(label_settings: QgsPalLayerSettings = None) -> bool:
+        """True for QGIS labels that are drawn even if they overlap others."""
         if label_settings is None:
             return False
         try:
@@ -1457,8 +1469,9 @@ class TextPropertyExtractor:
 
     @staticmethod
     def get_text_padding() -> float:
-        """Return ``text-padding`` in pixels (MapLibre default: 2)."""
-        return 10
+        """Return ``text-padding`` in pixels (MapLibre default: 2): the
+        free space a label keeps around itself from other labels."""
+        return 2
 
     @staticmethod
     def get_text_line_height() -> float:
@@ -2613,7 +2626,9 @@ class QgisMapLibreStyleExporter:
             "icon-pitch-alignment": IconPropertyExtractor.get_icon_pitch_alignment(),
             "icon-anchor": IconPropertyExtractor.get_icon_anchor(),
             "icon-allow-overlap": IconPropertyExtractor.get_icon_allow_overlap(True),
-            "icon-ignore-placement": IconPropertyExtractor.get_icon_ignore_placement(),
+            # Map symbols never hide labels in QGIS (only a labelled layer's
+            # own obstacle settings do): they must not block labels here.
+            "icon-ignore-placement": True,
             "icon-optional": IconPropertyExtractor.get_icon_optional(),
             "icon-keep-upright": IconPropertyExtractor.get_icon_keep_upright(),
             "symbol-placement": IconPropertyExtractor.get_symbol_placement(),
@@ -2991,6 +3006,12 @@ class QgisMapLibreStyleExporter:
                 "text-anchor": self._pinned_anchor(label_settings),
                 "text-allow-overlap": True,
             })
+        elif variable_anchor and placement in ("Horizontal", "Free"):
+            # Shifted candidates 1 em off the point: half a label (offset 0)
+            # never clears a label centred on the same point (a zone and a
+            # parcel that coincide have the same visible centroid).
+            layer_def["layout"]["text-variable-anchor"] = variable_anchor
+            layer_def["layout"]["text-radial-offset"] = 1
         elif variable_anchor:
             layer_def["layout"]["text-variable-anchor"] = variable_anchor
             layer_def["layout"]["text-radial-offset"] = \
@@ -3029,6 +3050,10 @@ class QgisMapLibreStyleExporter:
         else:
             self._apply_default_icon_props(layer_def)
 
+        if not pinned and TextPropertyExtractor.overlap_if_required(label_settings):
+            # Avoids other labels; the viewer still draws it where it cannot
+            # (resources/ml_viewer/visible_labels.mjs, enableOverlapFallback).
+            layer_def.setdefault("metadata", {})["q2vt:overlap"] = "if-required"
         polygons = self.visible_polygons.get(style_name)
         if polygons:
             # The viewer moves these labels to the visible part of their

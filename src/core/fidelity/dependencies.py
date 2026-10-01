@@ -40,7 +40,14 @@ def style_field_dependencies(style: dict) -> Dict[str, Set[str]]:
         source_layer = layer.get("source-layer")
         if not source_layer:
             continue
-        deps.setdefault(source_layer, set()).update(layer_field_dependencies(layer))
+        fields = layer_field_dependencies(layer)
+        deps.setdefault(source_layer, set()).update(fields)
+        # A label placed by the viewer on the visible part of its polygon is
+        # drawn from that polygon layer: it needs the same fields there (the
+        # pruned size field left the parcel numbers at the fallback size).
+        polygons = (layer.get("metadata") or {}).get("q2vt:visible-polygons")
+        if polygons:
+            deps.setdefault(polygons, set()).update(fields)
     return deps
 
 

@@ -122,5 +122,6 @@ browser, and writes `compare.html` (side by side, overlay, swipe, blink):
     python3 tools/gallery/project_compare.py project.qgs --out /tmp/cmp \
         --layers "*" --center-layer Épületek --zooms 16,17.5,19.5 --max-zoom 18
 
-The browser page runs the viewer's visible-polygon labels
-(`resources/ml_viewer/visible_labels.mjs`), as the MapLibre viewer does.
+The browser page runs the viewer's visible-polygon labels and the
+"overlap if required" label fallback (`resources/ml_viewer/visible_labels.mjs`),
+as the MapLibre viewer does.

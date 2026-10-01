@@ -1511,9 +1511,15 @@ class RulesExporter:
             settings.geometryGeneratorEnabled = False
             flat_rule.set_attr("c", target_geom)
         elif target_geom == 2:
+            # A label on the visible part: the static point (for clients
+            # without the viewer's visible-polygon labels) lies in the part
+            # inside the export extent. A whole-polygon centroid outside the
+            # extent emptied the dataset, and the style layer was dropped
+            # with the viewer's labels (large zoning polygons).
+            visible = self._labels_visible_polygon(flat_rule, 0)
             flat_rule.set_attr("c", 0)
             target_geom = 0
-            transform_expr = self._get_polygon_centroids_expression()
+            transform_expr = self._get_polygon_centroids_expression(clip=visible)
         return [target_geom, transform_expr]
 
     @staticmethod
@@ -1643,8 +1649,8 @@ class RulesExporter:
             geometry_expression=self._clip_to_extent("@geometry"),
             description=label.description, flat_rules=[], visible_polygons=True)
 
-    def _get_polygon_centroids_expression(self) -> str:
-        if self.cent_source == 1:
+    def _get_polygon_centroids_expression(self, clip: bool = False) -> str:
+        if clip or self.cent_source == 1:
             polygons = (
                 f"intersection(@geometry, "
                 f"geom_from_wkt('{self.extent.asWktPolygon()}'))"

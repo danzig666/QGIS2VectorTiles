@@ -422,6 +422,29 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
 
 
+def test_labels_avoid_each_other_and_overlap_only_if_required(export, tmp_path):
+    """Every label avoids the others in MapLibre; those QGIS may overlap are
+    marked for the viewer's fallback, and horizontal polygon labels can move
+    aside."""
+    layer = zoning_layer(path=str(tmp_path / "ov.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.placement = Qgis.LabelPlacement.Horizontal
+    placement = settings.placementSettings()
+    placement.setOverlapHandling(Qgis.LabelOverlapHandling.AllowOverlapIfRequired)
+    settings.setPlacementSettings(placement)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    [label] = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert label["layout"]["text-allow-overlap"] is False
+    assert label["metadata"]["q2vt:overlap"] == "if-required"
+    assert label["layout"]["text-variable-anchor"][0] == "center"
+    assert label["layout"]["text-radial-offset"] == 1
+
+
 def test_properties_on_missing_fields_are_ignored_as_in_qgis(export, tmp_path):
     """Szabályozás övezetkódok: a colour rule on a field the layer does not
     have is ignored by QGIS (static colour); the export evaluated it."""

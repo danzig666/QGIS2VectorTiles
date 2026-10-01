@@ -31,13 +31,23 @@ window.q2vtGo = (v) => new Promise((resolve) => {
     if (!window.q2vtVisibleLabels) { clearTimeout(timer); resolve(true); return; }
     // Visible-polygon labels: placed for this view, then drawn.
     window.q2vtVisibleLabels.update();
-    map.once("idle", () => { clearTimeout(timer); resolve(true); });
-    map.triggerRepaint();
+    // setData is processed by a worker: let it start before waiting for idle.
+    setTimeout(() => {
+      map.once("idle", () => {
+        // Overlap fallback: the labels that could not be placed, drawn.
+        window.q2vtVisibleLabels.sync();
+        map.once("idle", () => { clearTimeout(timer); resolve(true); });
+        map.triggerRepaint();
+      });
+      map.triggerRepaint();
+    }, 400);
   });
   if (v.only) {  // project_compare.py: show one QGIS layer's style layers
     const keep = new Set(v.only);
     for (const l of map.getStyle().layers) {
-      if (l.type !== "background") map.setLayoutProperty(l.id, "visibility", keep.has(l.id) ? "visible" : "none");
+      if (l.type === "background" || l.id.startsWith("q2vt_visible_loader_")) continue;
+      const own = keep.has(l.id) || keep.has(l.id.replace(/_q2vt_overlap$/, ""));
+      map.setLayoutProperty(l.id, "visibility", own ? "visible" : "none");
     }
   }
   map.jumpTo({ center: [v.lon, v.lat], zoom: v.zoom });

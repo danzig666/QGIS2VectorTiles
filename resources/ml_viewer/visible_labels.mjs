@@ -9,9 +9,19 @@
 // the map stops moving: each polygon's tile pieces are clipped to their own
 // tile (tiles overlap by a buffer) and to the screen, and the label goes to
 // the centroid of the visible area when that lies inside the polygon, else to
-// an interior point (the GEOS / QGIS rule).
+// an interior point (the GEOS / QGIS rule). A label stays where it is while
+// that point is still on the visible part of its polygon (and not at the
+// screen edge), so panning does not make labels jump.
+//
+// Labels QGIS may overlap "if required" (or "at no cost") carry
+//   metadata["q2vt:overlap"] = "if-required"
+// and avoid other labels in the style; enableOverlapFallback() draws the
+// ones MapLibre could not place without overlap anyway, as QGIS does.
 
 const SOURCE_PREFIX = "q2vt_visible_";
+export const LOADER_PREFIX = "q2vt_visible_loader_";
+export const OVERLAP_SUFFIX = "_q2vt_overlap";
+const EDGE_PX = 24; // a kept label must stay this far inside the screen
 
 export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
@@ -24,9 +34,21 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
     const before = style.layers.slice(index + 1).find((l) => !(l.metadata && l.metadata["q2vt:visible-polygons"]));
     groups.get(polygons).layers.push({ def: layer, before: before ? before.id : undefined });
   });
-  if (!groups.size) return null;
+  if (!groups.size) {
+    const overlap = enableOverlapFallback(map);
+    return { update: () => {}, sync: overlap.sync, groups };
+  }
 
+  const firstLayer = style.layers.length ? style.layers[0].id : undefined;
   for (const [polygons, group] of groups) {
+    // MapLibre loads a source's tiles only for visible layers: an invisible
+    // fill keeps the polygons loaded whatever else is shown.
+    const zooms = group.layers.map(({ def }) => [def.minzoom ?? 0, def.maxzoom ?? 24]);
+    map.addLayer({
+      id: LOADER_PREFIX + polygons, type: "fill", source: sourceId, "source-layer": polygons,
+      minzoom: Math.min(...zooms.map((z) => z[0])), maxzoom: Math.max(...zooms.map((z) => z[1])),
+      paint: { "fill-opacity": 0 },
+    }, firstLayer);
     map.addSource(group.source, {
       type: "geojson", data: { type: "FeatureCollection", features: [] },
       maxzoom: tileSource.maxzoom === undefined ? 18 : tileSource.maxzoom,
@@ -42,13 +64,20 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
     }
   }
 
+  // After the moves: the fallback copies follow the moved layers.
+  const overlap = enableOverlapFallback(map);
+
   let pending = null;
+  const states = new Map(); // polygon source layer -> label positions kept
   const update = () => {
     pending = null;
     const view = viewRect(map, maplibregl);
+    const margin = EDGE_PX * (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
     for (const [polygons, group] of groups) {
+      if (!states.has(polygons)) states.set(polygons, newLabelState());
       const features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
-      map.getSource(group.source).setData(labelPoints(features, view, maplibregl));
+      map.getSource(group.source).setData(
+        labelPoints(features, view, maplibregl, { state: states.get(polygons), margin }));
     }
   };
   const schedule = () => { if (!pending) pending = setTimeout(update, 60); };
@@ -56,7 +85,13 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles") {
   map.on("sourcedata", (e) => { if (e.sourceId === sourceId && e.isSourceLoaded) schedule(); });
   map.on("idle", schedule);
   update();
-  return { update, groups };
+  return { update, sync: overlap.sync, groups };
+}
+
+// Label positions kept between updates, and stable feature ids (for the
+// overlap fallback's feature state).
+export function newLabelState() {
+  return { points: new Map(), ids: new Map(), nextId: 1 };
 }
 
 // The screen as a world rectangle ([0, 1] Web Mercator, y down).
@@ -67,15 +102,23 @@ function viewRect(map, maplibregl) {
   return [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)];
 }
 
-export function labelPoints(features, view, maplibregl) {
+// options.state (newLabelState()): keep each label where it was while that
+// point is still on the visible part of its polygon and options.margin
+// (world units) inside the screen; options.margin defaults to 0.
+export function labelPoints(features, view, maplibregl, options = {}) {
+  const state = options.state || newLabelState();
+  const margin = options.margin || 0;
+  const inner = [view[0] + margin, view[1] + margin, view[2] - margin, view[3] - margin];
   // Only the deepest tiles: parent tiles shown while children load would
   // count the same area twice.
   let deepest = -1;
   for (const f of features) if (f._z > deepest) deepest = f._z;
+  const loaded = new Set(); // deepest tiles with data
   const byFeature = new Map();
   for (const f of features) {
     if (f._z !== deepest || !f._vectorTileFeature) continue;
-    const key = f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties);
+    loaded.add(`${f._x}/${f._y}`);
+    const key = String(f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties));
     const tile = f._vectorTileFeature;
     const scale = 1 / (tile.extent * 2 ** f._z);
     const ox = f._x / 2 ** f._z, oy = f._y / 2 ** f._z;
@@ -93,14 +136,32 @@ export function labelPoints(features, view, maplibregl) {
     if (!byFeature.has(key)) byFeature.set(key, { properties: { ...f.properties }, rings: [] });
     byFeature.get(key).rings.push(...rings);
   }
+  // A kept point on a tile still loading cannot be checked: keep it.
+  const unchecked = (point) => !loaded.has(
+    `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
+  const points = new Map();
+  for (const [key, { properties, rings }] of byFeature) {
+    const old = state.points.get(key);
+    const keep = old && within(inner, old.point) && (unchecked(old.point) || inside(rings, old.point));
+    const point = keep ? old.point : labelPoint(rings);
+    if (point) points.set(key, { point, properties });
+  }
+  for (const [key, old] of state.points) {
+    if (!points.has(key) && within(inner, old.point) && unchecked(old.point)) points.set(key, old);
+  }
+  state.points = points;
   const out = [];
-  for (const { properties, rings } of byFeature.values()) {
-    const point = labelPoint(rings);
-    if (!point) continue;
+  for (const [key, { point, properties }] of points) {
+    if (!state.ids.has(key)) state.ids.set(key, state.nextId++);
     const lngLat = new maplibregl.MercatorCoordinate(point[0], point[1], 0).toLngLat();
-    out.push({ type: "Feature", properties, geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
+    out.push({ type: "Feature", id: state.ids.get(key), properties,
+               geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out };
+}
+
+function within([x0, y0, x1, y1], [x, y]) {
+  return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
 function intersect(a, b) {
@@ -178,4 +239,79 @@ function inside(rings, [x, y]) {  // even-odd over every ring
     }
   }
   return result;
+}
+
+// "Overlap if required": each label layer marked q2vt:overlap avoids other
+// labels; a copy below it (overlap allowed, never blocking) draws the labels
+// MapLibre could not place, found after each placement with
+// queryRenderedFeatures (placed symbols only) and marked in feature state.
+export function enableOverlapFallback(map) {
+  const primaries = [];
+  for (const layer of map.getStyle().layers) {
+    if (layer.type !== "symbol" || !(layer.metadata && layer.metadata["q2vt:overlap"] === "if-required")) continue;
+    const copy = JSON.parse(JSON.stringify(layer));
+    copy.id = layer.id + OVERLAP_SUFFIX;
+    copy.layout = { ...copy.layout, "text-allow-overlap": true, "icon-allow-overlap": true,
+                    "text-ignore-placement": true, "icon-ignore-placement": true };
+    const anchors = copy.layout["text-variable-anchor"];
+    if (anchors) {  // the first (preferred) position
+      copy.layout["text-anchor"] = anchors[0];
+      delete copy.layout["text-variable-anchor"];
+      delete copy.layout["text-radial-offset"];
+    }
+    copy.paint = { ...copy.paint };
+    for (const name of ["text-opacity", "icon-opacity"]) {
+      copy.paint[name] = unlessPlaced(copy.paint[name] === undefined ? 1 : copy.paint[name]);
+    }
+    map.addLayer(copy, layer.id);
+    primaries.push(layer.id);
+  }
+  let marked = new Map();
+  const sync = () => {
+    const layers = primaries.filter((id) => map.getLayer(id));
+    const placed = new Map();
+    if (layers.length) {
+      for (const f of map.queryRenderedFeatures({ layers })) {
+        if (f.id === undefined || f.id === null) continue;
+        const target = f.sourceLayer ? { source: f.source, sourceLayer: f.sourceLayer, id: f.id }
+          : { source: f.source, id: f.id };
+        placed.set(`${f.source}\u0000${f.sourceLayer || ""}\u0000${f.id}`, target);
+      }
+    }
+    for (const [key, target] of marked) {
+      if (!placed.has(key)) map.setFeatureState(target, { q2vtPlaced: false });
+    }
+    for (const [key, target] of placed) {
+      if (!marked.has(key)) map.setFeatureState(target, { q2vtPlaced: true });
+    }
+    marked = placed;
+  };
+  if (primaries.length) {
+    let last = 0, pending = null;
+    const throttled = () => {
+      if (pending) return;
+      const wait = Math.max(0, 150 - (Date.now() - last));
+      pending = setTimeout(() => { pending = null; last = Date.now(); sync(); }, wait);
+    };
+    map.on("render", throttled);
+    map.on("idle", sync);
+  }
+  return { sync, layers: primaries };
+}
+
+// opacity -> 0 where the label was placed by its primary layer; zoom curves
+// keep ["zoom"] at the top (a MapLibre rule).
+function unlessPlaced(value) {
+  const placed = ["boolean", ["feature-state", "q2vtPlaced"], false];
+  const wrap = (v) => ["case", placed, 0, v];
+  if (Array.isArray(value) && (value[0] === "interpolate" || value[0] === "step")) {
+    const input = value[0] === "interpolate" ? 2 : 1;
+    if (Array.isArray(value[input]) && value[input][0] === "zoom") {
+      const out = value.slice();
+      for (let i = input + 2; i < out.length; i += 2) out[i] = wrap(out[i]);  // the outputs
+      return out;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;  // legacy function: leave
+  return wrap(value);
 }
