@@ -155,6 +155,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     bundle.groups, bundle.layers = model["groups"], model["layers"]
     bundle.rules, bundle.components = model["rules"], model["components"]
     _filter_fields(bundle.layers, profile, records.filter_domains)
+    themes = qgis_model.theme_presets(project, profile, model, bundle.warnings)
     bundle.feature_count = dict(records.counts)
     extra_files = {path: os.path.join(legend_dir, os.path.basename(path))
                    for path in set(swatches.values())}
@@ -203,12 +204,20 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     if dropped:  # raster layers that draw nothing in the extent
         bundle.layers = [layer for layer in bundle.layers if layer["id"] not in dropped]
         bundle.components = [c for c in bundle.components if c["layerId"] not in dropped]
+        for preset in themes["presets"]:
+            preset["layers"] = {k: v for k, v in preset["layers"].items() if k not in dropped}
+
+    if profile.basemap.kind == "protomaps":
+        stage("BASEMAP")
+        bundle.basemap = _prepare_basemap(profile, extent_3857, work_dir, progress)
+        progress.check()
 
     stage("BUILD_RELEASE")
     release = build_release(
         bundle, profile, publication_dir, transport="pmtiles", activate=activate,
         feedback=progress, canaries=canaries, extra_files=extra_files, extra_builders=[indexes],
-        extra_validators=[disclosure])
+        extra_validators=[disclosure], manifest_extra={
+            "themes": themes, "ui": {"accent": profile.accent_color}})
     result = LocalResult(ReleaseState.LOCAL_READY, release, publication_dir, exporter.output_path,
                          records.path, dict(records.counts), list(release.warnings))
     if profile.output.archive == "both":
@@ -270,3 +279,35 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
                     "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
                     "descriptor": descriptor, "tileSize": 256})
     return out
+
+
+def _prepare_basemap(profile, extent_3857, work_dir, progress) -> dict:
+    """Extract the basemap area, generate its glyphs, prepare its flavors."""
+    from . import basemap  # pylint: disable=import-outside-toplevel
+    config = profile.basemap
+    folder = os.path.join(work_dir, "basemap")
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    os.makedirs(folder)
+    docs = {flavor: basemap.load_flavor(flavor, profile.locale) for flavor in config.flavors}
+    keys = set()
+    for doc in docs.values():
+        keys |= basemap.text_keys(doc["layers"])
+    extent = (extent_3857.xMinimum(), extent_3857.yMinimum(), extent_3857.xMaximum(), extent_3857.yMaximum()) \
+        if hasattr(extent_3857, "xMinimum") else tuple(extent_3857)
+    detail, overview = basemap.areas(extent, config.padding, config.overview_km)
+    progress.info("Basemap: reading " + (config.source or "the latest Protomaps build") + " ...")
+    reader = basemap.open_source(config.source)
+    try:
+        result = basemap.extract(reader, os.path.join(folder, "basemap.pmtiles"), detail, overview,
+                                 config.max_zoom, config.overview_zoom, keys, progress.sub(0.0, 0.85))
+    finally:
+        reader.close()
+    progress.info(f"Basemap: {result.descriptor.addressed_tiles} tiles, "
+                  f"{result.descriptor.size_bytes / 1e6:.1f} MB ({result.requests} requests)")
+    fonts = basemap.generate_glyphs(result.characters, os.path.join(folder, "glyphs"))
+    flavors = {flavor: {"layers": basemap.prepare_flavor(doc, basemap.font_map()), "colors": doc["colors"]}
+               for flavor, doc in docs.items()}
+    return {"archive": result.descriptor.path, "descriptor": result.descriptor,
+            "glyphs_dir": os.path.join(folder, "glyphs"), "flavors": flavors,
+            "initial": config.initial, "fonts": fonts}

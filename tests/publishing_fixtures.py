@@ -243,3 +243,44 @@ def fixture_bundle(folder, max_zoom=4):
                         source_name="q2vt_tiles", sprite_dir=sprite, glyphs_dir=glyphs,
                         bounds_wgs84=(-180.0, -85.0, 180.0, 85.0),
                         view={"center": [0.0, 0.0], "zoom": 1, "minZoom": 0, "maxZoom": max_zoom})
+
+
+def protomaps_tile(z: int, x: int, y: int) -> bytes:
+    """A Protomaps-schema tile: earth everywhere, a lake, a named road,
+    buildings and a named place (Hungarian names with accents)."""
+    square = [[0, 0], [4096, 0], [4096, 4096], [0, 4096], [0, 0]]
+    lake = [[800, 800], [1800, 800], [1800, 1800], [800, 1800], [800, 800]]
+    layers = {
+        "earth": [("polygon", [square], {"kind": "earth"}, None)],
+        "water": [("polygon", [lake], {"kind": "water", "name": "Ő-tó", "min_zoom": 0}, None)],
+        "roads": [("line", [[0, 2048], [4096, 2100]],
+                   {"kind": "major_road", "name": "Fő utca", "name:hu": "Fő utca", "ref": "25",
+                    "min_zoom": 0}, None)],
+    }
+    if z >= 5:
+        layers["places"] = [("point", [2048, 3000],
+                             {"kind": "locality", "name": "Arló", "name:hu": "Arló",
+                              "population_rank": 9, "min_zoom": 5}, None)]
+    if z >= 13:
+        layers["buildings"] = [("polygon", [[[2500, 2500], [2700, 2500], [2700, 2700], [2500, 2700],
+                                             [2500, 2500]]], {"kind": "building", "height": 9}, None)]
+    return encode_tile(layers)
+
+
+def protomaps_planet(path: str, bbox=(18.9, 47.4, 19.2, 47.6), max_zoom: int = 14) -> str:
+    """A small "planet" PMTiles in the Protomaps schema: every tile of zooms
+    0..3, then the tiles of ``bbox`` (lon/lat) up to ``max_zoom``."""
+    from publishing.basemap import tiles_in  # pylint: disable=import-outside-toplevel
+    from publishing.pmtiles_builder import TileSink  # pylint: disable=import-outside-toplevel
+    from publishing.vendor.pmtiles.tile import Compression, TileType  # pylint: disable=import-outside-toplevel
+    names = ("earth", "water", "roads", "places", "buildings", "landuse", "pois", "boundaries",
+             "landcover", "transit", "physical_line", "physical_point")
+    meta = {"vector_layers": [{"id": n, "fields": {}} for n in names],
+            "attribution": "© OpenStreetMap", "name": "fixture planet"}
+    with TileSink(path) as sink:
+        for z in range(0, max_zoom + 1):
+            cells = [(x, y) for x in range(1 << z) for y in range(1 << z)] if z <= 3 else tiles_in(bbox, z)
+            for x, y in cells:
+                sink.add(z, x, y, gzip.compress(protomaps_tile(z, x, y), mtime=0))
+        sink.write(TileType.MVT, Compression.GZIP, meta, validate_kind="mvt")
+    return path

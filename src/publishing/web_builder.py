@@ -42,7 +42,7 @@ from .models import ExportBundle, PublicationProfile
 from .pmtiles_builder import ArchiveDescriptor, PmtilesOptions, build_pmtiles
 from .progress import Progress
 from .validation import (assert_vector_only, check_public_file, required_source_layers,
-                         safe_relative_path, scan_bundle, validate_pmtiles)
+                         safe_relative_path, scan_bundle, validate_pmtiles, vector_only_violations)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESOURCES = os.path.join(ROOT, "resources")
@@ -301,6 +301,25 @@ def validate_release_dir(staging: str, style: dict, archive_layers: Optional[Ite
         if href not in files:
             raise PublishingError("Q2VT_PUB_BUNDLE_INVALID", f"{href} missing")
         validate_pmtiles(os.path.join(staging, *href.split("/")), sample=pmtiles_sample, kind="image")
+    for rel in files:  # vector basemap flavors (added under the map by the viewer)
+        if rel.startswith("basemaps/") and rel.endswith(".json"):
+            with open(os.path.join(staging, *rel.split("/")), encoding="utf-8") as handle:
+                flavor = json.load(handle)
+            from .basemap import SOURCE_ID  # pylint: disable=import-outside-toplevel
+            flavor_style = {"sources": {SOURCE_ID: {"type": "vector"}}, "layers": flavor.get("layers", [])}
+            problems = vector_only_violations(flavor_style)
+            problems += [f"layer '{l.get('id')}' uses source {l.get('source')}"
+                         for l in flavor_style["layers"] if l.get("source") not in (None, SOURCE_ID)]
+            if problems:
+                raise PublishingError("Q2VT_PUB_RASTER_SOURCE", f"{rel}: " + "; ".join(problems[:3]))
+            style_fonts = {}
+            for layer in flavor_style["layers"]:
+                _collect_fonts((layer.get("layout") or {}).get("text-font"), style_fonts)
+            for font in style_fonts:
+                if not any(r.startswith(f"glyphs/{font}/") for r in files):
+                    raise PublishingError("Q2VT_PUB_BUNDLE_INVALID", f"{rel}: no glyphs for font '{font}'.")
+    if "data/basemap.pmtiles" in files:
+        validate_pmtiles(os.path.join(staging, "data", "basemap.pmtiles"), sample=pmtiles_sample)
     if archive_layers is not None:
         missing = set(required_source_layers(style)) - set(archive_layers)
         if missing:  # datasets with no feature in the extent: nothing to draw
@@ -443,6 +462,7 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "Packaging changed the style: " + "; ".join(problems[:5]))
     raster_sources = _add_raster_layers(style, bundle, staging, progress)
+    basemap_manifest = _add_basemap(style, bundle, profile, staging)
     write_json_atomic(os.path.join(staging, "style.json"), style)
     # 3. Styling assets.
     if bundle.sprite_dir and os.path.isdir(bundle.sprite_dir) and "sprite" in style:
@@ -472,6 +492,7 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     # 6. Manifest + public diagnostics.
     manifest = build_manifest(bundle, profile, release_id, source, manifest_extra)
     manifest["sources"].extend(raster_sources)
+    manifest["basemap"] = basemap_manifest
     manifest["logo"] = manifest_logo
     for builder in extra_builders:
         builder(staging, manifest)
@@ -529,6 +550,46 @@ def _add_raster_layers(style: dict, bundle: ExportBundle, staging: str, progress
                         "sha256": d.sha256, "sizeBytes": d.size_bytes, "layerId": raster["layerId"]})
         progress.check()
     return sources
+
+
+def _collect_fonts(value, out: dict) -> None:
+    """Font stack names in a ``text-font`` value (literal or expression)."""
+    if isinstance(value, list) and value and all(isinstance(v, str) for v in value) \
+            and value[0] not in ("literal", "case", "match", "step", "coalesce", "get", "format"):
+        out[",".join(value)] = True
+    elif isinstance(value, list):
+        for item in value:
+            _collect_fonts(item, out)
+
+
+def _add_basemap(style: dict, bundle: ExportBundle, profile: PublicationProfile, staging: str):
+    """The vector basemap: its archive, one style file per flavor and its
+    glyphs. The viewer adds the chosen flavor under the map at runtime."""
+    info = bundle.basemap
+    if not info:
+        return None
+    from .basemap import ATTRIBUTION, FLAVOR_TITLES, SOURCE_ID  # pylint: disable=import-outside-toplevel
+    d = info["descriptor"]
+    _copy(info["archive"], os.path.join(staging, "data", "basemap.pmtiles"))
+    if info.get("glyphs_dir") and os.path.isdir(info["glyphs_dir"]):
+        _copy_tree(info["glyphs_dir"], os.path.join(staging, "glyphs"))
+    style.setdefault("glyphs", "glyphs/{fontstack}/{range}.pbf")
+    titles = FLAVOR_TITLES.get(profile.locale, FLAVOR_TITLES["en"])
+    os.makedirs(os.path.join(staging, "basemaps"), exist_ok=True)
+    flavors = []
+    for flavor_id, flavor in info["flavors"].items():
+        rel = f"basemaps/{flavor_id}.json"
+        write_json_atomic(os.path.join(staging, *rel.split("/")),
+                          {"schemaVersion": 1, "id": flavor_id, "layers": flavor["layers"]})
+        flavors.append({"id": flavor_id, "title": titles.get(flavor_id, flavor_id), "style": rel,
+                        "colors": flavor.get("colors", {})})
+    return {
+        "source": {"id": SOURCE_ID, "kind": "pmtiles", "tileType": "mvt", "href": "data/basemap.pmtiles",
+                   "minTileZoom": d.min_zoom, "maxTileZoom": d.max_zoom,
+                   "bounds": [round(v, 7) for v in d.bounds], "sha256": d.sha256, "sizeBytes": d.size_bytes},
+        "flavors": flavors, "initial": info.get("initial", flavors[0]["id"] if flavors else "none"),
+        "attribution": ATTRIBUTION,
+    }
 
 
 def _describe_pmtiles(path: str) -> ArchiveDescriptor:

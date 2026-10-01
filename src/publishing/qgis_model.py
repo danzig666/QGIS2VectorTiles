@@ -319,6 +319,56 @@ def _raster_entry(layer, config, lid: str, path, paths, components: List[dict]) 
     return entry
 
 
+# --- map themes ----------------------------------------------------------------------------
+
+def theme_id(name: str) -> str:
+    import hashlib  # pylint: disable=import-outside-toplevel
+    return "th-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+
+
+def theme_presets(project: QgsProject, profile: PublicationProfile, model: dict,
+                  warnings: Optional[List[str]] = None) -> dict:
+    """The published QGIS map themes as viewer presets: which published
+    layers are visible (QGIS's effective visibility, groups included) and
+    which legend items (rules) are checked. Layers that cannot be switched
+    off stay on. Per-theme styles are not exported (the current style is)."""
+    collection = project.mapThemeCollection()
+    layer_ids = {layer["id"]: layer for layer in model["layers"]}
+    rules_by_layer: Dict[str, List[str]] = {}
+    for rule in model["rules"]:
+        rules_by_layer.setdefault(rule["layerId"], []).append(rule["id"])
+    presets = []
+    for name in profile.themes.names:
+        if not collection.hasMapTheme(name):
+            if warnings is not None:
+                warnings.append(f'Map theme "{name}" no longer exists; it is not published.')
+            continue
+        visible_ids = set(collection.mapThemeVisibleLayerIds(name))
+        layers = {lid: (not entry.get("toggleable", True)) or False for lid, entry in layer_ids.items()}
+        rules: Dict[str, bool] = {}
+        for record in collection.mapThemeState(name).layerRecords():
+            layer = record.layer()
+            if layer is None:
+                continue
+            lid = layer_logical_id(layer.id())
+            if lid not in layer_ids:
+                continue
+            if layer.id() in visible_ids:
+                layers[lid] = True
+            if not record.usingCurrentStyle and warnings is not None:
+                warnings.append(f'Map theme "{name}": layer "{layer.name()}" uses another style in the '
+                                "theme; the web map uses its current style.")
+            if record.usingLegendItems:
+                checked = {rule_logical_id(layer.id(), key) for key in record.checkedLegendItems}
+                for rid in rules_by_layer.get(lid, []):
+                    rules[rid] = rid in checked
+        presets.append({"id": theme_id(name), "title": name, "layers": layers,
+                        "groups": {group["id"]: True for group in model["groups"]}, "rules": rules})
+    initial = theme_id(profile.themes.initial) if profile.themes.initial and \
+        any(p["title"] == profile.themes.initial for p in presets) else None
+    return {"presets": presets, "initial": initial}
+
+
 # --- membership and records ------------------------------------------------------------
 
 def membership_expression(rules, layer_id: str) -> str:
