@@ -1,3 +1,13 @@
+# ⚠️ NOT FOR GENERAL USE
+
+**This is a special edition for Hungarian zoning plans (HÉSZ, `szab_ov` layer conventions), made for one office's own projects. If you are not sure you need it, you don't.**
+
+## 👉 [Download the generic edition instead (QGIS2VectorTiles 4.4.2)](https://github.com/danzig666/QGIS2VectorTiles/releases/tag/v4.4.2)
+
+or always the newest generic version: [latest release](https://github.com/danzig666/QGIS2VectorTiles/releases/latest).
+
+---
+
 **QGIS2VectorTiles 4.4.1 (fork, HU HÉSZ)**
 
 This is a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles) by Jossef Kanter, not an official release of the original plugin.

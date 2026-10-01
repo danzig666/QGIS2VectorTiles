@@ -1,5 +1,8 @@
 # Magyar HÉSZ változat (`hu-hesz` ág)
 
+> **Not for general use.** This edition is for Hungarian zoning plans only; everyone else should
+> use the generic plugin from the `main` branch / the "Latest" release.
+
 Ez a változat a generikus pluginból (`main`) és egy **előbeállításból** (preset) áll, amely a
 magyar településrendezési tervek szokásos réteg- és mezőneveiből kitölti a telekinformáció
 beállításait. A változat csak új fájlokat tartalmaz (lásd `docs/BRANCHES.md`), ezért a
