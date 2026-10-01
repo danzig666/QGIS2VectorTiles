@@ -897,3 +897,111 @@ def test_zero_length_dash_is_merged_into_the_gap(plugin, tmp_path):
     assert dashed and dashed[0][1].recipe.param("pattern") == (6.0, 4.0, 6.0, 24.0)
     ours = ink_mask(render([o for o, _ in dashed], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+def test_marker_line_offset_wider_than_a_polygon_is_exported(plugin, tmp_path):
+    """Crayon: an inward outline offset wider than a small polygon collapses
+    its ring. QGIS draws no markers there; the export failed the dataset
+    ("Cannot convert to geometry") and lost the markers of every polygon."""
+    layer = _layer("Polygon", ["POLYGON((-100 -100, 60 -100, 60 60, -100 60, -100 -100))",
+                               "POLYGON((80 80, 90 80, 90 90, 80 90, 80 80))"],
+                   str(tmp_path / "co.gpkg"))
+    ml = QgsMarkerLineSymbolLayer(True, 20)
+    ml.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    ml.setOffset(12)
+    ml.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    ml.setSubSymbol(_marker(Qgis.MarkerShape.Triangle, 8))
+    symbol = QgsFillSymbol()
+    symbol.changeSymbolLayer(0, ml)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_RULE_EXPORT_FAILED")
+    assert any(r.recipe is not None and r.recipe.kind == "marker_points" for r in rules)
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.05
+
+
+@pytest.mark.parametrize("dashed", [False, True])
+def test_line_offset_wider_than_a_polygon_is_exported(plugin, tmp_path, dashed):
+    """Outline offsets (plain and map-unit dashes) that collapse a small
+    polygon's ring draw nothing there and keep the other polygons."""
+    layer = _layer("Polygon", ["POLYGON((-100 -100, 60 -100, 60 60, -100 60, -100 -100))",
+                               "POLYGON((80 80, 90 80, 90 90, 80 90, 80 80))"],
+                   str(tmp_path / "lo.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 3)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setOffset(12)
+    line.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    if dashed:
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector([10, 6])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    symbol = QgsFillSymbol()
+    symbol.changeSymbolLayer(0, line)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_RULE_EXPORT_FAILED")
+    lines = [o for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert len(lines) == 1
+    for output in lines:  # the styler draws the outline as lines
+        output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol(
+            [rules[-1].rule.symbol().symbolLayer(0).clone()])))
+    assert mask_difference(reference, ink_mask(render(lines, EXTENT))) < 0.05
+
+
+@pytest.mark.parametrize("repeat", [0, 30])
+def test_labels_of_self_crossing_and_multipart_lines_are_kept(plugin, tmp_path, repeat):
+    """Méretvonal felirat on real lines: a label not drawn per part went
+    through dissolve + keepnbiggestparts, which nodes a self-crossing line into
+    pieces and drops every multi-part feature, with its label. QGIS labels
+    each feature once, on its longest part."""
+    from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+    layer = _layer("MultiLineString", [
+        "MULTILINESTRING((-100 -100, 0 0, -100 0, 0 -100))",              # crosses itself
+        "MULTILINESTRING((20 20, 30 20),(20 40, 110 40, 110 100))",        # longest part 2nd
+        "MULTILINESTRING((-100 50, -40 50))"], str(tmp_path / "ml.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "black"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "id"
+    settings.placement = Qgis.LabelPlacement.Line
+    settings.repeatDistance = repeat
+    settings.labelPerPart = False
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity.diagnostics import DiagnosticCollector
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(0, 22, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    (tmp_path / "utils").mkdir()
+    outputs, rules = RulesExporter(rules, EXTENT, 0, 22, str(tmp_path / "utils"), 0,
+                                   QgsProcessingFeedback(), diagnostics=diags).export()
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+    by_name = {o.name(): o for o in outputs}
+    label = [by_name[r.output_dataset] for r in rules if r.get_attr("t") == 1][0]
+    geometries = {int(f["q2vt_orig_id"]): f.geometry() for f in label.getFeatures()}
+    assert len(geometries) == 3 and label.featureCount() == 3
+    if repeat == 0:  # drawn once, at the middle of the longest part
+        point = geometries[2].asPoint()
+        assert (round(point.x()), round(point.y())) == (95, 40)
+    else:  # along the longest part, the crossing line kept whole
+        assert geometries[2].length() == pytest.approx(150, abs=0.5)
+        assert geometries[1].constGet().numPoints() == 4
+
+
+def test_replaced_symbol_layer_leaves_no_dangling_wrapper(plugin):
+    """changeSymbolLayer() deleted a layer the flattener still referenced; SIP
+    then returned that stale wrapper for a new object at the same address
+    (QGIS 3.44 / Windows: "'QgsFillSymbol' object has no attribute
+    'sizeUnit'"). The replaced layer now belongs to Python and stays valid
+    as long as it is referenced."""
+    from qgis.PyQt import sip
+    from q2vt_plugin.src.core.materializer import replace_symbol_layer
+    symbol = QgsLineSymbol([QgsHashedLineSymbolLayer()])
+    held = symbol.symbolLayer(0)
+    replace_symbol_layer(symbol, QgsMarkerLineSymbolLayer())
+    assert symbol.symbolLayer(0).layerType() == "MarkerLine"
+    assert sip.ispyowned(held) and not sip.isdeleted(held)
+    assert held.layerType() == "HashLine"

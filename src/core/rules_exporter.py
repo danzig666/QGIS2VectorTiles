@@ -840,7 +840,19 @@ class RulesExporter:
             symbol_layer = grp.flat_rules[0].rule.symbol().symbolLayers()[0]
             if symbol_layer.layerType() == 'CentroidFill' and not symbol_layer.pointOnAllParts():
                 keep_biggest_part = True
-        if keep_biggest_part:
+        if keep_biggest_part and grp.source_geometry != 2:
+            # Lines and points: regroup the parts of each feature (split in the
+            # base layer) without dissolving. Dissolve nodes a self-crossing
+            # line into pieces and keepnbiggestparts (polygons only) drops
+            # every multi-part line or point, with its label. A line label
+            # then sits on the longest part (_LONGEST_PART), as in QGIS.
+            transbase = self._run_alg_safe(
+                "collect", "native", INPUT=refactored, FIELD=[f"{_FIELD_PREFIX}_orig_id"])
+            if grp.source_geometry == 1:  # QGIS labels the longest part only
+                transbase = self._run_alg_safe(
+                    "geometrybyexpression", "native", INPUT=transbase, OUTPUT_GEOMETRY=1,
+                    EXPRESSION=self._LONGEST_PART)
+        elif keep_biggest_part:
             dissolved = self._run_alg_safe(
                 "dissolve", "native",
                 INPUT=refactored,
@@ -1004,6 +1016,10 @@ class RulesExporter:
             lines = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=source, OUTPUT_GEOMETRY=1,
                 EXPRESSION=mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+            # An inward offset wider than the polygon collapses the ring:
+            # QGIS draws no markers there.
+            lines = self._run_alg_safe("removenullgeometries", "native", INPUT=lines,
+                                       REMOVE_EMPTY=True)
             lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
         elif source_geometry == 2:  # marker line on a polygon outline
             # One line per ring: QGIS starts every ring afresh.
@@ -1013,6 +1029,8 @@ class RulesExporter:
             lines = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
                 EXPRESSION=mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}"))
+            lines = self._run_alg_safe("removenullgeometries", "native", INPUT=lines,
+                                       REMOVE_EMPTY=True)
         if recipe.param("arrow_curved") is not None:
             # Arrow heads sit at the ends of every (curved / per-segment) arrow.
             lines = self._run_alg_safe(
@@ -1273,10 +1291,15 @@ class RulesExporter:
         if not transformation:
             return None
         extent_wkt = self.extent.asWktPolygon()
+        # Geometries inside the extent are kept as they are: intersection()
+        # nodes a self-crossing line into pieces (a label then sits on a
+        # fragment) and can move a ring's start vertex.
         clipped = (
-            f"with_variable('clip', intersection({transformation[1]}, "
-            f"geom_from_wkt('{extent_wkt}')), "
-            f"if(not is_empty_or_null(@clip), @clip, NULL))"
+            f"with_variable('q2vt_t', {transformation[1]}, "
+            f"with_variable('q2vt_ext', geom_from_wkt('{extent_wkt}'), "
+            f"with_variable('clip', if(within(@q2vt_t, @q2vt_ext), @q2vt_t, "
+            f"intersection(@q2vt_t, @q2vt_ext)), "
+            f"if(not is_empty_or_null(@clip), @clip, NULL))))"
         )
         transformation[1] = clipped
         return tuple(transformation)

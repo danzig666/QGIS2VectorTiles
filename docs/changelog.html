@@ -449,9 +449,30 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 
   <div class="cl-entry featured latest">
     <div class="cl-header">
-      <div class="cl-version">v4.1.2</div>
+      <div class="cl-version">v4.1.3</div>
       <div class="cl-date">01 Oct 2026</div>
       <div class="cl-badge">Latest</div>
+    </div>
+    <div class="cl-body">
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Fixed the export failing on <strong>QGIS 3.44 / Windows</strong> (<code>'QgsFillSymbol' object has no attribute 'sizeUnit'</code>): replaced symbols are released before QGIS deletes them, which could also close QGIS.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Labels of <strong>self-crossing and multi-part lines</strong> are no longer dropped: labelled once, on the longest part, as in QGIS. Geometries inside the extent are no longer cut by the extent clip.</span>
+      </div>
+      <div class="cl-item">
+        <div class="cl-item-dot"></div>
+        <span>Marker lines offset beyond a small polygon no longer fail the layer.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="cl-entry">
+    <div class="cl-header">
+      <div class="cl-version">v4.1.2</div>
+      <div class="cl-date">01 Oct 2026</div>
     </div>
     <div class="cl-body">
       <div class="cl-item">

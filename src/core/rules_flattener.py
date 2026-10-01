@@ -641,13 +641,19 @@ class RulesFlattener:
             return [flat_rule]
         flattened = self._flatten_generators(symbol)
         if flattened is not None:
+            del symbol  # deleted by setSymbol: no stale wrapper (see below)
             flat_rule.rule.setSymbol(flattened)
             symbol = flat_rule.rule.symbol()
 
         layer_count = symbol.symbolLayerCount()
         split_rules = []
 
+        clone_symbol = clone_symbol_layer = rule_clone = None
         for layer_idx in reversed(range(layer_count)):
+            # Materializing can replace the previous clone's symbol layer
+            # (changeSymbolLayer deletes it): drop those wrappers before the
+            # next clone allocates (see the outline note below).
+            clone_symbol = clone_symbol_layer = None
             symbol_layer = symbol.symbolLayer(layer_idx)
             if not symbol_layer.enabled():
                 continue
@@ -692,8 +698,14 @@ class RulesFlattener:
                 if clone_symbol_layer.strokeStyle() != Qt.PenStyle.NoPen:
                     outline_rule = rule_clone.derive()
                     outline_rule.set_attr("c", 1)
-                    fill_symbol = outline_rule.rule.symbol()
-                    outline_symbol = self._convert_fill_outline_to_line_symbol(fill_symbol)
+                    # No Python reference to the fill symbol may outlive
+                    # setSymbol() below, which deletes it: SIP would hand
+                    # that stale QgsFillSymbol wrapper back for the next
+                    # object QGIS allocates at the same address (seen on
+                    # Windows: "'QgsFillSymbol' object has no attribute
+                    # 'sizeUnit'" for a point pattern's marker).
+                    outline_symbol = self._convert_fill_outline_to_line_symbol(
+                        outline_rule.rule.symbol())
                     if outline_symbol:
                         outline_rule.order = order + (1,)  # stroke above its fill
                         outline_rule.rule.setSymbol(outline_symbol)
@@ -716,7 +728,9 @@ class RulesFlattener:
         is one segment's length)."""
         sub_symbol = generator.subSymbol()
         rules = []
+        clone_layer = None
         for inner_idx in reversed(range(sub_symbol.symbolLayerCount())):
+            clone_layer = None  # may have been replaced (deleted) by materialize()
             inner = sub_symbol.symbolLayer(inner_idx)
             if not inner.enabled():
                 continue

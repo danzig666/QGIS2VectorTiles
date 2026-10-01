@@ -46,6 +46,19 @@ from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.units import physical_factor, normalize_unit, MM
 
 
+def replace_symbol_layer(symbol, layer, index: int = 0) -> None:
+    """``symbol.changeSymbolLayer(index, layer)`` without a dangling wrapper.
+
+    changeSymbolLayer() deletes the old layer in C++ while Python may still
+    hold its wrapper (the flattener's clone layer). SIP then hands that
+    stale wrapper, of the old class, back for the next object allocated at
+    the same address. Taking the layer out gives it to Python instead: it
+    is deleted with its last wrapper."""
+    old = symbol.takeSymbolLayer(index)
+    symbol.insertSymbolLayer(index, layer)
+    del old
+
+
 def _flag_names(flags) -> set:
     try:
         value = int(flags)
@@ -148,7 +161,7 @@ class SymbolMaterializer:
                 return outline
         if kind == "HashLine":
             layer = self._hash_as_marker_line(layer, flat_rule)
-            flat_rule.rule.symbol().changeSymbolLayer(0, layer)
+            replace_symbol_layer(flat_rule.rule.symbol(), layer)
             kind = "MarkerLine"
         if kind == "MarkerLine":
             return self._marker_line(flat_rule, layer)
@@ -343,7 +356,7 @@ class SymbolMaterializer:
         rule.set_attr("m", 1)
         if layer.layerType() == "HashLine":
             converted = self._hash_as_marker_line(clone, rule)
-            rule.rule.symbol().changeSymbolLayer(0, converted)
+            replace_symbol_layer(rule.rule.symbol(), converted)
         return [rule]
 
     def _offset_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
@@ -1123,7 +1136,7 @@ class SymbolMaterializer:
             native = flat_rule.derive()
             interval_layer = layer.clone()
             interval_layer.setPlacements(Qgis.MarkerLinePlacement.Interval)
-            native.rule.symbol().changeSymbolLayer(0, interval_layer)
+            replace_symbol_layer(native.rule.symbol(), interval_layer)
             if exact_interval:
                 recipe = mat.interval_points(layer.interval(), float(layer.offsetAlongLine()),
                                              line_offset, crs)
