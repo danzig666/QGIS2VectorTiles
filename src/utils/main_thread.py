@@ -20,6 +20,10 @@ def on_main_thread() -> bool:
     return app is not None and QThread.currentThread() == app.thread()
 
 
+def app_running() -> bool:
+    return QCoreApplication.instance() is not None
+
+
 def keep_responsive() -> None:
     """Process pending GUI events (main thread only, at most every 0.1 s)."""
     global _last  # pylint: disable=global-statement

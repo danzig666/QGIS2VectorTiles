@@ -80,3 +80,18 @@ def tile_max_zoom(maximum_scale: float) -> int:
     if interval.max_zoom is None:
         return MAX_TILE_ZOOM
     return max(0, min(MAX_TILE_ZOOM, int(math.ceil(interval.max_zoom - 1e-9)) - 1))
+
+
+def fit_zoom(width_m: float, height_m: float, min_zoom: float, max_zoom: float,
+             viewport=(1280, 800), padding: float = 0.9) -> float:
+    """MapLibre zoom (512 px tiles) at which a Web Mercator extent of
+    ``width_m`` x ``height_m`` fills a typical browser window, clamped to the
+    exported zooms. Used for the viewers' start view: opening at the minimum
+    zoom shows the whole earth when the export starts at zoom 0."""
+    earth = 40075016.68557849
+    fits = []
+    for size_m, pixels in ((width_m, viewport[0]), (height_m, viewport[1])):
+        if size_m > 0:
+            fits.append(math.log2(pixels * padding * earth / (512.0 * size_m)))
+    zoom = min(fits) if fits else float(min_zoom)
+    return round(max(float(min_zoom), min(float(max_zoom), zoom)), 2)

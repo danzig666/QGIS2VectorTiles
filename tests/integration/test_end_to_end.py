@@ -37,8 +37,9 @@ class Feedback(QgsProcessingFeedback):
 def export(plugin, tmp_path):
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
 
-    def run(layer, min_zoom=10, max_zoom=14, **kwargs):
-        reset_project(layer)
+    def run(layer, min_zoom=10, max_zoom=14, keep_project=False, **kwargs):
+        if not keep_project:
+            reset_project(layer)
         out = tmp_path / "out"
         out.mkdir(exist_ok=True)
         exporter = QGIS2VectorTiles(min_zoom=min_zoom, max_zoom=max_zoom, extent=EXTENT,
@@ -307,3 +308,60 @@ def test_pinned_label_geometry_is_the_data_defined_point(plugin):
     assert expr.evaluate(context).asWkt() == "LineString (5 5, 30 5)"
     expr = QgsExpression(callout_leader_expression("make_point(30, 5)", 2, 1))
     assert expr.evaluate(context).asWkt() == "LineString (10 5, 30 5)"
+
+
+def test_workers_never_touch_the_live_project(export, tmp_path, monkeypatch):
+    """QGIS 3.44 / Windows closed with heap corruption (0xc0000374): every
+    worker called QgsProject.instance().createExpressionContext(), which
+    rebuilds a cached project scope without a lock. Workers now copy scopes
+    taken on the main thread; project variables still reach expressions."""
+    import threading
+    from qgis.core import QgsExpressionContextUtils, QgsProject
+    import q2vt_plugin.src.core.rules_exporter as rules_exporter  # pylint: disable=import-error
+    calls = []
+
+    class GuardedProject:
+        @staticmethod
+        def instance():
+            if threading.current_thread() is not threading.main_thread():
+                calls.append(threading.current_thread().name)
+            return QgsProject.instance()
+    monkeypatch.setattr(rules_exporter, "QgsProject", GuardedProject)
+
+    layer = zoning_layer(path=str(tmp_path / "vars.gpkg"))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "@q2vt_test_prefix || \"zone\""
+    settings.isExpression = True
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    QgsExpressionContextUtils.setProjectVariable(QgsProject.instance(), "q2vt_test_prefix", "Z-")
+    try:
+        exporter, result = export(layer, keep_project=True)
+    finally:
+        QgsExpressionContextUtils.removeProjectVariable(QgsProject.instance(), "q2vt_test_prefix")
+    assert result and not calls, calls
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    labels = [name for name in archive["vector_layers"] if "t01" in name]
+    assert labels
+    texts = set()
+    from osgeo import ogr  # pylint: disable=import-outside-toplevel
+    dataset = ogr.Open(os.path.join(result, "tiles.mbtiles"))
+    for index in range(dataset.GetLayerCount()):
+        mvt_layer = dataset.GetLayer(index)
+        if "t01" not in mvt_layer.GetName():
+            continue
+        for feature in mvt_layer:
+            texts.add(feature.GetField("q2vt_label"))
+    texts.discard(None)  # the square without a zone: 'Z-' || NULL is NULL, as in QGIS
+    assert texts == {"Z-K1", "Z-K2", "Z-Lk"}, texts
+
+
+def test_viewer_starts_on_the_exported_area(export, tmp_path):
+    """With minimum zoom 0 the viewer opened on the whole earth."""
+    layer = zoning_layer(path=str(tmp_path / "view.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    exporter, result = export(layer, min_zoom=0, max_zoom=14)
+    viewer = open(os.path.join(result, "utils", "viewer", "viewer.html"), encoding="utf-8").read()
+    assert "_Q2VT_" not in viewer
+    assert "map.fitBounds([[" in viewer and "maxZoom: 14" in viewer

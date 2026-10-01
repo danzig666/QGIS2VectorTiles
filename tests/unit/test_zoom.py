@@ -52,3 +52,14 @@ def test_inverted_scales_are_empty():
     interval = zm.interval_from_scales(zm.zoom_to_scale(8), zm.zoom_to_scale(6))
     assert interval.is_empty
     assert interval.tile_zooms(0, 22) is None
+
+
+def test_viewer_start_zoom_fits_the_export_extent():
+    """The viewer opened at the minimum zoom: the whole earth for zoom 0."""
+    from fidelity.zoom import fit_zoom
+    # ~20 x 15 km (the reporter's project): about zoom 11.6 in a 1280 x 800 window.
+    zoom = fit_zoom(19723, 15351, 0, 17)
+    assert 11 < zoom < 12.5
+    assert fit_zoom(19723, 15351, 13, 17) == 13      # never below the exported zooms
+    assert fit_zoom(19723, 15351, 0, 10) == 10       # nor above
+    assert fit_zoom(40075016, 40075016, 0, 17) < 1   # the whole world

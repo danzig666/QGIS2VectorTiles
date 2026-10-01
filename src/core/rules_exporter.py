@@ -74,8 +74,10 @@ QgsTask. This is intentional:
 """
 
 import os
+import queue
 import re
 import threading
+import time
 import traceback
 import platform
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -90,6 +92,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsExpressionContext,
     QgsExpression,
+    QgsExpressionContextScope,
     QgsExpressionContextUtils,
     QgsProcessingContext,
     QgsProcessingFeedback,
@@ -222,6 +225,8 @@ class _RuleGroupSnapshot:
     # fields computed on each generated part right after it.
     pre_generator: Optional[str] = None
     generated_fields: List[Tuple[int, str, str]] = field(default_factory=list)
+    # For messages (workers must not read the live layer).
+    layer_name: str = ""
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -267,8 +272,15 @@ class RulesExporter:
         feedback: QgsProcessingFeedback,
         cpu_percent: int = 100,
         diagnostics: Optional[DiagnosticCollector] = None,
+        progress_range: Tuple[float, float] = (0.0, 100.0),
     ):
         self.flattened_rules = flattened_rules
+        # Share of the Processing progress bar this export fills.
+        self._progress_range = progress_range
+        # Messages from worker threads, written by the main thread
+        # (QgsProcessingFeedback keeps a log that is not thread-safe).
+        self._messages: "queue.SimpleQueue[Tuple[str, str]]" = queue.SimpleQueue()
+        self._layer_names: Dict[str, str] = {}
         # QgsRectangle is a value type — safe to share across threads.
         self.extent = extent
         self.include_required_fields_only = include_required_fields_only
@@ -286,6 +298,16 @@ class RulesExporter:
         self._planar = not self._ellipsoid or self._ellipsoid.upper() == "NONE"
         self._distance_unit = project.distanceUnits()
         self._area_unit = project.areaUnits()
+        # Expression scopes and transform context, built here on the main
+        # thread; workers only copy them. QgsProject.createExpressionContext()
+        # rebuilds a cached project scope (reset whenever a layer is added
+        # or removed) without a lock, and the global scope fills static user
+        # name caches: called from parallel workers, both corrupted the heap
+        # (QGIS 3.44 / Windows: 0xc0000374, QGIS closed without a message).
+        self._global_scope = QgsExpressionContextUtils.globalScope()
+        self._project_scope = QgsExpressionContextUtils.projectScope(project)
+        self._transform_context = project.transformContext()
+        self._scope_lock = threading.Lock()
 
         self.processed_layers: List[QgsVectorLayer] = []
 
@@ -445,6 +467,7 @@ class RulesExporter:
                 flat_rules=flat_rules,
                 pre_generator=pre_generator,
                 generated_fields=generated_fields,
+                layer_name=primary.layer.name(),
             ))
 
         return sources, rule_groups
@@ -521,8 +544,12 @@ class RulesExporter:
         place in the pipeline where we touch a database/network provider.
         """
         materialized: Dict[str, str] = {}
-        for src in sources.values():
+        self._layer_names = {src.layer_id: src.name for src in sources.values()}
+        for number, src in enumerate(sources.values(), 1):
             self._check_cancel()
+            self._post("pushInfo", f"   Reading layer {number}/{len(sources)}: {src.name}")
+            self._progress(0.0, 0.15, number - 1, len(sources))
+            main_thread.keep_responsive()
             out_path = join(self.utils_dir, f"materialized_{src.layer_id}.{_TEMP_LAYER_FORMAT}")
 
             if exists(out_path):
@@ -537,7 +564,7 @@ class RulesExporter:
                 # layer is owned by this thread.
                 layer = QgsVectorLayer(src.source_uri, src.name, src.provider)
                 if not layer.isValid():
-                    self.feedback.pushWarning(
+                    self._post("pushWarning",
                         f"Cannot open source '{src.name}' "
                         f"(provider={src.provider}); skipping."
                     )
@@ -600,8 +627,12 @@ class RulesExporter:
                 ): lid
                 for lid, src_path in todo.items()
             }
-            for fut in self._iter_completed(futures):
+            names = {lid: f": {name}" for lid, name in self._layer_names.items()}
+            for done_count, fut in enumerate(self._iter_completed(futures), 1):
                 lid = futures[fut]
+                self._progress(0.15, 0.3, done_count, len(futures))
+                self._post("pushInfo", f"   Prepared layer {done_count}/{len(futures)}"
+                                       f"{names.get(lid, '')}")
                 try:
                     fut.result(timeout=_PER_ALG_TIMEOUT_S)
                 except _Cancelled:
@@ -621,8 +652,7 @@ class RulesExporter:
         if source_crs == dest_crs:
             return self.extent
         
-        context = QgsProject.instance().transformContext()
-        transformer = QgsCoordinateTransform(source_crs, dest_crs, context)
+        transformer = QgsCoordinateTransform(source_crs, dest_crs, self._transform_context)
         transformed_extent = transformer.transformBoundingBox(self.extent)
         return transformed_extent
     
@@ -714,8 +744,17 @@ class RulesExporter:
                 )
                 futures[fut] = grp
 
-            for fut in self._iter_completed(futures):
+            total = len(futures)
+            step = max(1, total // 25)
+            last_message = time.monotonic()
+            for done_count, fut in enumerate(self._iter_completed(futures), 1):
                 grp = futures[fut]
+                self._progress(0.3, 1.0, done_count, total)
+                if done_count % step == 0 or done_count == total or \
+                        time.monotonic() - last_message > 5:
+                    last_message = time.monotonic()
+                    self._post("pushInfo", f"   Exported {done_count}/{total} datasets "
+                                           f"(last: {grp.layer_name or grp.layer_id})")
                 try:
                     outputs[grp.output_dataset] = fut.result(
                         timeout=_PER_ALG_TIMEOUT_S
@@ -738,12 +777,12 @@ class RulesExporter:
         return outputs
 
     def validate_expression(self, grp, expr_str: str):
-        layer_name = grp.flat_rules[0].layer.name() or grp.layer_id
+        layer_name = grp.layer_name or grp.layer_id
         rule_type = 'labeling' if grp.rule_type == 1 else 'symbology'
         warning_msg = f'The expression "{expr_str}" within the {rule_type} of the "{layer_name}" layer'
 
         if not isinstance(expr_str, str):
-            self.feedback.pushWarning(f"{warning_msg} must be a string.")
+            self._post("pushWarning", f"{warning_msg} must be a string.")
 
         expr_str = expr_str.strip()
 
@@ -753,7 +792,7 @@ class RulesExporter:
         expr = QgsExpression(expr_str)
 
         if expr.hasParserError():
-            self.feedback.pushWarning(f"{warning_msg} is not valid.")
+            self._post("pushWarning", f"{warning_msg} is not valid.")
             self.diagnostics.add(
                 "Q2VT_EXPR_INVALID", f"{warning_msg} is not valid: {expr.parserErrorString()}",
                 layer_id=grp.layer_id, component=grp.output_dataset, detail=expr_str)
@@ -1150,14 +1189,14 @@ class RulesExporter:
         """Run a processing algorithm with NO main-thread state access.
 
         * Fresh QgsProcessingContext per call.
-        * Minimal expression context (global scope only) — never
-          QgsProject.instance().
+        * Expression context: copies of the global and project scopes taken
+          on the main thread (see __init__) — never QgsProject.instance().
         * Per-call QgsProcessingFeedback.
         * Returns an output path (string), never a live layer reference.
         """
         self._check_cancel()
         context = QgsProcessingContext()
-        context.setExpressionContext(QgsProject.instance().createExpressionContext())
+        context.setExpressionContext(self._worker_expression_context())
         if not self._planar:
             context.setEllipsoid(self._ellipsoid)
         context.setDistanceUnit(self._distance_unit)
@@ -1182,17 +1221,16 @@ class RulesExporter:
             return output.source()
         return output
 
-    @staticmethod
-    def _make_worker_expression_context() -> QgsExpressionContext:
-        """Minimal expression context safe for worker-thread use.
-
-        Crucially does NOT call QgsProject.instance().createExpressionContext()
-        — that walks scopes which include layer references and is the original
-        implementation's biggest thread-affinity violation.
-        """
-        ctx = QgsExpressionContext()
-        ctx.appendScope(QgsExpressionContextUtils.globalScope())
-        return ctx
+    def _worker_expression_context(self) -> QgsExpressionContext:
+        """Global + project scope for a worker: copies of the main-thread
+        snapshots (project variables stay available to expressions)."""
+        with self._scope_lock:
+            scopes = [QgsExpressionContextScope(self._global_scope),
+                      QgsExpressionContextScope(self._project_scope)]
+        context = QgsExpressionContext()
+        for scope in scopes:
+            context.appendScope(scope)
+        return context
 
     # -------------------------------------------------------------------
     # Snapshot helpers — caller-thread only
@@ -1504,6 +1542,33 @@ class RulesExporter:
         from_user = max(1, int(cpu_n * self.cpu_percent / 100))
         return min(from_user, _MAX_WORKERS_HARD_CAP, num_jobs)
 
+    # -------------------------------------------------------------------
+    # Progress and messages
+    # -------------------------------------------------------------------
+    def _post(self, kind: str, message: str) -> None:
+        """pushInfo / pushWarning from any thread: workers queue the message
+        and the main thread writes it (see _flush_messages)."""
+        crash_log.note(message)
+        if main_thread.on_main_thread() or not main_thread.app_running():
+            getattr(self.feedback, kind)(message)
+        else:
+            self._messages.put((kind, message))
+
+    def _flush_messages(self) -> None:
+        while True:
+            try:
+                kind, message = self._messages.get_nowait()
+            except queue.Empty:
+                return
+            getattr(self.feedback, kind)(message)
+
+    def _progress(self, phase_start: float, phase_end: float, done: int, total: int) -> None:
+        """Progress bar: ``done/total`` of a phase spanning phase_start..end
+        (fractions of this export's share)."""
+        low, high = self._progress_range
+        fraction = phase_start + (phase_end - phase_start) * (done / max(1, total))
+        self.feedback.setProgress(low + (high - low) * fraction)
+
     def _iter_completed(
         self, futures: Dict[Future, Any]
     ) -> Iterator[Future]:
@@ -1518,6 +1583,7 @@ class RulesExporter:
             done, pending = wait(
                 pending, timeout=0.2, return_when=FIRST_COMPLETED
             )
+            self._flush_messages()
             main_thread.keep_responsive()
             for fut in done:
                 yield fut

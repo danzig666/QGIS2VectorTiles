@@ -30,6 +30,7 @@ else:
 
 from ..utils.config import _RESOURCES, _PORT, _EPSG_CRS, _SERVER, _MAPLIBRE_LABELS_FACTOR
 from .fidelity import expressions as ex
+from .fidelity.zoom import fit_zoom
 
 class ServerInitializer:
     """Copy server utilities and launch the local tile server."""
@@ -62,9 +63,12 @@ WshShell.Run "cmd /c """ & base & "utils\activate_server.bat""", 0
 Set WshShell = Nothing
 '''
 
-    def __init__(self, extent, min_zoom: int, viewer: int, output_dir: str):
+    def __init__(self, extent, min_zoom: int, viewer: int, output_dir: str,
+                 max_zoom: Optional[int] = None):
         self.extent = extent
         self.min_zoom = min_zoom
+        # Exported zooms as the user chose them (min_zoom is offset by the viewer).
+        self.max_zoom = max_zoom if max_zoom is not None else min_zoom + viewer
         self.viewer = viewer
         self.viewer_dir = join(_RESOURCES, 'ml_viewer' if viewer == 0 else 'ol_viewer')
         self.output_dir = output_dir
@@ -167,6 +171,22 @@ Set WshShell = Nothing
         center = transform.transform(self.extent.center())
         return f"[{center.x()}, {center.y()}]"
 
+    def _get_bounds_wgs84(self) -> str:
+        """The export extent as '[[west, south], [east, north]]' (EPSG:4326)."""
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
+            QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance().transformContext())
+        box = transform.transformBoundingBox(self.extent)
+        return (f"[[{box.xMinimum()}, {box.yMinimum()}], "
+                f"[{box.xMaximum()}, {box.yMaximum()}]]")
+
+    def _start_zoom(self) -> float:
+        """Zoom that shows the export extent (the OpenLayers viewer has no
+        fitBounds placeholder: its compiled bundle takes a zoom)."""
+        # In MapLibre (512 px) zooms; the OpenLayers zoom is one higher.
+        return fit_zoom(self.extent.width(), self.extent.height(),
+                        self.min_zoom, self.max_zoom - self.viewer)
+
     @staticmethod
     def _get_python_exe() -> str:
         """Return the Python executable path for the current platform."""
@@ -192,6 +212,8 @@ Set WshShell = Nothing
             viewer,
             {
                 "_Q2VT_MINZOOM": str(self.min_zoom + self.viewer),
+                "_Q2VT_MAXZOOM": str(self.max_zoom),
+                "_Q2VT_BOUNDS": self._get_bounds_wgs84(),
                 "_Q2VT_CENTER": center,
                 "18111991": str(self.port),
 
@@ -222,7 +244,7 @@ Set WshShell = Nothing
                 join(utils_dir, "viewer", "bundle.js"),
                 {
                     "18111991": str(self.port),
-                    "_Q2VT_MINZOOM": str(self.min_zoom + self.viewer),
+                    "_Q2VT_MINZOOM": str(self._start_zoom() + self.viewer),
                     "_Q2VT_CENTER": center,
                 }
             )
@@ -230,7 +252,7 @@ Set WshShell = Nothing
                 join(utils_dir, "viewer", "viewer.js"),
                 {
                     "18111991": str(self.port),
-                    "_Q2VT_MINZOOM": str(self.min_zoom + self.viewer),
+                    "_Q2VT_MINZOOM": str(self._start_zoom() + self.viewer),
                     "_Q2VT_CENTER": center,
                 }
             )

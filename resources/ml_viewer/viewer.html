@@ -68,12 +68,15 @@ const map = new maplibregl.Map({
 });
 
 map.addControl(new maplibregl.NavigationControl());
-map.setZoom(_Q2VT_MINZOOM);
-map.setCenter(_Q2VT_CENTER);
+// Start on the exported area (within the exported zooms), not at the
+// minimum zoom: with zoom 0 that showed the whole earth.
+map.fitBounds(_Q2VT_BOUNDS, {animate: false, padding: 20, maxZoom: _Q2VT_MAXZOOM});
+if (map.getZoom() < _Q2VT_MINZOOM) map.setZoom(_Q2VT_MINZOOM);
 
 // Update zoom level on map move
 map.on('zoom', updateZoomIndicator);
 map.on('zoomend', updateZoomIndicator);
+updateZoomIndicator();  // the start view (fitBounds) fires no zoom event
 
 function updateZoomIndicator() {
     const zoom = map.getZoom();

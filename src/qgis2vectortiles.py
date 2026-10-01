@@ -51,6 +51,7 @@ from .utils import crash_log
 from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
 from .core.fidelity import zoom as fidelity_zoom
+from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
 from .core.rules_exporter import RulesExporter
 from .core.tiles_generator import GDALTilesGenerator
@@ -129,6 +130,7 @@ class QGIS2VectorTiles:
                 self.diagnostics.add("Q2VT_HYBRID_NOT_AVAILABLE")
 
             self._log(". Flattening rules...")
+            self.feedback.setProgress(1)
             rules = self._flatten_rules()
             if not rules:
                 self._log(". No visible vector layers found in project.")
@@ -138,15 +140,18 @@ class QGIS2VectorTiles:
 
             flatten_time = perf_counter()
             self._log(". Exporting rules to datasets...")
+            self.feedback.setProgress(5)
             layers, rules = self._export_rules(rules)
             self._log(f". Successfully exported {len(layers)} layers "
                       f"({self._elapsed_minutes(flatten_time)} minutes).")
 
             self._log(". Styling tiles...")
+            self.feedback.setProgress(70)
             styled_layer = self._style_tiles(rules, temp_dir)
             self._log(". Successfully styled tiles.")
 
             self._log(". Exporting tiles style to client-side style package...")
+            self.feedback.setProgress(72)
             exporter = self._export_maplibre_style(temp_dir, styled_layer, rules)
             style = exporter.style
             self._log(". Successfully exported client-side style package.")
@@ -159,6 +164,7 @@ class QGIS2VectorTiles:
             archive = None
             if self._has_features(layers):
                 self._log(". Generating tiles...")
+                self.feedback.setProgress(85)
                 self._generate_tiles(layers, temp_dir, style, rules)
                 self._log(f". Successfully generated tiles "
                           f"({self._elapsed_minutes(export_time)} minutes).")
@@ -172,6 +178,7 @@ class QGIS2VectorTiles:
                 self._write_static_package(temp_dir, style, exporter.source_name)
             self._write_report(temp_dir, style, archive, rules)
             self._enforce_strict(temp_dir)
+            self.feedback.setProgress(100)
             self._log(f". Process completed successfully "
                       f"({self._elapsed_minutes(start_time)} minutes).")
             self._clear_project()
@@ -414,7 +421,8 @@ class QGIS2VectorTiles:
         return RulesExporter(
             rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
-            diagnostics=self.diagnostics,
+            cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
+            progress_range=(5.0, 70.0),
         ).export()
 
     def _has_features(self, layers: List[QgsVectorLayer]) -> bool:
@@ -488,14 +496,16 @@ class QGIS2VectorTiles:
             QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
             QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance().transformContext())
         center = transform.transform(self.extent.center())
+        zoom = fit_zoom(self.extent.width(), self.extent.height(),
+                        max(0, self.min_zoom), self.max_zoom)  # MapLibre zooms of the tiles
         path = write_static_package(temp_dir, style, source_name, viewer_dir,
-                                    (center.x(), center.y()), self.min_zoom + self.viewer)
+                                    (center.x(), center.y()), zoom)
         self._log(f". Static web package: {path}")
 
     def serve_tiles(self, temp_dir: str):
         """Serve the generated tiles via a local HTTP server."""
-        ServerInitializer(self.extent, self.min_zoom, self.viewer, temp_dir).serve_tiles(
-            launch=self.serve)
+        ServerInitializer(self.extent, self.min_zoom, self.viewer, temp_dir,
+                          max_zoom=self.max_zoom + self.viewer).serve_tiles(launch=self.serve)
 
 if __name__ == "__console__":
     adapter = QGIS2VectorTiles(output_dir=QgsProcessingUtils.tempFolder())

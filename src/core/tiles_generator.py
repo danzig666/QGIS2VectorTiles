@@ -170,7 +170,12 @@ class GDALTilesGenerator:
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             startupinfo=startupinfo, creationflags=creationflags,
         ) as proc:
+            started = last_message = time.monotonic()
             while proc.poll() is None:
+                if self.feedback is not None and time.monotonic() - last_message > 15:
+                    last_message = time.monotonic()
+                    self.feedback.pushInfo(
+                        f"   Still generating tiles ({(last_message - started) / 60:.1f} minutes)...")
                 if self.feedback is not None and self.feedback.isCanceled():
                     proc.terminate()
                     try:
