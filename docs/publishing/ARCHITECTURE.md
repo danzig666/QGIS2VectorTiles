@@ -1,0 +1,60 @@
+# Web publishing — architecture
+
+```text
+Publish Web Map window (src/gui)          Processing algorithm (unchanged + TILE_ARCHIVE_FORMAT)
+        │  PublicationProfile (saved in the project, no secrets)
+        ▼
+publishing.controller.export_local            (QGIS main thread, NoThreading kept)
+  PLAN        profile vs project (layers, fields, expressions)
+  EXPORT_MVT  existing compiler: QGIS2VectorTiles(layer_ids, feature_keys, extra_tile_fields,
+              background without raster, add_result_layer=False) -> tiles.mbtiles + style
+  RECORDS     qgis_model.collect_records: published features (extent x exported rule filters),
+              keys validated, label/terms/anchor/bounds/approved attributes (private JSONL)
+  LEGEND      QGIS-rendered swatches of the original legend items; logical model
+              (groups / layers / rules / components from flattener provenance)
+  BUILD       web_builder.build_release -> releases/<id>/ (staging, validation, rename),
+              pmtiles_builder (same MVT payloads), search/feature indexes, disclosure check,
+              current.json atomically
+        ▼
+publishing.deployments.publish                (QgsTask: files + network only)
+  pointer+ETag -> upload inventory -> stable entry -> public_verify -> conditional activation
+```
+
+## Packages
+
+| Path | Role |
+|---|---|
+| `src/publishing/models.py`, `profile.py` | Profile and ExportBundle contracts, validation, migrations, disclosure fingerprint. |
+| `src/publishing/pmtiles_builder.py`, `validation.py`, `mvt.py` | MBTiles → PMTiles v3 (official writer, vendored), archive validation, MVT decoding, vector-only checks. |
+| `src/publishing/bundle.py`, `web_builder.py`, `content_types.py` | Portable style, immutable releases, inventories, atomic pointer, retention, ZIP. |
+| `src/publishing/provenance.py`, `identifiers.py`, `disclosure.py`, `qgis_model.py` | Logical model, stable keys, public-field contract, QGIS-side records and legend. |
+| `src/publishing/search_index.py`, `feature_index.py` | Publication-wide search shards and exact lookup shards. |
+| `src/publishing/providers/`, `public_verify.py`, `deployments.py`, `credentials.py` | Hosting providers, public checks, activation protocol, QGIS auth adapter. |
+| `src/publishing/preview_server.py` | Loopback HTTP server with byte ranges. |
+| `src/gui/` | Publish window, project-saved profiles, release history. |
+| `resources/web_viewer/` | Static MapLibre viewer (ES modules, no framework, no CDN). |
+| `resources/ml_viewer/visible_labels.mjs` | The single maintained visible-polygon label helper (also used by the legacy viewer). |
+| `schemas/publishing/` | JSON Schemas of profile, manifest, release, current pointer and search index. |
+
+## Invariants
+
+* Map data is MVT in PMTiles v3 (or XYZ MVT for the legacy package). Raster, image, video,
+  canvas and persisted GeoJSON sources are refused before writing and again in the browser.
+  Runtime GeoJSON is limited to visible-polygon label points (derived from loaded tiles), the
+  search marker and measurement drawings.
+* Packaging is transport-only: `bundle.style_semantic_diff` must be empty (only tile URLs,
+  zoom bounds, sprite/glyph URLs and removed raster basemaps may differ).
+* Releases are immutable; `current.json` is the only mutable object and is replaced
+  atomically (locally) or with `If-Match` / `If-None-Match` (object storage).
+* The QGIS project is never modified by an export (layer tree, visibility, styles); only the
+  user's *Save settings* (and successful publishing) write the profile into project
+  properties.
+
+## Compatibility notes (paths changed since the plan's baseline)
+
+* `src/core/publisher.py` keeps `portable_style`, `write_xyz_tiles`, `write_static_package`;
+  the first two are wrappers of `src/publishing/bundle.py`.
+* `FlattenedRule` gained `provenance` (default `None`).
+* `RulesExporter` gained `feature_keys` and `extra_tile_fields` (defaults empty).
+* `QGIS2VectorTiles` gained `layer_ids`, `archive_format`, `add_result_layer`,
+  `feature_keys`, `extra_tile_fields` and `export_bundle()` (defaults: previous behaviour).

@@ -47,3 +47,32 @@ The Processing dialog has two new options:
 Developer documentation: [`docs/fidelity/`](docs/fidelity/) — baseline and confirmed
 defects, how to run the three test levels, the generated symbol compatibility table, and
 the status of each item of the fidelity plan.
+
+## Publish Web Map (this fork)
+
+*Web → QGIS2VectorTiles (fork) → Publish Web Map…* (also on the Web toolbar) opens a
+window that turns the project into a public, self-contained web map:
+
+- The map stays **vector tiles** (MVT). They are packed into one **PMTiles** archive that
+  the browser reads with HTTP byte ranges, so you need no tile server, database or Docker.
+- The viewer has a layer tree (including hidden layers you chose to publish), opacity,
+  legend with QGIS-rendered symbols, label switch, filters, popups, search, links to
+  features, permalinks, measuring (with EOV coordinates) and a phone layout. It is
+  available in Hungarian and English.
+- Every setting is **saved in the project**, but credentials are not. Keys stay in the
+  QGIS authentication database.
+- *Export locally* and *Preview* work offline. *Publish* uploads an immutable release to
+  **Cloudflare R2** (or other S3-compatible storage) and checks it through your public
+  domain. Only then does it switch the stable link, so the previous map stays online if
+  anything fails. *History* rolls back to an earlier release or removes old ones.
+- Only the fields you approve become public; every tile is checked before upload.
+
+The Processing algorithm is unchanged; it gained an optional *Tile archive format*
+(MBTiles, PMTiles or both).
+
+Documentation: [`docs/publishing/`](docs/publishing/), covering
+[hosting and R2 setup](docs/publishing/HOSTING.md),
+[security](docs/publishing/SECURITY.md),
+[architecture](docs/publishing/ARCHITECTURE.md),
+[tests](docs/publishing/TESTING.md) and
+[implementation status](docs/publishing/IMPLEMENTATION_STATUS.md).

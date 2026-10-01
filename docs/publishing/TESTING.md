@@ -1,0 +1,32 @@
+# Web publishing — tests
+
+All tests run with `pytest` from the repository root (see also `docs/fidelity/TESTING.md`).
+
+| File | Level | Covers |
+|---|---|---|
+| `tests/unit/test_publishing_validation.py` | pure | vector-only contract, paths, forbidden files, leak scan |
+| `tests/unit/test_publishing_pmtiles.py` | pure (+ go-pmtiles CLI) | MBTiles → PMTiles: every address and decompressed payload, TMS→XYZ, zoom 0, sparse, dedup, Unicode paths, raster/non-MVT refusal, malformed inputs, truncated metadata, immutability, cancellation, tampering |
+| `tests/unit/test_publishing_profile.py` | pure | profile round trip, migration, validation, no secrets, review fingerprint, JSON Schemas |
+| `tests/unit/test_publishing_web_builder.py` | pure | release layout/inventory, transport-only style, schemas, XYZ, failure injection, cancellation, conflict/rollback, retention, recovery, ZIP |
+| `tests/unit/test_publishing_preview_server.py` | pure | byte ranges (206/416/suffix/open), HEAD, MIME, traversal, nested Unicode paths |
+| `tests/unit/test_publishing_indexes.py` | pure + Node | keys, Hungarian normalization (Python = JS), 120k-record sharded search, lookup shards |
+| `tests/unit/test_publishing_providers.py` | pure | upload/verify/activate protocol on a fake S3 client with failure injection |
+| `tests/unit/test_publishing_s3_moto.py` | opt-in | real vendored boto3 against a moto S3 server |
+| `tests/integration/test_publishing_export.py` | PyQGIS | layer selection incl. hidden layers, PMTiles/Both, Processing outputs |
+| `tests/integration/test_publishing_pipeline.py` | PyQGIS | logical model, keys in tiles, disclosure canary, indexes, identity errors |
+| `tests/integration/test_publish_dialog.py` | PyQGIS (offscreen) | the Publish window end to end |
+| `tests/browser/test_pmtiles_transport.py` | browser | XYZ vs PMTiles pixel parity, partial reads, stable entry, error states |
+| `tests/browser/test_web_viewer_features.py` | browser | toggles, opacity, labels/filters, identify/XSS, search, deep links, permalinks, measure, phone |
+
+Optional tools:
+
+```bash
+python3 tools/publishing/fetch_pmtiles_cli.py            # official go-pmtiles for tests
+Q2VT_PMTILES_CLI=~/.cache/q2vt/go-pmtiles-1.28.0/pmtiles pytest tests/unit/test_publishing_pmtiles.py
+
+pip install --target /tmp/moto_env "moto[server]"        # dev only
+Q2VT_MOTO_PATH=/tmp/moto_env Q2VT_MOTO_PYTHON=python3.11 pytest tests/unit/test_publishing_s3_moto.py
+```
+
+Live R2 tests are deliberately not automated: they need an explicitly authorised sandbox
+bucket/prefix and credentials, and must never run from untrusted pull requests.

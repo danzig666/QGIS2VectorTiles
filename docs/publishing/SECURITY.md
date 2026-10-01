@@ -1,0 +1,50 @@
+# Web publishing — security and privacy
+
+Published maps are **public**: anyone with the address can download the archive and every
+file of the release. Hiding a field from a popup does not hide it from someone reading the
+archive; what is not approved is simply not written.
+
+## What becomes public
+
+* Geometry of the published layers inside the export extent, as drawn by the exported rules.
+* Generated rendering values (`q2vt_*`: label text, sizes, angles, draw order, feature key).
+* Fields approved in the Interaction tab: popup fields (feature-lookup files), search fields
+  (search index), filter fields (also written to the tiles of that layer).
+* With *Publish ALL attribute fields* (not recommended): every attribute.
+
+The Review tab lists this per layer; the first publication and every change of this scope
+need an explicit approval (stored with the settings as a fingerprint).
+
+## Enforced before anything is written or uploaded
+
+* Every tile is decoded; a property that is neither generated nor approved stops the
+  release (`Q2VT_PUB_FIELD_DISCLOSURE`).
+* Only allowlisted files are published (release.json inventory); projects, QLR, source
+  data, MBTiles, logs, fidelity reports, temporary and script files are refused.
+* Absolute local paths, known secret values and canaries are searched in every text file
+  (and in decoded tiles for canaries) before upload (`Q2VT_PUB_SECRET_LEAK`).
+
+## Credentials
+
+* Profiles (saved in the project) hold only an authentication configuration id; keys are in
+  the QGIS authentication database (encrypted, master password), or typed for one session.
+* The S3 client receives explicit keys; environment variables, `~/.aws` files and instance
+  roles are never used. TLS certificates are always verified.
+* Errors and logs are redacted; keys never appear in Processing history, the project,
+  public files, URLs or the upload journal.
+* Use a bucket-scoped token with object read/write only. Bucket, domain, CORS and public
+  access settings are changed by you in the Cloudflare dashboard, never by the plugin.
+
+## Viewer
+
+* No third-party requests (no CDN, no fonts, no telemetry); external basemaps are not
+  offered in this release.
+* Content-Security-Policy meta tag: scripts only from the release, no `eval`, no inline
+  scripts.
+* All titles, descriptions, attribution and attribute values are inserted as text
+  (`textContent`); links only for `http(s)`/`mailto` URL fields, with `noopener`.
+* URL state is parsed strictly (known ids, ranges, size limits); nothing from the URL is
+  evaluated as code or as a style expression.
+* There is no password protection: a client-side password in front of a public archive
+  would not protect anything. Private hosting needs server-side access control of every
+  file (future extension).
