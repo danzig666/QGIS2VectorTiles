@@ -61,8 +61,8 @@ def site(tmp_path_factory):
 PRELUDE = "const v = q2vtViewer, m = v.map, c = v.controls.control, s = v.controls.state, man = v.manifest;"
 VIS = ("const vis = (cid) => c.components.get(cid).styleLayerIds.filter((id) => m.getLayer(id))"
        ".map((id) => m.getLayoutProperty(id, 'visibility') !== 'none');")
-LABELS = ("const labels = () => { let n = 0; for (const g of v.labels.groups.values()) "
-          "{ const d = m.getSource(g.source)._data; n += ((d.geojson || d).features || []).length; } return n; };")
+LABELS = ("const labels = () => { let n = 0; for (const f of v.labels.snapshot().values()) n += f.length; "
+          "return n; };")
 
 
 def test_layer_group_rule_and_label_toggles(site, tmp_path):

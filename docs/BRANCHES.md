@@ -25,3 +25,8 @@
    its notes, commit, and run the *Release* workflow on `hu-hesz` with the same version. Both
    zips install into the same plugin folder, so installing one replaces the other. Profiles
    saved in projects are the same for both.
+6. **Only generic releases are "Latest"** on the repository page; the workflow creates variant
+   releases with `--latest=false`, so the default download stays the generic plugin. Variant
+   release notes start with a prominent English "not for general use" notice linking to the
+   generic release. To fix the title or notes of a published release, run *Release* with
+   `notes_only` (no zip, no tag change).

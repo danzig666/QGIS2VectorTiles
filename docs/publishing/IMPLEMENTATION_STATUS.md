@@ -119,3 +119,30 @@ the only raster sources a release may contain are those archives.
 | Run | Result |
 |---|---|
 | `pytest` (full suite) | **473 passed, 5 skipped** (the opt-in go-pmtiles/moto tests), 0 failed, 9 min 13 s |
+
+## 4.4.2: visible-polygon labels appear with the other labels
+
+Owner report: polygon labels on the visible part of their polygon were right but showed up
+noticeably after the other labels. The helper (`resources/ml_viewer/visible_labels.mjs`) waited
+for the whole tile source to load, then a 60 ms timer, and never updated while the map moved;
+every change rewrote the whole label source.
+
+| Change | Effect |
+|---|---|
+| Recompute as polygon tiles arrive (throttled 80 ms) and while the map moves (150 ms), not only after everything loaded / `moveend` | the points reach MapLibre when the other labels' tiles arrive |
+| Labels in advance for polygons in the loaded tiles up to half a screen beyond each edge (not within 48 px of it, so no text reaches the screen) | panning reveals labels that are already placed |
+| Use the tile level the map wants as soon as it has data (zooming out: before the old, deeper tiles are dropped) | new area's labels while zooming out |
+| Label point tiles stop at z15 (overzoomed beyond; ~0.1 m precision) | fewer, bigger label tiles: panning rarely needs new ones laid out |
+| Incremental `updateData` (only added / moved / removed points) instead of `setData` | only label tiles around changes reload |
+| `snapshot()` API (tests no longer read MapLibre's private `_data`) | |
+
+Measured on the owner project (EOV, 2815 parcels) in headless Chromium (SwiftShader, 4 cores),
+16 jump-pans / 12 one-level zooms, lag = when 90 % of the final visible-polygon labels are drawn
+minus the same for the other labels: pans median **540 ms → 0 ms**; zoom steps median
+**2.3 s → 0.8 s** with the 40 ms probe (the heavy probe inflates zoom times; without it the new
+zoom's label tiles load in 0.2–0.35 s, 1–2 SwiftShader frames). After 8 mixed pans/zooms every
+drawn label matches the written point (max 0.6 px at z19), no page errors.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py tests/browser/test_web_viewer_features.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_parity.py tests/unit/test_publishing_web_builder.py` | **59 passed** (2 new: labels in advance with the edge guard; wanted tile level) |

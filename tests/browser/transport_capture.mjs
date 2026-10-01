@@ -32,11 +32,7 @@ for (const view of views) {
     await new Promise((r) => setTimeout(r, 400));
     await idle();
     let labels = 0;
-    for (const group of (viewer.labels ? viewer.labels.groups.values() : [])) {
-      const data = map.getSource(group.source)._data;
-      const features = data && (data.geojson ? data.geojson.features : data.features);
-      labels += features ? features.length : 0;
-    }
+    for (const features of (viewer.labels ? viewer.labels.snapshot().values() : [])) labels += features.length;
     return { labels, errors: viewer.diagnostics.errors, warnings: viewer.diagnostics.warnings.length,
              zoom: map.getZoom() };
   }, view);
