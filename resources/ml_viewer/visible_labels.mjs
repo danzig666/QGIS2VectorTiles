@@ -13,7 +13,21 @@
 // the centroid of the visible area when that lies inside the polygon, else to
 // an interior point (the GEOS / QGIS rule). A label stays where it is while
 // that point is still on the visible part of its polygon (and not at the
-// screen edge), so panning does not make labels jump. While the map moves
+// screen edge), so panning does not make labels jump. Labels whose QGIS
+// placement is Horizontal or Free (metadata["q2vt:label-anchor"] = "pole")
+// go where they have the most room instead: the pole of inaccessibility of
+// the visible part (edges where tiles cut the polygon do not count), as
+// QGIS ranks its candidates; a kept label must still have most of that room
+// and a kept centroid label must stay near the centroid, so after a pan
+// labels sit in the middle of what is visible, not at an old edge spot.
+// A label is only shown where its whole box fits on the screen (QGIS
+// drops candidates outside the map extent), and only when the visible part
+// of its polygon is at least as large as the label's box: a polygon with a
+// sliver in view gets no label at the edge. Groups are placed by QGIS label priority
+// and z-index (metadata["q2vt:label-rank"]); later ones keep clear of the
+// boxes already placed (a zone code and the parcel number of the same
+// parcel do not compete for one point).
+// While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
 // stops: labels stay glued to the map like the other labels. Polygons in the
@@ -41,6 +55,8 @@ const GUARD_PX = 48; // ... but not so close that their text reaches the screen
 // more around the screen, so panning rarely needs new ones laid out. Points
 // keep 1/8192 of a z15 tile (about 0.1 m at mid latitudes).
 const POINT_MAXZOOM = 15;
+const KEEP_ROOM = 0.8;  // a kept "pole" label keeps >= 80 % of the best room
+const KEEP_PX = 24;     // a kept centroid label stays this close to the centroid
 
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
@@ -60,6 +76,13 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (!groups.has(polygons)) groups.set(polygons, { source: SOURCE_PREFIX + polygons, layers: [] });
     const before = style.layers.slice(index + 1).find((l) => !(l.metadata && l.metadata["q2vt:visible-polygons"]));
     groups.get(polygons).layers.push({ def: layer, before: before ? before.id : undefined });
+    if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
+    const rank = layer.metadata["q2vt:label-rank"];
+    if (Array.isArray(rank)) {
+      const old = groups.get(polygons).rank || [-Infinity, -Infinity];
+      if (rank[0] > old[0] || (rank[0] === old[0] && rank[1] > old[1])) groups.get(polygons).rank = rank;
+    }
+    groups.get(polygons).order = index;
   });
   const noop = () => {};
   if (!groups.size) {
@@ -89,6 +112,12 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     for (const { def, before } of group.layers) {
       const moved = { ...def, source: group.source };
       delete moved["source-layer"];
+      // The position is computed here (room, screen fit, other labels):
+      // MapLibre must not shift the label a box width off it (that pushed
+      // labels out of their polygon and off the screen).
+      moved.layout = { ...moved.layout, "text-anchor": "center" };
+      delete moved.layout["text-variable-anchor"];
+      delete moved.layout["text-radial-offset"];
       map.addLayer(moved, before && map.getLayer(before) ? before : undefined);
     }
   }
@@ -116,7 +145,14 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     // The tile level MapLibre covers the view with (vector sources: floor).
     const tileZoom = Math.max(tileSource.minzoom ?? 0, Math.min(tileSource.maxzoom ?? 22,
       Math.floor(map.getZoom() + Math.log2(512 / (tileSource.tileSize || 512)))));
-    for (const [polygons, group] of groups) {
+    // Best spots first: higher QGIS priority, then z-index, then on top in the style.
+    const ranked = [...groups].sort(([, a], [, b]) => {
+      const ra = a.rank || [5, 0], rb = b.rank || [5, 0];
+      return (rb[0] - ra[0]) || (rb[1] - ra[1]) || ((b.order ?? 0) - (a.order ?? 0));
+    });
+    const placed = [];  // world boxes of the labels placed so far
+    const zoom = map.getZoom();
+    for (const [polygons, group] of ranked) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
       const features = map.querySourceFeatures(sourceId, { sourceLayer: polygons });
       if (features.length && !features.some((f) => f._vectorTileFeature && Number.isInteger(f._z))) {
@@ -125,10 +161,16 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         return;
       }
       const data = labelPoints(features, view, maplibregl, {
-        state: states.get(polygons), margin, reach, tileZoom, freeze: map.isMoving(), guard: GUARD_PX * perPx,
+        state: states.get(polygons), margin, reach, tileZoom, guard: GUARD_PX * perPx,
+        anchor: group.anchor || "centroid", precision: perPx, keepDistance: KEEP_PX * perPx,
+        // Moving, or tiles still arriving (the visible part is not complete):
+        // placed labels stay; the final position once everything is there.
+        freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
+        labelBox: labelBoxes(map, group, zoom, perPx), avoid: placed.slice(),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
       write(map.getSource(group.source), data, polygons);
+      if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
     }
   };
   // Only what changed goes to the source: an incremental update reloads just
@@ -263,6 +305,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     for (const ring of tile.loadGeometry()) {
       const world = ring.map((p) => [ox + p.x * scale, oy + p.y * scale]);
       const clipped = clipRing(world, clip);
+      clipped.cut = clip;  // edges along it are tile cuts, not polygon edges
       if (clipped.length >= 3) rings.push(clipped);
     }
     if (!rings.length) continue;
@@ -275,22 +318,77 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   const unchecked = (point) => !loaded.has(
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
   const points = new Map();
-  for (const [key, { properties, rings: loaded }] of byFeature) {
+  const avoid = (options.avoid || []).slice();
+  const boxes = [];
+  // Bigger polygons first: they get the middle, smaller neighbours keep clear.
+  const area = (rings) => Math.abs(rings.reduce((sum, ring) => sum + ring.reduce((a, [x1, y1], i) => {
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    return a + x1 * y2 - x2 * y1;
+  }, 0), 0));
+  const ordered = [...byFeature].map(([key, value]) => [key, value, area(value.rings)])
+    .sort((a, b) => b[2] - a[2]);
+  for (const [key, { properties, rings: loaded }] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
       points.set(key, { point: old.point, properties });
       continue;
     }
-    const rings = reach === view ? loaded
-      : loaded.map((ring) => clipRing(ring, view)).filter((ring) => ring.length >= 3);
+    const rings = reach === view ? loaded : loaded.map((ring) => {
+      const clipped = clipRing(ring, view);
+      clipped.cut = ring.cut;
+      return clipped;
+    }).filter((ring) => ring.length >= 3);
+    const pole = options.anchor === "pole";
     if (!rings.length) {  // off the screen: in advance, away from the screen edge
-      const point = labelPoint(loaded);
+      const point = pole ? roomiestPoint(loaded, options.precision).point : labelPoint(loaded);
       if (point && !within(guarded, point)) points.set(key, { point, properties });
       continue;
     }
-    const keep = old && within(inner, old.point) && (unchecked(old.point) || inside(rings, old.point));
-    const point = keep ? old.point : labelPoint(rings);
-    if (point) points.set(key, { point, properties });
+    // The label's box (half width/height, world units): it must fit on the
+    // screen and should keep clear of the boxes of better-ranked labels.
+    const half = options.labelBox ? options.labelBox(properties) : null;
+    const fit = (x, y) => (half ? Math.min(x - view[0] - half[0], view[2] - half[0] - x,
+                                           y - view[1] - half[1], view[3] - half[1] - y) : Infinity);
+    // Only boxes that can matter: within a label's size of the visible part.
+    let near = [];
+    if (half && avoid.length) {
+      const extent = bounds(rings);
+      const reachBox = grow(extent, 2 * half[0], 2 * half[1]);
+      near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
+    }
+    const clear = (x, y) => {
+      let min = Infinity;
+      for (const box of near) min = Math.min(min, rectDistance(x, y, box));
+      return min;
+    };
+    if (half && area(rings) < 4 * half[0] * half[1]) continue;  // only a sliver in view
+    let point;
+    if (pole) {
+      const room = (extra) => roomiestPoint(rings, options.precision, extra);
+      let score = (x, y) => Math.min(fit(x, y), clear(x, y));
+      let best = room(score);
+      if (!(best.room > 0)) {  // no free spot: the best spot that fits (MapLibre decides)
+        score = fit;
+        best = room(score);
+      }
+      if (!(best.room > 0)) continue;  // only a sliver in view: no label (as QGIS)
+      const keep = old && within(inner, old.point) && (unchecked(old.point)
+        || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
+      point = keep ? old.point : best.point;
+    } else {
+      const target = labelPoint(rings);
+      if (!target || fit(...target) < 0) continue;
+      const near = (p) => Math.hypot(p[0] - target[0], p[1] - target[1]) <= (options.keepDistance ?? Infinity);
+      const keep = old && within(inner, old.point) && fit(...old.point) >= 0 && (unchecked(old.point)
+        || (inside(rings, old.point) && near(old.point)));
+      point = keep ? old.point : target;
+    }
+    if (half) {
+      const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
+      boxes.push(box);
+      avoid.push(box);
+    }
+    points.set(key, { point, properties });
   }
   for (const [key, old] of state.points) {
     if (!points.has(key) && !excluded.has(key) && (options.freeze || within(inner, old.point)) && unchecked(old.point)
@@ -304,7 +402,222 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     out.push({ type: "Feature", id: state.ids.get(key), properties,
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
-  return { type: "FeatureCollection", features: out };
+  return { type: "FeatureCollection", features: out, boxes };
+}
+
+// Polygon edges of rings, without the edges along their tile cut.
+function realEdges(rings) {
+  const on = (v, w) => Math.abs(v - w) <= 1e-12;
+  const edges = [];
+  for (const ring of rings) {
+    const cut = ring.cut;
+    for (let i = 0, n = ring.length; i < n; i++) {
+      const a = ring[i], b = ring[(i + 1) % n];
+      if (cut && ((on(a[0], b[0]) && (on(a[0], cut[0]) || on(a[0], cut[2])))
+          || (on(a[1], b[1]) && (on(a[1], cut[1]) || on(a[1], cut[3]))))) continue;
+      edges.push([a, b]);
+    }
+  }
+  return edges;
+}
+
+function segmentDistance(x, y, [ax, ay], [bx, by]) {
+  let dx = bx - ax, dy = by - ay;
+  if (dx !== 0 || dy !== 0) {
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+    ax += dx * t;
+    ay += dy * t;
+  }
+  return Math.hypot(x - ax, y - ay);
+}
+
+function signedRoom(rings, edges, x, y) {
+  let min = Infinity;
+  for (const edge of edges) min = Math.min(min, segmentDistance(x, y, edge[0], edge[1]));
+  return inside(rings, [x, y]) ? min : -min;
+}
+
+// Room (distance to the nearest real polygon edge; negative outside) at a point.
+export function roomAt(rings, point) {
+  const edges = realEdges(rings);
+  return edges.length ? signedRoom(rings, edges, point[0], point[1]) : (inside(rings, point) ? Infinity : -Infinity);
+}
+
+// The point with the most room inside the rings (pole of inaccessibility,
+// grid refinement with a priority queue), to ``precision``. Edges along tile
+// cuts (ring.cut) are not polygon edges. Returns {point, room}.
+export function roomiestPoint(rings, precision = 0, extra = null) {
+  const edges = realEdges(rings);
+  const fallback = labelPoint(rings);
+  if (!fallback) return { point: null, room: -Infinity };
+  if (!edges.length) {
+    return { point: fallback, room: extra ? extra(fallback[0], fallback[1]) : Infinity };
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const ring of rings) {
+    for (const [x, y] of ring) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  const size = Math.min(maxX - minX, maxY - minY);
+  if (!(size > 0)) {
+    const room = roomAt(rings, fallback);
+    return { point: fallback, room: extra ? Math.min(room, extra(fallback[0], fallback[1])) : room };
+  }
+  const cell = (x, y, h) => {
+    const d = extra ? Math.min(signedRoom(rings, edges, x, y), extra(x, y)) : signedRoom(rings, edges, x, y);
+    return { x, y, h, d, max: d + h * Math.SQRT2 };
+  };
+  const heap = [];
+  const push = (c) => {
+    heap.push(c);
+    for (let i = heap.length - 1; i > 0;) {
+      const parent = (i - 1) >> 1;
+      if (heap[parent].max >= heap[i].max) break;
+      [heap[parent], heap[i]] = [heap[i], heap[parent]];
+      i = parent;
+    }
+  };
+  const pop = () => {
+    const top = heap[0], last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      for (let i = 0; ;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l].max > heap[m].max) m = l;
+        if (r < heap.length && heap[r].max > heap[m].max) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]];
+        i = m;
+      }
+    }
+    return top;
+  };
+  const half = size / 2;
+  for (let x = minX; x < maxX; x += size) {
+    for (let y = minY; y < maxY; y += size) push(cell(x + half, y + half, half));
+  }
+  let best = cell(fallback[0], fallback[1], 0);
+  const center = cell((minX + maxX) / 2, (minY + maxY) / 2, 0);
+  if (center.d > best.d) best = center;
+  const tolerance = Math.max(precision, size * 1e-4);
+  for (let visited = 0; heap.length && visited < 600; visited++) {
+    const c = pop();
+    if (c.d > best.d) best = c;
+    if (c.max - best.d <= tolerance) continue;
+    const h = c.h / 2;
+    push(cell(c.x - h, c.y - h, h));
+    push(cell(c.x + h, c.y - h, h));
+    push(cell(c.x - h, c.y + h, h));
+    push(cell(c.x + h, c.y + h, h));
+  }
+  return { point: [best.x, best.y], room: best.d };
+}
+
+function bounds(rings) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const ring of rings) {
+    for (const [x, y] of ring) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+  }
+  return [x0, y0, x1, y1];
+}
+
+// Signed distance from a point to a rectangle (negative inside).
+function rectDistance(x, y, [x0, y0, x1, y1]) {
+  const dx = Math.max(x0 - x, 0, x - x1), dy = Math.max(y0 - y, 0, y - y1);
+  if (dx || dy) return Math.hypot(dx, dy);
+  return -Math.min(x - x0, x1 - x, y - y0, y1 - y);
+}
+
+// A style expression evaluated at a zoom for a feature's properties (the
+// subset the converter writes for sizes and paddings: numbers, literal,
+// get, to-number, coalesce, + - * /, interpolate / step on zoom). Unknown
+// forms give undefined.
+export function evaluate(expression, zoom, properties = {}) {
+  if (!Array.isArray(expression)) return expression;
+  const [op, ...args] = expression;
+  const ev = (value) => evaluate(value, zoom, properties);
+  switch (op) {
+    case "literal": return args[0];
+    case "zoom": return zoom;
+    case "get": return properties[args[0]];
+    case "to-number": {
+      for (const value of args) {
+        const number = Number(ev(value));
+        if (value !== null && Number.isFinite(number)) return number;
+      }
+      return 0;
+    }
+    case "coalesce": {
+      for (const value of args) {
+        const result = ev(value);
+        if (result !== null && result !== undefined) return result;
+      }
+      return undefined;
+    }
+    case "+": return args.reduce((sum, value) => sum + Number(ev(value)), 0);
+    case "*": return args.reduce((product, value) => product * Number(ev(value)), 1);
+    case "-": return args.length === 1 ? -Number(ev(args[0])) : Number(ev(args[0])) - Number(ev(args[1]));
+    case "/": return Number(ev(args[0])) / Number(ev(args[1]));
+    case "step": {
+      const input = Number(ev(args[0]));
+      let output = ev(args[1]);
+      for (let i = 2; i + 1 < args.length; i += 2) if (input >= args[i]) output = ev(args[i + 1]);
+      return output;
+    }
+    case "interpolate": {
+      const [type, input, ...stops] = args;
+      const x = Number(ev(input));
+      const base = Array.isArray(type) && type[0] === "exponential" ? Number(type[1]) : 1;
+      if (x <= stops[0]) return ev(stops[1]);
+      for (let i = 0; i + 3 < stops.length; i += 2) {
+        const z0 = stops[i], z1 = stops[i + 2];
+        if (x <= z1) {
+          const t = base === 1 ? (x - z0) / (z1 - z0)
+            : (base ** (x - z0) - 1) / (base ** (z1 - z0) - 1);
+          const a = ev(stops[i + 1]), b = ev(stops[i + 3]);
+          return Array.isArray(a) ? a.map((v, k) => v + (b[k] - v) * t) : a + (b - a) * t;
+        }
+      }
+      return ev(stops[stops.length - 1]);
+    }
+    default: return undefined;
+  }
+}
+
+// The style layer of a group drawn at this zoom.
+function activeLayer(group, zoom) {
+  return (group.layers.find(({ def }) => (def.minzoom ?? 0) <= zoom && zoom < (def.maxzoom ?? 25))
+    || group.layers[0]).def;
+}
+
+function groupShown(map, group, zoom) {
+  const def = activeLayer(group, zoom);
+  return (def.minzoom ?? 0) <= zoom && zoom < (def.maxzoom ?? 25)
+    && map.getLayer(def.id) && map.getLayoutProperty(def.id, "visibility") !== "none";
+}
+
+// properties -> [half width, half height] of a label's box in world units,
+// estimated from its text, text size and background padding.
+function labelBoxes(map, group, zoom, perPx) {
+  const layout = activeLayer(group, zoom).layout || {};
+  return (properties) => {
+    const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
+    if (!text) return null;
+    let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
+    if (!Number.isFinite(size) || size <= 0) size = 16;
+    let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
+    pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
+    const lines = text.split("\n");
+    const width = Math.max(...lines.map((line) => line.length)) * 0.6 * size + pad[1] + pad[3];
+    const height = lines.length * 1.2 * size + pad[0] + pad[2];
+    return [(width / 2 + 2) * perPx, (height / 2 + 2) * perPx];
+  };
 }
 
 function grow([x0, y0, x1, y1], dx, dy) {

@@ -3062,6 +3062,12 @@ class QgisMapLibreStyleExporter:
             layer_def.setdefault("metadata", {}).update({
                 "q2vt:visible-polygons": polygons[0],
                 "q2vt:label-per-part": polygons[1],
+                # Horizontal / Free: QGIS puts the label where it has the most
+                # room (pole of inaccessibility); around / over point: centroid.
+                "q2vt:label-anchor": "pole" if placement in ("Horizontal", "Free") else "centroid",
+                # Who gets the best spot when labels compete (QGIS priority,
+                # then z-index): the viewer places these labels in that order.
+                "q2vt:label-rank": [label_settings.priority, label_settings.zIndex],
             })
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
