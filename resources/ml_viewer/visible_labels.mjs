@@ -42,10 +42,13 @@
 // centroid of what is loaded of them), so panning reveals labels that are
 // already placed instead of waiting for a new round.
 //
-// Labels QGIS may overlap "if required" (or "at no cost") carry
-//   metadata["q2vt:overlap"] = "if-required"
-// and avoid other labels in the style; enableOverlapFallback() draws the
-// ones MapLibre could not place without overlap anyway, as QGIS does.
+// MapLibre draws these labels exactly where they are put (text-overlap
+// "always"): the placement above keeps them clear of each other where it
+// can, and a label with no free spot overlaps rather than disappearing -
+// labels that never blink while the map moves matter more than a rare
+// overlap. Other label layers QGIS may overlap "if required"
+// (metadata["q2vt:overlap"]) use MapLibre's cooperative overlap
+// (enableOverlapFallback).
 
 const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
@@ -132,7 +135,15 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       // drawn size, as QGIS does). MapLibre's collision boxes take the text
       // size of the next whole zoom - up to twice the drawn size for map-unit
       // text - and hid most of them: drawn by the fallback copy instead.
-      if (group.kind === "line") moved.metadata = { ...moved.metadata, "q2vt:overlap": "if-required" };
+      // The position and the overlaps are decided here (other labels,
+      // MapLibre's own included): MapLibre draws the label where it is put.
+      // Its own collision boxes (text size of the next whole zoom, up to
+      // twice the drawn size) hid labels, and its re-placement while the
+      // map moves made them blink.
+      moved.layout["text-overlap"] = "always";
+      if (moved.layout["icon-image"] !== undefined) moved.layout["icon-overlap"] = "always";
+      delete moved.layout["text-allow-overlap"];
+      delete moved.layout["icon-allow-overlap"];
       // Free (angled) placement: the angle is computed here per label.
       if (group.orient === "free") moved.layout["text-rotate"] = ["to-number", ["get", FREE_ROTATION], 0];
       map.addLayer(moved, before && map.getLayer(before) ? before : undefined);
@@ -412,41 +423,40 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const room = (extra) => roomiestPoint(rings, options.precision, extra);
         let score = (x, y) => Math.min(fit(x, y), clear(x, y));
         let best = room(score);
-        if (!(best.room > 0)) {  // no free spot: the best spot that fits (MapLibre decides)
+        if (!(best.room > 0)) {  // no free spot: the best spot that fits (overlapping)
           score = fit;
           best = room(score);
         }
         return { best, score };
       };
       let { best, score } = search();
-      // Free (angled), as QGIS: horizontal where the label fits inside the
-      // polygon, else turned along the polygon around the label (a street
-      // name along its street), searched again with the turned box.
-      let angle = 0;
-      const free = options.orient === "free" && options.rotationField && label;
-      if (free && !(best.room > 0 && fitsFlat(rings, best.point, best.room, label))) {
-        angle = localDirection(loaded, best.room > 0 ? best.point : null, label[0]);
-        half = envelope(label, angle);
-        nearBoxes();
-        // Searched again only if the turned label does not fit where it is.
-        if (!(best.room > 0) || Math.min(fit(...best.point), clear(...best.point)) < 0) {
-          ({ best, score } = search());
-          if (best.room > 0) {  // the direction where it ended up
-            angle = localDirection(loaded, best.point, label[0]);
-            half = envelope(label, angle);
-          }
-        }
-      }
       if (!(best.room > 0)) continue;  // only a sliver in view: no label (as QGIS)
-      const keep = old && within(inner, old.point) && (unchecked(old.point)
-        || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
-      point = keep ? old.point : best.point;
-      if (free) {  // the angle at the spot taken (a kept spot too)
-        if (point !== best.point) {  // a kept spot: its own angle
-          angle = fitsFlat(rings, point, roomAt(rings, point), label) ? 0 : localDirection(loaded, point, label[0]);
+      const free = options.orient === "free" && options.rotationField && label;
+      if (free) {
+        // Free (angled), as QGIS: horizontal where the label fits inside the
+        // polygon, else turned along the polygon (a street name along its
+        // street) - always wholly inside the polygon, else no label.
+        const field = options.rotationField;
+        const fine = (p) => Math.min(fit(...p), clear(...p)) >= 0;
+        const flatOld = old && !Number(old.properties?.[field]) && within(inner, old.point)
+          && fitsFlat(rings, old.point, roomAt(rings, old.point), label) && fine(old.point)
+          && roomAt(rings, old.point) >= KEEP_ROOM * best.room;
+        let placed = null;
+        if (flatOld) placed = { point: old.point, angle: 0 };
+        else if (fitsFlat(rings, best.point, best.room, label) && fit(...best.point) >= 0) {
+          placed = { point: best.point, angle: 0 };
+        } else {
+          const angle = localDirection(loaded, best.point, label[0]);
+          placed = placeTurned(rings, angle, label, view, avoid, best.point, old, field, options.precision);
         }
-        half = envelope(label, angle);
-        properties = { ...properties, [options.rotationField]: angle * 180 / Math.PI };
+        if (!placed) continue;
+        point = placed.point;
+        half = envelope(label, placed.angle);
+        properties = { ...properties, [field]: placed.angle * 180 / Math.PI };
+      } else {
+        const keep = old && within(inner, old.point) && (unchecked(old.point)
+          || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
+        point = keep ? old.point : best.point;
       }
     } else {
       const target = labelPoint(rings);
@@ -493,6 +503,88 @@ function boxInside(rings, [x, y], [hx, hy]) {
     if (!inside(rings, corner)) return false;
   }
   return !realEdges(rings).some(([a, b]) => clipLine([a, b], box).length);
+}
+
+// A label turned by ``angle`` placed wholly inside the polygon (QGIS drops
+// polygon label candidates that stick out), on the screen and clear of
+// ``avoid``: candidate spots on a grid along the turned axes (anchored to
+// the world, so the same spots after a pan); the best centred one wins (most
+// room to the polygon's edges), then the one nearest ``target``. A kept spot
+// at the same angle stays while it is still fine and nearly as centred.
+// Returns {point, angle} or null.
+function placeTurned(rings, angle, label, view, avoid, target, old, field, precision = 0) {
+  const [hx, hy] = label;
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const toFrame = ([x, y]) => [x * c + y * s, -x * s + y * c];
+  const fromFrame = ([u, v]) => [u * c - v * s, u * s + v * c];
+  const edges = realEdges(rings).map(([a, b]) => [toFrame(a), toFrame(b)]);
+  const [ex, ey] = envelope(label, angle);
+  // Does the turned label at p overlap an (axis-aligned) box? Separating axes.
+  const overlaps = (p, [u, v], box) => {
+    const [x, y] = p;
+    const [ex2, ey2] = [ex, ey];
+    if (x + ex2 <= box[0] || x - ex2 >= box[2] || y + ey2 <= box[1] || y - ey2 >= box[3]) return false;
+    let us = Infinity, ue = -Infinity, vs = Infinity, ve = -Infinity;
+    for (const corner of [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]) {
+      const [cu, cv] = toFrame(corner);
+      us = Math.min(us, cu); ue = Math.max(ue, cu); vs = Math.min(vs, cv); ve = Math.max(ve, cv);
+    }
+    return !(ue <= u - hx || us >= u + hx || ve <= v - hy || vs >= v + hy);
+  };
+  const ok = (p, clearOf = avoid) => {
+    const [x, y] = p;
+    if (Math.min(x - view[0] - ex, view[2] - ex - x, y - view[1] - ey, view[3] - ey - y) < 0) return false;
+    const [u, v] = toFrame(p);
+    if (clearOf.some((other) => overlaps(p, [u, v], other))) return false;
+    const rect = [u - hx, v - hy, u + hx, v + hy];
+    for (const corner of [[rect[0], rect[1]], [rect[2], rect[1]], [rect[2], rect[3]], [rect[0], rect[3]]]) {
+      if (!inside(rings, fromFrame(corner))) return false;
+    }
+    return !edges.some((edge) => clipLine(edge, rect).length);
+  };
+  let [u0, v0, u1, v1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const ring of rings) {
+    for (const point of ring) {
+      const [u, v] = toFrame(point);
+      if (u < u0) u0 = u; if (u > u1) u1 = u;
+      if (v < v0) v0 = v; if (v > v1) v1 = v;
+    }
+  }
+  // Longer or taller than the polygon along the label: it cannot fit.
+  if (u1 - u0 < 2 * hx || v1 - v0 < 2 * hy) return null;
+  let du = Math.max(hx / 3, precision), dv = Math.max(hy / 2, precision);
+  const cells = ((u1 - u0) / du) * ((v1 - v0) / dv);
+  if (cells > 800) {  // a big polygon: coarser grid
+    const k = Math.sqrt(cells / 800);
+    du *= k;
+    dv *= k;
+  }
+  const candidates = [];
+  for (let u = Math.floor(u0 / du) * du; u <= u1; u += du) {
+    for (let v = Math.floor(v0 / dv) * dv; v <= v1; v += dv) {
+      const p = fromFrame([u, v]);
+      const room = roomAt(rings, p);
+      if (room >= hy) candidates.push({ p, room });  // at least the label's height across
+    }
+  }
+  const bin = Math.max(dv, precision) / 2;  // rooms within half a step count as equal
+  candidates.sort((a, b) => (Math.round(b.room / bin) - Math.round(a.room / bin))
+    || (Math.hypot(a.p[0] - target[0], a.p[1] - target[1]) - Math.hypot(b.p[0] - target[0], b.p[1] - target[1])));
+  let found = null;
+  for (let i = 0; i < candidates.length && i < 400 && !found; i++) {
+    if (ok(candidates[i].p)) found = candidates[i];
+  }
+  // Nothing clear of the other labels: the best spot inside anyway (MapLibre
+  // and the overlap setting decide, as for horizontal labels) - never outside.
+  for (let i = 0; i < candidates.length && i < 400 && !found; i++) {
+    if (ok(candidates[i].p, [])) found = candidates[i];
+  }
+  if (!found) return null;
+  if (old && Math.abs(Number(old.properties?.[field]) - angle * 180 / Math.PI) < 3 && ok(old.point)
+      && roomAt(rings, old.point) >= KEEP_ROOM * found.room) {
+    return { point: old.point, angle };
+  }
+  return { point: found.p, angle };
 }
 
 // boxInside, decided by the free room around the point where that settles it.
@@ -563,7 +655,7 @@ function signedRoom(rings, edges, x, y) {
 }
 
 // Room (distance to the nearest real polygon edge; negative outside) at a point.
-export { boxInside, localDirection, envelope };
+export { boxInside, localDirection, envelope, placeTurned };
 
 export function roomAt(rings, point) {
   const edges = realEdges(rings);
@@ -1023,83 +1115,22 @@ function inside(rings, [x, y]) {  // even-odd over every ring
   return result;
 }
 
-// "Overlap if required": each label layer marked q2vt:overlap avoids other
-// labels; a copy below it (overlap allowed, never blocking) draws the labels
-// MapLibre could not place, found after each placement with
-// queryRenderedFeatures (placed symbols only) and marked in feature state.
+// "Overlap if required" (QGIS) for the label layers MapLibre places itself
+// (metadata q2vt:overlap): MapLibre's cooperative overlap - other positions
+// first, overlapping only if none is free. (A copy layer switched by the
+// placement result lagged behind it: labels blinked while the map moved.)
+// Labels placed by enableVisibleLabels are drawn where they are put.
 export function enableOverlapFallback(map) {
-  const primaries = [];
+  const layers = [];
   for (const layer of map.getStyle().layers) {
     if (layer.type !== "symbol" || !(layer.metadata && layer.metadata["q2vt:overlap"] === "if-required")) continue;
-    const copy = JSON.parse(JSON.stringify(layer));
-    copy.id = layer.id + OVERLAP_SUFFIX;
-    copy.layout = { ...copy.layout, "text-allow-overlap": true, "icon-allow-overlap": true,
-                    "text-ignore-placement": true, "icon-ignore-placement": true };
-    const anchors = copy.layout["text-variable-anchor"];
-    if (anchors) {  // the first (preferred) position
-      copy.layout["text-anchor"] = anchors[0];
-      delete copy.layout["text-variable-anchor"];
-      delete copy.layout["text-radial-offset"];
-    }
-    copy.paint = { ...copy.paint };
-    for (const name of ["text-opacity", "icon-opacity"]) {
-      copy.paint[name] = unlessPlaced(copy.paint[name] === undefined ? 1 : copy.paint[name]);
-    }
-    map.addLayer(copy, layer.id);
-    primaries.push(layer.id);
+    const layout = layer.layout || {};
+    if (layout["text-overlap"] === "always") continue;  // placed by the viewer
+    if (layout["text-field"] !== undefined) map.setLayoutProperty(layer.id, "text-overlap", "cooperative");
+    if (layout["icon-image"] !== undefined) map.setLayoutProperty(layer.id, "icon-overlap", "cooperative");
+    layers.push(layer.id);
   }
-  let marked = new Map();
-  const sync = () => {
-    const layers = primaries.filter((id) => map.getLayer(id));
-    const placed = new Map();
-    if (layers.length) {
-      for (const f of map.queryRenderedFeatures({ layers })) {
-        if (f.id === undefined || f.id === null) continue;
-        const target = f.sourceLayer ? { source: f.source, sourceLayer: f.sourceLayer, id: f.id }
-          : { source: f.source, id: f.id };
-        placed.set(`${f.source}\u0000${f.sourceLayer || ""}\u0000${f.id}`, target);
-      }
-    }
-    for (const [key, target] of marked) {
-      if (!placed.has(key)) map.setFeatureState(target, { q2vtPlaced: false });
-    }
-    for (const [key, target] of placed) {
-      if (!marked.has(key)) map.setFeatureState(target, { q2vtPlaced: true });
-    }
-    marked = placed;
-  };
-  let last = 0, pending = null;
-  const throttled = () => {
-    if (pending) return;
-    const wait = Math.max(0, 150 - (Date.now() - last));
-    pending = setTimeout(() => { pending = null; last = Date.now(); sync(); }, wait);
-  };
-  if (primaries.length) {
-    map.on("render", throttled);
-    map.on("idle", sync);
-  }
-  const destroy = () => {
-    if (pending) clearTimeout(pending);
-    pending = null;
-    map.off("render", throttled);
-    map.off("idle", sync);
-  };
-  return { sync, layers: primaries, destroy };
+  const noop = () => {};
+  return { sync: noop, layers, destroy: noop };
 }
 
-// opacity -> 0 where the label was placed by its primary layer; zoom curves
-// keep ["zoom"] at the top (a MapLibre rule).
-function unlessPlaced(value) {
-  const placed = ["boolean", ["feature-state", "q2vtPlaced"], false];
-  const wrap = (v) => ["case", placed, 0, v];
-  if (Array.isArray(value) && (value[0] === "interpolate" || value[0] === "step")) {
-    const input = value[0] === "interpolate" ? 2 : 1;
-    if (Array.isArray(value[input]) && value[input][0] === "zoom") {
-      const out = value.slice();
-      for (let i = input + 2; i < out.length; i += 2) out[i] = wrap(out[i]);  // the outputs
-      return out;
-    }
-  }
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;  // legacy function: leave
-  return wrap(value);
-}
