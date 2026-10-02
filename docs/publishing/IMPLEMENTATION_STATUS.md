@@ -301,3 +301,21 @@ viewer. Export 159 s (was 154 s), web release 25.8 MB (was 25.5 MB).
 |---|---|
 | `pytest tests/integration/test_end_to_end.py -k detail_below` | 1 passed (new; fails with the old tolerance) |
 | exporter / pipeline / cache suites (end to end, units and properties, publishing pipeline, materialize, export cache) | 141 passed |
+
+## 4.5.6: Publish window - extent from a layer, roomy Interaction tab, settings files
+
+Owner reports: "web map extent setting is bad now, it shows cut off coordinates and only a
+button with use the canvas extent; there should be a lookup combo for selecting a layer";
+"on the interaction tab the left layer list is very cramped"; "there should be an option to
+export and import settings to and from file in the gui".
+
+| Change | Detail |
+|---|---|
+| Extent | layer combo (any layer; empty entry = fixed extent) + *Map canvas* button; `view.extentLayer` (schema) - the layer's extent is recomputed at every export; a removed layer keeps its last extent, fixed; summary "Layer extent: about 13.2 × 10.2 km / E … / N …" instead of EPSG:3857 numbers |
+| Interaction tab | the field note did not wrap (≈2000 px minimum width) and squeezed the layer list; it wraps now; the list has a 220 px minimum, wraps names, shows layer icons and tooltips; the splitter cannot collapse it |
+| Settings file | *Settings file…* menu: export (`.q2vt.json`: profile + names of the layers it refers to) and import (bare profiles too); layers matched by id, else unique name; unmatched left out and reported; same web map or a new one |
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publish_dialog_extent.py` | 4 passed (new) |
+| Publish window and profile suites (`test_publish_dialog*.py`, `test_publishing_profile.py`) | 45 passed |

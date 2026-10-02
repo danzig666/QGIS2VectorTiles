@@ -172,6 +172,7 @@ class ParcelInfoConfig:
 @dataclass
 class ViewConfig:
     extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857; None = canvas
+    extent_layer: str = ""                # layer id: the extent follows that layer's extent
     min_zoom: int = 0
     max_zoom: int = 16
     max_view_zoom: int = 22               # browser zoom limit (overzoom)

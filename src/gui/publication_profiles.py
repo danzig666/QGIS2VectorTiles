@@ -87,3 +87,77 @@ def as_new_publication(profile: PublicationProfile) -> PublicationProfile:
 def dumps_profile(profile: PublicationProfile) -> str:
     """Stable JSON of a profile (to compare settings between runs)."""
     return dumps(profile)
+
+
+# ---------------------------------------------------------------- settings files
+FILE_FORMAT = "q2vtPublicationSettings"
+
+
+def export_document(profile: PublicationProfile, project: QgsProject) -> str:
+    """The settings as a file: the profile plus the names of the layers it
+    refers to (layer ids differ between projects; names let another project
+    take the settings over). No secrets: profiles never hold any."""
+    names = {layer_id: layer.name() for layer_id, layer in project.mapLayers().items()}
+    data = json.loads(dumps(profile))
+    used = {value for value in _strings(data) if value in names}
+    return json.dumps({FILE_FORMAT: 1, "profile": data,
+                       "layerNames": {layer_id: names[layer_id] for layer_id in sorted(used)}},
+                      ensure_ascii=False, sort_keys=True, indent=1)
+
+
+def import_document(text: str, project: QgsProject) -> Tuple[PublicationProfile, List[str]]:
+    """Profile from a settings file (or a bare profile JSON), its layers
+    matched to this project: by id, else by a unique layer name. Layers not
+    found are dropped. Returns (profile, notes for the user)."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a settings file")
+    names = (data.get("layerNames") or {}) if FILE_FORMAT in data else {}
+    raw = data["profile"] if FILE_FORMAT in data else data
+    here = project.mapLayers()
+    by_name = {}
+    for layer_id, layer in here.items():
+        by_name.setdefault(layer.name(), []).append(layer_id)
+    mapping, missing = {}, []
+    for old_id, name in names.items():
+        if old_id in here:
+            continue
+        candidates = by_name.get(name, [])
+        if len(candidates) == 1:
+            mapping[old_id] = candidates[0]
+        else:
+            missing.append(name)
+    profile = load_profile(json.dumps(_replace(raw, mapping)))
+    notes = []
+    if mapping:
+        notes.append(f"{len(mapping)} layer(s) matched by name.")
+    kept = [config for config in profile.layers if config.layer_id in here]
+    dropped = len(profile.layers) - len(kept)
+    profile.layers = kept
+    if profile.view.extent_layer and profile.view.extent_layer not in here:
+        profile.view.extent_layer = ""
+    if dropped or missing:
+        notes.append(f"{max(dropped, len(missing))} layer(s) not found in this project and left out"
+                     + (": " + ", ".join(sorted(set(missing))[:8]) if missing else "") + ".")
+    return profile, notes
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _replace(value, mapping):
+    if isinstance(value, str):
+        return mapping.get(value, value)
+    if isinstance(value, dict):
+        return {key: _replace(item, mapping) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace(item, mapping) for item in value]
+    return value
