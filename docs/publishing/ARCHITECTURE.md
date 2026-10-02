@@ -7,7 +7,9 @@ Publish Web Map window (src/gui)          Processing algorithm (unchanged + TILE
 publishing.controller.export_local            (QGIS main thread, NoThreading kept)
   PLAN        profile vs project (layers, fields, expressions)
   EXPORT_MVT  existing compiler: QGIS2VectorTiles(layer_ids, feature_keys, extra_tile_fields,
-              background without raster, add_result_layer=False) -> tiles.mbtiles + style
+              background without raster, add_result_layer=False, cache) -> tiles.mbtiles + style
+              (export cache: datasets and per-layer tile sets of unchanged layers reused,
+              per-layer tiles merged; core/export_cache.py)
   RECORDS     qgis_model.collect_records: published features (extent x exported rule filters),
               keys validated, label/terms/anchor/bounds/approved attributes (private JSONL)
   LEGEND      QGIS-rendered swatches of the original legend items; logical model
@@ -24,7 +26,8 @@ publishing.controller.export_local            (QGIS main thread, NoThreading kep
               current.json atomically
         ▼
 publishing.deployments.publish                (QgsTask: files + network only)
-  pointer+ETag -> upload inventory -> stable entry -> public_verify -> conditional activation
+  pointer+ETag -> upload inventory (unchanged files copied from the current release inside
+  the bucket) -> stable entry -> public_verify -> conditional activation
 ```
 
 ## Packages
@@ -42,7 +45,8 @@ publishing.deployments.publish                (QgsTask: files + network only)
 | `src/publishing/parcel_report.py` | Parcel report (telekinformáció) computed at export time. |
 | `src/publishing/basemap.py` | Vector basemap: build discovery, range reader, region extract, flavors, glyphs. |
 | `resources/basemaps/protomaps/` | Vendored `@protomaps/basemaps` 5.7.2 layer definitions (hu/en × 5 flavors). |
-| `src/gui/` | Publish window, project-saved profiles, release history. |
+| `src/core/export_cache.py` | Export cache: content-addressed datasets, per-layer tile sets and the parcel report of unchanged layers (`<output folder>/.q2vt-cache`). |
+| `src/gui/` | Publish window, project-saved profiles, release history, Cloudflare R2 guide (`r2_guide.py`). |
 | `resources/web_viewer/` | Static MapLibre viewer (ES modules, no framework, no CDN). |
 | `resources/ml_viewer/visible_labels.mjs` | The single maintained visible-polygon label helper (also used by the legacy viewer). |
 | `schemas/publishing/` | JSON Schemas of profile, manifest, release, current pointer and search index. |
