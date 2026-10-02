@@ -76,35 +76,28 @@ def test_label_at_the_screen_edge_moves_in():
     assert edge[0][1] > 0.6
 
 
-def _unless_placed(value):
+def test_overlap_if_required_uses_cooperative_overlap():
+    # No copy layers (switched by the placement result, they lagged behind it
+    # and labels blinked while the map moved): MapLibre's cooperative overlap.
     script = (f"import {{ enableOverlapFallback }} from {json.dumps('file://' + MODULE)};"
-              "const added = [];"
-              "const map = { getStyle: () => ({ layers: [{ id: 'a', type: 'symbol', "
-              "metadata: { 'q2vt:overlap': 'if-required' }, layout: { 'text-variable-anchor': "
-              f"['center', 'top'], 'text-radial-offset': 0 }}, paint: {{ 'text-opacity': {json.dumps(value)} }} }}] }}),"
-              "addLayer: (l, before) => added.push([l, before]), on: () => {} };"
-              "enableOverlapFallback(map); console.log(JSON.stringify(added));")
+              "const set = [], added = [];"
+              "const layers = ["
+              "{ id: 'a', type: 'symbol', metadata: { 'q2vt:overlap': 'if-required' }, layout: { 'text-field': 'x' } },"
+              "{ id: 'b', type: 'symbol', metadata: { 'q2vt:overlap': 'if-required' },"
+              "  layout: { 'text-field': 'x', 'icon-image': 'i' } },"
+              "{ id: 'c', type: 'symbol', metadata: { 'q2vt:overlap': 'if-required' },"
+              "  layout: { 'text-field': 'x', 'text-overlap': 'always' } },"
+              "{ id: 'd', type: 'symbol', layout: { 'text-field': 'x' } }];"
+              "const map = { getStyle: () => ({ layers }), setLayoutProperty: (...a) => set.push(a),"
+              "  addLayer: (l) => added.push(l), on: () => {} };"
+              "const out = enableOverlapFallback(map);"
+              "console.log(JSON.stringify({ set, added: added.length, layers: out.layers }));")
     run = subprocess.run(["node", "--input-type=module", "-e", script],
                          capture_output=True, text=True, check=True)
-    return json.loads(run.stdout)
-
-
-def test_overlap_fallback_copy():
-    [[copy, before]] = _unless_placed(0.8)
-    placed = ["boolean", ["feature-state", "q2vtPlaced"], False]
-    assert before == "a" and copy["id"] == "a_q2vt_overlap"
-    assert copy["layout"]["text-allow-overlap"] is True and copy["layout"]["text-ignore-placement"] is True
-    assert copy["layout"]["text-anchor"] == "center" and "text-variable-anchor" not in copy["layout"]
-    assert copy["paint"]["text-opacity"] == ["case", placed, 0, 0.8]
-    assert copy["paint"]["icon-opacity"] == ["case", placed, 0, 1]
-
-
-def test_overlap_fallback_keeps_zoom_curves_on_top():
-    curve = ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1]
-    [[copy, _]] = _unless_placed(curve)
-    placed = ["boolean", ["feature-state", "q2vtPlaced"], False]
-    assert copy["paint"]["text-opacity"] == ["interpolate", ["linear"], ["zoom"],
-                                             10, ["case", placed, 0, 0.5], 14, ["case", placed, 0, 1]]
+    result = json.loads(run.stdout)
+    assert result["added"] == 0 and result["layers"] == ["a", "b"]
+    assert result["set"] == [["a", "text-overlap", "cooperative"], ["b", "text-overlap", "cooperative"],
+                             ["b", "icon-overlap", "cooperative"]]
 
 
 def _points(squares, view, options):
@@ -371,3 +364,41 @@ def test_free_placement_helpers():
     ell = [[0, 0], [100, 0], [100, 10], [10, 10], [10, 100], [0, 100]]
     assert _js(f"m.localDirection([{json.dumps(ell)}], [60, 5], 20)") == pytest.approx(0, abs=0.01)
     assert abs(_js(f"m.localDirection([{json.dumps(ell)}], [5, 60], 20)")) == pytest.approx(math.pi / 2, abs=0.01)
+
+
+def _strip(cx, cy, length, width, a):
+    dx, dy = math.cos(a), math.sin(a)
+    nx, ny = -dy, dx
+    return [[cx + sx * dx * length / 2 + sy * nx * width / 2, cy + sx * dy * length / 2 + sy * ny * width / 2]
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+
+
+def test_turned_labels_stay_inside_and_centred():
+    # Streets rising at 30°, 300 units wide (the label is 2 × 0.012 × 4096 ≈ 98 high):
+    # the label sits on the street's centre line, wholly inside.
+    a = math.radians(-30)
+    box = [0.06, 0.012]
+    street = _strip(2048, 2048, 3000, 300, a)
+    x, y, rotation = _free([(1, street)], [0, 0, 1, 1], box)[1]
+    assert rotation == pytest.approx(-30, abs=1)
+    # Distance from the centre line (world units; 300 / 4096 wide street).
+    nx, ny = -math.sin(a), math.cos(a)
+    off = abs((x - 0.5) * nx + (y - 0.5) * ny)
+    assert off < 0.25 * 300 / 4096
+    # Too narrow for the label's height, or too short for its length: no label
+    # (QGIS drops candidates that stick out of the polygon).
+    narrow = _strip(2048, 2048, 3000, 60, a)
+    short = _strip(2048, 2048, 300, 300, a + 0.0)
+    assert _free([(2, narrow), (3, short)], [0, 0, 1, 1], box) == {}
+
+
+def test_place_turned_keeps_clear_of_other_labels_inside_the_street():
+    # Another label on the middle of a horizontal-ish street: the turned label
+    # moves along the street (still centred across it), not to its edge.
+    rings = json.dumps([_strip(0.5, 0.5, 0.8, 0.06, math.radians(-30))])
+    other = json.dumps([[0.45, 0.45, 0.55, 0.55]])
+    out = _js(f"m.placeTurned({rings}, -Math.PI / 6, [0.06, 0.012], [0, 0, 1, 1], {other}, [0.5, 0.5], null, 'rot', 0.001)")
+    x, y = out["point"]
+    nx, ny = -math.sin(math.radians(-30)), math.cos(math.radians(-30))
+    assert abs((x - 0.5) * nx + (y - 0.5) * ny) < 0.01   # on the centre line
+    assert abs(x - 0.5) > 0.05                            # moved along the street

@@ -342,3 +342,23 @@ their streets; narrow parcels turned, wide ones horizontal. Label placement z15 
 | `pytest tests/integration/test_publish_scale_limits.py` | 3 passed (new) |
 | Publish window and profile suites | 48 passed |
 | browser, web builder, end to end, flattener, publishing pipeline, export cache suites | 116 passed |
+
+## 4.6.1: no blinking labels; turned labels inside their parcel
+
+Owner reports: "Bencze út is too close to the boundary, there's space above"; "they must not hang
+off the parcel"; "the labels still flicker much when panning ... overlap is less important than
+flickering, make it fast and flicker free, some overlap is okay".
+
+| Cause | Fix |
+|---|---|
+| "If required" labels were a primary layer plus a copy layer shown where the primary was not placed, switched by feature state from `queryRenderedFeatures` every 150 ms: while moving, both were off for a moment | moved (viewer-placed) label layers: `text-overlap` / `icon-overlap` `always` - drawn where placed; the placer avoids other labels where it can, else overlaps (no strict dropping). Other "if required" layers: MapLibre `cooperative` overlap; no copy layers, no sync |
+| Turned labels: screen fit only; the spot came from the horizontal search (pushed by other labels' boxes) | `placeTurned`: a world-anchored grid in the turned frame, candidates with room ≥ half the label height, ordered by room (centred) then distance to the pole; the turned rectangle wholly inside (corners inside, no real edge across it), on screen, clear of other labels (separating axes with the turned rectangle); else the best inside spot overlapping; none inside: no label; early exit when the polygon is shorter / narrower than the label |
+
+Owner project: Bencze út, Vásártér utca, Ady Endre utca inside and centred in their streets.
+Flicker measurement (2 s pan, labels visible → hidden → visible in the inner screen): 0 (was 6
+dragging, 3 easing). Label placement: z15 ≈ 0.7 s, z16 ≈ 0.3 s (only when the map stops).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 23 passed |
+| browser and web builder suites | 82 passed |
