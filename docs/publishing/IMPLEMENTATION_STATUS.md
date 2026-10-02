@@ -257,3 +257,26 @@ are smaller). Label placement time (headless): z15 3235 labels 0.43 s, z16 0.16 
 | `pytest tests/integration/test_end_to_end.py -k once_per_line` | 1 new passed (`_vl` lines with the label fields, metadata, rotated midpoint) |
 | label-related suites (web viewer features, transport, parity, web builder, export cache) | 77 passed |
 | exporter / pipeline suites (end to end, units and properties, publishing pipeline, materialize) | 134 passed |
+
+## 4.5.4: every contour label placed is shown
+
+Owner report on the 4.5.3 screenshots: "only 190 is showing, 185 and 187.5 don't" (185 was
+pushed to the screen edge, 187.5 hidden). Both were MapLibre collision rejections: its
+collision boxes use the text size of the next whole zoom (up to 2× the drawn size for map-unit
+text), so a spot clear by the drawn size was rejected, and clearing the oversized box left no
+spot between the parcel numbers.
+
+| Cause | Fix |
+|---|---|
+| MapLibre's collision boxes are up to 2× the drawn label at fractional zooms | line-label layers are drawn through the overlap fallback (`q2vt:overlap: if-required` at runtime): what MapLibre rejects, the copy draws |
+| The placer must then do the whole collision check | line labels are placed clear (drawn size, rotated envelope) of the labels placed before and of the point labels MapLibre draws itself (`queryRenderedFeatures` on the other symbol layers: building numbers, names); no clear spot: no label |
+| 4.5.3's collision-size boxes (`hitBox`) | removed |
+
+Owner project, the reported view (z18.2): 187.5, 190, 185 and 195 shown (QGIS shows the same
+four), also after arriving by panning. Label placement time (headless): z15 0.5 s, z16 0.17 s,
+z17 0.06 s, z18 0.02 s.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 20 passed (line tests: avoid by drawn size, no clear spot → no label) |
+| label-related suites (visible labels, web viewer features, transport, parity, web builder, end to end) | 89 passed |

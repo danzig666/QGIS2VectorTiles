@@ -32,10 +32,8 @@
 // visible stretch of their line, rotated along it, if the label fits along
 // that stretch and on the screen (sliding along the line, or to a shorter
 // visible stretch, to fit and to keep clear of other labels), as QGIS places
-// line labels inside the extent. "Clear" uses MapLibre's collision boxes,
-// which take the text size of the next whole zoom (up to twice the drawn
-// size for labels sized in map units): a spot clear only by the drawn size
-// would be hidden by MapLibre.
+// line labels inside the extent; clear also of the point labels MapLibre
+// draws itself (building numbers, names). No clear spot: no label.
 // While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
@@ -128,6 +126,11 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       moved.layout = { ...moved.layout, "text-anchor": "center" };
       delete moved.layout["text-variable-anchor"];
       delete moved.layout["text-radial-offset"];
+      // Line labels are placed here clear of the other labels (by their
+      // drawn size, as QGIS does). MapLibre's collision boxes take the text
+      // size of the next whole zoom - up to twice the drawn size for map-unit
+      // text - and hid most of them: drawn by the fallback copy instead.
+      if (group.kind === "line") moved.metadata = { ...moved.metadata, "q2vt:overlap": "if-required" };
       map.addLayer(moved, before && map.getLayer(before) ? before : undefined);
     }
   }
@@ -161,7 +164,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       return (rb[0] - ra[0]) || (rb[1] - ra[1]) || ((b.order ?? 0) - (a.order ?? 0));
     });
     const placed = [];  // world boxes of the labels placed so far
-    const hits = [];    // ... and their MapLibre collision boxes
+    // Boxes of the labels MapLibre draws itself (building numbers, names...):
+    // line labels keep clear of them too. Only when a line group needs them.
+    let otherBoxes = null;
+    const others = () => (otherBoxes ??= renderedLabelBoxes(map, maplibregl, groups, zoom, perPx));
     const zoom = map.getZoom();
     for (const [polygons, group] of ranked) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
@@ -177,16 +183,13 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // Moving, or tiles still arriving (the visible part is not complete):
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
-        labelBox: labelBoxes(map, group, zoom, perPx), avoid: placed.slice(),
-        hitBox: labelBoxes(map, group, zoom, perPx, Math.floor(zoom) + 1), avoidHits: hits.slice(),
+        labelBox: labelBoxes(map, group, zoom, perPx),
+        avoid: group.kind === "line" ? placed.concat(others()) : placed.slice(),
         kind: group.kind || "polygon", rotationField: rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
       write(map.getSource(group.source), data, polygons);
-      if (data.boxes && groupShown(map, group, zoom)) {
-        placed.push(...data.boxes);
-        hits.push(...data.hits);
-      }
+      if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
     }
   };
   // Only what changed goes to the source: an incremental update reloads just
@@ -339,8 +342,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
   const points = new Map();
   const avoid = (options.avoid || []).slice();
-  const avoidHits = (options.avoidHits || []).slice();
-  const boxes = [], hits = [];
+  const boxes = [];
   // Bigger polygons first: they get the middle, smaller neighbours keep clear.
   const area = (rings) => Math.abs(rings.reduce((sum, ring) => sum + ring.reduce((a, [x1, y1], i) => {
     const [x2, y2] = ring[(i + 1) % ring.length];
@@ -355,14 +357,12 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       continue;
     }
     if (options.kind === "line") {
-      const placed = placeOnLine(loaded, properties, old, view, guarded, avoidHits, options);
+      const placed = placeOnLine(loaded, properties, old, view, guarded, avoid, options);
       if (placed) {
         points.set(key, placed);
         if (placed.box) {
           boxes.push(placed.box);
           avoid.push(placed.box);
-          hits.push(placed.hit);
-          avoidHits.push(placed.hit);
         }
       }
       continue;
@@ -419,12 +419,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     }
     if (half) {
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
-      const [hx, hy] = (options.hitBox && options.hitBox(properties)) || half;
-      const hit = [point[0] - hx, point[1] - hy, point[0] + hx, point[1] + hy];
       boxes.push(box);
       avoid.push(box);
-      hits.push(hit);
-      avoidHits.push(hit);
     }
     points.set(key, { point, properties });
   }
@@ -440,7 +436,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     out.push({ type: "Feature", id: state.ids.get(key), properties,
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
-  return { type: "FeatureCollection", features: out, boxes, hits };
+  return { type: "FeatureCollection", features: out, boxes };
 }
 
 // Polygon edges of rings, without the edges along their tile cut.
@@ -664,10 +660,9 @@ function project(chain, [x, y]) {
 
 // A line label on the visible part of its line: the middle of the longest
 // visible stretch if the label fits there (along the line, on the screen)
-// and its MapLibre collision box is clear of the labels placed before (else
-// MapLibre hides it), else the nearest such spot along that stretch or a
-// shorter one; no clear spot: the best spot that fits (MapLibre decides).
-function placeOnLine(loaded, properties, old, view, guarded, avoidHits, options) {
+// and is clear of the labels placed before, else the nearest such spot
+// along that stretch or a shorter one; no clear spot: no label (as QGIS).
+function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
   const withRotation = (rotation) => (options.rotationField
     ? { ...properties, [options.rotationField]: rotation } : properties);
   const chains = (pieces) => stitch(pieces).map((chain) => ({ chain, length: chainLength(chain) }))
@@ -680,23 +675,21 @@ function placeOnLine(loaded, properties, old, view, guarded, avoidHits, options)
     return { point: at.point, properties: withRotation(at.rotation) };
   }
   const half = options.labelBox ? options.labelBox(properties) : null;
-  const hitHalf = (half && options.hitBox && options.hitBox(properties)) || half;
   // Axis-aligned envelope of a rotated box (as MapLibre's rotated collision box).
   const envelope = ([hx, hy], angle) => [
     Math.abs(Math.cos(angle)) * hx + Math.abs(Math.sin(angle)) * hy,
     Math.abs(Math.sin(angle)) * hx + Math.abs(Math.cos(angle)) * hy];
   const candidate = (chain, s) => {
     const at = along(chain, s);
-    if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null, hit: null };
+    if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null };
     const angle = at.rotation * Math.PI / 180;
     const [x, y] = at.point;
-    const [ex, ey] = envelope(half, angle), [hx, hy] = envelope(hitHalf, angle);
+    const [ex, ey] = envelope(half, angle);
     const fit = Math.min(x - view[0] - ex, view[2] - ex - x, y - view[1] - ey, view[3] - ey - y);
-    const hit = [x - hx, y - hy, x + hx, y + hy];
-    const clear = !avoidHits.some((other) => intersect(other, hit));
-    return { ...at, fit, clear, box: [x - ex, y - ey, x + ex, y + ey], hit };
+    const box = [x - ex, y - ey, x + ex, y + ey];
+    return { ...at, fit, clear: !avoid.some((other) => intersect(other, box)), box };
   };
-  const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box, hit: c.hit });
+  const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box });
   const lo = half ? half[0] : 0;
   const longest = visible[0];
   if (old && !options.freeze && longest.length >= 2 * lo) {  // kept while near the middle and still fine
@@ -708,7 +701,6 @@ function placeOnLine(loaded, properties, old, view, guarded, avoidHits, options)
       if (kept && kept.fit >= 0 && kept.clear) return result(kept);
     }
   }
-  let fallback = null;
   for (const { chain, length } of visible) {
     if (length < 2 * lo) break;  // the label does not fit along it (nor along shorter ones)
     // From the middle outwards, in steps of a quarter label (at most 40).
@@ -717,12 +709,10 @@ function placeOnLine(loaded, properties, old, view, guarded, avoidHits, options)
       const s = length / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
       if (s < lo - 1e-12 || s > length - lo + 1e-12) continue;
       const c = candidate(chain, s);
-      if (!c || c.fit < 0) continue;
-      if (c.clear) return result(c);
-      if (!fallback) fallback = c;
+      if (c && c.fit >= 0 && c.clear) return result(c);
     }
   }
-  return fallback ? result(fallback) : null;
+  return null;
 }
 
 // The feature property the label's text-rotate reads, if any.
@@ -816,15 +806,15 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
-// With ``sizeZoom`` the text size at that zoom: MapLibre's collision boxes
-// use the size at the next whole zoom (the tile's layout size), so a label
-// sized in map units collides with a box up to twice its drawn size.
-function labelBoxes(map, group, zoom, perPx, sizeZoom = zoom) {
-  const layout = activeLayer(group, zoom).layout || {};
+function labelBoxes(map, group, zoom, perPx) {
+  return layoutBoxes(activeLayer(group, zoom).layout || {}, zoom, perPx);
+}
+
+function layoutBoxes(layout, zoom, perPx) {
   return (properties) => {
     const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
     if (!text) return null;
-    let size = Number(evaluate(layout["text-size"] ?? 16, sizeZoom, properties));
+    let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
     if (!Number.isFinite(size) || size <= 0) size = 16;
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
@@ -833,6 +823,30 @@ function labelBoxes(map, group, zoom, perPx, sizeZoom = zoom) {
     const height = lines.length * 1.2 * size + pad[0] + pad[2];
     return [(width / 2 + 2) * perPx, (height / 2 + 2) * perPx];
   };
+}
+
+// World boxes of the point labels MapLibre draws from the other symbol
+// layers (estimated from text and size at the anchor; rotation, offsets and
+// icons ignored).
+function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx) {
+  const ours = new Set();
+  for (const group of groups.values()) {
+    for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
+  }
+  const layers = map.getStyle().layers.filter((l) => l.type === "symbol" && !ours.has(l.id)
+    && (l.layout || {})["text-field"] !== undefined).map((l) => l.id);
+  if (!layers.length) return [];
+  const boxes = [];
+  const sizes = new Map();
+  for (const f of map.queryRenderedFeatures({ layers })) {
+    if (f.geometry.type !== "Point") continue;  // labels along lines: their position is unknown here
+    if (!sizes.has(f.layer.id)) sizes.set(f.layer.id, layoutBoxes(f.layer.layout || {}, zoom, perPx));
+    const half = sizes.get(f.layer.id)(f.properties);
+    if (!half) continue;
+    const p = maplibregl.MercatorCoordinate.fromLngLat(f.geometry.coordinates);
+    boxes.push([p.x - half[0], p.y - half[1], p.x + half[0], p.y + half[1]]);
+  }
+  return boxes;
 }
 
 function grow([x0, y0, x1, y1], dx, dy) {
