@@ -977,6 +977,15 @@ class PublishDialog(QDialog):
         self.o_labels.addItem(tr("Visible polygon"), 1)
         self.o_labels.addItem(tr("As set in each layer's labels"), 2)
         self.o_all_fields = QCheckBox(tr("Publish ALL attribute fields in the tiles (not recommended)"))
+        cache_row = QHBoxLayout()
+        self.o_reuse = QCheckBox(tr("Reuse unchanged layers from earlier exports (faster)"))
+        self.o_reuse.setToolTip(tr("Layers whose data files, style and export settings did not change "
+                                   "since an earlier export in this output folder are not processed "
+                                   "again. Database and web layers are always exported."))
+        clear_cache = QPushButton(tr("Clear cache…"))
+        clear_cache.clicked.connect(self.clear_cache)
+        cache_row.addWidget(self.o_reuse, 1)
+        cache_row.addWidget(clear_cache)
         form.addRow(tr("Archive"), self.o_archive)
         form.addRow(tr("Local output folder"), dir_row)
         form.addRow("", self.o_xyz)
@@ -986,11 +995,32 @@ class PublishDialog(QDialog):
         form.addRow(tr("Beyond the maximum zoom"), self.o_overzoom)
         form.addRow(tr("Polygon labels"), self.o_labels)
         form.addRow("", self.o_all_fields)
+        form.addRow("", cache_row)
         form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
                                   "PMTiles archive, never as images. Only QGIS raster layers become image "
                                   "tiles, each in its own archive. Sprites, patterns, legend swatches and "
                                   "fonts are styling assets.")))
         return widget
+
+    def clear_cache(self):
+        """Delete the export cache of the local output folder."""
+        from ..core.export_cache import ExportCache  # pylint: disable=import-outside-toplevel
+        from ..publishing.controller import cache_dir  # pylint: disable=import-outside-toplevel
+        try:
+            cache = ExportCache(cache_dir(self.collect()))
+        except PublishingError as error:
+            self._fail(error.code, error.message, error.detail)
+            return
+        size = cache.size()
+        if not size:
+            QMessageBox.information(self, tr("Cache"), tr("The cache of this output folder is empty."))
+            return
+        answer = QMessageBox.question(
+            self, tr("Cache"), tr("Delete the export cache ({:.0f} MB)? The next export processes "
+                                  "every layer again.").format(size / 1024 / 1024))
+        if answer == QMessageBox.StandardButton.Yes:
+            cache.clear()
+            self.status.setText(tr("Export cache deleted."))
 
     def _choose_dir(self):
         path = QFileDialog.getExistingDirectory(self, tr("Local output folder"), self.o_dir.text())
@@ -1168,6 +1198,7 @@ class PublishDialog(QDialog):
         self.o_overzoom.setCurrentIndex(max(0, self.o_overzoom.findData(profile.output.overzoom)))
         self.o_labels.setCurrentIndex(max(0, self.o_labels.findData(profile.output.polygon_labels_base)))
         self.o_all_fields.setChecked(profile.output.include_all_fields)
+        self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
         self.d_account.setText(dest.account_id)
@@ -1368,6 +1399,7 @@ class PublishDialog(QDialog):
         out.overzoom = self.o_overzoom.currentData()
         out.polygon_labels_base = self.o_labels.currentData()
         out.include_all_fields = self.o_all_fields.isChecked()
+        out.reuse_unchanged = self.o_reuse.isChecked()
         dest = profile.destination
         dest.kind = self.d_kind.currentData()
         dest.account_id = self.d_account.text().strip()

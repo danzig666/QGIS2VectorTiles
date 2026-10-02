@@ -1812,7 +1812,7 @@ class QgisMapLibreStyleExporter:
             props = obj.dataDefinedProperties()
         except (AttributeError, RuntimeError):
             return names
-        for key in props.propertyKeys():
+        for key in sorted(props.propertyKeys()):
             prop = props.property(key)
             if prop and prop.isActive():
                 names.append(_property_name(obj, key))
@@ -2173,7 +2173,7 @@ class QgisMapLibreStyleExporter:
             props = obj.dataDefinedProperties()
         except (AttributeError, RuntimeError):
             return []
-        for key in props.propertyKeys():
+        for key in sorted(props.propertyKeys()):
             prop = props.property(key)
             if not prop or not prop.isActive() or _property_name(obj, key).lower() in excluded:
                 continue

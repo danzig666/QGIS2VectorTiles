@@ -202,6 +202,7 @@ class OutputConfig:
     overzoom: int = 0
     polygon_labels_base: int = 2
     include_all_fields: bool = False   # False = required fields only (+ approved fields)
+    reuse_unchanged: bool = True       # export cache: layers unchanged since the last export are reused
 
 
 @dataclass

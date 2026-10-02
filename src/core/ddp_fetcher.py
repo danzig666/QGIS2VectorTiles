@@ -114,7 +114,7 @@ class DataDefinedPropertiesFetcher:
         props = obj.dataDefinedProperties()
         suffix = self._suffix if self._objects == 0 else f"{self._suffix}_{self._objects}"
         self._objects += 1
-        for key in props.propertyKeys():
+        for key in sorted(props.propertyKeys()):  # a set: fixed order across sessions
             prop = props.property(key)
             if not prop or not prop.isActive():
                 continue

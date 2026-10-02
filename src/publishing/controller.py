@@ -63,6 +63,14 @@ def publication_dirs(profile: PublicationProfile, base: Optional[str] = None):
     return os.path.join(base, profile.slug), os.path.join(base, ".q2vt-work", profile.slug)
 
 
+def cache_dir(profile: PublicationProfile, base: Optional[str] = None) -> str:
+    """The export cache of a local output folder (shared by its publications)."""
+    base = base or profile.output.local_directory
+    if not base:
+        raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "Choose a local output folder.")
+    return os.path.join(os.path.abspath(base), ".q2vt-cache")
+
+
 def _filter_fields(manifest_layers: List[dict], profile: PublicationProfile, domains) -> None:
     by_id = {}
     from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
@@ -128,6 +136,11 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     raster_plans = _plan_rasters(project, profile, raster_configs, extent_3857)
     keys, _ = qgis_model.feature_keys(vector_profile)
 
+    cache = None
+    if profile.output.reuse_unchanged:
+        from ..core.export_cache import ExportCache  # pylint: disable=import-outside-toplevel
+        cache = ExportCache(cache_dir(profile, base_dir))
+
     stage("EXPORT_MVT")
     exporter = QGIS2VectorTiles(
         min_zoom=profile.view.min_zoom, max_zoom=profile.view.max_zoom, extent=extent_3857,
@@ -139,12 +152,14 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         static_package=profile.output.xyz_package, parallel=False,
         layer_ids=vector_profile.included_layer_ids(), archive_format="mbtiles",
         add_result_layer=False, feature_keys=keys,
-        extra_tile_fields=qgis_model.tile_fields(vector_profile))
+        extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache)
     progress.check()
     if not exporter.convert_project_to_vector_tiles():
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "The vector tile export produced no tiles (see the export log).")
     bundle = exporter.export_bundle(profile.publication_id)
+    if cache is not None:
+        cache.prune()
     progress.check()
 
     stage("RECORDS")
@@ -205,10 +220,10 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     parcel_manifest = None
     if info.enabled:
         stage("PARCELS")
-        from .parcel_report import build_parcel_report  # pylint: disable=import-outside-toplevel
+        from .parcel_report import cached_parcel_report  # pylint: disable=import-outside-toplevel
         parcel_dir = os.path.join(exporter.output_path, "parcels")
-        report = build_parcel_report(project, profile, extent_3857, parcel_dir, legend_dir,
-                                     progress.sub(0.0, 1.0))
+        report = cached_parcel_report(cache, project, profile, extent_3857, parcel_dir, legend_dir,
+                                      progress.sub(0.0, 1.0))
         bundle.warnings.extend(report.warnings)
         for name in os.listdir(parcel_dir):
             extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)

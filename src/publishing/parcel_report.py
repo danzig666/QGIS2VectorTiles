@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -493,3 +494,63 @@ def _write_shards(records: Dict[str, dict], layer_id: str, out_dir: str) -> dict
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, separators=(",", ":"))
     return manifest
+
+
+def _report_key(project, profile: PublicationProfile, extent_3857: QgsRectangle) -> Optional[str]:
+    """Cache key of a parcel report: its settings, the extent, the code that
+    computes it and every layer it reads (source files and style, since the
+    legend graphics come from the symbols). None: some layer is not file based."""
+    from ..core import export_cache  # pylint: disable=import-outside-toplevel
+    info = profile.parcel_info
+    layer_ids = [info.parcel_layer_id, info.zoning_layer_id, info.regulation_layer_id] + \
+        [cut.layer_id for cut in info.cut_lines] + [item.layer_id for item in info.restrictions]
+    states = {}
+    for layer_id in filter(None, layer_ids):
+        layer = project.mapLayer(layer_id)
+        state = export_cache.layer_state(layer) if layer is not None else {"missing": True}
+        if state is None:
+            return None
+        states[layer_id] = state
+    code = hashlib.sha256()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("parcel_report.py", "feature_index.py", "identifiers.py"):
+        with open(os.path.join(here, name), "rb") as handle:
+            code.update(handle.read())
+    return export_cache.make_key(
+        "parcels", code.hexdigest(), profile.to_dict()["parcelInfo"], profile.locale,
+        [extent_3857.xMinimum(), extent_3857.yMinimum(), extent_3857.xMaximum(), extent_3857.yMaximum()],
+        states, project.ellipsoid(), project.crs().toWkt())
+
+
+def cached_parcel_report(cache, project, profile: PublicationProfile, extent_3857: QgsRectangle,
+                         out_dir: str, legend_dir: str,
+                         progress: Optional[Progress] = None) -> ParcelReportResult:
+    """build_parcel_report, reused from the export cache while its layers,
+    settings and extent are unchanged."""
+    key = _report_key(project, profile, extent_3857) if cache is not None else None
+    if key:
+        hit = cache.get_bundle("parcels", key)
+        if hit is not None:
+            meta, folder = hit
+            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(legend_dir, exist_ok=True)
+            for name in meta["_files"]:
+                kind, _, rest = name.partition("/")
+                target = os.path.join(out_dir if kind == "parcels" else legend_dir, rest)
+                shutil.copyfile(os.path.join(folder, *name.split("/")), target)
+            if progress is not None:
+                progress.info("Parcel report: unchanged, reused from the export cache")
+            return ParcelReportResult(
+                meta["manifest"], meta["catalog"], meta["records"],
+                {path: os.path.join(legend_dir, name) for path, name in meta["swatches"].items()},
+                list(meta["warnings"]))
+    result = build_parcel_report(project, profile, extent_3857, out_dir, legend_dir, progress)
+    if key:
+        files = {f"parcels/{name}": os.path.join(out_dir, name) for name in os.listdir(out_dir)}
+        files.update({f"legend/{os.path.basename(local)}": local for local in result.swatches.values()})
+        cache.put_bundle("parcels", key, {
+            "manifest": result.manifest, "catalog": result.catalog, "records": result.records,
+            "warnings": result.warnings,
+            "swatches": {path: os.path.basename(local) for path, local in result.swatches.items()},
+        }, files)
+    return result
