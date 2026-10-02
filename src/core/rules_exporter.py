@@ -73,6 +73,7 @@ QgsTask. This is intentional:
    * No QCoreApplication.processEvents() polling loop.
 """
 
+import math
 import dataclasses
 import os
 import queue
@@ -806,9 +807,16 @@ class RulesExporter:
             "simplifygeometries", "native",
             INPUT=singleparted,
             METHOD=0,
-            TOLERANCE=_DATA_SIMPLIFICATION_TOLERANCE,
+            TOLERANCE=self._simplification_tolerance(),
             OUTPUT=dst_path,
         )
+
+    def _simplification_tolerance(self) -> float:
+        """Simplification tolerance in EPSG:3857 metres: a fraction of one
+        tile unit (1/4096 of a tile) at the max zoom, so that simplification
+        never shows beyond the tiles' own coordinate rounding."""
+        world = 2 * math.pi * 6378137.0
+        return _DATA_SIMPLIFICATION_TOLERANCE * world / (2 ** int(self.max_zoom) * 4096)
 
     # -------------------------------------------------------------------
     # Phase 3 — parallel rule export (file → file)

@@ -422,6 +422,36 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
 
 
+def test_detail_below_a_metre_survives_at_the_max_zoom(export, tmp_path):
+    """Geometry is simplified only within the tiles' own rounding at the max
+    zoom. A fixed 1 m tolerance moved shared boundaries of two layers (a zone
+    boundary on a parcel edge) apart by up to a metre, pixels when zoomed in."""
+    from osgeo import gdal  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "parcels", "memory")
+    feature = QgsFeature(layer.fields())
+    # The south edge bends 0.4 m at its middle (5 tile units at zoom 17).
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "POLYGON((2120000 6020000, 2120050 6020000.4, 2120100 6020000, "
+        "2120100 6020100, 2120000 6020100, 2120000 6020000))"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "bend.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    exporter, result = export(layer, min_zoom=17, max_zoom=17)
+    tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), gdal.OF_VECTOR,
+                        open_options=["ZOOM_LEVEL=17", "CLIP=NO"])
+    south = []
+    for i in range(tiles.GetLayerCount()):
+        for f in tiles.GetLayer(i):
+            ring = f.GetGeometryRef()
+            while ring.GetGeometryCount():
+                ring = ring.GetGeometryRef(0)
+            south += [ring.GetPoint(k)[1] for k in range(ring.GetPointCount())
+                      if 2120001 < ring.GetPoint(k)[0] < 2120099 and ring.GetPoint(k)[1] < 6020050]
+    assert south and max(south) - 6020000 == pytest.approx(0.4, abs=0.08)
+
+
 def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     """A line label drawn once per line (no repeat distance) is exported at the
     line's middle, and its lines (``_vl``) ship with the label's fields: the

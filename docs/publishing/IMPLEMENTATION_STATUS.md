@@ -280,3 +280,24 @@ z17 0.06 s, z18 0.02 s.
 |---|---|
 | `pytest tests/browser/test_visible_labels.py` | 20 passed (line tests: avoid by drawn size, no clear spot → no label) |
 | label-related suites (visible labels, web viewer features, transport, parity, web builder, end to end) | 89 passed |
+
+## 4.5.5: shared boundaries stay on top of each other
+
+Owner report: "the övezethatár is not exactly on the parcel boundary on the south boundary of
+parcel 862". In the source data (EOV) the zone boundary's vertices lie exactly on the parcel's
+edge (0.000 m). The base-layer pipeline simplified every layer with a fixed tolerance of 1 CRS
+unit (1 m in EPSG:3857), each layer on its own, so the parcel ring and the zone line (and the
+marker points placed along it, `…m02`) lost different vertices.
+
+| Cause | Fix |
+|---|---|
+| `_DATA_SIMPLIFICATION_TOLERANCE = 1` m, independent of zoom (at z22, 1 m is ~50 px) | `_DATA_SIMPLIFICATION_TOLERANCE = 0.25` tile units at the export's max zoom (`RulesExporter._simplification_tolerance`: 1.9 cm at z17, 3.7 cm at z16) - below the tiles' own coordinate rounding, which keeps shared vertices identical |
+
+Owner project, in the exported data (EPSG:3857): the zone-boundary marker points were up to
+0.96 m off parcel 862's boundary, now 0.000-0.001 m; the dots sit on the parcel line in the
+viewer. Export 159 s (was 154 s), web release 25.8 MB (was 25.5 MB).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_end_to_end.py -k detail_below` | 1 passed (new; fails with the old tolerance) |
+| exporter / pipeline / cache suites (end to end, units and properties, publishing pipeline, materialize, export cache) | 141 passed |

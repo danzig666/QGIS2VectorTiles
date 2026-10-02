@@ -32,7 +32,12 @@ _PORT = 9000
 # Safe to adjust to tune output quality/size vs. processing speed.
 # =====================================================================
 _EPSG_CRS = 3857                          # Output projection (Web Mercator)
-_DATA_SIMPLIFICATION_TOLERANCE = 1        # Geometry simplification, in CRS units
+# Geometry simplification before tiling, in tile units (1/4096 of a tile) at the
+# export's max zoom: a quarter unit moves nothing beyond the tiles' own rounding.
+# (It was 1 CRS unit = 1 m: each layer simplified on its own, so boundaries
+# shared by two layers, e.g. a zone boundary on a parcel edge, drifted apart by
+# up to ~1 m, several pixels when zoomed in.)
+_DATA_SIMPLIFICATION_TOLERANCE = 0.25
 _REMOVE_DUPLICATES_DISTANCE = 300         # Minimum spacing between points, in points
 _TOP_SCALE = 295829355.45                 # Map scale of zoom 0 (96 DPI, Web Mercator); see fidelity/zoom.py
 _SPRITE_QUALITY = 3
