@@ -152,7 +152,9 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         static_package=profile.output.xyz_package, parallel=False,
         layer_ids=vector_profile.included_layer_ids(), archive_format="mbtiles",
         add_result_layer=False, feature_keys=keys,
-        extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache)
+        extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache,
+        scale_limits={c.layer_id: (c.min_scale, c.max_scale) for c in vector_profile.layers
+                      if c.included and (c.min_scale or c.max_scale)})
     progress.check()
     if not exporter.convert_project_to_vector_tiles():
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",

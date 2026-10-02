@@ -45,14 +45,26 @@ from .materializer import SymbolMaterializer
 
 
 
+def combine_scale_ranges(low_a: float, high_a: float, low_b: float, high_b: float):
+    """Intersection of two QGIS scale ranges (minimum = zoomed-out limit,
+    maximum = zoomed-in limit; 0 = no limit)."""
+    lows = [v for v in (low_a, low_b) if v]
+    highs = [v for v in (high_a, high_b) if v]
+    return (min(lows) if lows else 0.0), (max(highs) if highs else 0.0)
+
+
 class RulesFlattener:
     """Flatten QGIS rule-based styling with full property inheritance."""
 
     RULE_TYPES = {0: "renderer", 1: "labeling"}
 
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
-                 diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None):
+                 diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
+                 scale_limits=None):
         self.min_zoom = min_zoom
+        # {layer id: (min scale, max scale)}: extra scale range of a layer
+        # (publishing, web only), on top of its own; 0 = no limit.
+        self.scale_limits = dict(scale_limits or {})
         self.max_zoom = max_zoom
         self.utils_dir = utils_dir
         self.layer_tree_root = QgsProject.instance().layerTreeRoot()
@@ -359,9 +371,13 @@ class RulesFlattener:
     def _prepare_root_rule(self, rule_system, layer: QgsVectorLayer):
         """Set layer-level scale visibility on the root rule."""
         root_rule = rule_system.rootRule()
-        if layer.hasScaleBasedVisibility():
-            root_rule.setMinimumScale(layer.minimumScale())
-            root_rule.setMaximumScale(layer.maximumScale())
+        low, high = (layer.minimumScale(), layer.maximumScale()) \
+            if layer.hasScaleBasedVisibility() else (0.0, 0.0)
+        extra_low, extra_high = self.scale_limits.get(layer.id(), (0.0, 0.0))
+        low, high = combine_scale_ranges(low, high, extra_low or 0.0, extra_high or 0.0)
+        if low or high:
+            root_rule.setMinimumScale(low)
+            root_rule.setMaximumScale(high)
         return root_rule
 
     def _set_rule_attributes(

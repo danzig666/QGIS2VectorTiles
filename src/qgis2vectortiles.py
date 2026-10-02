@@ -95,6 +95,7 @@ class QGIS2VectorTiles:
         feature_keys=None,
         extra_tile_fields=None,
         cache=None,
+        scale_limits=None,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -122,6 +123,8 @@ class QGIS2VectorTiles:
         self.static_package = static_package
         self.parallel = parallel
         self.layer_ids = None if layer_ids is None else set(layer_ids)
+        # {layer id: (min scale, max scale)}: extra web-only scale range.
+        self.scale_limits = dict(scale_limits or {})
         if archive_format not in ("mbtiles", "pmtiles", "both"):
             raise ValueError(f"archive_format must be mbtiles, pmtiles or both, not {archive_format!r}")
         self.archive_format = archive_format
@@ -405,7 +408,7 @@ class QGIS2VectorTiles:
     def _flatten_rules(self) -> List[FlattenedRule]:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
-            layer_ids=self.layer_ids,
+            layer_ids=self.layer_ids, scale_limits=self.scale_limits,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).

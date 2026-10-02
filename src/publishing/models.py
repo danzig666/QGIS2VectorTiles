@@ -83,6 +83,11 @@ class LayerConfig:
     opacity: float = 1.0
     deep_links: bool = True
     toggleable: bool = True            # the viewer's user may switch it off
+    # Web map only, on top of the layer's own QGIS scale range (QGIS scale
+    # denominators, 0 = no limit): hidden when zoomed out beyond 1:min_scale
+    # or zoomed in beyond 1:max_scale. Not tiled where hidden.
+    min_scale: float = 0.0
+    max_scale: float = 0.0
     # Raster layers only (rendered by QGIS into their own raster PMTiles archive):
     raster_format: str = "png"         # RASTER_FORMATS; png keeps transparency
     raster_min_zoom: Optional[int] = None   # None = the publication's tile zooms

@@ -3,6 +3,7 @@
 the middle of the widest span through the middle of the extent."""
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -317,3 +318,56 @@ def test_line_label_tries_other_visible_stretches():
     blocked = [[0, 0.2, 1, 0.3]]                                        # the whole upper one
     x, y, _ = _lines(lines, [0, 0, 0.9, 1], {"box": box, "avoid": blocked})[1]
     assert y == pytest.approx(0.75)
+
+
+def _free(polygons, view, box):
+    """labelPoints of polygons [(id, [[x, y], ...] in z0 tile units)] with QGIS
+    Free placement: {id: (x, y, rotation in degrees)}."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(polygons)}.map(([id, ring]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring.map(([x, y]) => ({{ x, y }}))] }} }}));
+const box = {json.dumps(box)};
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, {{ state: newLabelState(),
+  anchor: "pole", orient: "free", rotationField: "rot", labelBox: () => box, precision: 0.0005 }});
+console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates,
+  f.properties.rot])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return {item[0]: item[1:] for item in json.loads(run.stdout)}
+
+
+def test_free_placement_turns_labels_along_narrow_polygons():
+    # A street rising to the right at 30° (narrower than the label is long),
+    # a wide square, and a tall narrow strip.
+    import math
+    angle = math.radians(-30)  # y down: rising to the right
+    def strip(cx, cy, length, width, a):
+        dx, dy = math.cos(a), math.sin(a)
+        nx, ny = -dy, dx
+        return [[cx + sx * dx * length / 2 + sy * nx * width / 2, cy + sx * dy * length / 2 + sy * ny * width / 2]
+                for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+    polygons = [(1, strip(1300, 1300, 2000, 200, angle)),
+                (2, [[2600, 2600], [3800, 2600], [3800, 3800], [2600, 3800]]),
+                (3, strip(800, 3200, 1400, 150, math.pi / 2))]
+    box = [0.06, 0.012]  # half width / height: wider than the street, fits the square
+    points = _free(polygons, [0, 0, 1, 1], box)
+    assert points[1][2] == pytest.approx(-30, abs=1)   # along the street, upright
+    assert points[2][2] == pytest.approx(0)            # fits: horizontal (QGIS)
+    assert points[3][2] == pytest.approx(-90, abs=1)   # vertical strip: reads bottom to top
+
+
+def test_free_placement_helpers():
+    assert _js("m.envelope([2, 1], Math.PI / 2)") == pytest.approx([1, 2])
+    square = [[0, 0], [10, 0], [10, 10], [0, 10]]
+    assert _js(f"m.boxInside([{json.dumps(square)}], [5, 5], [2, 1])") is True
+    assert _js(f"m.boxInside([{json.dumps(square)}], [5, 5], [6, 1])") is False
+    # An L: around its horizontal arm the direction is horizontal.
+    ell = [[0, 0], [100, 0], [100, 10], [10, 10], [10, 100], [0, 100]]
+    assert _js(f"m.localDirection([{json.dumps(ell)}], [60, 5], 20)") == pytest.approx(0, abs=0.01)
+    assert abs(_js(f"m.localDirection([{json.dumps(ell)}], [5, 60], 20)")) == pytest.approx(math.pi / 2, abs=0.01)

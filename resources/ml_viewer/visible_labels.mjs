@@ -50,6 +50,7 @@
 const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
 export const OVERLAP_SUFFIX = "_q2vt_overlap";
+const FREE_ROTATION = "q2vt_free_rotation";
 const EDGE_PX = 24; // a kept label must stay this far inside the screen
 // Recompute at most this often while polygon tiles arrive / the map moves.
 // Unchanged labels keep their fade state across the GeoJSON reloads
@@ -85,6 +86,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     groups.get(polygons).layers.push({ def: layer, before: before ? before.id : undefined });
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
     if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
+    if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
     const rank = layer.metadata["q2vt:label-rank"];
     if (Array.isArray(rank)) {
       const old = groups.get(polygons).rank || [-Infinity, -Infinity];
@@ -131,6 +133,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       // size of the next whole zoom - up to twice the drawn size for map-unit
       // text - and hid most of them: drawn by the fallback copy instead.
       if (group.kind === "line") moved.metadata = { ...moved.metadata, "q2vt:overlap": "if-required" };
+      // Free (angled) placement: the angle is computed here per label.
+      if (group.orient === "free") moved.layout["text-rotate"] = ["to-number", ["get", FREE_ROTATION], 0];
       map.addLayer(moved, before && map.getLayer(before) ? before : undefined);
     }
   }
@@ -185,7 +189,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
         labelBox: labelBoxes(map, group, zoom, perPx),
         avoid: group.kind === "line" ? placed.concat(others()) : placed.slice(),
-        kind: group.kind || "polygon", rotationField: rotationField(group, zoom),
+        kind: group.kind || "polygon", orient: group.orient || "horizontal",
+        rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
       write(map.getSource(group.source), data, polygons);
@@ -350,7 +355,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   }, 0), 0));
   const ordered = [...byFeature].map(([key, value]) => [key, value, area(value.rings)])
     .sort((a, b) => b[2] - a[2]);
-  for (const [key, { properties, rings: loaded }] of ordered) {
+  for (let [key, { properties, rings: loaded }] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
       points.set(key, { point: old.point, properties: old.properties || properties });
@@ -380,35 +385,69 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     }
     // The label's box (half width/height, world units): it must fit on the
     // screen and should keep clear of the boxes of better-ranked labels.
-    const half = options.labelBox ? options.labelBox(properties) : null;
+    const label = options.labelBox ? options.labelBox(properties) : null;
+    let half = label;
     const fit = (x, y) => (half ? Math.min(x - view[0] - half[0], view[2] - half[0] - x,
                                            y - view[1] - half[1], view[3] - half[1] - y) : Infinity);
     // Only boxes that can matter: within a label's size of the visible part.
     let near = [];
-    if (half && avoid.length) {
-      const extent = bounds(rings);
-      const reachBox = grow(extent, 2 * half[0], 2 * half[1]);
-      near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
-    }
+    const nearBoxes = () => {
+      near = [];
+      if (half && avoid.length) {
+        const extent = bounds(rings);
+        const reachBox = grow(extent, 2 * half[0], 2 * half[1]);
+        near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
+      }
+    };
+    nearBoxes();
     const clear = (x, y) => {
       let min = Infinity;
       for (const box of near) min = Math.min(min, rectDistance(x, y, box));
       return min;
     };
-    if (half && area(rings) < 4 * half[0] * half[1]) continue;  // only a sliver in view
+    if (label && area(rings) < 4 * label[0] * label[1]) continue;  // only a sliver in view
     let point;
     if (pole) {
-      const room = (extra) => roomiestPoint(rings, options.precision, extra);
-      let score = (x, y) => Math.min(fit(x, y), clear(x, y));
-      let best = room(score);
-      if (!(best.room > 0)) {  // no free spot: the best spot that fits (MapLibre decides)
-        score = fit;
-        best = room(score);
+      const search = () => {
+        const room = (extra) => roomiestPoint(rings, options.precision, extra);
+        let score = (x, y) => Math.min(fit(x, y), clear(x, y));
+        let best = room(score);
+        if (!(best.room > 0)) {  // no free spot: the best spot that fits (MapLibre decides)
+          score = fit;
+          best = room(score);
+        }
+        return { best, score };
+      };
+      let { best, score } = search();
+      // Free (angled), as QGIS: horizontal where the label fits inside the
+      // polygon, else turned along the polygon around the label (a street
+      // name along its street), searched again with the turned box.
+      let angle = 0;
+      const free = options.orient === "free" && options.rotationField && label;
+      if (free && !(best.room > 0 && fitsFlat(rings, best.point, best.room, label))) {
+        angle = localDirection(loaded, best.room > 0 ? best.point : null, label[0]);
+        half = envelope(label, angle);
+        nearBoxes();
+        // Searched again only if the turned label does not fit where it is.
+        if (!(best.room > 0) || Math.min(fit(...best.point), clear(...best.point)) < 0) {
+          ({ best, score } = search());
+          if (best.room > 0) {  // the direction where it ended up
+            angle = localDirection(loaded, best.point, label[0]);
+            half = envelope(label, angle);
+          }
+        }
       }
       if (!(best.room > 0)) continue;  // only a sliver in view: no label (as QGIS)
       const keep = old && within(inner, old.point) && (unchecked(old.point)
         || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
       point = keep ? old.point : best.point;
+      if (free) {  // the angle at the spot taken (a kept spot too)
+        if (point !== best.point) {  // a kept spot: its own angle
+          angle = fitsFlat(rings, point, roomAt(rings, point), label) ? 0 : localDirection(loaded, point, label[0]);
+        }
+        half = envelope(label, angle);
+        properties = { ...properties, [options.rotationField]: angle * 180 / Math.PI };
+      }
     } else {
       const target = labelPoint(rings);
       if (!target || fit(...target) < 0) continue;
@@ -437,6 +476,58 @@ export function labelPoints(features, view, maplibregl, options = {}) {
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out, boxes };
+}
+
+// Half extents of the axis-aligned envelope of a box turned by ``angle`` (radians).
+function envelope([hx, hy], angle) {
+  const c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
+  return [c * hx + s * hy, s * hx + c * hy];
+}
+
+// Does a horizontal label box at ``point`` lie inside the polygon (corners
+// inside, no polygon edge across it)? QGIS's Free placement keeps such a
+// label horizontal.
+function boxInside(rings, [x, y], [hx, hy]) {
+  const box = [x - hx, y - hy, x + hx, y + hy];
+  for (const corner of [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]) {
+    if (!inside(rings, corner)) return false;
+  }
+  return !realEdges(rings).some(([a, b]) => clipLine([a, b], box).length);
+}
+
+// boxInside, decided by the free room around the point where that settles it.
+function fitsFlat(rings, point, room, [hx, hy]) {
+  if (room >= Math.hypot(hx, hy)) return true;  // the whole box is within the free circle
+  if (room < hy) return false;                  // not even its height fits
+  return boxInside(rings, point, [hx, hy]);
+}
+
+// The direction of a polygon around ``point`` (within ``radius``; anywhere
+// when no point): the length-weighted mean direction of its edges (tile cuts
+// left out), as an angle in [-90°, 90°) in radians, y down - the long axis
+// of a street around the label.
+function localDirection(rings, point, radius) {
+  const around = (radius2) => {
+    let sx = 0, sy = 0;
+    const box = point ? [point[0] - radius2, point[1] - radius2, point[0] + radius2, point[1] + radius2] : null;
+    for (const [a, b] of realEdges(rings)) {
+      for (const piece of box ? clipLine([a, b], box) : [[a, b]]) {
+        const dx = piece[piece.length - 1][0] - piece[0][0], dy = piece[piece.length - 1][1] - piece[0][1];
+        const length = Math.hypot(dx, dy);
+        if (!length) continue;
+        const theta = Math.atan2(dy, dx);
+        sx += length * Math.cos(2 * theta);
+        sy += length * Math.sin(2 * theta);
+      }
+    }
+    return [sx, sy];
+  };
+  let [sx, sy] = around(radius);
+  if (!sx && !sy) [sx, sy] = around(radius * 4);
+  let angle = Math.atan2(sy, sx) / 2;
+  if (angle >= Math.PI / 2) angle -= Math.PI;
+  if (angle < -Math.PI / 2) angle += Math.PI;
+  return angle;
 }
 
 // Polygon edges of rings, without the edges along their tile cut.
@@ -472,6 +563,8 @@ function signedRoom(rings, edges, x, y) {
 }
 
 // Room (distance to the nearest real polygon edge; negative outside) at a point.
+export { boxInside, localDirection, envelope };
+
 export function roomAt(rings, point) {
   const edges = realEdges(rings);
   return edges.length ? signedRoom(rings, edges, point[0], point[1]) : (inside(rings, point) ? Infinity : -Infinity);
@@ -675,10 +768,6 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     return { point: at.point, properties: withRotation(at.rotation) };
   }
   const half = options.labelBox ? options.labelBox(properties) : null;
-  // Axis-aligned envelope of a rotated box (as MapLibre's rotated collision box).
-  const envelope = ([hx, hy], angle) => [
-    Math.abs(Math.cos(angle)) * hx + Math.abs(Math.sin(angle)) * hy,
-    Math.abs(Math.sin(angle)) * hx + Math.abs(Math.cos(angle)) * hy];
   const candidate = (chain, s) => {
     const at = along(chain, s);
     if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null };

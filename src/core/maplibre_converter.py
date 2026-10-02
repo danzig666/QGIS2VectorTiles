@@ -3068,6 +3068,11 @@ class QgisMapLibreStyleExporter:
                 # Who gets the best spot when labels compete (QGIS priority,
                 # then z-index): the viewer places these labels in that order.
                 "q2vt:label-rank": [label_settings.priority, label_settings.zIndex],
+                # Free (angled): horizontal where the label fits inside its
+                # polygon, else turned along the polygon (QGIS); the viewer
+                # computes the angle unless a rotation is set in QGIS.
+                "q2vt:label-orient": "free" if placement == "Free" and not self._label_rotated(
+                    label_settings) else "horizontal",
                 # "line": a line label put at the middle of the line's visible part.
                 "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
@@ -3374,6 +3379,16 @@ class QgisMapLibreStyleExporter:
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
         })
+
+    @staticmethod
+    def _label_rotated(label_settings) -> bool:
+        """A fixed or data-defined label rotation set in QGIS (it wins over
+        the Free placement's own angle)."""
+        if label_settings.angleOffset:
+            return True
+        prop = label_settings.dataDefinedProperties().property(
+            QgsPalLayerSettings.Property.LabelRotation)
+        return bool(prop and prop.isActive())
 
     def _apply_default_icon_props(self, layer_def: dict):
         """Apply default icon layout/paint when no background marker is present."""

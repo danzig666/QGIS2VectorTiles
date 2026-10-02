@@ -47,7 +47,8 @@ UNCHECKED = Qt.CheckState.Unchecked
 PARTIAL = Qt.CheckState.PartiallyChecked
 LAYER_ROLE = Qt.ItemDataRole.UserRole
 GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
-COL_PUBLISH, COL_VISIBLE, COL_TOGGLE = 1, 2, 3
+SCALES_ROLE = Qt.ItemDataRole.UserRole + 2  # [min scale, max scale], web only
+COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_SCALES = 1, 2, 3, 4
 
 
 def publishable(layer) -> bool:
@@ -359,10 +360,20 @@ class PublishDialog(QDialog):
         bulk_row.addWidget(self.bulk)
         layers_layout.addLayout(bulk_row)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("Visible at start"), tr("Can be switched off")])
+        # Short headers (the layer names need the room); the meaning in tooltips.
+        self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("At start"), tr("Switchable"),
+                                   tr("Scales")])
+        self.tree.headerItem().setToolTip(COL_PUBLISH, tr("Published in the web map"))
+        self.tree.headerItem().setToolTip(COL_VISIBLE, tr("Visible when the web map opens"))
+        self.tree.headerItem().setToolTip(COL_TOGGLE, tr("Visitors can switch it off"))
+        self.tree.headerItem().setToolTip(COL_SCALES, tr(
+            "Web map only: hide layers when zoomed out (or in) beyond a scale - faster when zoomed "
+            "out, smaller export. Double-click a cell, or select rows → Selected layers → Visible "
+            "scales…"))
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (COL_PUBLISH, COL_VISIBLE, COL_TOGGLE):
+        for column in (COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_SCALES):
             self.tree.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(
@@ -396,7 +407,60 @@ class PublishDialog(QDialog):
                 (tr("Can be switched off by visitors"), COL_TOGGLE, True),
                 (tr("Always shown (cannot be switched off)"), COL_TOGGLE, False)):
             menu.addAction(text, lambda c=column, v=value: self.apply_to_selection(c, v))
+        menu.addSeparator()
+        menu.addAction(tr("Visible scales…"), self.edit_scales)
         return menu
+
+    def _selected_layer_items(self):
+        """Selected layer rows; a selected group stands for every layer in it."""
+        items, seen = [], set()
+        for item in self.tree.selectedItems():
+            for target in [item] + (list(self._descendants(item)) if item.data(0, GROUP_ROLE) else []):
+                if target.data(0, LAYER_ROLE) and id(target) not in seen:
+                    seen.add(id(target))
+                    items.append(target)
+        return items
+
+    def _tree_double_clicked(self, item, column):
+        if column == COL_SCALES and (item.data(0, LAYER_ROLE) or item.data(0, GROUP_ROLE)):
+            if not item.isSelected():
+                self.tree.clearSelection()
+                item.setSelected(True)
+            self.edit_scales()
+
+    def edit_scales(self, values=None) -> bool:
+        """Set the web-only visible scale range of the selected layers
+        (``values``: (min scale, max scale) instead of asking)."""
+        from .scale_range import ScaleRangeDialog, range_text  # pylint: disable=import-outside-toplevel
+        items = self._selected_layer_items()
+        if not items:
+            self.status.setText(tr("Select layers (or groups) in the list first."))
+            return False
+        if values is None:
+            low, high = items[0].data(COL_SCALES, SCALES_ROLE) or (0.0, 0.0)
+            layer = self.project.mapLayer(items[0].data(0, LAYER_ROLE))
+            own = range_text(layer.minimumScale(), layer.maximumScale()) \
+                if layer is not None and layer.hasScaleBasedVisibility() else ""
+            dialog = ScaleRangeDialog(self, low, high, len(items), own if len(items) == 1 else "",
+                                      self.iface.mapCanvas() if self.iface is not None else None)
+            if not dialog.exec():
+                return False
+            values = dialog.values()
+        for item in items:
+            self._set_item_scales(item, *values)
+        return True
+
+    def _set_item_scales(self, item, low, high):
+        from .scale_range import range_text  # pylint: disable=import-outside-toplevel
+        item.setData(COL_SCALES, SCALES_ROLE, [float(low or 0), float(high or 0)])
+        layer = self.project.mapLayer(item.data(0, LAYER_ROLE))
+        own = range_text(layer.minimumScale(), layer.maximumScale()) \
+            if layer is not None and layer.hasScaleBasedVisibility() else ""
+        text = range_text(low, high)
+        item.setText(COL_SCALES, text or (tr("(QGIS)") if own else ""))
+        item.setForeground(COL_SCALES, self.palette().text() if text else self.palette().placeholderText())
+        item.setToolTip(COL_SCALES, (tr("Web map: {}").format(text) if text else tr("No web limit"))
+                        + (tr("\nQGIS layer: {}").format(own) if own else ""))
 
     def _descendants(self, item):
         for i in range(item.childCount()):
@@ -544,6 +608,7 @@ class PublishDialog(QDialog):
                     item.setCheckState(COL_PUBLISH, _check(config.included))
                     item.setCheckState(COL_VISIBLE, _check(config.initially_visible))
                     item.setCheckState(COL_TOGGLE, _check(config.toggleable))
+                    self._set_item_scales(item, config.min_scale, config.max_scale)
         add(self.project.layerTreeRoot(), self.tree.invisibleRootItem(), ())
         self._sync_group_publish(self.tree.invisibleRootItem())
         self.tree.blockSignals(False)
@@ -1470,6 +1535,7 @@ class PublishDialog(QDialog):
             config.toggleable = not config.included or item.checkState(COL_TOGGLE) == CHECKED
             if config.included and not config.toggleable:
                 config.initially_visible = True
+            config.min_scale, config.max_scale = item.data(COL_SCALES, SCALES_ROLE) or (0.0, 0.0)
             layers.append(config)
         profile.layers = layers
         groups = []

@@ -319,3 +319,26 @@ export and import settings to and from file in the gui".
 |---|---|
 | `pytest tests/integration/test_publish_dialog_extent.py` | 4 passed (new) |
 | Publish window and profile suites (`test_publish_dialog*.py`, `test_publishing_profile.py`) | 45 passed |
+
+## 4.6.0: Free (angled) labels, visible scales per layer, no views bar for one view
+
+Owner reports: street names not rotated ("(878) Kossuth Lajos utca"); "a column where the
+scales the layer is seen can be set, also en masse ... the display can be very slow when
+zoomed out"; "don't display Nézetek when there's only one".
+
+| Change | Detail |
+|---|---|
+| Free (angled) placement | Földrészletek labels use QGIS Free placement (5); it was treated like Horizontal. QGIS (pal): horizontal if the label fits inside the polygon, else along the polygon's oriented box. Converter: `q2vt:label-orient: free` (unless a QGIS rotation is set); viewer: `text-rotate` from `q2vt_free_rotation`; horizontal if `fitsFlat` (free room ≥ half diagonal, else exact `boxInside`), else `localDirection` (length-weighted mean edge direction, tile cuts left out, around the spot) and the turned box's envelope for screen fit / clearance (searched again only if it does not fit) |
+| Visible scales | `LayerConfig.min_scale` / `max_scale` (schema `minScale` / `maxScale`); Map tab column *Scales* + `ScaleRangeDialog` (QgsScaleWidget), per row (double-click) or for the selection / groups; `combine_scale_ranges` with the layer's own range in the flattener (root rule: renderer and labels), raster tile zooms and the manifest; not tiled where hidden; short column headers (tooltips) to leave room for layer names |
+| Views bar | hidden when fewer than two views |
+
+Owner project: "(878) Kossuth Lajos utca", Ady Endre, Vásártér, Zombori utca, Vasút út along
+their streets; narrow parcels turned, wide ones horizontal. Label placement z15 0.64 s with Free,
+0.57 s without (same run); z16 unchanged. Views bar: 3 views shown, 1 view hidden.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 22 passed (2 new) |
+| `pytest tests/integration/test_publish_scale_limits.py` | 3 passed (new) |
+| Publish window and profile suites | 48 passed |
+| browser, web builder, end to end, flattener, publishing pipeline, export cache suites | 116 passed |

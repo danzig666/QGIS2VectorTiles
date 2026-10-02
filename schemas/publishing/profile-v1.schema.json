@@ -622,6 +622,14 @@
         },
         "rasterHidpi": {
           "type": "boolean"
+        },
+        "minScale": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maxScale": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },
