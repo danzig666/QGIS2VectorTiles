@@ -526,7 +526,8 @@ class QGIS2VectorTiles:
             diagnostics=self.diagnostics, profile=self.profile,
             visibility=self._visibility_by_style(rules or []),
             visible_polygons={rule.rule.description(): (rule.visible_polygons,
-                                                        rule.label_per_part)
+                                                        rule.label_per_part,
+                                                        getattr(rule, "visible_kind", "polygon"))
                               for rule in rules or [] if getattr(rule, "visible_polygons", None)},
             lengths=self.lengths,
             ordered_styles={rule.rule.description() for rule in rules or []

@@ -422,6 +422,43 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
 
 
+def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
+    """A line label drawn once per line (no repeat distance) is exported at the
+    line's middle, and its lines (``_vl``) ship with the label's fields: the
+    viewer moves the label to the middle of the visible part of the line."""
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "contours", "memory")
+    layer.dataProvider().addAttributes([QgsField("height", QVariant.Double)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([187.5])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "LineString (2119500 6019500, 2121000 6021000, 2122500 6020000)"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "contours.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "orange"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "height"
+    settings.placement = Qgis.LabelPlacement.Line
+    settings.repeatDistance = 0
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    metadata = labels[0]["metadata"]
+    assert metadata["q2vt:visible-kind"] == "line"
+    lines = metadata["q2vt:visible-polygons"]
+    assert lines == labels[0]["source-layer"] + "_vl"
+    assert labels[0]["layout"]["symbol-placement"] == "point"   # the midpoint, rotated
+    assert "labelrotation" in json.dumps(labels[0]["layout"]["text-rotate"])
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    assert lines in archive["vector_layers"]
+    assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
+
+
 def test_labels_avoid_each_other_and_overlap_only_if_required(export, tmp_path):
     """Every label avoids the others in MapLibre; those QGIS may overlap are
     marked for the viewer's fallback, and horizontal polygon labels can move

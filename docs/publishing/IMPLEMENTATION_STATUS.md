@@ -230,3 +230,30 @@ the web map (Vt-2 frame 147×68 px vs 153×78 px).
 |---|---|
 | `pytest tests/browser/test_visible_labels.py` | 15 passed (5 new: tile cuts ignored, fit on screen / slivers hidden, labels keep clear of each other, old edge spot moves to the middle, style size expressions) |
 | label-related suites (web viewer features, transport, parity, web builder, export cache) | 67 passed |
+
+## 4.5.3: contour labels on the visible part of the line
+
+Owner report: "I don't see labels on szintvonalak". The contours (*Szintvonal*, 6240 lines,
+QGIS **Parallel** placement, no repeat distance, one label per line) were labelled at the
+middle of the whole line (`_single_line_label_as_point`), which for long contours is far off
+screen; QGIS places line labels inside the map extent.
+
+| Cause | Fix |
+|---|---|
+| A once-per-line label was a static point at the middle of the whole line | exporter: the label's lines ship as `<label dataset>_vl` (clipped to the extent) with the label's fields; style metadata `q2vt:visible-polygons` → the `_vl` layer, `q2vt:visible-kind: line`; the static midpoint stays for other clients |
+| — | viewer: the line pieces of the loaded tiles are cut to the screen (Liang–Barsky), joined where tiles cut them, and the label goes to the middle of the longest visible stretch, rotated along it (kept upright); none if the label does not fit along the stretch or on the screen; it slides along the line (then to shorter stretches) to keep clear of labels placed before; a kept spot stays while near the middle; frozen while the map moves |
+| MapLibre hid labels the placer thought clear: its collision boxes use the text size of the next whole zoom (layout size), up to 2× the drawn size for map-unit text (measured with `showCollisionBoxes`: "190" drawn 30 px wide, box 60 px) | the clearance test of line labels uses MapLibre's collision box (text size at ⌊zoom⌋+1, rotated envelope); every placed label now also reports its collision box |
+
+Owner project, the reported view (z18.2): contour labels 190, 195 and 185 on screen (none
+before), also after arriving by panning. QGIS also draws 187.5 there; in the web map its
+collision box (~96 px tall at z18.2) does not fit between the parcel numbers anywhere along
+its visible stretch, so MapLibre hides it (at zooms closer to the next whole zoom the boxes
+are smaller). Label placement time (headless): z15 3235 labels 0.43 s, z16 0.16 s, z17
+0.05 s, z18 0.02 s (only when the map stops).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 20 passed (5 new: middle of the visible stretch, rotation upright, too short → none, slide along to a clear collision box / keep a spot near the middle, other visible stretches) |
+| `pytest tests/integration/test_end_to_end.py -k once_per_line` | 1 new passed (`_vl` lines with the label fields, metadata, rotated midpoint) |
+| label-related suites (web viewer features, transport, parity, web builder, export cache) | 77 passed |
+| exporter / pipeline suites (end to end, units and properties, publishing pipeline, materialize) | 134 passed |

@@ -103,7 +103,11 @@ class GDALTilesGenerator:
         dependencies = style_field_dependencies(self.style)
         for layer in self.layers:
             gpkg = layer.source().split("|layername=")[0]
-            required = dependencies.get(self._layer_name(layer), set())
+            name = self._layer_name(layer)
+            required = set(dependencies.get(name, set()))
+            for suffix in ("_vp", "_vl"):  # the polygons / lines of a label: its fields
+                if name.endswith(suffix):
+                    required |= dependencies.get(name[:-len(suffix)], set())
             ds = ogr.Open(gpkg, update=1)
             if ds is None:
                 continue
