@@ -1660,7 +1660,8 @@ class RulesExporter:
             visible = self._labels_visible_polygon(flat_rule, 0)
             flat_rule.set_attr("c", 0)
             target_geom = 0
-            transform_expr = self._get_polygon_centroids_expression(clip=visible)
+            transform_expr = self._get_polygon_centroids_expression(
+                clip=visible, roomiest=self._roomiest_placement(settings))
         return [target_geom, transform_expr]
 
     @staticmethod
@@ -1790,7 +1791,18 @@ class RulesExporter:
             geometry_expression=self._clip_to_extent("@geometry"),
             description=label.description, flat_rules=[], visible_polygons=True)
 
-    def _get_polygon_centroids_expression(self, clip: bool = False) -> str:
+    @staticmethod
+    def _roomiest_placement(settings) -> bool:
+        """Horizontal / Free polygon labels: QGIS ranks the candidates by their
+        distance from the polygon's pole of inaccessibility (the point with the
+        most room), not by the centroid."""
+        if settings is None:
+            return False
+        placement = _enum_value(settings.placement)
+        return placement in (_enum_value(Qgis.LabelPlacement.Horizontal),
+                             _enum_value(Qgis.LabelPlacement.Free))
+
+    def _get_polygon_centroids_expression(self, clip: bool = False, roomiest: bool = False) -> str:
         if clip or self.cent_source == 1:
             polygons = (
                 f"intersection(@geometry, "
@@ -1798,6 +1810,9 @@ class RulesExporter:
             )
         else:
             polygons = "@geometry"
+        if roomiest:  # 0.5 m in EPSG:3857 units (the base layers' CRS)
+            return (f"with_variable('source', {polygons}, "
+                    f"coalesce(pole_of_inaccessibility(@source, 0.5), point_on_surface(@source)))")
         return (
             f"with_variable('source', {polygons}, "
             f"if(intersects(centroid(@source), @source), "

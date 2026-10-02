@@ -205,3 +205,28 @@ than half of the release; copied objects carry the new release's checksum and he
 | `pytest tests/unit/test_publishing_providers.py` (+ moto opt-in) | 14 passed (+4 with moto: unchanged files copied, changed and missing ones uploaded) |
 | Publishing suites (pipeline, parcel report, raster, basemap/themes, dialogs, presets, profile, web builder) with the cache on by default | 76 passed |
 | `pytest` (full suite) | **489 passed, 5 skipped** (opt-in go-pmtiles/moto), 0 failed, 8 min 49 s |
+
+## 4.5.2: zone labels in the middle of the zone, none on slivers
+
+Owner report: zone codes (*Szabályozás övezetkódok*, QGIS **Horizontal** placement, visible
+polygon, z-index 10) were placed at the bottom of their zone, cut at the screen edge, or
+pushed out of the zone; "they should be inside the zone, in the middle if space is enough"
+and "not shown if only a small part of the polygon is in view".
+
+| Cause | Fix |
+|---|---|
+| Horizontal / Free polygon labels used the centroid; QGIS ranks their candidates by the distance from the polygon's pole of inaccessibility | exporter: static point `pole_of_inaccessibility`; style metadata `q2vt:label-anchor: pole`; viewer: the roomiest point of the visible part (grid search; edges where tiles cut the polygon do not count) |
+| After a pan a label stayed wherever it still was inside its polygon (e.g. at the bottom) | kept only with ≥ 80 % of the best room (pole) or within 24 px of the centroid; otherwise moved to the middle once the map stops and its tiles are loaded |
+| Labels shown with only a sliver of their polygon in view, cut by the screen edge | a label is shown only if its estimated box (text, size and frame padding evaluated from the style at the current zoom) fits on the screen and the visible part is at least as large as the box (QGIS drops candidates outside the map extent) |
+| A zone and the parcel number of the same parcel shared one point; MapLibre's variable anchors shifted one a box width (out of the zone, off the screen) | labels placed by QGIS priority, then z-index (`q2vt:label-rank`), larger polygons first; later ones take the roomiest spot clear of the boxes placed before; the computed point is kept (no variable-anchor shift) |
+
+Owner project, the reported view (z18.2): every zone code inside its zone, Vt-2 in the middle,
+Vt-1 clear of parcel 902, no label at a screen edge; the same after arriving by panning.
+Label placement time (headless, 4 cores): z15 2039 labels 0.37 s, z16 0.18 s, z17 0.06 s
+(only when the map stops). In the project CRS QGIS draws the zone codes at the same size as
+the web map (Vt-2 frame 147×68 px vs 153×78 px).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 15 passed (5 new: tile cuts ignored, fit on screen / slivers hidden, labels keep clear of each other, old edge spot moves to the middle, style size expressions) |
+| label-related suites (web viewer features, transport, parity, web builder, export cache) | 67 passed |

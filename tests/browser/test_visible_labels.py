@@ -117,7 +117,9 @@ const features = {json.dumps(squares)}.map(([id, z, x, y, [x0, y0, x1, y1]]) => 
   _x: x, _y: y, _z: z, properties: {{ q2vt_orig_id: id }},
   _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     .map(([px, py]) => ({{ x: px, y: py }}))] }} }}));
-const out = labelPoints(features, {json.dumps(view)}, maplibregl, {json.dumps(options)});
+const options = {json.dumps(options)};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
 console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates])));
 """
     run = subprocess.run(["node", "--input-type=module", "-e", script],
@@ -168,3 +170,77 @@ console.log(JSON.stringify([at([0, 0, 1, 1], false), at([0.49, 0.49, 1, 1], true
     first, moving, stopped = json.loads(run.stdout)
     assert moving == pytest.approx(first)       # dragging: glued to the map
     assert stopped[0] > 0.6                     # stopped: moved onto the visible part
+
+
+def _js(expression):
+    script = (f"import * as m from {json.dumps('file://' + MODULE)};"
+              f"console.log(JSON.stringify({expression}));")
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def test_roomiest_point_ignores_tile_cuts():
+    # A 10 x 4 rectangle cut by a tile edge at x = 5: the most room is its
+    # middle; a U shape's centroid lies in the notch, its roomiest point not.
+    a = "Object.assign([[0,0],[5,0],[5,4],[0,4]], {cut: [-1,-1,5,10]})"
+    b = "Object.assign([[5,0],[10,0],[10,4],[5,4]], {cut: [5,-1,11,10]})"
+    best = _js(f"m.roomiestPoint([{a}, {b}])")
+    assert best["point"] == pytest.approx([5, 2]) and best["room"] == pytest.approx(2)
+    u = [[0, 0], [6, 0], [6, 6], [4, 6], [4, 2], [2, 2], [2, 6], [0, 6]]
+    x, y = _js(f"m.roomiestPoint([{json.dumps(u)}]).point")
+    assert 0 < y < 2 and 0 < x < 6  # in the bottom bar, not in the notch (y > 2, 2 < x < 4)
+    assert _js(f"m.roomAt([{json.dumps(u)}], [3, 4])") < 0
+
+
+def test_horizontal_labels_fit_the_screen_and_slivers_get_none():
+    view = [0, 0, 0.5, 1]
+    box = [0.05, 0.02]  # half width, half height (world units)
+    squares = [(1, 0, 0, 0, (0, 1000, 2400, 3000)),      # half visible: label moved inward
+               (2, 0, 0, 0, (1900, 3200, 4000, 3600)),   # a sliver at the edge: no label
+               (3, 0, 0, 0, (200, 3300, 1600, 3900))]    # fully visible
+    points = _points(squares, view, {"anchor": "pole", "box": box})
+    assert set(points) == {1, 3}
+    x, y = points[1]
+    assert x <= 0.5 - box[0] + 1e-9 and 0 < x and 1000 / 4096 < y < 3000 / 4096
+
+
+def test_labels_keep_clear_of_each_other():
+    # Two polygons with the same shape (a zone and its parcel): the bigger
+    # one first, the other moves to a spot clear of its box.
+    squares = [(1, 0, 0, 0, (400, 400, 3600, 3600)), (2, 0, 0, 0, (400, 400, 3600, 3700))]
+    box = [0.08, 0.03]
+    points = _points(squares, [0, 0, 1, 1], {"anchor": "pole", "box": box})
+    (x1, y1), (x2, y2) = points[2], points[1]
+    assert points[2] == pytest.approx([0.5, 0.5 + 50 / 4096], abs=0.02)  # the bigger: middle
+    assert abs(x1 - x2) >= 2 * box[0] - 1e-6 or abs(y1 - y2) >= 2 * box[1] - 1e-6
+
+
+def test_old_edge_spot_moves_back_to_the_middle():
+    # After a pan a label kept near the bottom of its polygon moves to the
+    # middle once the map stops (it kept less than most of the best room).
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const ring = [[512, 512], [3584, 512], [3584, 3584], [512, 3584]].map(([x, y]) => ({{x, y}}));
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 7 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring] }} }};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const state = newLabelState();
+state.points.set("7", {{ point: [0.5, 0.84], properties: {{ q2vt_orig_id: 7 }} }});
+const out = labelPoints([feature], [0, 0, 1, 1], maplibregl, {{ state, anchor: "pole" }});
+console.log(JSON.stringify(out.features[0].geometry.coordinates));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    assert json.loads(run.stdout) == pytest.approx([0.5, 0.5])
+
+
+def test_style_expressions_for_label_sizes():
+    zoom_curve = ["interpolate", ["exponential", 2], ["zoom"], 0, 0.0002, 24, 3213.2041]
+    assert _js(f"m.evaluate({json.dumps(zoom_curve)}, 18.2)") == pytest.approx(57.7, abs=0.1)
+    data = ["*", ["to-number", ["get", "size"], 6], 2]
+    assert _js(f"m.evaluate({json.dumps(data)}, 10, {{size: '3'}})") == 6
+    assert _js(f"m.evaluate({json.dumps(data)}, 10, {{}})") == 12
+    assert _js(f"m.evaluate(['step', ['zoom'], 1, 10, 2, 15, 3], 12)") == 2
