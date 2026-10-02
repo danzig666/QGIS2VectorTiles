@@ -224,8 +224,18 @@ class PublishDialog(QDialog):
         self.btn_folder = QPushButton(tr("Open local package"))
         self.btn_cancel = QPushButton(tr("Cancel"))
         self.btn_close = QPushButton(tr("Close"))
-        for button in (self.btn_save, self.btn_export, self.btn_preview, self.btn_publish,
-                       self.btn_open, self.btn_copy, self.btn_folder):
+        # Settings to / from a file (another project, a colleague, a backup).
+        self.btn_settings_file = QToolButton()
+        self.btn_settings_file.setText(tr("Settings file…"))
+        self.btn_settings_file.setToolTip(tr("Export these settings to a file, or import settings "
+                                             "from one (layers are matched by name in another project)."))
+        self.btn_settings_file.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        file_menu = QMenu(self)
+        file_menu.addAction(tr("Export settings to a file…"), self.export_settings_file)
+        file_menu.addAction(tr("Import settings from a file…"), self.import_settings_file)
+        self.btn_settings_file.setMenu(file_menu)
+        for button in (self.btn_save, self.btn_settings_file, self.btn_export, self.btn_preview,
+                       self.btn_publish, self.btn_open, self.btn_copy, self.btn_folder):
             buttons.addWidget(button)
         # Presets (domain conventions, e.g. a national zoning plan): only when a
         # variant of the plugin ships some (publishing/presets).
@@ -294,15 +304,28 @@ class PublishDialog(QDialog):
         form.addRow(tr("Minimum tile zoom"), self.e_min_zoom)
         form.addRow(tr("Maximum tile zoom"), self.e_max_zoom)
         form.addRow(tr("Maximum browser zoom (overzoom)"), self.e_max_view)
+        # Extent: a layer's extent (follows the layer) or a fixed one taken
+        # from the map canvas; summarized in words, not raw coordinates.
+        extent_box = QVBoxLayout()
         extent_row = QHBoxLayout()
-        self.extent_label = QLabel()
-        self.extent_label.setWordWrap(True)
-        extent_button = QPushButton(tr("Use the map canvas extent"))
+        self.e_extent_layer = self._layer_combo(any_layer=True, allow_empty=True,
+                                                empty_text=tr("Fixed extent (from the map canvas)"))
+        self.e_extent_layer.setToolTip(tr("The published area: the extent of a layer (follows the "
+                                          "layer when its data changes), or a fixed area."))
+        self.e_extent_layer.layerChanged.connect(self._extent_layer_changed)
+        extent_button = QPushButton(tr("Map canvas"))
+        extent_button.setToolTip(tr("Fix the published area to what the QGIS map canvas shows now."))
         extent_button.clicked.connect(self._use_canvas_extent)
         extent_button.setEnabled(self.iface is not None)
-        extent_row.addWidget(self.extent_label, 1)
+        self.e_extent_layer.setMinimumContentsLength(12)
+        extent_row.addWidget(self.e_extent_layer, 1)
         extent_row.addWidget(extent_button)
-        form.addRow(tr("Extent"), extent_row)
+        extent_box.addLayout(extent_row)
+        # Short lines, not wrapped: the form reserves their full height.
+        self.extent_label = QLabel()
+        self.extent_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        extent_box.addWidget(self.extent_label)
+        form.addRow(tr("Extent"), extent_box)
         try:
             from qgis.gui import QgsColorButton  # pylint: disable=import-outside-toplevel
             self.e_accent = QgsColorButton()
@@ -429,12 +452,59 @@ class PublishDialog(QDialog):
 
     def _use_canvas_extent(self):
         self.profile.view.extent = self._canvas_extent_3857()
+        self.profile.view.extent_layer = ""
+        self.e_extent_layer.blockSignals(True)
+        self.e_extent_layer.setLayer(None)
+        self.e_extent_layer.blockSignals(False)
         self._show_extent()
+
+    def _extent_layer_changed(self, layer):
+        self.profile.view.extent_layer = layer.id() if layer is not None else ""
+        if layer is not None:
+            self.profile.view.extent = self._layer_extent_3857(layer)
+        elif not self.profile.view.extent and self.iface is not None:
+            self.profile.view.extent = self._canvas_extent_3857()
+        self._show_extent()
+
+    def _layer_extent_3857(self, layer):
+        transform = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:3857"),
+                                           self.project)
+        box = transform.transformBoundingBox(layer.extent())
+        if box.isEmpty():
+            return self.profile.view.extent
+        return [box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()]
+
+    def _current_extent_3857(self):
+        """The extent setting now: the chosen layer's extent (refreshed), else
+        the fixed extent, else the map canvas."""
+        layer = self.project.mapLayer(self.profile.view.extent_layer) \
+            if self.profile.view.extent_layer else None
+        if layer is not None:
+            self.profile.view.extent = self._layer_extent_3857(layer)
+        return self.profile.view.extent or (self._canvas_extent_3857() if self.iface else None)
 
     def _show_extent(self):
         extent = self.profile.view.extent
-        self.extent_label.setText(tr("canvas extent") if not extent else
-                                  "EPSG:3857 " + ", ".join(f"{v:.0f}" for v in extent))
+        layer = self.project.mapLayer(self.profile.view.extent_layer) \
+            if self.profile.view.extent_layer else None
+        if not extent:
+            self.extent_label.setText(tr("The map canvas extent\nat the time of export."))
+            return
+        transform = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
+                                           QgsCoordinateReferenceSystem("EPSG:4326"), self.project)
+        box = transform.transformBoundingBox(QgsRectangle(*extent))
+        # Ground size: Web Mercator units shrink by cos(latitude).
+        import math  # pylint: disable=import-outside-toplevel
+        scale = math.cos(math.radians((box.yMinimum() + box.yMaximum()) / 2))
+        width = (extent[2] - extent[0]) * scale / 1000
+        height = (extent[3] - extent[1]) * scale / 1000
+        source = tr("Layer extent") if layer is not None else tr("Fixed extent")
+        self.extent_label.setText(tr("{source}: about {w:.1f} × {h:.1f} km\n"
+                                     "E {w0:.4f}° – {e0:.4f}°\nN {s0:.4f}° – {n0:.4f}°").format(
+            source=source, w=width, h=height, w0=box.xMinimum(), e0=box.xMaximum(),
+            s0=box.yMinimum(), n0=box.yMaximum()))
+        self.extent_label.setToolTip(tr("Extent of “{}”").format(layer.name()) if layer is not None
+                                     else tr("Fixed with “Map canvas”"))
 
     def _fill_tree(self, profile):
         self.tree.blockSignals(True)
@@ -558,7 +628,12 @@ class PublishDialog(QDialog):
             grid.addWidget(box, index // 3, index % 3)
         layout.addWidget(options)
         split = QSplitter()
+        split.setChildrenCollapsible(False)
         self.i_layers = QListWidget()
+        # Room for layer names: wrapped, never squeezed by the field table.
+        self.i_layers.setMinimumWidth(220)
+        self.i_layers.setWordWrap(True)
+        self.i_layers.setSpacing(2)
         self.i_layers.currentItemChanged.connect(self._interaction_layer_changed)
         split.addWidget(self.i_layers)
         right = QWidget()
@@ -583,16 +658,21 @@ class PublishDialog(QDialog):
                                                  tr("Search"), tr("Feature key"), tr("Filter")])
         self.i_fields.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.i_fields.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        right_layout.addWidget(QLabel(tr("Only checked fields become public (popup, search, filter). "
-                                         "The feature key should be unique and never empty, e.g. a "
-                                         "parcel number; without one, feature links only work in the "
-                                         "same version of the map.")))
+        fields_note = QLabel(tr("Only checked fields become public (popup, search, filter). "
+                                "The feature key should be unique and never empty, e.g. a "
+                                "parcel number; without one, feature links only work in the "
+                                "same version of the map."))
+        fields_note.setWordWrap(True)  # unwrapped, it made the tab ~2000 px wide (list squeezed)
+        right_layout.addWidget(fields_note)
         right_layout.addWidget(self.i_fields, 1)
         self.i_stack = QStackedWidget()
         self.i_stack.addWidget(right)
         self.i_stack.addWidget(self._raster_page())
         split.addWidget(self.i_stack)
+        split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
+        split.setSizes([300, 660])  # else the field table's width squeezes the list
+        self.i_split = split
         layout.addWidget(split, 1)
         return widget
 
@@ -706,16 +786,23 @@ class PublishDialog(QDialog):
         return widget
 
     # ------------------------------------------------------------------ parcel report
-    def _layer_combo(self, geometry=None, allow_empty=False):
+    def _layer_combo(self, geometry=None, allow_empty=False, any_layer=False, empty_text=None):
         from qgis.gui import QgsMapLayerComboBox  # pylint: disable=import-outside-toplevel
         from qgis.core import QgsMapLayerProxyModel  # pylint: disable=import-outside-toplevel
         combo = QgsMapLayerComboBox()
-        flags = {"polygon": "PolygonLayer", "line": "LineLayer", None: "VectorLayer"}[geometry]
+        flags = "All" if any_layer else {"polygon": "PolygonLayer", "line": "LineLayer",
+                                         None: "VectorLayer"}[geometry]
         try:
             combo.setFilters(getattr(QgsMapLayerProxyModel.Filter, flags))
         except AttributeError:
             combo.setFilters(getattr(Qgis.LayerFilter, flags))
-        combo.setAllowEmptyLayer(allow_empty)
+        if empty_text is not None:
+            try:
+                combo.setAllowEmptyLayer(allow_empty, empty_text)
+            except TypeError:  # QGIS < 3.20: no text for the empty entry
+                combo.setAllowEmptyLayer(allow_empty)
+        else:
+            combo.setAllowEmptyLayer(allow_empty)
         combo.setProject(self.project)
         return combo
 
@@ -1166,6 +1253,13 @@ class PublishDialog(QDialog):
         self.e_min_zoom.setValue(profile.view.min_zoom)
         self.e_max_zoom.setValue(profile.view.max_zoom)
         self.e_max_view.setValue(profile.view.max_view_zoom)
+        self.e_extent_layer.blockSignals(True)
+        self.e_extent_layer.setLayer(self.project.mapLayer(profile.view.extent_layer)
+                                     if profile.view.extent_layer else None)
+        self.e_extent_layer.blockSignals(False)
+        if profile.view.extent_layer and self.e_extent_layer.currentLayer() is None:
+            profile.view.extent_layer = ""  # the layer is gone: keep its last extent, fixed
+        self._current_extent_3857()
         self._show_extent()
         self._fill_tree(profile)  # extent label refreshed by _use_canvas_extent
         if hasattr(self.e_accent, "setColor"):
@@ -1244,6 +1338,11 @@ class PublishDialog(QDialog):
             layer = self.project.mapLayer(layer_id)
             item = QListWidgetItem(layer.name())
             item.setData(Qt.ItemDataRole.UserRole, layer_id)
+            item.setToolTip(layer.name())
+            try:
+                item.setIcon(QgsIconUtils.iconForLayer(layer))
+            except (AttributeError, TypeError):
+                pass
             self.i_layers.addItem(item)
         self.i_layers.blockSignals(False)
         self.current_layer_id = None
@@ -1452,6 +1551,59 @@ class PublishDialog(QDialog):
         self.status.setText(tr("Settings saved in the project (save the project file to keep them)."))
         return True
 
+    def export_settings_file(self, path=None) -> bool:
+        if not path:
+            start = os.path.join(os.path.dirname(self.project.fileName()) or os.path.expanduser("~"),
+                                 f"{self.e_slug.text().strip() or 'web-map'}.q2vt.json")
+            path, _ = QFileDialog.getSaveFileName(self, tr("Export settings"), start,
+                                                  tr("Publication settings (*.q2vt.json *.json)"))
+        if not path:
+            return False
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(store.export_document(self.collect(), self.project))
+        except OSError as error:
+            QMessageBox.warning(self, tr("Export settings"), str(error))
+            return False
+        self.status.setText(tr("Settings exported to {} (no passwords or keys are included).").format(path))
+        return True
+
+    def import_settings_file(self, path=None, same_map=None) -> bool:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, tr("Import settings"),
+                                                  os.path.dirname(self.project.fileName()) or "",
+                                                  tr("Publication settings (*.q2vt.json *.json)"))
+        if not path:
+            return False
+        try:
+            with open(path, encoding="utf-8") as handle:
+                profile, notes = store.import_document(handle.read(), self.project)
+        except (OSError, ValueError, KeyError, PublishingError) as error:
+            QMessageBox.warning(self, tr("Import settings"),
+                                tr("Not a publication settings file:\n{}").format(error))
+            return False
+        if same_map is None:
+            answer = QMessageBox.question(
+                self, tr("Import settings"),
+                tr("Yes: keep publishing the same web map as the file (same address).\n"
+                   "No: a new, separate web map with these settings."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            same_map = answer == QMessageBox.StandardButton.Yes
+        if not same_map:
+            profile = store.as_new_publication(profile)
+        known = {config.layer_id for config in profile.layers}
+        for node in self.project.layerTreeRoot().findLayers():
+            layer = node.layer()
+            if publishable(layer) and layer.id() not in known:
+                profile.layers.append(LayerConfig(layer.id(), included=False, initially_visible=False))
+        self.profile = profile
+        self._populate(profile)
+        for note in notes:
+            self.log(note)
+        self.status.setText(tr("Settings imported from {}. Check them, then Save settings to keep them "
+                               "in the project.").format(os.path.basename(path)))
+        return True
+
     def _busy(self, busy: bool):
         for button in (self.btn_save, self.btn_export, self.btn_publish, self.btn_close):
             button.setEnabled(not busy)
@@ -1464,7 +1616,7 @@ class PublishDialog(QDialog):
             self.task.cancel()
 
     def _extent(self) -> QgsRectangle:
-        extent = self.profile.view.extent or (self._canvas_extent_3857() if self.iface else None)
+        extent = self._current_extent_3857()
         if not extent:
             raise PublishingError("Q2VT_PUB_PROFILE_INVALID", tr("Choose an extent."))
         return QgsRectangle(*extent)

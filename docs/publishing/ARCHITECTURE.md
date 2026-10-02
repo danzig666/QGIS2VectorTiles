@@ -71,6 +71,12 @@ publishing.deployments.publish                (QgsTask: files + network only)
 * The QGIS project is never modified by an export (layer tree, visibility, styles); only the
   user's *Save settings* (and successful publishing) write the profile into project
   properties.
+* *Settings file…* exports the profile to a `.q2vt.json` file (`{"q2vtPublicationSettings": 1,
+  "profile": …, "layerNames": {id: name}}`, no secrets) and imports one (or a bare profile):
+  layers are matched by id, else by a unique layer name; unmatched layers are left out; the
+  user chooses the same web map (same publication id / address) or a new one.
+* The extent is `view.extent` (EPSG:3857) or, with `view.extentLayer`, a layer's extent,
+  recomputed from the layer at every export (the stored extent is its last value).
 
 ## Compatibility notes (paths changed since the plan's baseline)
 

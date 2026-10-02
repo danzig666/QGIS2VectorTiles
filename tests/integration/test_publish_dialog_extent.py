@@ -1,0 +1,114 @@
+"""Publish window: the extent from a layer (combo; follows the layer's
+extent), a fixed extent, a readable summary instead of raw coordinates, the
+setting saved in the profile; and room for the layer list on the
+Interaction tab."""
+
+import os
+import sys
+
+from qgis.core import QgsFeature, QgsGeometry
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import QMessageBox
+
+from q2vt_fixtures import reset_project
+
+CHECKED = Qt.CheckState.Checked
+
+
+def _dialog(plugin, monkeypatch, tmp_path):
+    for name in ("warning", "information", "critical"):
+        monkeypatch.setattr(QMessageBox, name, lambda *a, **k: None)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_publishing_pipeline import _parcels  # pylint: disable=import-error,import-outside-toplevel
+    os.makedirs(str(tmp_path), exist_ok=True)
+    parcels = _parcels(str(tmp_path / "parcels.gpkg"))
+    project = reset_project()
+    project.addMapLayer(parcels)
+    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error
+    return PublishDialog(iface=None), parcels
+
+
+def test_extent_from_a_layer_follows_it(plugin, monkeypatch, tmp_path):
+    dialog, parcels = _dialog(plugin, monkeypatch, tmp_path)
+    assert dialog.e_extent_layer.currentLayer() is None
+    assert "canvas" in dialog.extent_label.text()
+    dialog.e_extent_layer.setLayer(parcels)
+    view = dialog.collect().view
+    assert view.extent_layer == parcels.id()
+    box = parcels.extent()  # EPSG:3857 already
+    assert view.extent == [box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()]
+    text = dialog.extent_label.text()
+    assert text.startswith("Layer extent") and parcels.name() in dialog.extent_label.toolTip() and " km" in text and "\nN " in text and "EPSG" not in text
+    # The layer grows: the published extent follows it.
+    parcels.startEditing()
+    feature = QgsFeature(parcels.fields())
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "POLYGON((2125000 6025000, 2125100 6025000, 2125100 6025100, 2125000 6025000))"))
+    parcels.addFeature(feature)
+    assert parcels.commitChanges()
+    parcels.updateExtents()
+    assert dialog._extent().xMaximum() >= 2125100 - 1e-6  # pylint: disable=protected-access
+    # Saved and read back.
+    from q2vt_plugin.src.publishing.profile import dumps, load_profile  # pylint: disable=import-error
+    again = load_profile(dumps(dialog.collect()))
+    assert again.view.extent_layer == parcels.id()
+    dialog.close()
+
+
+def test_fixed_extent_and_a_removed_layer(plugin, monkeypatch, tmp_path):
+    dialog, parcels = _dialog(plugin, monkeypatch, tmp_path)
+    dialog.profile.view.extent = [2119000, 6019000, 2123000, 6023000]
+    dialog.e_extent_layer.setLayer(parcels)
+    dialog.e_extent_layer.setLayer(None)            # back to the fixed extent
+    assert dialog.profile.view.extent_layer == ""
+    assert dialog.extent_label.text().startswith("Fixed extent")
+    dialog.e_extent_layer.setLayer(parcels)
+    profile = dialog.collect()
+    from qgis.core import QgsProject  # pylint: disable=import-outside-toplevel
+    QgsProject.instance().removeMapLayer(parcels.id())
+    dialog._populate(profile)                       # pylint: disable=protected-access
+    assert dialog.profile.view.extent_layer == "" and dialog.profile.view.extent  # last extent kept
+    dialog.close()
+
+
+def test_interaction_layer_list_has_room(plugin, monkeypatch, tmp_path):
+    dialog, parcels = _dialog(plugin, monkeypatch, tmp_path)
+    dialog.show()
+    dialog.tabs.setCurrentIndex(1)
+    assert dialog.i_layers.width() >= 220
+    assert dialog.i_split.sizes()[0] >= 220
+    dialog.close()
+
+
+def test_settings_file_export_and_import_into_another_project(plugin, monkeypatch, tmp_path):
+    dialog, parcels = _dialog(plugin, monkeypatch, tmp_path)
+    dialog.e_title.setText("Arló terv")
+    dialog.e_slug.setText("arlo-terv")
+    dialog.e_extent_layer.setLayer(parcels)
+    item = next(dialog._tree_items())  # pylint: disable=protected-access
+    item.setCheckState(1, CHECKED)
+    path = str(tmp_path / "arlo.q2vt.json")
+    assert dialog.export_settings_file(path)
+    original = dialog.collect()
+    text = open(path, encoding="utf-8").read()
+    assert parcels.name() in text and "secret" not in text.lower()
+    old_id = parcels.id()
+    dialog.close()
+
+    # Another project: the same layer under a new id.
+    other, copy = _dialog(plugin, monkeypatch, tmp_path / "other")
+    assert copy.id() != old_id
+    assert other.import_settings_file(path, same_map=True)
+    profile = other.collect()
+    assert profile.title == "Arló terv" and profile.slug == "arlo-terv"
+    assert profile.view.extent_layer == copy.id()
+    assert profile.layer(copy.id()) is not None and profile.layer(copy.id()).included
+    assert profile.publication_id == original.publication_id
+    assert other.import_settings_file(path, same_map=False)
+    assert other.collect().publication_id != original.publication_id
+    # Not a settings file: refused, nothing changed.
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    assert not other.import_settings_file(str(bad), same_map=True)
+    assert other.collect().title == "Arló terv"
+    other.close()
