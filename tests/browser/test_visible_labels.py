@@ -244,3 +244,79 @@ def test_style_expressions_for_label_sizes():
     assert _js(f"m.evaluate({json.dumps(data)}, 10, {{size: '3'}})") == 6
     assert _js(f"m.evaluate({json.dumps(data)}, 10, {{}})") == 12
     assert _js(f"m.evaluate(['step', ['zoom'], 1, 10, 2, 15, 3], 12)") == 2
+
+
+def _lines(lines, view, options, before=None):
+    """labelPoints of line features [(id, [[x, y], ...] in z0 tile units)]
+    with kind "line" and the rotation written to "rot"; ``before`` sets a
+    kept point first."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(lines)}.map(([id, points]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, rot: 99 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), ...{json.dumps(options)} }};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+if (options.hit) {{ const hit = options.hit; options.hitBox = () => hit; }}
+for (const [id, point] of {json.dumps(before or [])}) options.state.points.set(String(id), {{ point }});
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates,
+  f.properties.rot])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return {item[0]: item[1:] for item in json.loads(run.stdout)}
+
+
+def test_line_label_at_the_middle_of_the_visible_stretch():
+    # A long horizontal contour: the label goes to the middle of the part on
+    # the screen (the left half of the tile), not the middle of the line.
+    points = _lines([(1, [[0, 2048], [4096, 2048]])], [0, 0, 0.5, 1], {"box": [0.05, 0.01]})
+    x, y, rotation = points[1]
+    assert (x, y) == pytest.approx((0.25, 0.5)) and rotation == pytest.approx(0)
+
+
+def test_line_label_rotation_follows_the_line_and_stays_upright():
+    view = [0, 0, 1, 1]
+    down = _lines([(1, [[0, 0], [4096, 4096]])], view, {})[1]      # down-right on screen
+    up = _lines([(1, [[4096, 4096], [0, 0]])], view, {})[1]        # same line, reversed
+    steep = _lines([(1, [[2048, 0], [2048, 4096]])], view, {})[1]  # vertical
+    assert down[:2] == pytest.approx([0.5, 0.5]) and down[2] == pytest.approx(45)
+    assert up[2] == pytest.approx(45)                              # upright either way
+    assert steep[2] == pytest.approx(90)
+
+
+def test_line_label_needs_room_along_the_visible_stretch():
+    # Only a short piece of the line is on the screen: no label there.
+    lines = [(1, [[1900, 1000], [2400, 1000]]), (2, [[100, 3000], [1900, 3000]])]
+    points = _lines(lines, [0, 0, 0.5, 1], {"box": [0.1, 0.01]})
+    assert set(points) == {2}
+
+
+def test_line_label_slides_along_to_fit_and_keeps_clear():
+    # A label already placed on the middle: the line label slides along the
+    # line until its MapLibre collision box (larger than the drawn text: the
+    # size at the next whole zoom) is clear; a kept spot near the middle stays.
+    box, hit = [0.05, 0.01], [0.1, 0.02]
+    line = [(1, [[0, 2048], [4096, 2048]])]
+    other = [[0.45, 0.45, 0.55, 0.55]]
+    x, y, _ = _lines(line, [0, 0, 1, 1], {"box": box, "avoidHits": other})[1]
+    assert y == pytest.approx(0.5) and abs(x - 0.5) >= 0.1 - 1e-9
+    x, y, _ = _lines(line, [0, 0, 1, 1], {"box": box, "hit": hit, "avoidHits": other})[1]
+    assert y == pytest.approx(0.5) and abs(x - 0.5) >= 0.15 - 1e-9
+    kept = _lines(line, [0, 0, 1, 1], {"box": box, "precision": 0.001}, before=[(1, [0.6, 0.5])])
+    assert kept[1][:2] == pytest.approx([0.6, 0.5])
+    far = _lines(line, [0, 0, 1, 1], {"box": box, "precision": 0.001}, before=[(1, [0.9, 0.5])])
+    assert far[1][:2] == pytest.approx([0.5, 0.5])                 # too far from the middle
+
+
+def test_line_label_tries_other_visible_stretches():
+    # The longest stretch is taken; a shorter one gets the label.
+    lines = [(1, [[0, 1024], [4096, 1024], [4096, 3072], [0, 3072]])]  # two long horizontals on screen
+    box = [0.05, 0.01]
+    blocked = [[0, 0.2, 1, 0.3]]                                        # the whole upper one
+    x, y, _ = _lines(lines, [0, 0, 0.9, 1], {"box": box, "avoidHits": blocked})[1]
+    assert y == pytest.approx(0.75)

@@ -550,6 +550,8 @@ class RulesExporter:
             ))
             if self._labels_visible_polygon(primary, geom_target):
                 rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
+            elif getattr(primary, "line_label_midpoint", False) and primary.get_attr("t") == 1:
+                rule_groups.append(self._visible_line_group(rule_groups[-1], primary))
 
         return sources, rule_groups
 
@@ -1759,6 +1761,7 @@ class RulesExporter:
 
     # Suffix of the dataset holding a polygon label's polygons.
     VISIBLE_POLYGONS_SUFFIX = "_vp"
+    VISIBLE_LINES_SUFFIX = "_vl"
 
     def _labels_visible_polygon(self, flat_rule: FlattenedRule, geom_target: int) -> bool:
         """A polygon label placed on the *visible part* of its polygon, as
@@ -1788,6 +1791,22 @@ class RulesExporter:
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
         return dataclasses.replace(
             label, output_dataset=name, geometry_target=2,
+            geometry_expression=self._clip_to_extent("@geometry"),
+            description=label.description, flat_rules=[], visible_polygons=True)
+
+    def _visible_line_group(self, label: "_RuleGroupSnapshot",
+                            flat_rule: FlattenedRule) -> "_RuleGroupSnapshot":
+        """The lines of a line label drawn once per line (exported at the
+        line's middle, _single_line_label_as_point), with the label's fields:
+        the viewer puts the label at the middle of the line's *visible* part,
+        along it, as QGIS places line labels inside the map extent."""
+        name = label.output_dataset + self.VISIBLE_LINES_SUFFIX
+        for rule in label.flat_rules:
+            rule.visible_polygons = name
+            rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
+            rule.visible_kind = "line"
+        return dataclasses.replace(
+            label, output_dataset=name, geometry_target=1,
             geometry_expression=self._clip_to_extent("@geometry"),
             description=label.description, flat_rules=[], visible_polygons=True)
 

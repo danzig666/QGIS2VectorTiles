@@ -3068,6 +3068,8 @@ class QgisMapLibreStyleExporter:
                 # Who gets the best spot when labels compete (QGIS priority,
                 # then z-index): the viewer places these labels in that order.
                 "q2vt:label-rank": [label_settings.priority, label_settings.zIndex],
+                # "line": a line label put at the middle of the line's visible part.
+                "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 

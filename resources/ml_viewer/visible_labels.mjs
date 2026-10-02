@@ -27,6 +27,15 @@
 // and z-index (metadata["q2vt:label-rank"]); later ones keep clear of the
 // boxes already placed (a zone code and the parcel number of the same
 // parcel do not compete for one point).
+// Line labels drawn once per line (metadata["q2vt:visible-kind"] = "line",
+// exported at the middle of the whole line) go to the middle of the longest
+// visible stretch of their line, rotated along it, if the label fits along
+// that stretch and on the screen (sliding along the line, or to a shorter
+// visible stretch, to fit and to keep clear of other labels), as QGIS places
+// line labels inside the extent. "Clear" uses MapLibre's collision boxes,
+// which take the text size of the next whole zoom (up to twice the drawn
+// size for labels sized in map units): a spot clear only by the drawn size
+// would be hidden by MapLibre.
 // While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
@@ -77,6 +86,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     const before = style.layers.slice(index + 1).find((l) => !(l.metadata && l.metadata["q2vt:visible-polygons"]));
     groups.get(polygons).layers.push({ def: layer, before: before ? before.id : undefined });
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
+    if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
     const rank = layer.metadata["q2vt:label-rank"];
     if (Array.isArray(rank)) {
       const old = groups.get(polygons).rank || [-Infinity, -Infinity];
@@ -151,6 +161,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       return (rb[0] - ra[0]) || (rb[1] - ra[1]) || ((b.order ?? 0) - (a.order ?? 0));
     });
     const placed = [];  // world boxes of the labels placed so far
+    const hits = [];    // ... and their MapLibre collision boxes
     const zoom = map.getZoom();
     for (const [polygons, group] of ranked) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
@@ -167,10 +178,15 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
         labelBox: labelBoxes(map, group, zoom, perPx), avoid: placed.slice(),
+        hitBox: labelBoxes(map, group, zoom, perPx, Math.floor(zoom) + 1), avoidHits: hits.slice(),
+        kind: group.kind || "polygon", rotationField: rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
       });
       write(map.getSource(group.source), data, polygons);
-      if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
+      if (data.boxes && groupShown(map, group, zoom)) {
+        placed.push(...data.boxes);
+        hits.push(...data.hits);
+      }
     }
   };
   // Only what changed goes to the source: an incremental update reloads just
@@ -304,6 +320,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const rings = [];
     for (const ring of tile.loadGeometry()) {
       const world = ring.map((p) => [ox + p.x * scale, oy + p.y * scale]);
+      if (options.kind === "line") {  // polylines, cut to the tile
+        rings.push(...clipLine(world, clip));
+        continue;
+      }
       const clipped = clipRing(world, clip);
       clipped.cut = clip;  // edges along it are tile cuts, not polygon edges
       if (clipped.length >= 3) rings.push(clipped);
@@ -319,7 +339,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
   const points = new Map();
   const avoid = (options.avoid || []).slice();
-  const boxes = [];
+  const avoidHits = (options.avoidHits || []).slice();
+  const boxes = [], hits = [];
   // Bigger polygons first: they get the middle, smaller neighbours keep clear.
   const area = (rings) => Math.abs(rings.reduce((sum, ring) => sum + ring.reduce((a, [x1, y1], i) => {
     const [x2, y2] = ring[(i + 1) % ring.length];
@@ -330,7 +351,20 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   for (const [key, { properties, rings: loaded }] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
-      points.set(key, { point: old.point, properties });
+      points.set(key, { point: old.point, properties: old.properties || properties });
+      continue;
+    }
+    if (options.kind === "line") {
+      const placed = placeOnLine(loaded, properties, old, view, guarded, avoidHits, options);
+      if (placed) {
+        points.set(key, placed);
+        if (placed.box) {
+          boxes.push(placed.box);
+          avoid.push(placed.box);
+          hits.push(placed.hit);
+          avoidHits.push(placed.hit);
+        }
+      }
       continue;
     }
     const rings = reach === view ? loaded : loaded.map((ring) => {
@@ -385,8 +419,12 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     }
     if (half) {
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
+      const [hx, hy] = (options.hitBox && options.hitBox(properties)) || half;
+      const hit = [point[0] - hx, point[1] - hy, point[0] + hx, point[1] + hy];
       boxes.push(box);
       avoid.push(box);
+      hits.push(hit);
+      avoidHits.push(hit);
     }
     points.set(key, { point, properties });
   }
@@ -402,7 +440,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     out.push({ type: "Feature", id: state.ids.get(key), properties,
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
-  return { type: "FeatureCollection", features: out, boxes };
+  return { type: "FeatureCollection", features: out, boxes, hits };
 }
 
 // Polygon edges of rings, without the edges along their tile cut.
@@ -527,6 +565,180 @@ function bounds(rings) {
   return [x0, y0, x1, y1];
 }
 
+// Polyline cut to a rectangle (Liang-Barsky per segment): the pieces inside.
+function clipLine(points, [x0, y0, x1, y1]) {
+  const pieces = [];
+  let current = null;
+  for (let i = 0; i + 1 < points.length; i++) {
+    let [ax, ay] = points[i];
+    let [bx, by] = points[i + 1];
+    const dx = bx - ax, dy = by - ay;
+    let t0 = 0, t1 = 1;
+    let inside = true;
+    for (const [p, q] of [[-dx, ax - x0], [dx, x1 - ax], [-dy, ay - y0], [dy, y1 - ay]]) {
+      if (p === 0) {
+        if (q < 0) { inside = false; break; }
+      } else {
+        const r = q / p;
+        if (p < 0) { if (r > t1) { inside = false; break; } if (r > t0) t0 = r; }
+        else { if (r < t0) { inside = false; break; } if (r < t1) t1 = r; }
+      }
+    }
+    if (!inside) { current = null; continue; }
+    const start = [ax + t0 * dx, ay + t0 * dy], end = [ax + t1 * dx, ay + t1 * dy];
+    if (!current || t0 > 0) {
+      current = [start];
+      pieces.push(current);
+    }
+    current.push(end);
+    if (t1 < 1) current = null;
+  }
+  return pieces.filter((piece) => piece.length >= 2);
+}
+
+// Pieces of one line (cut at tile edges and the screen) joined where their
+// ends meet.
+function stitch(pieces) {
+  const same = (a, b) => Math.abs(a[0] - b[0]) <= 1e-10 && Math.abs(a[1] - b[1]) <= 1e-10;
+  const chains = pieces.map((piece) => piece.slice());
+  for (let joined = true; joined;) {
+    joined = false;
+    for (let i = 0; i < chains.length && !joined; i++) {
+      for (let j = 0; j < chains.length && !joined; j++) {
+        if (i === j) continue;
+        const a = chains[i], b = chains[j];
+        let merged = null;
+        if (same(a[a.length - 1], b[0])) merged = a.concat(b.slice(1));
+        else if (same(a[a.length - 1], b[b.length - 1])) merged = a.concat(b.slice(0, -1).reverse());
+        else if (same(a[0], b[0])) merged = a.slice().reverse().concat(b.slice(1));
+        if (merged) {
+          chains[i] = merged;
+          chains.splice(j, 1);
+          joined = true;
+        }
+      }
+    }
+  }
+  return chains;
+}
+
+function chainLength(chain) {
+  let length = 0;
+  for (let i = 0; i + 1 < chain.length; i++) {
+    length += Math.hypot(chain[i + 1][0] - chain[i][0], chain[i + 1][1] - chain[i][1]);
+  }
+  return length;
+}
+
+// Point at distance s along a chain and the label rotation there (QGIS:
+// line azimuth - 90°, kept upright in (-90°, 90°]; world y grows south).
+function along(chain, s) {
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const [ax, ay] = chain[i], [bx, by] = chain[i + 1];
+    const step = Math.hypot(bx - ax, by - ay);
+    if (s <= step || i + 2 === chain.length) {
+      const t = step ? Math.max(0, Math.min(1, s / step)) : 0;
+      let rotation = Math.atan2(bx - ax, -(by - ay)) * 180 / Math.PI - 90;
+      if (rotation > 90) rotation -= 180;
+      if (rotation <= -90) rotation += 180;
+      return { point: [ax + (bx - ax) * t, ay + (by - ay) * t], rotation };
+    }
+    s -= step;
+  }
+  return null;
+}
+
+// Distance along a chain of the point on it nearest to ``point``, and how far.
+function project(chain, [x, y]) {
+  let best = { s: 0, d: Infinity }, walked = 0;
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const [ax, ay] = chain[i], [bx, by] = chain[i + 1];
+    const dx = bx - ax, dy = by - ay, step = Math.hypot(dx, dy);
+    const t = step ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (step * step))) : 0;
+    const d = Math.hypot(x - (ax + dx * t), y - (ay + dy * t));
+    if (d < best.d) best = { s: walked + t * step, d };
+    walked += step;
+  }
+  return best;
+}
+
+// A line label on the visible part of its line: the middle of the longest
+// visible stretch if the label fits there (along the line, on the screen)
+// and its MapLibre collision box is clear of the labels placed before (else
+// MapLibre hides it), else the nearest such spot along that stretch or a
+// shorter one; no clear spot: the best spot that fits (MapLibre decides).
+function placeOnLine(loaded, properties, old, view, guarded, avoidHits, options) {
+  const withRotation = (rotation) => (options.rotationField
+    ? { ...properties, [options.rotationField]: rotation } : properties);
+  const chains = (pieces) => stitch(pieces).map((chain) => ({ chain, length: chainLength(chain) }))
+    .sort((a, b) => b.length - a.length);
+  const visible = chains(loaded.flatMap((piece) => clipLine(piece, view)));
+  if (!visible.length) {  // off the screen: in advance, away from the screen edge
+    const whole = chains(loaded)[0];
+    const at = whole && along(whole.chain, whole.length / 2);
+    if (!at || within(guarded, at.point)) return null;
+    return { point: at.point, properties: withRotation(at.rotation) };
+  }
+  const half = options.labelBox ? options.labelBox(properties) : null;
+  const hitHalf = (half && options.hitBox && options.hitBox(properties)) || half;
+  // Axis-aligned envelope of a rotated box (as MapLibre's rotated collision box).
+  const envelope = ([hx, hy], angle) => [
+    Math.abs(Math.cos(angle)) * hx + Math.abs(Math.sin(angle)) * hy,
+    Math.abs(Math.sin(angle)) * hx + Math.abs(Math.cos(angle)) * hy];
+  const candidate = (chain, s) => {
+    const at = along(chain, s);
+    if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null, hit: null };
+    const angle = at.rotation * Math.PI / 180;
+    const [x, y] = at.point;
+    const [ex, ey] = envelope(half, angle), [hx, hy] = envelope(hitHalf, angle);
+    const fit = Math.min(x - view[0] - ex, view[2] - ex - x, y - view[1] - ey, view[3] - ey - y);
+    const hit = [x - hx, y - hy, x + hx, y + hy];
+    const clear = !avoidHits.some((other) => intersect(other, hit));
+    return { ...at, fit, clear, box: [x - ex, y - ey, x + ex, y + ey], hit };
+  };
+  const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box, hit: c.hit });
+  const lo = half ? half[0] : 0;
+  const longest = visible[0];
+  if (old && !options.freeze && longest.length >= 2 * lo) {  // kept while near the middle and still fine
+    const { s, d } = project(longest.chain, old.point);
+    const precision = options.precision || 0;
+    if (d <= 2 * precision + 1e-12 && Math.abs(s - longest.length / 2) <= longest.length / 4
+        && s >= lo && s <= longest.length - lo) {
+      const kept = candidate(longest.chain, s);
+      if (kept && kept.fit >= 0 && kept.clear) return result(kept);
+    }
+  }
+  let fallback = null;
+  for (const { chain, length } of visible) {
+    if (length < 2 * lo) break;  // the label does not fit along it (nor along shorter ones)
+    // From the middle outwards, in steps of a quarter label (at most 40).
+    const step = Math.max(length / 40, half ? half[0] / 2 : length / 20);
+    for (let k = 0; k <= 2 * Math.ceil(length / 2 / step); k++) {
+      const s = length / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
+      if (s < lo - 1e-12 || s > length - lo + 1e-12) continue;
+      const c = candidate(chain, s);
+      if (!c || c.fit < 0) continue;
+      if (c.clear) return result(c);
+      if (!fallback) fallback = c;
+    }
+  }
+  return fallback ? result(fallback) : null;
+}
+
+// The feature property the label's text-rotate reads, if any.
+function rotationField(group, zoom) {
+  const find = (expression) => {
+    if (!Array.isArray(expression)) return null;
+    if (expression[0] === "get" && typeof expression[1] === "string") return expression[1];
+    for (const part of expression.slice(1)) {
+      const found = find(part);
+      if (found) return found;
+    }
+    return null;
+  };
+  return find((activeLayer(group, zoom).layout || {})["text-rotate"]);
+}
+
 // Signed distance from a point to a rectangle (negative inside).
 function rectDistance(x, y, [x0, y0, x1, y1]) {
   const dx = Math.max(x0 - x, 0, x - x1), dy = Math.max(y0 - y, 0, y - y1);
@@ -604,12 +816,15 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
-function labelBoxes(map, group, zoom, perPx) {
+// With ``sizeZoom`` the text size at that zoom: MapLibre's collision boxes
+// use the size at the next whole zoom (the tile's layout size), so a label
+// sized in map units collides with a box up to twice its drawn size.
+function labelBoxes(map, group, zoom, perPx, sizeZoom = zoom) {
   const layout = activeLayer(group, zoom).layout || {};
   return (properties) => {
     const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
     if (!text) return null;
-    let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
+    let size = Number(evaluate(layout["text-size"] ?? 16, sizeZoom, properties));
     if (!Number.isFinite(size) || size <= 0) size = 16;
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
