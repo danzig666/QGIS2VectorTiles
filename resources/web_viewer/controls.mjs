@@ -254,7 +254,8 @@ class AttributionControl {
 function themeBar(manifest, state) {
   const bar = document.getElementById("q2vt-themes");
   const list = presets(manifest);
-  if (!bar || !list.length) return null;
+  // One view only: nothing to choose, no bar (its layers are the start view).
+  if (!bar || list.length < 2) return null;
   const label = el("span", "q2vt-themes-label");
   label.append(icon("sparkle", 16), el("span", "", t("app.themes")));
   bar.setAttribute("aria-label", t("app.themes"));

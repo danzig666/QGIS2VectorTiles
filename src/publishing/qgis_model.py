@@ -159,6 +159,24 @@ def _zoom_of_scale(scale: float) -> Optional[float]:
         return None
 
 
+def layer_scale_range(layer, config) -> Tuple[float, float]:
+    """The scales a layer is shown at on the web: its QGIS scale range and
+    the publication's extra limit (config.min_scale / max_scale) together."""
+    from ..core.rules_flattener import combine_scale_ranges  # pylint: disable=import-outside-toplevel
+    low, high = (layer.minimumScale(), layer.maximumScale()) \
+        if layer.hasScaleBasedVisibility() else (0.0, 0.0)
+    return combine_scale_ranges(low, high, float(getattr(config, "min_scale", 0) or 0),
+                                float(getattr(config, "max_scale", 0) or 0))
+
+
+def _set_zoom_range(entry: dict, layer, config) -> None:
+    low, high = layer_scale_range(layer, config)
+    if low and _zoom_of_scale(low) is not None:
+        entry["minZoom"] = _zoom_of_scale(low)   # zoomed-out limit
+    if high and _zoom_of_scale(high) is not None:
+        entry["maxZoom"] = _zoom_of_scale(high)  # zoomed-in limit
+
+
 def logical_model(project: QgsProject, profile: PublicationProfile, rules, style: dict,
                   swatches: Optional[Dict[str, str]] = None) -> dict:
     """groups / layers / rules / components of the manifest."""
@@ -211,12 +229,7 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
             "deepLinks": bool(config.deep_links), "ruleIds": [], "componentIds": [],
             "swatch": swatches.get(lid),
         }
-        if layer.hasScaleBasedVisibility():
-            low, high = _zoom_of_scale(layer.minimumScale()), _zoom_of_scale(layer.maximumScale())
-            if low is not None:
-                entry["minZoom"] = low
-            if high is not None:
-                entry["maxZoom"] = high
+        _set_zoom_range(entry, layer, config)
         renderer = layer.renderer()
         try:
             items = renderer.legendSymbolItems() if renderer is not None else []
@@ -307,12 +320,7 @@ def _raster_entry(layer, config, lid: str, path, paths, components: List[dict]) 
         "legend": bool(config.legend), "popupFields": [], "filterFields": [], "searchable": False,
         "deepLinks": False, "ruleIds": [], "componentIds": [cid], "swatch": None,
     }
-    if layer.hasScaleBasedVisibility():
-        low, high = _zoom_of_scale(layer.minimumScale()), _zoom_of_scale(layer.maximumScale())
-        if low is not None and layer.minimumScale() > 0:
-            entry["minZoom"] = low
-        if high is not None and layer.maximumScale() > 0:
-            entry["maxZoom"] = high
+    _set_zoom_range(entry, layer, config)
     components.append({"id": cid, "role": "raster", "layerId": lid, "ruleIds": [],
                        "styleLayerIds": [raster_style_layer_id(lid)], "sourceId": raster_source_id(lid),
                        "sourceLayer": None, "dependsOnSourceLayers": [], "interactive": False})

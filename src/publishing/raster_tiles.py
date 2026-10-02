@@ -82,6 +82,13 @@ def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
                extent_3857: QgsRectangle) -> RasterPlan:
     """Zooms, area (export extent ∩ layer extent) and an upper bound of tiles."""
     low, high = zoom_range(config, profile)
+    # Not rendered where the layer is hidden on the web (its scale range).
+    from .qgis_model import _zoom_of_scale, layer_scale_range  # pylint: disable=import-outside-toplevel
+    out_scale, in_scale = layer_scale_range(layer, config)
+    if out_scale and _zoom_of_scale(out_scale) is not None:
+        low = min(high, max(low, int(math.floor(_zoom_of_scale(out_scale)))))
+    if in_scale and _zoom_of_scale(in_scale) is not None:
+        high = max(low, min(high, int(math.ceil(_zoom_of_scale(in_scale)))))
     web = QgsCoordinateReferenceSystem(WEB_MERCATOR)
     area = QgsRectangle(extent_3857)
     warnings = []

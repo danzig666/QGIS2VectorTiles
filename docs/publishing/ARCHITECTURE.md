@@ -75,6 +75,10 @@ publishing.deployments.publish                (QgsTask: files + network only)
   "profile": …, "layerNames": {id: name}}`, no secrets) and imports one (or a bare profile):
   layers are matched by id, else by a unique layer name; unmatched layers are left out; the
   user chooses the same web map (same publication id / address) or a new one.
+* `layers[].minScale` / `maxScale` (web only, QGIS scale denominators, 0 = no limit) narrow a
+  layer's own QGIS scale range (`RulesFlattener` root rule via `scale_limits`,
+  `combine_scale_ranges`; raster tile zooms; manifest `minZoom`/`maxZoom`). Hidden zooms are
+  not tiled.
 * The extent is `view.extent` (EPSG:3857) or, with `view.extentLayer`, a layer's extent,
   recomputed from the layer at every export (the stored extent is its last value).
 
