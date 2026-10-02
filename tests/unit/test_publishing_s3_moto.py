@@ -112,3 +112,15 @@ def test_full_publish_against_moto(moto, tmp_path):
     failed = [(c.name, c.detail) for c in result.checks.checks if not c.ok]
     assert result.state == ReleaseState.PUBLISHED, (result.message, failed)
     assert {"range:0-126", "tile", "manifest"} <= {c.name for c in result.checks.checks}
+    # A second release: unchanged files are copied inside the bucket
+    # (CopyObject with the new release's headers), the rest uploaded.
+    second = build_release(bundle, profile, str(tmp_path / "local2" / "moto"))
+    again = publish(second, profile, provider, str(tmp_path / "work2"))
+    assert again.state == ReleaseState.PUBLISHED, again.message
+    with open(os.path.join(second.release_dir, "release.json"), encoding="utf-8") as handle:
+        files = json.load(handle)["files"]
+    assert again.uploaded_bytes < sum(f["size"] for f in files) / 2
+    style = next(f for f in files if f["path"] == "style.json")
+    head = provider.client.head_object(Bucket="pub", Key=f"maps/moto/releases/{second.release_id}/style.json")
+    assert head["Metadata"]["sha256"] == style["sha256"]
+    assert head["CacheControl"] == style["cacheControl"] and head["ContentType"].startswith("application/json")

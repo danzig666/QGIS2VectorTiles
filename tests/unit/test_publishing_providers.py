@@ -229,3 +229,40 @@ def test_no_ambient_credentials():
         provider.client  # pylint: disable=pointless-statement
     assert error.value.code == "Q2VT_PUB_CREDENTIALS"
     assert "secret" not in repr(Credentials("AKIA1234", "secret-value")).lower()
+
+
+def test_unchanged_files_are_copied_from_the_previous_release(env):
+    """A new release of mostly unchanged files: the bucket copies them from
+    the current release (no upload); headers and checksums are the new
+    release's; a file missing from the old release is uploaded instead."""
+    first_release = _release(env, "a")
+    first = _publish(env, first_release)
+    second_release = _release(env, "b")
+    inventory = json.load(open(os.path.join(second_release.release_dir, "release.json"), encoding="utf-8"))
+    old = json.load(open(os.path.join(first_release.release_dir, "release.json"), encoding="utf-8"))
+    same = {(f["sha256"], f["size"]) for f in old["files"]}
+    gone = f"maps/felho/releases/{first.release_id}/data/map.pmtiles"
+    os.remove(env["client"]._path("maps", gone))  # pylint: disable=protected-access
+    del env["client"].meta[gone]                    # e.g. removed by hand: must be uploaded
+    env["client"].calls.clear()
+    second = _publish(env, second_release)
+    assert second.state == ReleaseState.PUBLISHED, second.message
+    copies = {c[1]["Key"] for c in env["client"].calls if c[0] == "copy_object"}  # attempts
+    puts = {c[1]["Key"] for c in env["client"].calls if c[0] in ("put_object", "complete_multipart_upload")}
+    archive = f"maps/felho/releases/{second.release_id}/data/map.pmtiles"
+    assert archive in puts
+    unchanged = {f"maps/felho/releases/{second.release_id}/{f['path']}" for f in inventory["files"]
+                 if (f["sha256"], f["size"]) in same} - {archive}
+    changed = {f"maps/felho/releases/{second.release_id}/{f['path']}" for f in inventory["files"]} - unchanged
+    assert len(unchanged) > len(changed) > 1           # e.g. manifest.json names its release
+    assert unchanged <= copies and not (unchanged & puts)  # copied in the bucket, not uploaded
+    assert changed <= puts and not ((changed - {archive}) & copies)
+    assert archive in copies  # tried first, then uploaded because the old file was gone
+    assert second.uploaded_bytes == sum(f["size"] for f in inventory["files"]
+                                        if f"maps/felho/releases/{second.release_id}/{f['path']}" in changed)
+    meta = env["client"].meta
+    item = next(f for f in inventory["files"]
+                if f"maps/felho/releases/{second.release_id}/{f['path']}" in unchanged)
+    copied = meta[f"maps/felho/releases/{second.release_id}/{item['path']}"]
+    assert copied["Metadata"]["sha256"] == item["sha256"] and copied["CacheControl"] == item["cacheControl"]
+    assert second.checks.ok  # the copied release works at its public URL

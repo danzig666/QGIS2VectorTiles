@@ -60,6 +60,13 @@ class LocalProvider(Provider):
             json.dump({"sha256": sha256, "contentType": content_type}, handle)
         return sha256
 
+    def copy_object(self, source_relative, relative, content_type, cache_control, sha256):
+        source = self._path(source_relative)
+        meta = self.head(source_relative)
+        if meta is None or meta["metadata"].get("sha256") != sha256:
+            return None
+        return self.put_file(relative, source, content_type, cache_control, sha256)
+
     def put_bytes(self, relative, data, content_type, cache_control, if_match=None,
                   if_none_match=False, sha256=""):
         target = self._path(relative)
