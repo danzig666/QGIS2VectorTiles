@@ -55,6 +55,7 @@ from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
 from .core.rules_exporter import RulesExporter
 from .core.tiles_generator import GDALTilesGenerator
+from .core import export_cache
 from .core.tiles_styler import TilesStyler
 from .core.maplibre_converter import QgisMapLibreStyleExporter
 from .core.server_initializer import ServerInitializer
@@ -93,8 +94,11 @@ class QGIS2VectorTiles:
         add_result_layer: bool = True,
         feature_keys=None,
         extra_tile_fields=None,
+        cache=None,
     ):
-        """``layer_ids``: export exactly these vector layers (also hidden
+        """``cache``: a core.export_cache.ExportCache — datasets and tiles of
+        layers unchanged since an earlier export are reused (None: off, as
+        before). ``layer_ids``: export exactly these vector layers (also hidden
         ones; the layer tree is not touched); None = the visible layers, as
         before. ``archive_format``: "mbtiles" (default, as before), "pmtiles"
         or "both" (the same MVT tiles repackaged as PMTiles v3).
@@ -124,6 +128,8 @@ class QGIS2VectorTiles:
         self.add_result_layer = add_result_layer
         self.feature_keys = dict(feature_keys or {})
         self.extra_tile_fields = dict(extra_tile_fields or {})
+        self.cache = cache
+        self.dataset_keys: Dict[str, str] = {}
         # Results of the last run (the publishing workflow builds its
         # ExportBundle from them; see export_bundle()).
         self.rules: List[FlattenedRule] = []
@@ -456,13 +462,17 @@ class QGIS2VectorTiles:
         return extent
 
     def _export_rules(self, rules: List[FlattenedRule]):
-        return RulesExporter(
+        exporter = RulesExporter(
             rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
             progress_range=(5.0, 70.0), parallel=self.parallel,
             feature_keys=self.feature_keys, extra_tile_fields=self.extra_tile_fields,
-        ).export()
+            cache=self.cache,
+        )
+        result = exporter.export()
+        self.dataset_keys = dict(exporter.dataset_keys)
+        return result
 
     def _has_features(self, layers: List[QgsVectorLayer]) -> bool:
         return any(layer.featureCount() > 0 for layer in layers)
@@ -491,8 +501,11 @@ class QGIS2VectorTiles:
             self._expected_zooms = (min(z[0] for z in present), max(z[1] for z in present))
         tiles_uri, min_zoom = GDALTilesGenerator(
             layers, style, temp_dir, self.extent, self.cpu_percent, self.feedback,
-            layer_zooms=layer_zooms,
+            layer_zooms=layer_zooms, cache=self.cache, dataset_keys=self.dataset_keys,
+            layer_groups=export_cache.source_layer_groups(rules or []),
         ).generate()
+        if self.cache is not None:
+            self._log(f". Export {self.cache.summary()}.")
         self.min_zoom = min_zoom
         return tiles_uri
 

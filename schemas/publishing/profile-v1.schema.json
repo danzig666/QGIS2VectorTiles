@@ -164,6 +164,9 @@
         },
         "includeAllFields": {
           "type": "boolean"
+        },
+        "reuseUnchanged": {
+          "type": "boolean"
         }
       }
     },

@@ -71,6 +71,13 @@ class Provider:
     def get_bytes(self, relative: str) -> Optional[Tuple[bytes, str]]:
         raise NotImplementedError
 
+    def copy_object(self, source_relative: str, relative: str, content_type: str,
+                    cache_control: str, sha256: str) -> Optional[str]:
+        """Server-side copy of an object of this publication (an unchanged
+        file of the previous release); returns the new ETag, or None when
+        the provider cannot copy (the file is uploaded instead)."""
+        return None
+
     def list_releases(self) -> List[str]:
         raise NotImplementedError
 

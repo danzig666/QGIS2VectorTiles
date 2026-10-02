@@ -42,6 +42,14 @@ need an explicit approval (stored with the settings as a fingerprint).
 * Use a bucket-scoped token with object read/write only. Bucket, domain, CORS and public
   access settings are changed by you in the Cloudflare dashboard, never by the plugin.
 
+## Export cache
+
+The export cache (`<output folder>/.q2vt-cache`) holds intermediate datasets and tiles of the
+published layers (the fields the tiles need), next to the local release folders. It is never
+uploaded — uploads send only the files listed in a validated release inventory — and it holds
+no credentials. *Output → Clear cache…* deletes it; it is pruned after 30 days unused or
+beyond 4 GB.
+
 ## Viewer
 
 * No third-party requests (no CDN, no fonts, no telemetry). The basemap is copied into the

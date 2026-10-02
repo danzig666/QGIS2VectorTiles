@@ -112,6 +112,7 @@ from ..utils.config import _DATA_SIMPLIFICATION_TOLERANCE, _EPSG_CRS, _FIELD_PRE
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
+from . import export_cache
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
 from .fidelity import html_labels
@@ -198,6 +199,9 @@ class _SourceSnapshot:
     crs_wkt: str = ""
     # Publishing: QGIS expression of the stable feature key ("" = none).
     feature_key: str = ""
+    # Size/mtime digest of the source files (export cache); None: not
+    # file based, never reused.
+    data_fingerprint: Optional[str] = None
 
     @property
     def needs_serial_read(self) -> bool:
@@ -323,8 +327,16 @@ class RulesExporter:
         parallel: bool = False,
         feature_keys: Optional[Dict[str, str]] = None,
         extra_tile_fields: Optional[Dict[str, List[str]]] = None,
+        cache: Optional["export_cache.ExportCache"] = None,
     ):
         self.flattened_rules = flattened_rules
+        # Datasets of unchanged layers reused from earlier exports (None: off).
+        self.cache = cache
+        # {output dataset: cache key} of the datasets of this export (also
+        # read by the tile generator for its per-layer tile cache).
+        self.dataset_keys: Dict[str, str] = {}
+        self._group_diagnostics: Dict[str, list] = {}
+        self._failed_groups: set = set()
         # Publishing: {layer id: QGIS expression of the stable feature key}
         # (written to FEATURE_KEY_FIELD of every dataset of the layer) and
         # {layer id: approved source fields kept in the tiles (filters)}.
@@ -390,12 +402,16 @@ class RulesExporter:
             if self._is_cancelled():
                 return [], []
             sources, rule_groups = self._snapshot_caller_thread()
+            cached_outputs = self._reuse_cached(sources, rule_groups)
+            pending = [grp for grp in rule_groups if grp.output_dataset not in cached_outputs]
+            needed = {grp.layer_id for grp in pending}
 
             # Phase 1 — serial source materialisation (caller thread).
             if self._is_cancelled():
                 return [], []
 
-            materialized = self._materialize_sources_serial(sources)
+            materialized = self._materialize_sources_serial(
+                {lid: src for lid, src in sources.items() if lid in needed})
 
             # Phase 2 — parallel base-layer pipeline (file → file).
             if self._is_cancelled():
@@ -407,7 +423,9 @@ class RulesExporter:
             if self._is_cancelled():
                 return [], []
             
-            rule_outputs = self._export_rules_parallel(rule_groups, base_layers)
+            rule_outputs = self._export_rules_parallel(pending, base_layers)
+            self._store_cached(pending, rule_outputs)
+            rule_outputs.update(cached_outputs)
             # Phase 4 — collect results on caller thread.
             return self._collect_results(rule_groups, rule_outputs)
         finally:
@@ -462,6 +480,8 @@ class RulesExporter:
                 order_by=self._order_by(r.layer),
                 crs_wkt=r.layer.crs().toWkt(),
                 feature_key=self.feature_keys.get(lid, ""),
+                data_fingerprint=(export_cache.source_fingerprint(
+                    r.layer.providerType(), r.layer.source()) if self.cache else None),
             )
 
         # Snapshot rule groups.
@@ -809,9 +829,10 @@ class RulesExporter:
                 src_path = base_layers.get(grp.layer_id)
                 if not src_path or not exists(src_path):
                     outputs[grp.output_dataset] = None
+                    self._failed_groups.add(grp.output_dataset)  # source unreadable: not "empty"
                     continue
                 fut = pool.submit(
-                    self._export_one_rule_group, grp, src_path
+                    self._export_one_rule_group_recorded, grp, src_path
                 )
                 futures[fut] = grp
 
@@ -836,6 +857,7 @@ class RulesExporter:
                         outputs.setdefault(pending_grp.output_dataset, None)
                     return outputs
                 except Exception as error:  # noqa: BLE001
+                    self._failed_groups.add(grp.output_dataset)
                     self.feedback.reportError(
                         f"Rule export failed for '{grp.output_dataset}':\n"
                         f"{traceback.format_exc()}"
@@ -846,6 +868,99 @@ class RulesExporter:
                         detail=traceback.format_exc(limit=-3))
                     outputs[grp.output_dataset] = None
         return outputs
+
+    def _export_one_rule_group_recorded(self, grp: _RuleGroupSnapshot, source_path: str):
+        """_export_one_rule_group, keeping the diagnostics it adds (stored
+        with the dataset in the export cache and replayed on reuse)."""
+        before = len(self.diagnostics.items)
+        try:
+            return self._export_one_rule_group(grp, source_path)
+        finally:
+            added = self.diagnostics.items[before:]
+            if self.parallel:  # other groups add concurrently: only this group's
+                added = [d for d in added if d.component == grp.output_dataset]
+            self._group_diagnostics[grp.output_dataset] = added
+
+    # -------------------------------------------------------------------
+    # Export cache
+    # -------------------------------------------------------------------
+    def _cache_context(self) -> dict:
+        """Settings every dataset depends on (besides its rule and source)."""
+        extent = self.extent
+        project_scope = QgsExpressionContextUtils.projectScope(QgsProject.instance())
+        global_scope = QgsExpressionContextUtils.globalScope()
+        variables = {}
+        for scope in (global_scope, project_scope):
+            for name in scope.variableNames():
+                if name.startswith(("project_last_saved", "project_path", "project_home",
+                                    "project_basename", "project_filename", "user_", "_")):
+                    continue
+                value = export_cache.stable_value(scope.variable(name))
+                if value is not export_cache.UNSTABLE:
+                    variables[name] = value
+        operations = self._transform_context.coordinateOperations() \
+            if hasattr(self._transform_context, "coordinateOperations") else {}
+        return {
+            "extent": [extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum()],
+            "required_fields_only": self.include_required_fields_only,
+            "max_zoom": self.max_zoom, "cent_source": self.cent_source,
+            "ellipsoid": self._ellipsoid, "planar": self._planar,
+            "units": [int(getattr(self._distance_unit, "value", self._distance_unit)),
+                      int(getattr(self._area_unit, "value", self._area_unit))],
+            "variables": variables,
+            "operations": {f"{k[0]}>{k[1]}" if isinstance(k, tuple) else str(k): str(v)
+                           for k, v in dict(operations).items()},
+        }
+
+    def _dataset_key(self, context: dict, src: _SourceSnapshot, grp: _RuleGroupSnapshot) -> str:
+        group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
+                 if f.name not in ("flat_rules", "output_dataset", "layer_name")}
+        source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
+                  if f.name not in ("layer_id", "name")}
+        return export_cache.make_key("dataset", context, source,
+                                     self.extra_tile_fields.get(grp.layer_id, []), group)
+
+    def _reuse_cached(self, sources: Dict[str, _SourceSnapshot],
+                      rule_groups: List[_RuleGroupSnapshot]) -> Dict[str, Optional[str]]:
+        """Copy the datasets of unchanged layers from the cache; returns
+        {output dataset: path or None (empty result)} of the reused ones."""
+        self.dataset_keys = {}
+        reused: Dict[str, Optional[str]] = {}
+        if self.cache is None:
+            return reused
+        context = self._cache_context()
+        for grp in rule_groups:
+            src = sources.get(grp.layer_id)
+            if src is None or not src.data_fingerprint:
+                continue
+            key = self._dataset_key(context, src, grp)
+            self.dataset_keys[grp.output_dataset] = key
+            target = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")
+            meta = self.cache.get_dataset(key, target)
+            if meta is None:
+                continue
+            reused[grp.output_dataset] = None if meta.get("empty") else target
+            stored = meta.get("diagnostics") or []
+            old = next((d.get("component") for d in stored if d.get("component")), "")
+            export_cache.replay_diagnostics(self.diagnostics, stored, old, grp.output_dataset)
+        if reused:
+            self._post("pushInfo", f"   Reused {len(reused)} of {len(rule_groups)} datasets of "
+                                   "unchanged layers (export cache)")
+        return reused
+
+    def _store_cached(self, groups: List[_RuleGroupSnapshot],
+                      outputs: Dict[str, Optional[str]]) -> None:
+        if self.cache is None or self._is_cancelled():
+            return
+        for grp in groups:
+            key = self.dataset_keys.get(grp.output_dataset)
+            if not key or grp.output_dataset in self._failed_groups \
+                    or grp.output_dataset not in outputs:
+                continue
+            path = outputs.get(grp.output_dataset)
+            self.cache.put_dataset(key, path if path and exists(path) else None,
+                                   export_cache.diagnostics_to_dicts(
+                                       self._group_diagnostics.get(grp.output_dataset, [])))
 
     def validate_expression(self, grp, expr_str: str):
         layer_name = grp.layer_name or grp.layer_id

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from os import cpu_count
 from os.path import join, basename
 from typing import Dict, List, Optional, Tuple
@@ -35,6 +36,7 @@ from qgis.core import QgsVectorLayer, QgsProcessingFeedback, QgsProcessingUtils
 from ..utils import main_thread
 from ..utils.config import _EPSG_CRS, _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM
 from .fidelity.dependencies import prunable_fields, style_field_dependencies
+from . import export_cache
 
 _MVT_MAX_ZOOM = 22
 
@@ -55,7 +57,15 @@ class GDALTilesGenerator:
         cpu_percent: int,
         feedback: QgsProcessingFeedback,
         layer_zooms: Optional[Dict[str, Tuple[int, int]]] = None,
+        cache: Optional["export_cache.ExportCache"] = None,
+        dataset_keys: Optional[Dict[str, str]] = None,
+        layer_groups: Optional[Dict[str, List[str]]] = None,
     ):
+        # With a cache: one tile set per QGIS layer (its datasets), reused
+        # while the layer's datasets are unchanged, then merged.
+        self.cache = cache
+        self.dataset_keys = dataset_keys or {}
+        self.layer_groups = layer_groups or {}
         self.layers = layers
         self.style = style
         self.output_dir = output_dir
@@ -73,10 +83,13 @@ class GDALTilesGenerator:
         min_zoom = self._get_global_min_zoom()
         max_zoom = self._get_global_max_zoom()
 
-        self._build_vrt(vrt_path)
-        conf_path = join(QgsProcessingUtils.tempFolder(), "layers_conf.json")
-        self._write_layer_conf(conf_path)
-        self._run_ogr2ogr(vrt_path, output, min_zoom, max_zoom, conf_path)
+        if self.cache is not None:
+            self._generate_per_layer(output, min_zoom, max_zoom)
+        else:
+            self._build_vrt(vrt_path)
+            conf_path = join(QgsProcessingUtils.tempFolder(), "layers_conf.json")
+            self._write_layer_conf(conf_path)
+            self._run_ogr2ogr(vrt_path, output, min_zoom, max_zoom, conf_path)
         self._prune_tiles_outside_extent(output)
 
         return uri, min_zoom
@@ -106,10 +119,10 @@ class GDALTilesGenerator:
 
     # --- VRT construction ---
 
-    def _build_vrt(self, vrt_path: str):
+    def _build_vrt(self, vrt_path: str, layers: Optional[List[QgsVectorLayer]] = None):
         """Write an OGR VRT containing one entry per layer with per-zoom configuration."""
         root = ET.Element("OGRVRTDataSource")
-        for layer in self.layers:
+        for layer in self.layers if layers is None else layers:
             name = self._layer_name(layer)
             min_zoom, max_zoom = self._layer_zoom_range(layer)
             node = ET.SubElement(root, "OGRVRTLayer", name=name)
@@ -118,14 +131,14 @@ class GDALTilesGenerator:
             ET.SubElement(node, "GeometryType").text = "wkbUnknown"
         ET.ElementTree(root).write(vrt_path, encoding="utf-8", xml_declaration=True)
 
-    def _write_layer_conf(self, conf_path: str):
+    def _write_layer_conf(self, conf_path: str, layers: Optional[List[QgsVectorLayer]] = None):
         """Per-layer zoom ranges for the MVT writer (``-dsco CONF``).
 
         OGR VRT has no layer-creation options, so zoom ranges put there are
         ignored and every dataset would be written at every zoom level.
         """
         conf = {}
-        for layer in self.layers:
+        for layer in self.layers if layers is None else layers:
             min_zoom, max_zoom = self._layer_zoom_range(layer)
             conf[self._layer_name(layer)] = {"minzoom": int(min_zoom), "maxzoom": int(max_zoom)}
         with open(conf_path, "w", encoding="utf-8") as handle:
@@ -138,13 +151,11 @@ class GDALTilesGenerator:
         """ogr2ogr from the QGIS/GDAL environment (PATH as set up by QGIS)."""
         return shutil.which("ogr2ogr") or "ogr2ogr"
 
-    def _run_ogr2ogr(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
-                     conf_path: Optional[str] = None):
-        """Execute ogr2ogr to convert the VRT to MBTiles."""
-        cpu_num = str(max(1, int((cpu_count() or 1) * self.cpu_percent / 100)))
-        env = os.environ.copy()
-        env["GDAL_NUM_THREADS"] = cpu_num
+    def _cpu_num(self) -> int:
+        return max(1, int((cpu_count() or 1) * self.cpu_percent / 100))
 
+    def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
+                         conf_path: Optional[str] = None) -> List[str]:
         cmd = [
             self._ogr2ogr_executable(), "-f", "MBTiles", output, vrt_path,
             "-dsco", f"MINZOOM={min_zoom}",
@@ -157,6 +168,23 @@ class GDALTilesGenerator:
         ]
         if conf_path:
             cmd += ["-dsco", f"CONF={conf_path}"]
+        return cmd
+
+    @staticmethod
+    def _popen_options() -> dict:
+        if os.name != "nt":
+            return {}
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        return {"startupinfo": startupinfo, "creationflags": 0x08000000}  # CREATE_NO_WINDOW
+
+    def _run_ogr2ogr(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
+                     conf_path: Optional[str] = None):
+        """Execute ogr2ogr to convert the VRT to MBTiles."""
+        env = os.environ.copy()
+        env["GDAL_NUM_THREADS"] = str(self._cpu_num())
+        cmd = self._ogr2ogr_command(vrt_path, output, min_zoom, max_zoom, conf_path)
 
         startupinfo = None
         creationflags = 0
@@ -193,6 +221,110 @@ class GDALTilesGenerator:
                 if self.feedback:
                     self.feedback.reportError(error_msg)
                 raise RuntimeError(error_msg)
+
+    # --- per-layer tiles (export cache) ---
+
+    def _dataset_fields(self, layer: QgsVectorLayer) -> List[str]:
+        ds = ogr.Open(layer.source().split("|layername=")[0])
+        if ds is None:
+            return []
+        defn = ds.GetLayer(0).GetLayerDefn()
+        names = [defn.GetFieldDefn(i).GetName() for i in range(defn.GetFieldCount())]
+        ds = None
+        return names
+
+    def _tile_groups(self) -> List[Tuple[Optional[str], List[QgsVectorLayer]]]:
+        """[(cache key or None, datasets)] — one group per QGIS layer, in the
+        order of the datasets (the order of one combined export)."""
+        by_name = {self._layer_name(layer): layer for layer in self.layers}
+        owner = {name: lid for lid, names in self.layer_groups.items() for name in names}
+        groups: Dict[str, List[QgsVectorLayer]] = {}
+        for name, layer in by_name.items():
+            groups.setdefault(owner.get(name, f"dataset:{name}"), []).append(layer)
+        out = []
+        for members in groups.values():
+            parts = []
+            for layer in members:
+                name = self._layer_name(layer)
+                key = self.dataset_keys.get(name)
+                if key is None:
+                    parts = None
+                    break
+                parts.append([name, key, list(self._layer_zoom_range(layer)),
+                              self._dataset_fields(layer)])
+            out.append((export_cache.make_key("tiles", self._zooms, parts,
+                                              _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM)
+                        if parts is not None else None, members))
+        return out
+
+    def _generate_per_layer(self, output: str, min_zoom: int, max_zoom: int):
+        """Tiles of each QGIS layer's datasets (from the cache when unchanged),
+        merged into ``output``."""
+        self._zooms = [min_zoom, max_zoom]
+        work = join(self.output_dir, "layer_tiles")
+        os.makedirs(work, exist_ok=True)
+        parts, jobs = [], []
+        for number, (key, members) in enumerate(self._tile_groups()):
+            cached = self.cache.get_tiles(key) if key else None
+            if cached:
+                parts.append(cached)
+                continue
+            target = join(work, f"group_{number:04d}.mbtiles")
+            vrt = join(work, f"group_{number:04d}.vrt")
+            conf = join(work, f"group_{number:04d}.json")
+            self._build_vrt(vrt, members)
+            self._write_layer_conf(conf, members)
+            jobs.append((key, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf)))
+            parts.append(target)
+        if self.feedback is not None:
+            self.feedback.pushInfo(f"   Tiles: {len(parts) - len(jobs)} of {len(parts)} layers "
+                                   "reused from earlier exports, " f"{len(jobs)} to generate")
+        self._run_parallel([cmd for _, _, cmd in jobs])
+        stored = {target: self.cache.put_tiles(key, target) for key, target, _ in jobs if key}
+        merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom)
+        shutil.rmtree(work, ignore_errors=True)  # kept in the cache; not needed here
+
+    def _run_parallel(self, commands: List[List[str]]):
+        """Run ogr2ogr commands, several at a time, polled from this (main)
+        thread so QGIS stays responsive and Cancel works."""
+        if not commands:
+            return
+        cpu = self._cpu_num()
+        slots = max(1, min(len(commands), cpu))
+        env = os.environ.copy()
+        env["GDAL_NUM_THREADS"] = str(max(1, cpu // slots))
+        waiting, running = list(commands), []
+        started = last_message = time.monotonic()
+        try:
+            while waiting or running:
+                while waiting and len(running) < slots:
+                    running.append(subprocess.Popen(
+                        waiting.pop(0), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=True, **self._popen_options()))
+                for proc in [p for p in running if p.poll() is not None]:
+                    running.remove(proc)
+                    _, stderr = proc.communicate()
+                    if proc.returncode != 0:
+                        error_msg = f"ogr2ogr failed.\nError: {stderr}"
+                        if self.feedback:
+                            self.feedback.reportError(error_msg)
+                        raise RuntimeError(error_msg)
+                if self.feedback is not None and self.feedback.isCanceled():
+                    raise TilesGenerationCancelled("Tile generation cancelled")
+                if self.feedback is not None and time.monotonic() - last_message > 15:
+                    last_message = time.monotonic()
+                    self.feedback.pushInfo(
+                        f"   Still generating tiles ({(last_message - started) / 60:.1f} minutes, "
+                        f"{len(waiting) + len(running)} layers left)...")
+                time.sleep(0.05)
+                main_thread.keep_responsive()
+        finally:
+            for proc in running:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
     def _prune_tiles_outside_extent(self, output: str):
         """Drop tiles that do not intersect the requested extent.
@@ -250,3 +382,68 @@ class GDALTilesGenerator:
 
     def _get_global_max_zoom(self) -> int:
         return max((self._layer_zoom_range(layer)[1] for layer in self.layers), default=14)
+
+
+def _tile_layers(data: bytes) -> bytes:
+    """An MVT tile's bytes (gzip or raw) without compression."""
+    return zlib.decompress(data, 47) if data[:2] == b"\x1f\x8b" else data
+
+
+def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int) -> None:
+    """One MBTiles of several MVT MBTiles with distinct layers: a tile's
+    layers are concatenated (an MVT tile is a list of layer messages, so the
+    concatenation of tiles is a tile with all their layers) and gzipped."""
+    if os.path.exists(output):
+        os.remove(output)
+    vector_layers, stats, bounds = [], [], None
+    with sqlite3.connect(output) as out:
+        out.execute("CREATE TABLE metadata (name text, value text)")
+        out.execute("CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, "
+                    "tile_data blob, UNIQUE (zoom_level, tile_column, tile_row))")
+        if len(parts) == 1:  # nothing to merge: copy as is
+            out.execute("ATTACH DATABASE ? AS part", (parts[0],))
+            out.execute("INSERT INTO tiles SELECT zoom_level, tile_column, tile_row, tile_data FROM part.tiles")
+            out.execute("INSERT INTO metadata SELECT name, value FROM part.metadata")
+            out.commit()
+            out.execute("DETACH DATABASE part")
+            return
+        merged: Dict[Tuple[int, int, int], List[bytes]] = {}
+        for path in parts:
+            with sqlite3.connect(path) as part:
+                for z, x, y, data in part.execute(
+                        "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles"):
+                    merged.setdefault((z, x, y), []).append(_tile_layers(data))
+                meta = dict(part.execute("SELECT name, value FROM metadata"))
+            try:
+                info = json.loads(meta.get("json") or "{}")
+            except ValueError:
+                info = {}
+            vector_layers += info.get("vector_layers") or []
+            stats += (info.get("tilestats") or {}).get("layers") or []
+            try:
+                west, south, east, north = (float(v) for v in meta["bounds"].split(","))
+                bounds = [west, south, east, north] if bounds is None else [
+                    min(bounds[0], west), min(bounds[1], south), max(bounds[2], east), max(bounds[3], north)]
+            except (KeyError, ValueError):
+                pass
+        out.executemany("INSERT INTO tiles VALUES (?, ?, ?, ?)", (
+            (z, x, y, _gzip(b"".join(chunks))) for (z, x, y), chunks in sorted(merged.items())))
+        bounds = bounds or [-180.0, -85.0511, 180.0, 85.0511]
+        center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2, min_zoom]
+        metadata = {
+            "name": "tiles", "description": "", "version": "2", "minzoom": str(min_zoom),
+            "maxzoom": str(max_zoom), "center": ",".join(f"{v:.7g}" if i < 2 else str(v)
+                                                          for i, v in enumerate(center)),
+            "bounds": ",".join(f"{v:.7f}" for v in bounds), "type": "overlay", "format": "pbf",
+            "scheme": "tms",
+            "json": json.dumps({"vector_layers": vector_layers,
+                                "tilestats": {"layerCount": len(stats), "layers": stats}},
+                               ensure_ascii=False),
+        }
+        out.executemany("INSERT INTO metadata VALUES (?, ?)", metadata.items())
+        out.commit()
+
+
+def _gzip(data: bytes) -> bytes:
+    compressor = zlib.compressobj(6, zlib.DEFLATED, 31)
+    return compressor.compress(data) + compressor.flush()

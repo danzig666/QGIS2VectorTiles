@@ -231,6 +231,21 @@ class S3Provider(Provider):
         return self._multipart(relative, path, size, content_type, cache_control, sha256,
                                progress, journal)
 
+    def copy_object(self, source_relative: str, relative: str, content_type: str,
+                    cache_control: str, sha256: str) -> Optional[str]:
+        existing = self.head(relative)
+        if existing and existing["metadata"].get("sha256") == sha256:
+            return existing["etag"]  # already there (retry/resume)
+        if existing:
+            raise ProviderError("Q2VT_PUB_UPLOAD", f"{relative} already exists with other content; "
+                                "release objects are immutable.")
+        response = self._call(
+            "copy_object", Bucket=self.bucket, Key=self.key(relative),
+            CopySource={"Bucket": self.bucket, "Key": self.key(source_relative)},
+            MetadataDirective="REPLACE", ContentType=content_type, CacheControl=cache_control,
+            Metadata={"sha256": sha256})
+        return (response.get("CopyObjectResult") or {}).get("ETag", "")
+
     def _multipart(self, relative, path, size, content_type, cache_control, sha256, progress, journal):
         part_size = max(self.part_size, -(-size // MAX_PARTS))
         key = self.key(relative)

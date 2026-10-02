@@ -164,3 +164,44 @@ labels still match the written points (max 0.6 px at z19), no page errors.
 | Run | Result |
 |---|---|
 | `pytest tests/browser/test_visible_labels.py tests/browser/test_web_viewer_features.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_parity.py tests/unit/test_publishing_web_builder.py tests/integration/test_plugin_package.py` | **61 passed** (new: labels do not move while the map moves) |
+
+## 4.5.0: faster re-exports and uploads, Cloudflare R2 guide
+
+Owner request (2 Oct 2026): "Every layer is regenerated every time? Could they be cached so
+small changes don't take so long? … How do I get the Cloudflare values? Some explanation in
+the plugin itself would be nice."
+
+| Change | Where |
+|---|---|
+| **Export cache**: datasets of rule groups whose layer source files (size/mtime; GeoPackage `gpkg_contents.last_change`, not `-wal` files), rule snapshot and export settings are unchanged are copied from `<output folder>/.q2vt-cache`; only the sources of changed rules are read again; diagnostics are stored and replayed | `core/export_cache.py`, `core/rules_exporter.py` |
+| **Per-layer tile sets** (with the cache): one ogr2ogr run per QGIS layer, several in parallel, reused while the layer's datasets are unchanged, merged by concatenating MVT layers | `core/tiles_generator.py` |
+| **Parcel report** reused while its layers (data and style), settings and extent are unchanged | `publishing/parcel_report.py` |
+| Deterministic keys: expression variables without object addresses, canonical style XML (Qt orders attributes randomly per session, also inside nested symbol XML), data-defined property keys sorted (were set-ordered per session — also makes exports reproducible) | `export_cache.py`, `ddp_fetcher.py`, `maplibre_converter.py` |
+| Output tab: *Reuse unchanged layers* (default on), *Clear cache…*; profile `output.reuseUnchanged` | `gui/publish_dialog.py`, schema |
+| **Uploads**: files with the same SHA-256 and size as in the current release are copied inside the bucket (S3/R2 `CopyObject`, new headers + checksum); a failed copy falls back to an upload | `deployments.py`, `providers/` |
+| **Cloudflare R2 guide** in the Publish window (10 steps, dashboard links), tooltips on every destination field, Cloudflare addresses pasted into the fields fill the account id and bucket, fields per destination kind, live *Map address*, *Save keys in QGIS…* (encrypted Basic configuration) | `gui/r2_guide.py`, `providers/r2.py` (`parse_pasted`) |
+
+Owner project (EOV, 40 layers, 153 datasets, 4585 tiles, parcel report on), headless:
+
+| Export | Time |
+|---|---|
+| Before (4.4.3) | 168 s (95 s datasets, 46 s tiles, 7 s parcel report) |
+| First export with the cache (empty) | 142–153 s (tiles 30 s: layers tiled in parallel) |
+| Again, nothing changed | **15 s** (153/153 datasets, 40/40 tile sets, parcel report reused) |
+| One feature of one layer moved | **15 s** (1 dataset and 1 tile set redone) |
+| A fill colour + a label rule changed | **22 s** (the label's dataset; the parcel report, whose restriction legend changed colour) |
+
+Equivalence: the cached exports' tiles equal an uncached export of the same data in every
+layer's features (geometry, attributes); the order of features inside some label layers
+differs, as it does between two uncached exports (367 of 4585 tiles), and one z17 tile of one
+layer differs by one vertex (GDAL simplifies a tile slightly differently when that layer is
+tiled alone). Fidelity diagnostics identical (18). A second publish against moto uploads less
+than half of the release; copied objects carry the new release's checksum and headers.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_export_cache.py tests/integration/test_export_cache.py` | 7 passed (keys, fingerprints incl. GeoPackage edits in the `-wal`, stable variables, canonical XML, entries, replay, pruning; two-layer project exported twice / after a data and a label edit = uncached export; merge) |
+| `pytest tests/integration/test_publish_dialog_r2.py` | 3 passed (pasted addresses, fields per kind, address preview, guide content, save keys) |
+| `pytest tests/unit/test_publishing_providers.py` (+ moto opt-in) | 14 passed (+4 with moto: unchanged files copied, changed and missing ones uploaded) |
+| Publishing suites (pipeline, parcel report, raster, basemap/themes, dialogs, presets, profile, web builder) with the cache on by default | 76 passed |
+| `pytest` (full suite) | **489 passed, 5 skipped** (opt-in go-pmtiles/moto), 0 failed, 8 min 49 s |

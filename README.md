@@ -62,8 +62,8 @@ window that turns the project into a public, self-contained web map:
 - Every setting is **saved in the project**, but credentials are not. Keys stay in the
   QGIS authentication database.
 - *Export locally* and *Preview* work offline. *Publish* uploads an immutable release to
-  **Cloudflare R2** (or other S3-compatible storage) and checks it through your public
-  domain. Only then does it switch the stable link, so the previous map stays online if
+  **Cloudflare R2** (or other S3-compatible storage; a step-by-step R2 guide is built into the
+  window) and checks it through your public domain. Only then does it switch the stable link, so the previous map stays online if
   anything fails. *History* rolls back to an earlier release or removes old ones.
 - Only the fields you approve become public; every tile is checked before upload.
 - **Raster layers** (orthophotos, scanned plans, rendered DEMs) are drawn by QGIS into their own
@@ -77,6 +77,8 @@ window that turns the project into a public, self-contained web map:
   (computed in QGIS from the exact geometry when exporting).
 - A modern viewer: floating panels on desktop, a bottom sheet on phones, light and dark
   appearance, your accent colour.
+- **Fast re-exports**: unchanged layers are reused from earlier exports, and unchanged files are
+  copied inside the bucket instead of uploaded again (a 3-minute plan re-exports in ~15 s).
 
 The Processing algorithm is unchanged; it gained an optional *Tile archive format*
 (MBTiles, PMTiles or both).

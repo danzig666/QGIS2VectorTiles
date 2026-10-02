@@ -96,6 +96,18 @@ class FakeS3Client:
         data = data if isinstance(data, bytes) else data.read()
         return self._call("put_object", params, lambda: self._store(params["Bucket"], params["Key"], data, params))
 
+    def copy_object(self, **params):
+        """Server-side copy; MetadataDirective REPLACE takes the new headers."""
+        def real():
+            source = params["CopySource"]
+            if source["Key"] not in self.meta:
+                raise ClientError("NoSuchKey", 404)
+            with open(self._path(source["Bucket"], source["Key"]), "rb") as handle:
+                data = handle.read()
+            stored = self._store(params["Bucket"], params["Key"], data, params)
+            return {"CopyObjectResult": {"ETag": stored["ETag"]}}
+        return self._call("copy_object", params, real)
+
     def create_multipart_upload(self, **params):
         def real():
             upload = f"up-{len(self.uploads) + 1}"

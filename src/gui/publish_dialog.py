@@ -977,6 +977,15 @@ class PublishDialog(QDialog):
         self.o_labels.addItem(tr("Visible polygon"), 1)
         self.o_labels.addItem(tr("As set in each layer's labels"), 2)
         self.o_all_fields = QCheckBox(tr("Publish ALL attribute fields in the tiles (not recommended)"))
+        cache_row = QHBoxLayout()
+        self.o_reuse = QCheckBox(tr("Reuse unchanged layers from earlier exports (faster)"))
+        self.o_reuse.setToolTip(tr("Layers whose data files, style and export settings did not change "
+                                   "since an earlier export in this output folder are not processed "
+                                   "again. Database and web layers are always exported."))
+        clear_cache = QPushButton(tr("Clear cache…"))
+        clear_cache.clicked.connect(self.clear_cache)
+        cache_row.addWidget(self.o_reuse, 1)
+        cache_row.addWidget(clear_cache)
         form.addRow(tr("Archive"), self.o_archive)
         form.addRow(tr("Local output folder"), dir_row)
         form.addRow("", self.o_xyz)
@@ -986,11 +995,32 @@ class PublishDialog(QDialog):
         form.addRow(tr("Beyond the maximum zoom"), self.o_overzoom)
         form.addRow(tr("Polygon labels"), self.o_labels)
         form.addRow("", self.o_all_fields)
+        form.addRow("", cache_row)
         form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
                                   "PMTiles archive, never as images. Only QGIS raster layers become image "
                                   "tiles, each in its own archive. Sprites, patterns, legend swatches and "
                                   "fonts are styling assets.")))
         return widget
+
+    def clear_cache(self):
+        """Delete the export cache of the local output folder."""
+        from ..core.export_cache import ExportCache  # pylint: disable=import-outside-toplevel
+        from ..publishing.controller import cache_dir  # pylint: disable=import-outside-toplevel
+        try:
+            cache = ExportCache(cache_dir(self.collect()))
+        except PublishingError as error:
+            self._fail(error.code, error.message, error.detail)
+            return
+        size = cache.size()
+        if not size:
+            QMessageBox.information(self, tr("Cache"), tr("The cache of this output folder is empty."))
+            return
+        answer = QMessageBox.question(
+            self, tr("Cache"), tr("Delete the export cache ({:.0f} MB)? The next export processes "
+                                  "every layer again.").format(size / 1024 / 1024))
+        if answer == QMessageBox.StandardButton.Yes:
+            cache.clear()
+            self.status.setText(tr("Export cache deleted."))
 
     def _choose_dir(self):
         path = QFileDialog.getExistingDirectory(self, tr("Local output folder"), self.o_dir.text())
@@ -998,20 +1028,36 @@ class PublishDialog(QDialog):
             self.o_dir.setText(path)
 
     def _destination_tab(self):
+        from .r2_guide import FIELD_HELP  # pylint: disable=import-outside-toplevel
         widget = QWidget()
         form = QFormLayout(widget)
+        self.d_form = form
         self.d_kind = QComboBox()
         self.d_kind.addItem(tr("Local only (no upload)"), "local")
         self.d_kind.addItem(tr("Cloudflare R2"), "r2")
         self.d_kind.addItem(tr("Other S3-compatible storage"), "s3")
         self.d_account = QLineEdit()
+        self.d_account.setPlaceholderText(tr("32 characters – or paste the S3 API URL / dashboard address"))
         self.d_endpoint = QLineEdit()
-        self.d_endpoint.setPlaceholderText(tr("R2: derived from the account id"))
+        self.d_endpoint.setPlaceholderText(tr("R2: leave empty (derived from the account id)"))
         self.d_bucket = QLineEdit()
+        self.d_bucket.setPlaceholderText("maps")
         self.d_prefix = QLineEdit()
         self.d_prefix.setPlaceholderText("maps/<slug>")
         self.d_public = QLineEdit()
         self.d_public.setPlaceholderText("https://maps.example.com")
+        for field, key in ((self.d_account, "account"), (self.d_endpoint, "endpoint"),
+                           (self.d_bucket, "bucket"), (self.d_prefix, "prefix"), (self.d_public, "public")):
+            field.setToolTip(tr(FIELD_HELP[key]))
+        # Pasted Cloudflare addresses: take the account id (and bucket) from them.
+        self.d_account.editingFinished.connect(lambda: self._parse_pasted(self.d_account))
+        self.d_endpoint.editingFinished.connect(lambda: self._parse_pasted(self.d_endpoint))
+        self.d_bucket.editingFinished.connect(lambda: self._parse_pasted(self.d_bucket))
+        self.d_address = QLabel()
+        self.d_address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for field in (self.d_public, self.d_prefix, getattr(self, "e_slug", None)):
+            if field is not None:
+                field.textChanged.connect(self._update_address)
         self.d_retention = QSpinBox()
         self.d_retention.setRange(1, 100)
         self.d_conditional = QCheckBox(tr("Storage supports conditional writes (R2, AWS S3)"))
@@ -1023,25 +1069,45 @@ class PublishDialog(QDialog):
             self.d_auth = None
         if self.d_auth is not None:
             auth_row.addWidget(self.d_auth)
+            self.d_auth.setToolTip(tr(FIELD_HELP["auth"]))
+        help_row = QHBoxLayout()
+        guide = QPushButton(tr("Step-by-step: set up Cloudflare R2…"))
+        guide.setToolTip(tr("Where to find each value in the Cloudflare dashboard"))
+        guide.clicked.connect(self.show_r2_guide)
+        help_row.addWidget(guide)
+        help_row.addStretch(1)
+        self.d_help_row = form.rowCount()
+        form.addRow("", help_row)
         form.addRow(tr("Destination"), self.d_kind)
+        self.d_rows = {}
         form.addRow(tr("Cloudflare account id"), self.d_account)
+        self.d_rows["account"] = self.d_account
         form.addRow(tr("S3 API endpoint"), self.d_endpoint)
+        self.d_rows["endpoint"] = self.d_endpoint
         form.addRow(tr("Bucket"), self.d_bucket)
         form.addRow(tr("Prefix in the bucket"), self.d_prefix)
         form.addRow(tr("Public base URL (custom domain)"), self.d_public)
+        form.addRow(tr("Map address"), self.d_address)
         form.addRow(tr("Saved credentials (QGIS authentication: user = access key id, "
                        "password = secret)"), auth_row)
         session = QHBoxLayout()
         self.d_session_key = QLineEdit()
-        self.d_session_key.setPlaceholderText(tr("Access key id (this session only)"))
+        self.d_session_key.setPlaceholderText(tr("Access Key ID"))
+        self.d_session_key.setToolTip(tr(FIELD_HELP["session"]))
         self.d_session_secret = QLineEdit()
         self.d_session_secret.setEchoMode(QLineEdit.EchoMode.Password)
-        self.d_session_secret.setPlaceholderText(tr("Secret access key (this session only)"))
+        self.d_session_secret.setPlaceholderText(tr("Secret Access Key"))
+        self.d_session_secret.setToolTip(tr(FIELD_HELP["session"]))
+        save_keys = QPushButton(tr("Save keys in QGIS…"))
+        save_keys.setToolTip(tr("Store these keys encrypted in QGIS and select them above"))
+        save_keys.clicked.connect(self.save_keys)
         session.addWidget(self.d_session_key)
         session.addWidget(self.d_session_secret)
+        session.addWidget(save_keys)
         form.addRow(tr("Or keys for this session only"), session)
         form.addRow(tr("Releases to keep"), self.d_retention)
         form.addRow("", self.d_conditional)
+        self.d_kind.currentIndexChanged.connect(self._destination_kind_changed)
         buttons = QHBoxLayout()
         test = QPushButton(tr("Test connection"))
         test.clicked.connect(self.test_connection)
@@ -1132,6 +1198,7 @@ class PublishDialog(QDialog):
         self.o_overzoom.setCurrentIndex(max(0, self.o_overzoom.findData(profile.output.overzoom)))
         self.o_labels.setCurrentIndex(max(0, self.o_labels.findData(profile.output.polygon_labels_base)))
         self.o_all_fields.setChecked(profile.output.include_all_fields)
+        self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
         self.d_account.setText(dest.account_id)
@@ -1143,6 +1210,8 @@ class PublishDialog(QDialog):
         self.d_conditional.setChecked(dest.conditional_writes)
         if self.d_auth is not None and dest.credential_ref:
             self.d_auth.setConfigId(dest.credential_ref)
+        self._destination_kind_changed()
+        self._update_address()
 
     def _tab_changed(self, index):
         if self.tabs.widget(index) is not None and self.tabs.tabText(index) == tr("Interaction"):
@@ -1330,6 +1399,7 @@ class PublishDialog(QDialog):
         out.overzoom = self.o_overzoom.currentData()
         out.polygon_labels_base = self.o_labels.currentData()
         out.include_all_fields = self.o_all_fields.isChecked()
+        out.reuse_unchanged = self.o_reuse.isChecked()
         dest = profile.destination
         dest.kind = self.d_kind.currentData()
         dest.account_id = self.d_account.text().strip()
@@ -1469,6 +1539,77 @@ class PublishDialog(QDialog):
             return
         text = "\n".join(f"{'✔' if ok else '✖'} {name}: {detail}" for name, ok, detail in checks)
         QMessageBox.information(self, tr("Connection"), text)
+
+    def show_r2_guide(self):
+        from .r2_guide import R2GuideDialog  # pylint: disable=import-outside-toplevel
+        self.r2_guide = R2GuideDialog(self)
+        self.r2_guide.show()
+
+    def _parse_pasted(self, field):
+        """A Cloudflare address pasted into the account, endpoint or bucket
+        field: account id (+ bucket, + jurisdiction endpoint) taken from it."""
+        from ..publishing.providers.r2 import parse_pasted  # pylint: disable=import-outside-toplevel
+        text = field.text().strip()
+        found = parse_pasted(text)
+        if not found or (field is self.d_bucket and "://" not in text and "." not in text):
+            return
+        if self.d_kind.currentData() == "local":
+            self.d_kind.setCurrentIndex(max(0, self.d_kind.findData("r2")))
+        self.d_account.setText(found["account_id"])
+        self.d_endpoint.setText(found.get("endpoint", ""))
+        if found.get("bucket"):
+            self.d_bucket.setText(found["bucket"])
+        elif field is self.d_bucket:
+            self.d_bucket.clear()
+
+    def _destination_kind_changed(self, *_):
+        kind = self.d_kind.currentData()
+        for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, kind != "local")):
+            widget.setVisible(shown)
+            label = self.d_form.labelForField(widget)
+            if label is not None:
+                label.setVisible(shown)
+        label = self.d_form.labelForField(self.d_endpoint)
+        if label is not None:
+            label.setText(tr("S3 API endpoint (optional)") if kind == "r2" else tr("S3 API endpoint"))
+        self._update_address()
+
+    def _update_address(self, *_):
+        public = self.d_public.text().strip().rstrip("/")
+        if self.d_kind.currentData() == "local" or not public:
+            self.d_address.setText(tr("— (enter the public base URL)") if self.d_kind.currentData() != "local"
+                                   else tr("— (local only)"))
+            return
+        from ..publishing.profile import normalize_prefix  # pylint: disable=import-outside-toplevel
+        try:
+            prefix = self.d_prefix.text().strip()
+            prefix = normalize_prefix(prefix) if prefix else \
+                f"maps/{self.e_slug.text().strip() or slugify(self.e_title.text().strip())}"
+            self.d_address.setText(f"{public}/{prefix}/")
+        except PublishingError:
+            self.d_address.setText(tr("— (check the prefix)"))
+
+    def save_keys(self):
+        """The session keys, stored encrypted in the QGIS authentication
+        database as a Basic configuration, then selected."""
+        from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
+        key, secret = self.d_session_key.text().strip(), self.d_session_secret.text()
+        if not key or not secret:
+            QMessageBox.information(self, tr("Keys"), tr("Paste the Access Key ID and the Secret Access "
+                                                         "Key of the R2 API token first."))
+            return
+        bucket = self.d_bucket.text().strip() or "maps"
+        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QGIS2VectorTiles)"
+        try:
+            config_id = store_auth_config(name, key, secret)
+        except PublishingError as error:
+            self._fail(error.code, error.message, error.detail)
+            return
+        if self.d_auth is not None:
+            self.d_auth.setConfigId(config_id)
+        self.d_session_key.clear()
+        self.d_session_secret.clear()
+        self.status.setText(tr("Keys saved encrypted in QGIS as “{}” and selected.").format(name))
 
     def show_cors(self):
         profile = self.collect()

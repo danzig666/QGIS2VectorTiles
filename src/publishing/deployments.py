@@ -17,7 +17,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .content_types import IMMUTABLE, NO_CACHE, content_type
 from .errors import Cancelled, PublishingError
@@ -64,9 +64,25 @@ def _check_pointer_owner(pointer: Optional[dict], profile: PublicationProfile) -
             "as an update of that publication.")
 
 
+def previous_files(provider, release_id: Optional[str]) -> Dict[Tuple[str, int], str]:
+    """{(sha256, size): path} of a published release's files ({} if unknown)."""
+    if not release_id:
+        return {}
+    try:
+        found = provider.get_bytes(f"releases/{release_id}/release.json")
+        inventory = json.loads(found[0].decode("utf-8")) if found else {}
+    except (PublishingError, ValueError, UnicodeDecodeError):
+        return {}
+    return {(item["sha256"], item["size"]): item["path"] for item in inventory.get("files", [])
+            if isinstance(item, dict) and item.get("sha256") and "path" in item}
+
+
 def upload_release(provider, release_dir: str, release_id: str, journal_path: str,
-                   progress: Optional[Progress] = None, concurrency: int = 4) -> int:
-    """Upload one immutable release from its inventory; returns bytes sent."""
+                   progress: Optional[Progress] = None, concurrency: int = 4,
+                   previous_release: Optional[str] = None) -> int:
+    """Upload one immutable release from its inventory; returns bytes sent.
+    Files that the ``previous_release`` already has (same SHA-256 and size)
+    are copied inside the bucket instead of uploaded again."""
     progress = progress or Progress()
     with open(os.path.join(release_dir, "release.json"), encoding="utf-8") as handle:
         inventory = json.load(handle)
@@ -81,8 +97,11 @@ def upload_release(provider, release_dir: str, release_id: str, journal_path: st
                                      "endpoint": getattr(provider, "endpoint", ""),
                                      "prefix": provider.prefix, "release": release_id})
     files = sorted(inventory["files"], key=lambda f: f["size"])
-    total = sum(f["size"] for f in files) or 1
+    reusable = previous_files(provider, previous_release) if previous_release != release_id else {}
+    # Progress counts the bytes to upload (copies inside the bucket are quick).
+    total = sum(f["size"] for f in files if (f["sha256"], f["size"]) not in reusable) or 1
     sent = [0]
+    copied = [0, 0]
     lock = threading.Lock()
 
     def one(item):
@@ -93,6 +112,21 @@ def upload_release(provider, release_dir: str, release_id: str, journal_path: st
             head = provider.head(rel)
             if head and head["size"] == item["size"]:
                 return item["size"]
+        source = reusable.get((item["sha256"], item["size"]))
+        if source:
+            try:
+                etag = provider.copy_object(f"releases/{previous_release}/{source}", rel,
+                                            item["contentType"], item.get("cacheControl", IMMUTABLE),
+                                            item["sha256"])
+            except PublishingError:
+                etag = None  # e.g. the old file is gone: upload it
+            if etag is not None:
+                journal.update(rel, {"sha256": item["sha256"]})
+                journal.done(rel, etag)
+                with lock:
+                    copied[0] += 1
+                    copied[1] += item["size"]
+                return 0
         etag = provider.put_file(rel, os.path.join(release_dir, *item["path"].split("/")),
                                  item["contentType"], item.get("cacheControl", IMMUTABLE),
                                  item["sha256"], progress=progress.sub(0, 1) if item["size"] > SMALL_FILE
@@ -111,6 +145,9 @@ def upload_release(provider, release_dir: str, release_id: str, journal_path: st
             future.result()
     for item in large:
         one(item)
+    if copied[0]:
+        progress.info(f"{copied[0]} unchanged files ({copied[1] / 1024 / 1024:.1f} MB) copied from "
+                      f"release {previous_release} in the bucket instead of uploaded")
     # The inventory last: a listed release with release.json is complete.
     path = os.path.join(release_dir, "release.json")
     from .bundle import sha256_path  # pylint: disable=import-outside-toplevel
@@ -184,7 +221,8 @@ def publish(release, profile: PublicationProfile, provider, work_dir: str, progr
         progress.info(f"Uploading release {release_id}...")
         journal = os.path.join(work_dir, f"upload-{release_id}.json")
         result.uploaded_bytes = upload_release(provider, release.release_dir, release_id, journal,
-                                               progress.sub(0.0, 0.8))
+                                               progress.sub(0.0, 0.8),
+                                               previous_release=result.previous_release)
         upload_stable_entry(provider, release.publication_dir)
         result.state = ReleaseState.UPLOADED_NOT_ACTIVE
         if verify:
