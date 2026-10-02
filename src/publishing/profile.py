@@ -213,7 +213,9 @@ def validate(profile: PublicationProfile) -> List[str]:
             if not 0 <= float(item.buffer_m) <= 1000:
                 errors.append("parcelInfo.restrictions.bufferM: 0-1000 m")
         if bool(info.regulation_layer_id) != bool(info.regulation_code_field):
-            errors.append("parcelInfo: regulation table needs both a layer and its zone code field")
+            errors.append("Parcel report → Zone regulations table: choose the table's zone code field "
+                          "(the field with the same zone codes as the zone layer, e.g. szab_ov), or set "
+                          "Table to empty if you do not use a regulations table (it is optional)")
     if not re.match(r"^#[0-9a-fA-F]{6}$", profile.accent_color or ""):
         errors.append("accentColor: #rrggbb")
     view = profile.view

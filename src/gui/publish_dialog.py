@@ -819,6 +819,7 @@ class PublishDialog(QDialog):
         self.p_regulation_fields = self._fields_table()
         self.p_regulation.layerChanged.connect(
             lambda layer: self._fill_fields_table(self.p_regulation_fields, layer, []))
+        self.p_regulation.layerChanged.connect(self._guess_regulation_code)
         form.addRow(tr("Table"), self.p_regulation)
         form.addRow(tr("Zone code field"), self.p_regulation_code)
         form.addRow(tr("Fields shown"), self.p_regulation_fields)
@@ -841,6 +842,18 @@ class PublishDialog(QDialog):
         bottom.addWidget(other_box, 1)
         layout.addLayout(bottom)
         return scroll
+
+    def _guess_regulation_code(self, layer):
+        """A regulations table chosen: pick its zone code field — the one named
+        like the zone layer's code field (e.g. szab_ov), else a usual code name."""
+        if layer is None or self.p_regulation_code.currentField():
+            return
+        names = {field.name().lower(): field.name() for field in layer.fields()}
+        for wanted in (self.p_code.currentField(), "szab_ov", "ovezet", "övezet", "kod", "kód",
+                       "code", "zone", "zone_code"):
+            if wanted and wanted.lower() in names:
+                self.p_regulation_code.setField(names[wanted.lower()])
+                return
 
     def _fill_parcel_tab(self, profile):
         info = profile.parcel_info
