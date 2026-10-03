@@ -69,7 +69,7 @@
   "tools.measureMethod": "Geodéziai számítás (WGS 84 ellipszoid közelítés); nem földmérési pontosságú.",
   "tools.clear": "Törlés",
   "tools.print": "Nyomtatás",
-  "tools.printNote": "Az aktuális nézetet nyomtatja jelmagyarázattal.",
+  "tools.printNote": "Az aktuális nézetet nyomtatja a választott méretarányban, jelmagyarázattal (A4 fekvő). A méretarány 100%-os nyomtatási méretezésnél pontos.",
   "legend.empty": "Nincs jelmagyarázat",
   "layers.group": "Csoport",
   "search.typeMore": "Írjon be még néhány karaktert",
@@ -97,5 +97,8 @@
   "parcel.print": "Telekinformáció nyomtatása",
   "legend.visibleOnly": "Csak a nézetben látható elemek",
   "legend.noneVisible": "Ebben a nézetben nincs megjelenített elem.",
-  "parcel.disclaimer": "Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat a hatályos rendelet tartalmazza."
+  "parcel.disclaimer": "Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat a hatályos rendelet tartalmazza.",
+  "print.scale": "M 1:{scale}",
+  "print.scaleLabel": "Méretarány",
+  "print.scaleScreen": "A képernyő szerint (kerekítve)"
 }

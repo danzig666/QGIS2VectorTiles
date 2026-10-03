@@ -5,8 +5,10 @@
 import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
+import { PRINT_SCALES } from "./print.mjs";
 
 const SOURCE = "q2vt_measure";
+const SCALE_KEY = "q2vt:print-scale";
 
 export function formatDistance(metres) {
   return metres >= 1000 ? `${formatNumber(metres / 1000, 3)} km` : `${formatNumber(metres, 1)} m`;
@@ -147,11 +149,26 @@ export class Tools {
     block.append(el("h3", "", t("tools.print")));
     const button = iconButton("q2vt-chip", null, "print", { text: t("tools.print") });
     button.addEventListener("click", () => this.print());
-    block.append(button, el("p", "q2vt-muted", t("tools.printNote")));
+    const label = el("label", "q2vt-print-choice");
+    const choice = document.createElement("select");
+    choice.append(new Option(t("print.scaleScreen"), "0"));
+    for (const scale of PRINT_SCALES) choice.append(new Option(`1:${formatNumber(scale, 0)}`, String(scale)));
+    const saved = (() => { try { return localStorage.getItem(SCALE_KEY); } catch { return null; } })();
+    if (saved && [...choice.options].some((o) => o.value === saved)) choice.value = saved;
+    const apply = () => { if (this.viewer && this.viewer.printer) this.viewer.printer.scale = Number(choice.value) || 0; };
+    choice.addEventListener("change", () => {
+      apply();
+      try { localStorage.setItem(SCALE_KEY, choice.value); } catch { /* storage unavailable */ }
+    });
+    this.applyScale = apply;
+    apply();  // the saved choice also for Ctrl+P and the parcel print
+    label.append(el("span", "", t("print.scaleLabel")), choice);
+    block.append(label, button, el("p", "q2vt-muted", t("tools.printNote")));
     this.container.append(block);
   }
 
   print() {
+    if (this.applyScale) this.applyScale();
     if (this.viewer && this.viewer.printer) this.viewer.printer.print("map");
     else window.print();
   }

@@ -438,3 +438,28 @@ Zone code: the owner's parcel report listed 241, 488, 487 as zone codes, because
 | `pytest tests/integration/test_publish_dialog_parcel.py tests/integration/test_publishing_parcel_report.py` | 6 passed |
 | browser features, static package, web builder + the parcel suites | 27 passed |
 | Chromium PDF of the test plan (map print, parcel print) | 1 page each |
+
+## 4.6.5: printing at a map scale
+
+Owner request: "Kéne a nyomtatásra egy méretarány is pl M 1:500" (the print should also have a
+scale, for example M 1:500).
+
+`print.mjs`:
+- `scaleAt(zoom, lat)` is the scale denominator on paper:
+  `40075016.686 · cos φ / (512 · 2^z) / (0.0254 / 96)`. A CSS pixel is 1/96 inch when printing
+  at 100 %.
+- `zoomFor(scale, lat)` is its inverse.
+- `standardScale` rounds to the nearest of `PRINT_SCALES` on a log scale (1:250 … 1:500 000).
+- `Printer.scale` is 0 for the screen's scale rounded to a standard one, or a fixed denominator.
+- `prepare` jumps to `zoomFor(wanted)` at the same centre. If the map's zoom limits keep it from
+  that zoom, `printScale` is the scale actually reached. The sheet header shows
+  `print.scale` ("M 1:{scale}" / "Scale 1:{scale}").
+
+`tools.mjs`: a *Scale* select in the Print card, kept in `localStorage` (`q2vt:print-scale`)
+and applied at start-up, so Ctrl+P and the parcel print use it too.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_parcel.py` | 3 passed (scale rounded to a standard one; 1:1000 measured within 1 %) |
+| browser features, static package, web builder + the above | 24 passed |
+| Chromium print of the test plan at 1:500 | 186 mm → 92.9 m (1:500 within 0.2 %), 1 page |
