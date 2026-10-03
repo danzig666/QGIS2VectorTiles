@@ -240,6 +240,14 @@ def apply(project, profile) -> List[str]:
     info.zoning_code_field = _field(zoning, ZONE_CODE_FIELDS)
     info.zoning_fields = _fields(zoning, ZONE_FIELDS)
     _ensure_published(profile, parcels, notes, "a telekre kattintáshoz")
+    # Every parcel number on the map (smaller on narrow / tiny parcels), and
+    # the parcel number searchable.
+    parcel_config = profile.layer(parcels.id())
+    parcel_config.label_always = True
+    if not parcel_config.search_fields:
+        parcel_config.search_fields = [info.key_field]
+    notes.append("Minden helyrajzi szám kiíródik a térképen (keskeny telken kisebb méretben), "
+                 "és a helyrajzi számra lehet keresni.")
     notes.append(f"Telkek: „{parcels.name()}”, azonosító: {info.key_field}.")
     notes.append(f"Övezetek: „{zoning.name()}”, övezetkód: {info.zoning_code_field}; "
                  f"{len(info.zoning_fields)} övezeti érték.")

@@ -79,6 +79,9 @@ def test_preset_fills_the_parcel_report(plugin):
     assert by_layer[layers["tajertek"].id()].buffer_m == 10.0 and by_layer[layers["lap"].id()].name_field == "NEV"
     assert info.disclaimer.startswith("Tájékoztató")
     assert profile.layer(layers["parcels"].id()).included
+    # Every parcel number shown (smaller where it does not fit) and searchable.
+    assert profile.layer(layers["parcels"].id()).label_always
+    assert profile.layer(layers["parcels"].id()).search_fields == ["hrsz"]
     assert not [e for e in validate(profile) if "parcelInfo" in e]
     assert any("javaslatok" in note for note in notes)
 
