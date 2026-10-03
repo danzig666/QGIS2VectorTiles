@@ -48,7 +48,7 @@ PARTIAL = Qt.CheckState.PartiallyChecked
 LAYER_ROLE = Qt.ItemDataRole.UserRole
 GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
 SCALES_ROLE = Qt.ItemDataRole.UserRole + 2  # [min scale, max scale], web only
-COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_SCALES = 1, 2, 3, 4
+COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_LEGEND, COL_SCALES = 1, 2, 3, 4, 5
 
 
 def publishable(layer) -> bool:
@@ -362,7 +362,8 @@ class PublishDialog(QDialog):
         self.tree = QTreeWidget()
         # Short headers (the layer names need the room); the meaning in tooltips.
         self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("At start"), tr("Switchable"),
-                                   tr("Scales")])
+                                   tr("Legend"), tr("Scales")])
+        self.tree.headerItem().setToolTip(COL_LEGEND, tr("Shown in the web map's legend"))
         self.tree.headerItem().setToolTip(COL_PUBLISH, tr("Published in the web map"))
         self.tree.headerItem().setToolTip(COL_VISIBLE, tr("Visible when the web map opens"))
         self.tree.headerItem().setToolTip(COL_TOGGLE, tr("Visitors can switch it off"))
@@ -371,7 +372,7 @@ class PublishDialog(QDialog):
             "out, smaller export. Double-click a cell, or select rows → Selected layers → Visible "
             "scales…"))
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_SCALES):
+        for column in (COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_LEGEND, COL_SCALES):
             self.tree.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -405,7 +406,8 @@ class PublishDialog(QDialog):
                 (tr("Publish"), COL_PUBLISH, True), (tr("Do not publish"), COL_PUBLISH, False),
                 (tr("Visible at start"), COL_VISIBLE, True), (tr("Hidden at start"), COL_VISIBLE, False),
                 (tr("Can be switched off by visitors"), COL_TOGGLE, True),
-                (tr("Always shown (cannot be switched off)"), COL_TOGGLE, False)):
+                (tr("Always shown (cannot be switched off)"), COL_TOGGLE, False),
+                (tr("Show in the legend"), COL_LEGEND, True), (tr("Hide from the legend"), COL_LEGEND, False)):
             menu.addAction(text, lambda c=column, v=value: self.apply_to_selection(c, v))
         menu.addSeparator()
         menu.addAction(tr("Visible scales…"), self.edit_scales)
@@ -608,6 +610,7 @@ class PublishDialog(QDialog):
                     item.setCheckState(COL_PUBLISH, _check(config.included))
                     item.setCheckState(COL_VISIBLE, _check(config.initially_visible))
                     item.setCheckState(COL_TOGGLE, _check(config.toggleable))
+                    item.setCheckState(COL_LEGEND, _check(config.legend))
                     self._set_item_scales(item, config.min_scale, config.max_scale)
         add(self.project.layerTreeRoot(), self.tree.invisibleRootItem(), ())
         self._sync_group_publish(self.tree.invisibleRootItem())
@@ -651,9 +654,31 @@ class PublishDialog(QDialog):
                     item.setCheckState(COL_PUBLISH, CHECKED)
             if column == COL_VISIBLE and item.checkState(COL_VISIBLE) == UNCHECKED:
                 item.setCheckState(COL_TOGGLE, CHECKED)
+            if column == COL_LEGEND and item.data(0, LAYER_ROLE):
+                self._legend_changed(item.data(0, LAYER_ROLE), item.checkState(COL_LEGEND) == CHECKED)
             self._sync_group_publish(self.tree.invisibleRootItem())
         finally:
             self.tree.blockSignals(False)
+
+    def _legend_changed(self, layer_id, shown: bool):
+        """The Map tab's Legend column and the Interaction tab's "Show in the
+        legend" are one setting."""
+        config = self.layer_configs.setdefault(layer_id, LayerConfig(layer_id))
+        config.legend = shown
+        if layer_id == self.current_layer_id:
+            for box in (self.i_legend, self.r_legend):
+                box.blockSignals(True)
+                box.setChecked(shown)
+                box.blockSignals(False)
+
+    def _legend_box_toggled(self, shown: bool):
+        for item in self._tree_items():
+            if item.data(0, LAYER_ROLE) == self.current_layer_id:
+                self.tree.blockSignals(True)
+                item.setCheckState(COL_LEGEND, _check(shown))
+                self.tree.blockSignals(False)
+        if self.current_layer_id:
+            self.layer_configs.setdefault(self.current_layer_id, LayerConfig(self.current_layer_id)).legend = shown
 
     def _tree_items(self):
         stack = [self.tree.invisibleRootItem()]
@@ -717,6 +742,7 @@ class PublishDialog(QDialog):
         form.addRow(tr("Feature title (display expression)"), self.i_display)
         form.addRow(tr("Initial opacity"), self.i_opacity)
         form.addRow("", self.i_legend)
+        self.i_legend.toggled.connect(self._legend_box_toggled)
         form.addRow("", self.i_links)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
@@ -763,6 +789,7 @@ class PublishDialog(QDialog):
         self.r_opacity.setRange(0, 1)
         self.r_opacity.setSingleStep(0.1)
         self.r_legend = QCheckBox(tr("Show in the legend"))
+        self.r_legend.toggled.connect(self._legend_box_toggled)
         self.r_estimate = QLabel()
         self.r_estimate.setWordWrap(True)
         form.addRow(tr("Title in the viewer"), self.r_title)
@@ -1537,6 +1564,7 @@ class PublishDialog(QDialog):
             if config.included and not config.toggleable:
                 config.initially_visible = True
             config.min_scale, config.max_scale = item.data(COL_SCALES, SCALES_ROLE) or (0.0, 0.0)
+            config.legend = item.checkState(COL_LEGEND) == CHECKED
             layers.append(config)
         profile.layers = layers
         groups = []
