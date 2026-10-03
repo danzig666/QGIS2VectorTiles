@@ -313,22 +313,24 @@ def test_line_label_tries_other_visible_stretches():
     assert y == pytest.approx(0.75)
 
 
-def _free(polygons, view, box):
+def _free(polygons, view, box, always=False, extra=None):
     """labelPoints of polygons [(id, [[x, y], ...] in z0 tile units)] with QGIS
-    Free placement: {id: (x, y, rotation in degrees)}."""
+    Free placement: {id: (x, y, rotation in degrees, label scale)}."""
     script = f"""
 import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
 const maplibregl = {{ MercatorCoordinate: class {{
   constructor(x, y) {{ this.x = x; this.y = y; }}
   toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const extra = {json.dumps(extra or {})};
 const features = {json.dumps(polygons)}.map(([id, ring]) => ({{
-  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id }},
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, ...(extra[id] || {{}}) }},
   _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring.map(([x, y]) => ({{ x, y }}))] }} }}));
 const box = {json.dumps(box)};
 const out = labelPoints(features, {json.dumps(view)}, maplibregl, {{ state: newLabelState(),
-  anchor: "pole", orient: "free", rotationField: "rot", labelBox: () => box, precision: 0.0005 }});
+  anchor: "pole", orient: "free", rotationField: "rot", labelBox: () => box, precision: 0.0005,
+  always: {json.dumps(bool(always))} }});
 console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates,
-  f.properties.rot])));
+  f.properties.rot, f.properties.q2vt_label_scale ?? 1])));
 """
     run = subprocess.run(["node", "--input-type=module", "-e", script],
                          capture_output=True, text=True, check=True)
@@ -379,7 +381,7 @@ def test_turned_labels_stay_inside_and_centred():
     a = math.radians(-30)
     box = [0.06, 0.012]
     street = _strip(2048, 2048, 3000, 300, a)
-    x, y, rotation = _free([(1, street)], [0, 0, 1, 1], box)[1]
+    x, y, rotation, _scale = _free([(1, street)], [0, 0, 1, 1], box)[1]
     assert rotation == pytest.approx(-30, abs=1)
     # Distance from the centre line (world units; 300 / 4096 wide street).
     nx, ny = -math.sin(a), math.cos(a)
@@ -402,3 +404,43 @@ def test_place_turned_keeps_clear_of_other_labels_inside_the_street():
     nx, ny = -math.sin(math.radians(-30)), math.cos(math.radians(-30))
     assert abs((x - 0.5) * nx + (y - 0.5) * ny) < 0.01   # on the centre line
     assert abs(x - 0.5) > 0.05                            # moved along the street
+
+
+def _band(cx, cy, length, width):
+    return [[cx - length / 2, cy - width / 2], [cx + length / 2, cy - width / 2],
+            [cx + length / 2, cy + width / 2], [cx - length / 2, cy + width / 2]]
+
+
+def test_always_label_shrinks_or_forces_a_label_that_does_not_fit():
+    # A narrow horizontal strip (tile units; label half height 0.012 world =
+    # ~49 tile units): 70 units wide -> the label fits at 65 %; 30 units wide
+    # -> not even at half size: at the roomiest point anyway, half size.
+    box = [0.03, 0.012]
+    polygons = [(1, _band(1000, 1000, 1600, 70)), (2, _band(1000, 2000, 1600, 30))]
+    off = _free(polygons, [0, 0, 1, 1], box)
+    assert 1 not in off and 2 not in off  # without the option: no label (as before)
+    on = _free(polygons, [0, 0, 1, 1], box, always=True)
+    assert on[1][3] < 1 and on[2][3] == pytest.approx(0.5)
+    assert on[2][1] == pytest.approx(2000 / 4096, abs=0.002)  # on the strip's middle line
+    assert on[1][2] == pytest.approx(0, abs=1) and on[2][2] == pytest.approx(0, abs=1)  # along it
+
+
+def test_always_label_uses_the_precomputed_spot_without_a_search():
+    # The export's pole (EPSG:3857 metres) of a strip too narrow for the label:
+    # used as it is (point, main angle 90 = east -> horizontal, scale = room / height).
+    size = 2 * 20037508.342789244
+    x, y = (1000 / 4096 - 0.5) * size, (0.5 - 2000 / 4096) * size
+    room = 0.006 * size  # half the label's half height
+    extra = {2: {"q2vt_pole_x": x, "q2vt_pole_y": y, "q2vt_pole_r": room, "q2vt_pole_a": 90}}
+    on = _free([(2, _band(1000, 2000, 1600, 30))], [0, 0, 1, 1], [0.03, 0.012], always=True, extra=extra)
+    assert on[2][0] == pytest.approx(1000 / 4096) and on[2][1] == pytest.approx(2000 / 4096)
+    assert on[2][2] == pytest.approx(0) and on[2][3] == pytest.approx(0.5)
+
+
+def test_scaled_text_size_keeps_a_dense_zoom_curve():
+    size = _js('m.scaledTextSize(["interpolate", ["exponential", 2], ["zoom"], 0, 1, 24, 2 ** 24])')
+    assert size[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
+    stops = size[3:]
+    assert stops[0::2] == list(range(0, 25))  # a stop at every whole zoom
+    assert stops[1::2][10][1] == pytest.approx(2 ** 10)
+    assert stops[1][2][0] == "to-number"

@@ -286,6 +286,9 @@
           "legend": {
             "type": "boolean"
           },
+          "labelAlways": {
+            "type": "boolean"
+          },
           "featureKeyProperty": {
             "type": [
               "string",

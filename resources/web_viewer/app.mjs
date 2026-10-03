@@ -144,7 +144,16 @@ async function start() {
     await new Promise((resolve) => map.once("load", resolve));
     document.body.classList.add("q2vt-loaded");
     const sourceId = manifest.sources[0].id;
+    // Layers whose every feature keeps its label (shrunk where it does not fit).
+    const always = new Set();
+    for (const layer of manifest.layers || []) {
+      if (!layer.labelAlways) continue;
+      for (const component of manifest.components || []) {
+        if (component.layerId === layer.id) for (const id of component.styleLayerIds || []) always.add(id);
+      }
+    }
     viewer.labels = enableVisibleLabels(map, maplibregl, sourceId, {
+      always,
       onUnsupported: (reason) => warn("error.labels", reason),
     });
     // Interactive controls (layer tree, legend, popups, search, filters,
