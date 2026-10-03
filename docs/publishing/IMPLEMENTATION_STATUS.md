@@ -388,3 +388,23 @@ zone opens its report directly.
 | `pytest tests/unit/test_export_cache.py tests/integration/test_export_cache.py` | 8 passed |
 | browser, web builder and profile suites | 112 passed |
 | Publish window, publishing pipeline and cache suites | 27 passed |
+
+## 4.6.3: stale modules after a plugin update; legend column
+
+Owner report: export failed right after installing 4.6.2 -
+`AttributeError: module 'QGIS2VectorTilesFork.src.core.export_cache' has no attribute
+'part_hash'`. The zip was consistent; QGIS (`qgis.utils` plugin unload) removes only the plugin
+modules recorded while the plugin loaded, so `export_cache` (first imported during an export)
+stayed in `sys.modules` in its 4.6.1 version while `rules_exporter` was the new one. The plugin's
+`__init__.py` now removes every `<package>.*` module from `sys.modules` before importing anything,
+so each (re)load starts fresh. `test_plugin_package` re-imports the package like QGIS after an
+update and checks that a late-imported module is fresh.
+
+Legend column: Map tab layer list column *Legend* (`LayerConfig.legend`), bulk *Show in / Hide
+from the legend*, synced both ways with the Interaction tab's *Show in the legend* (vector and
+raster pages).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_plugin_package.py` | 1 passed |
+| `pytest tests/integration/test_publish_scale_limits.py tests/integration/test_publish_dialog*.py` | 19 passed |

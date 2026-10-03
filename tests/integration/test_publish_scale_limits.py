@@ -42,7 +42,7 @@ def test_scales_column_sets_many_layers_and_is_saved(plugin, monkeypatch, tmp_pa
     group_item = next(dialog._group_items())  # pylint: disable=protected-access
     group_item.setSelected(True)               # the group: both layers
     assert dialog.edit_scales((25000.0, 0.0))
-    texts = [item.text(4) for item in dialog._tree_items()]  # pylint: disable=protected-access
+    texts = [item.text(5) for item in dialog._tree_items()]  # pylint: disable=protected-access
     assert texts == ["1:25 000 –", "1:25 000 –"]
     profile = dialog.collect()
     assert [(c.min_scale, c.max_scale) for c in profile.layers] == [(25000.0, 0.0)] * 2
@@ -72,3 +72,34 @@ def test_export_hides_and_does_not_tile_beyond_the_limit(plugin, tmp_path):
         levels = {z for (z,) in conn.execute("SELECT DISTINCT zoom_level FROM tiles")}
     assert levels and min(levels) >= 12      # no tiles where it is hidden
     assert not parcels.hasScaleBasedVisibility()
+
+
+def test_legend_column_and_interaction_checkbox_are_one_setting(plugin, monkeypatch, tmp_path):
+    for name in ("warning", "information", "critical"):
+        monkeypatch.setattr(QMessageBox, name, lambda *a, **k: None)
+    project = reset_project()
+    group = project.layerTreeRoot().addGroup("Csoport")
+    layers = []
+    for index in range(2):
+        layer = _parcels(str(tmp_path / f"l{index}.gpkg"))
+        layer.setName(f"L{index}")
+        project.addMapLayer(layer, False)
+        group.addLayer(layer)
+        layers.append(layer)
+    from qgis.PyQt.QtCore import Qt  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error
+    dialog = PublishDialog(iface=None)
+    items = list(dialog._tree_items())  # pylint: disable=protected-access
+    assert all(item.checkState(4) == Qt.CheckState.Checked for item in items)  # default: shown
+    next(dialog._group_items()).setSelected(True)  # pylint: disable=protected-access
+    dialog.apply_to_selection(4, False)            # bulk: hide the group's layers from the legend
+    assert [c.legend for c in dialog.collect().layers] == [False, False]
+    # The Interaction tab shows it, and its checkbox changes the column.
+    dialog.tabs.setCurrentIndex(1)
+    dialog._fill_interaction_layers()               # pylint: disable=protected-access
+    dialog.i_layers.setCurrentRow(0)
+    assert not dialog.i_legend.isChecked()
+    dialog.i_legend.setChecked(True)
+    assert items[0].checkState(4) == Qt.CheckState.Checked
+    assert [c.legend for c in dialog.collect().layers] == [True, False]
+    dialog.close()

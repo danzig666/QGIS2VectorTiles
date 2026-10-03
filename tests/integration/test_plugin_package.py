@@ -53,6 +53,14 @@ SMOKE = textwrap.dedent("""
     from QGIS2VectorTilesFork.src.publishing import controller, deployments  # noqa: F401
     versions = sdk_versions()
     plugin.unload()
+    # Updated without restarting QGIS: QGIS imports the package again; a
+    # module first imported late (the export cache) must not stay old.
+    import QGIS2VectorTilesFork.src.core.export_cache as old_cache
+    old_cache.STALE = True
+    del sys.modules["QGIS2VectorTilesFork"]
+    import QGIS2VectorTilesFork  # noqa: F811
+    import QGIS2VectorTilesFork.src.core.export_cache as new_cache
+    assert not hasattr(new_cache, "STALE"), "stale module after a plugin reload"
     print("CALLS", calls)
     print("SDK", versions)
     app.exitQgis()

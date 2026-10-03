@@ -1,7 +1,17 @@
 """QGIS2VectorTiles (fork) plugin for QGIS"""
 
-from qgis.core import QgsApplication
-from .src.processing.provider import QGIS2VectorTilesPorvider
+import sys as _sys
+
+# A plugin update without restarting QGIS: QGIS forgets only the plugin
+# modules it saw imported when the plugin loaded; modules imported later
+# (e.g. the export cache, imported when an export runs) stayed in memory in
+# their old version next to new ones ("module ... has no attribute ...").
+# Every module of this plugin is loaded afresh whenever the plugin is.
+for _name in [name for name in _sys.modules if name.startswith(__name__ + ".")]:
+    del _sys.modules[_name]
+
+from qgis.core import QgsApplication  # noqa: E402  pylint: disable=wrong-import-position
+from .src.processing.provider import QGIS2VectorTilesPorvider  # noqa: E402  pylint: disable=wrong-import-position
 
 
 class QGIS2VectorTiles:
