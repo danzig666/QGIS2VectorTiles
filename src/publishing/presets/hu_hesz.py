@@ -244,6 +244,7 @@ def apply(project, profile) -> List[str]:
     # the parcel number searchable.
     parcel_config = profile.layer(parcels.id())
     parcel_config.label_always = True
+    parcel_config.snap = True  # measurements snap to parcel corners and boundaries
     if not parcel_config.search_fields:
         parcel_config.search_fields = [info.key_field]
     notes.append("Minden helyrajzi szám kiíródik a térképen (keskeny telken kisebb méretben), "
@@ -254,6 +255,9 @@ def apply(project, profile) -> List[str]:
 
     cut_lines = _find_cut_lines(layers)
     info.cut_lines = [CutLineConfig(layer.id(), title) for layer, title in cut_lines]
+    for layer, _title in cut_lines:  # ... and to the regulation lines / zone boundaries
+        _ensure_published(profile, layer, notes, "a mérés illesztéséhez")
+        profile.layer(layer.id()).snap = True
     if cut_lines:
         notes.append("Telekrészeket vágó vonalak: " + ", ".join(f"„{layer.name()}”" for layer, _ in cut_lines) + ".")
     else:

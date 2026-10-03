@@ -82,6 +82,9 @@ def test_preset_fills_the_parcel_report(plugin):
     # Every parcel number shown (smaller where it does not fit) and searchable.
     assert profile.layer(layers["parcels"].id()).label_always
     assert profile.layer(layers["parcels"].id()).search_fields == ["hrsz"]
+    # Measurements snap to the parcels and the cut lines.
+    assert profile.layer(layers["parcels"].id()).snap
+    assert all(profile.layer(layers[k].id()).snap for k in ("reg", "zone"))
     assert not [e for e in validate(profile) if "parcelInfo" in e]
     assert any("javaslatok" in note for note in notes)
 
