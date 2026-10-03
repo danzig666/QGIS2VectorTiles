@@ -463,3 +463,29 @@ and applied at start-up, so Ctrl+P and the parcel print use it too.
 | `pytest tests/browser/test_web_viewer_parcel.py` | 3 passed (scale rounded to a standard one; 1:1000 measured within 1 %) |
 | browser features, static package, web builder + the above | 24 passed |
 | Chromium print of the test plan at 1:500 | 186 mm → 92.9 m (1:500 within 0.2 %), 1 page |
+
+## 4.6.6: reused datasets under a new zoom-range name
+
+Owner style `foldreszletek.qml` set a 1:4000 – 1:100 label scale range on the parcels.
+1. The re-export into the same folder reused 154/154 datasets and regenerated the parcels' tile
+   set.
+2. That tile set lost the labels (`…t01…o15i17f00`) and fills `o13`–`o16`, with the warning
+   "style source layer(s) have no tiles".
+
+Cause: the dataset key excludes `output_dataset`, whose name carries the zoom range, so equal
+content is shared across names. `ExportCache.get_dataset` copies the GeoPackage, whose table
+keeps the name it was first written under. The tiles VRT had no `SrcLayer`, so OGR looked for a
+table named like the tile layer, found none, and wrote nothing for that layer.
+
+Fix: `TilesGenerator._build_vrt` adds `<SrcLayer>` with the file's actual table name
+(`_dataset_table`).
+
+Test: `test_reused_dataset_under_a_new_zoom_range_keeps_its_features` changes a label scale
+range, re-exports with every dataset reused, and compares the tiles with a fresh export (labels
+present). It fails without the fix.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_export_cache.py` | 3 passed |
+| `pytest tests/unit/test_export_cache.py` + PMTiles suite | 23 passed, 1 skipped |
+| Test plan with the owner's QML, cached re-export | labels at z15.59–20.91, no missing source layers |

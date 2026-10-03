@@ -130,7 +130,15 @@ class GDALTilesGenerator:
             name = self._layer_name(layer)
             min_zoom, max_zoom = self._layer_zoom_range(layer)
             node = ET.SubElement(root, "OGRVRTLayer", name=name)
-            ET.SubElement(node, "SrcDataSource").text = layer.source().split("|layername=")[0]
+            source = layer.source().split("|layername=")[0]
+            ET.SubElement(node, "SrcDataSource").text = source
+            # The table inside the file: a dataset reused from the export cache
+            # keeps the name it was first written under (another rule's name
+            # when only the rule's zoom range changed); without SrcLayer OGR
+            # looks for a table named like the tile layer and writes nothing.
+            table = self._dataset_table(source)
+            if table and table != name:
+                ET.SubElement(node, "SrcLayer").text = table
             ET.SubElement(node, "LayerSRS").text = f"EPSG:{_EPSG_CRS}"
             ET.SubElement(node, "GeometryType").text = "wkbUnknown"
         ET.ElementTree(root).write(vrt_path, encoding="utf-8", xml_declaration=True)
@@ -227,6 +235,15 @@ class GDALTilesGenerator:
                 raise RuntimeError(error_msg)
 
     # --- per-layer tiles (export cache) ---
+
+    @staticmethod
+    def _dataset_table(path: str) -> Optional[str]:
+        ds = ogr.Open(path)
+        if ds is None or ds.GetLayerCount() == 0:
+            return None
+        name = ds.GetLayer(0).GetName()
+        ds = None
+        return name
 
     def _dataset_fields(self, layer: QgsVectorLayer) -> List[str]:
         ds = ogr.Open(layer.source().split("|layername=")[0])
