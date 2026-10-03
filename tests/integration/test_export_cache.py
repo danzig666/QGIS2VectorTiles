@@ -181,3 +181,31 @@ def test_merge_keeps_every_layer(plugin, tmp_path):
     assert b"roads" in tiles[(1, 1, 0)] and b"parcels" in tiles[(1, 1, 0)]
     assert b"parcels" not in tiles[(1, 0, 0)]
     assert '"roads"' in meta["json"] and '"parcels"' in meta["json"] and meta["bounds"].startswith("1.0")
+
+
+def test_reused_dataset_under_a_new_zoom_range_keeps_its_features(plugin, tmp_path):
+    """Owner report: after giving a layer's labels a scale range (1:4000 - 1:100)
+    the web map had no labels. The label dataset was reused from the cache
+    under its new name (its zoom range is in the name, not in its content),
+    but the GeoPackage inside still had the old table name, and the tiles of
+    that layer came out empty."""
+    project, profile, parcels, _zones = _setup(tmp_path)
+    export_local(project, profile, EXTENT, Log())
+
+    settings = parcels.labeling().settings()
+    settings.scaleVisibility = True
+    settings.minimumScale, settings.maximumScale = 40000, 0  # labels from zoom 12 only
+    parcels.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    log = Log()
+    cached = export_local(project, profile, EXTENT, log)
+    hits, total = (int(v) for v in log.cache_line().split("cache: ")[1].split(" datasets")[0].split(" of "))
+    assert hits == total  # every dataset reused, the parcels' tiles redone
+
+    profile.output.reuse_unchanged = False
+    profile.output.local_directory = str(tmp_path / "fresh")
+    fresh = export_local(project, profile, EXTENT, Log())
+    tiles = _tiles(cached)
+    assert tiles == _tiles(fresh)
+    labels = {name for layers in tiles.values() for name, features in layers.items()
+              if features and name.startswith(("l00t01", "l01t01"))}
+    assert labels, sorted({name for layers in tiles.values() for name in layers})
