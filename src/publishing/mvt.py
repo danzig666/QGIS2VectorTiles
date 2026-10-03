@@ -1,10 +1,11 @@
 """
 Minimal Mapbox Vector Tile (protobuf) decoder.
 
-Decodes layers, feature ids, types and properties (not geometry
-coordinates): enough to prove that an archive holds vector tiles, to check
-source-layer names and fields, and to scan published tiles for values that
-must not be there. Independent of the fidelity package's tile reader.
+Decodes layers, feature ids, types and properties (geometry coordinates
+only on request): enough to prove that an archive holds vector tiles, to
+check source-layer names and fields, to scan published tiles for values
+that must not be there, and to read the basemap's named streets.
+Independent of the fidelity package's tile reader.
 """
 
 import gzip
@@ -103,10 +104,13 @@ def payload(data: bytes) -> bytes:
     return data
 
 
-def decode(data: bytes, properties: bool = True) -> Dict[str, dict]:
+def decode(data: bytes, properties: bool = True, geometry: bool = False,
+           layers_wanted=None) -> Dict[str, dict]:
     """``{layer name: {"version", "extent", "features": [...], "keys"}}``.
 
-    Each feature is ``{"id", "type", "properties", "geometry_ints"}``.
+    Each feature is ``{"id", "type", "properties", "geometry_ints"}``, plus
+    ``"geometry"`` (the command integers, see ``lines``) when asked.
+    ``layers_wanted``: decode only these layers (others are skipped).
     Raises MvtDecodeError for anything that is not a vector tile.
     """
     raw = payload(data)
@@ -133,6 +137,8 @@ def decode(data: bytes, properties: bool = True) -> Dict[str, dict]:
                 features_raw.append(l_value)
         if name is None:
             raise MvtDecodeError("layer without a name")
+        if layers_wanted is not None and name not in layers_wanted:
+            continue
         if version not in (1, 2):
             raise MvtDecodeError(f"layer {name}: unsupported version {version}")
         features = []
@@ -152,7 +158,10 @@ def decode(data: bytes, properties: bool = True) -> Dict[str, dict]:
                             raise MvtDecodeError(f"layer {name}: tag index out of range")
                         feature["properties"][keys[k]] = values[v]
                 elif f_number == 4 and f_wire == 2:
-                    feature["geometry_ints"] = len(_packed(f_value))
+                    ints = _packed(f_value)
+                    feature["geometry_ints"] = len(ints)
+                    if geometry:
+                        feature["geometry"] = ints
             features.append(feature)
         if name in layers:  # same name twice: merge (legal but unusual)
             layers[name]["features"].extend(features)
@@ -160,6 +169,34 @@ def decode(data: bytes, properties: bool = True) -> Dict[str, dict]:
             layers[name] = {"version": version, "extent": extent, "keys": keys,
                             "features": features}
     return layers
+
+
+def lines(ints: List[int]) -> List[List[Tuple[int, int]]]:
+    """The parts of a line or polygon geometry in tile coordinates (MoveTo,
+    LineTo, ClosePath commands; a closed ring repeats its first point)."""
+    parts: List[List[Tuple[int, int]]] = []
+    x = y = 0
+    i = 0
+    while i < len(ints):
+        command, count = ints[i] & 7, ints[i] >> 3
+        i += 1
+        if command in (1, 2):
+            if i + 2 * count > len(ints):
+                raise MvtDecodeError("truncated geometry")
+            for _ in range(count):
+                x += _zigzag(ints[i])
+                y += _zigzag(ints[i + 1])
+                i += 2
+                if command == 1:
+                    parts.append([(x, y)])
+                elif parts:
+                    parts[-1].append((x, y))
+        elif command == 7:
+            if parts and parts[-1]:
+                parts[-1].append(parts[-1][0])
+        else:
+            raise MvtDecodeError(f"unknown geometry command {command}")
+    return [part for part in parts if len(part) >= 2]
 
 
 def layer_names(data: bytes) -> List[str]:

@@ -121,3 +121,30 @@ def test_flavors_are_vector_only_without_sprites(flavor, locale):
     assert not vector_only_violations(style)
     assert basemap.used_fontstacks(layers) <= set(basemap.FONTSTACKS.values())
     assert len(layers) > 40 and doc["colors"]["background"].startswith("#")
+
+
+def test_line_geometry_and_streets_from_the_roads_layer(tmp_path):
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    from publishing.basemap import STREETS_LAYER, LocalReader, street_records  # pylint: disable=import-outside-toplevel
+    from publishing_fixtures import encode_tile, protomaps_planet  # pylint: disable=import-outside-toplevel
+    tile = encode_tile({"roads": [("line", [[0, 10], [100, 10], [100, 50]], {"name": "A"}, None)],
+                        "earth": [("polygon", [[[0, 0], [10, 0], [10, 10], [0, 0]]], {}, None)]})
+    roads = mvt.decode(tile, geometry=True, layers_wanted={"roads"})
+    assert list(roads) == ["roads"]
+    assert mvt.lines(roads["roads"]["features"][0]["geometry"]) == [[(0, 10), (100, 10), (100, 50)]]
+    ring = mvt.decode(tile, geometry=True)["earth"]["features"][0]["geometry"]
+    assert mvt.lines(ring)[0][0] == mvt.lines(ring)[0][-1]  # ClosePath repeats the first point
+    planet = protomaps_planet(str(tmp_path / "planet.pmtiles"))
+    reader = LocalReader(planet)
+    try:
+        everything = street_records(reader, (18.95, 47.45, 19.05, 47.5))
+        west_half = street_records(reader, (18.95, 47.45, 19.05, 47.5),
+                                   clip=lambda line: [[p for p in line if p[0] <= 19.0]])
+    finally:
+        reader.close()
+    # One "Fő utca" per tile row: rows 1.6 km apart are separate streets, the
+    # tiles of one row join (pieces within 300 m).
+    assert {r["label"] for r in everything} == {"Fő utca"} and len(everything) >= 3
+    assert all(r["layerId"] == STREETS_LAYER and len(r["anchor"]) == 2 for r in everything)
+    assert len({r["featureKey"] for r in everything}) == len(everything)
+    assert all(r["bounds"][2] <= 19.0 + 1e-6 for r in west_half)

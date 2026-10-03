@@ -196,6 +196,9 @@ class InteractionConfig:
     print: bool = True
     legend_visible_only: bool = False  # legend lists only what is drawn in the current view
     layers_panel: bool = True          # the Layers tab (off: visitors see the legend only)
+    # Named OpenStreetMap streets inside the extent layer in the search (read
+    # from the basemap; without a basemap from its source: needs internet).
+    street_search: bool = False
 
 
 @dataclass

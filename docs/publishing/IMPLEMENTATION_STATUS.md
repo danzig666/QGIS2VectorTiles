@@ -489,3 +489,51 @@ present). It fails without the fix.
 | `pytest tests/integration/test_export_cache.py` | 3 passed |
 | `pytest tests/unit/test_export_cache.py` + PMTiles suite | 23 passed, 1 skipped |
 | Test plan with the owner's QML, cached re-export | labels at z15.59–20.91, no missing source layers |
+
+## 4.7.0: street search; Publish window geometry
+
+Owner requests:
+- the plugin window remembers its size and position, kept in the QGIS settings;
+- search on a chosen field of any layer (helyrajzi szám);
+- street names inside the extent layer from the street map;
+- all of it in one search box.
+
+**Street search** (`InteractionConfig.street_search`, profile `streetSearch`):
+- **Decoding:** `mvt.decode(..., geometry=True, layers_wanted=...)` and `mvt.lines()` decode the
+  MoveTo, LineTo and ClosePath commands.
+- **Archive reading:** `basemap._open_archive` and `basemap._fetch` (split out of `extract`) locate
+  and read tiles.
+- **Street records:** `basemap.street_records(reader, bbox, clip, locale)`:
+  1. Reads the `roads` layer at zoom ≤ 15 and takes the `name:<locale>` / `name` of line
+     features.
+  2. Clips each line with `clip()`.
+  3. Groups pieces of one name whose boxes are within 300 m (union-find).
+  4. Emits records `{layerId: "q2vt-streets", featureKey: "<name>#n", label, terms, anchor,
+     bounds, suggestedZoom: 17}`. The anchor is halfway along the longest piece.
+- **Area:** `controller._street_area` computes it in PLAN, before the tile export, which removes
+  layers that are not in the layer tree. It is the extent layer's polygons, made valid and merged
+  in EPSG:4326. A line or point extent layer gives its extent; no extent layer gives the export
+  extent.
+- **STREETS stage** (after BASEMAP): reads from the bundled basemap archive, else from
+  `basemap.open_source(profile.basemap.source)`. Any error is a warning and the export continues
+  without streets.
+- **Search index:** the records join the publication's index with
+  `searchable["q2vt-streets"] = ["name"]`.
+- **Viewer:** `search.mjs` shows the road icon and "Utca (OpenStreetMap)" for street results,
+  moves the map and marks the anchor, and opens no popup.
+
+**Field search:** it already existed (Interaction tab, *Search* column per field). Verified on
+the test plan in the browser.
+
+**Window geometry:** `PublishDialog._restore_geometry` / `_save_geometry` use `QgsSettings`
+`QGIS2VectorTilesFork/publishDialog/geometry`. It is saved in `closeEvent` and in `done()`
+(Escape). It falls back to the default size and the main screen when no screen shows the saved
+frame.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_street_search.py` | 3 passed |
+| `pytest tests/unit/test_publishing_basemap.py` | 16 passed |
+| `pytest tests/browser/test_web_viewer_basemap_raster.py` | 6 passed |
+| `pytest tests/integration/test_publish_dialog_extent.py` | 5 passed |
+| profile, web builder, indexes, validation, dialog, viewer suites | 104 passed |

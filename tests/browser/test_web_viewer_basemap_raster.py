@@ -72,6 +72,7 @@ def site(tmp_path_factory):
     profile.basemap.source = protomaps_planet(str(base / "planet.pmtiles"))
     profile.basemap.flavors, profile.basemap.initial = ["light", "dark"], "light"
     profile.accent_color = "#0f766e"
+    profile.interaction.street_search = True  # OpenStreetMap street names in the search
     result = export_local(project, profile, EXTENT)
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),
@@ -162,3 +163,24 @@ def test_layouts_fit_and_dark_switch(site, tmp_path, width, height):
         assert r["panelBottom"] == r["height"] and r["controlsTop"] >= r["headerBottom"]
     else:             # desktop: the panel floats under the header
         assert r["panelTop"] > r["headerBottom"]
+
+
+def test_one_search_box_finds_fields_and_streets(site, tmp_path):
+    results = _run(site["url"], [
+        {"eval": "document.getElementById('q2vt-search').focus(); return 1;"}, {"wait": 800},
+        {"type": ["#q2vt-search", "fő utca"]}, {"wait": 1500},
+        {"eval": """return [...document.querySelectorAll('#q2vt-results li[role=option]')].map((li) =>
+          [li.querySelector('.q2vt-result-label').textContent, li.querySelector('.q2vt-layer-name').textContent]);"""},
+        {"press": "Enter"}, {"wait": 2500},
+        {"eval": """const m = q2vtViewer.map, c = m.getCenter();
+          return { popups: document.querySelectorAll('.maplibregl-popup').length,
+            marker: m.getSource('q2vt_search_marker').serialize().data.features.length, zoom: m.getZoom(), lat: c.lat,
+            value: document.getElementById('q2vt-search').value };"""},
+        {"type": ["#q2vt-search", "00123/4"]}, {"wait": 1500},
+        {"eval": """return [...document.querySelectorAll('#q2vt-results li[role=option] .q2vt-layer-name')]
+          .map((n) => n.textContent);"""},
+    ], tmp_path)
+    streets, chosen, parcels = results[1], results[2], results[3]
+    assert streets and all(label == "Fő utca" and kind == "Utca (OpenStreetMap)" for label, kind in streets)
+    assert chosen["popups"] == 0 and chosen["marker"] == 1 and chosen["value"] == "Fő utca"
+    assert parcels and "Utca (OpenStreetMap)" not in parcels  # the same box finds the parcels

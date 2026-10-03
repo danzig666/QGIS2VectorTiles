@@ -25,6 +25,7 @@ const PATHS = {
   print: '<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="2"/><path d="M7 14h10v6H7z"/>',
   ruler: '<path d="M3.5 15.5L15.5 3.5l5 5-12 12z"/><path d="M7 12l2 2M10 9l2 2M13 6l2 2"/>',
   area: '<path d="M5 18l2-12 11 3-2 9z"/><circle cx="5" cy="18" r="1.4"/><circle cx="7" cy="6" r="1.4"/><circle cx="18" cy="9" r="1.4"/><circle cx="16" cy="18" r="1.4"/>',
+  road: '<path d="M8 3L4 21M16 3l4 18M12 4v3M12 10.5v3M12 17v3"/>',
   pin: '<path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0113 0c0 4.8-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
   sparkle: '<path d="M12 3.5l1.8 5 5 1.8-5 1.8-1.8 5-1.8-5-5-1.8 5-1.8z"/>',
 };
