@@ -101,5 +101,7 @@
   "print.scale": "Scale 1:{scale}",
   "print.scaleLabel": "Scale",
   "print.scaleScreen": "As on screen (rounded)",
-  "search.street": "Street (OpenStreetMap)"
+  "search.street": "Street (OpenStreetMap)",
+  "tools.snap": "Snap to: {layers}",
+  "tools.snapHelp": "Points snap to the nearest corner of these layers, else to their nearest edge (red ring). Hold Alt for a free point."
 }

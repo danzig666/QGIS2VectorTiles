@@ -101,5 +101,7 @@
   "print.scale": "M 1:{scale}",
   "print.scaleLabel": "Méretarány",
   "print.scaleScreen": "A képernyő szerint (kerekítve)",
-  "search.street": "Utca (OpenStreetMap)"
+  "search.street": "Utca (OpenStreetMap)",
+  "tools.snap": "Illesztés: {layers}",
+  "tools.snapHelp": "A pont ezeknek a rétegeknek a legközelebbi töréspontjára, ennek híján az élére illeszkedik (piros kör). Alt lenyomva: szabad pont."
 }

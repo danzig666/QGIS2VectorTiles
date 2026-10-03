@@ -229,7 +229,7 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
             "initialVisibility": bool(config.initially_visible),
             "toggleable": bool(config.toggleable),
             "opacity": float(config.opacity), "legend": bool(config.legend),
-            "labelAlways": bool(config.label_always),
+            "labelAlways": bool(config.label_always), "snap": bool(config.snap),
             "featureKeyProperty": "q2vt_feature_key",
             "identityScope": key_expression(config.key_fields)[1],
             "popupFields": [{"field": p.field, "title": p.alias or p.field, "type": p.type}

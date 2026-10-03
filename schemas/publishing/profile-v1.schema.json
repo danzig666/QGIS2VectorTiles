@@ -590,6 +590,9 @@
         "labelAlways": {
           "type": "boolean"
         },
+        "snap": {
+          "type": "boolean"
+        },
         "opacity": {
           "type": "number",
           "minimum": 0,

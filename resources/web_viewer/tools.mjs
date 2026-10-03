@@ -6,8 +6,11 @@ import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
 import { PRINT_SCALES } from "./print.mjs";
+import { Snapper } from "./snap.mjs";
 
 const SOURCE = "q2vt_measure";
+const SNAP_SOURCE = "q2vt_measure_snap";
+const SNAP_KEY = "q2vt:snap";
 const SCALE_KEY = "q2vt:print-scale";
 
 export function formatDistance(metres) {
@@ -72,9 +75,48 @@ export class Tools {
     const clear = iconButton("q2vt-chip q2vt-chip-ghost", null, "close", { text: t("tools.clear") });
     clear.addEventListener("click", () => this.stop(true));
     row.append(clear);
-    block.append(row, result, el("p", "q2vt-muted", t("tools.measureHelp")), el("p", "q2vt-muted", t("tools.measureMethod")));
+    block.append(row, result);
+    // Snapping to the publisher's snap layers (vertices first, then edges).
+    this.snapper = new Snapper({ map: this.map, manifest: this.manifest });
+    this.snapping = false;
+    if (this.snapper.available) {
+      const saved = (() => { try { return localStorage.getItem(SNAP_KEY); } catch { return null; } })();
+      this.snapping = saved !== "0";
+      const label = el("label", "q2vt-snap-choice");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = this.snapping;
+      box.addEventListener("change", () => {
+        this.snapping = box.checked;
+        this.showSnap(null);
+        try { localStorage.setItem(SNAP_KEY, box.checked ? "1" : "0"); } catch { /* storage unavailable */ }
+      });
+      label.append(box, el("span", "", t("tools.snap", { layers: this.snapper.titles.join(", ") })));
+      block.append(label);
+    }
+    block.append(el("p", "q2vt-muted", t("tools.measureHelp")),
+      ...(this.snapper.available ? [el("p", "q2vt-muted", t("tools.snapHelp"))] : []),
+      el("p", "q2vt-muted", t("tools.measureMethod")));
     this.container.append(block);
-    this.onClick = (e) => { if (this.mode) { this.points.push([e.lngLat.lng, e.lngLat.lat]); this.draw(); } };
+    this.snapRadius = window.matchMedia && window.matchMedia("(pointer: coarse)").matches ? 22 : 12;
+    this.onClick = (e) => {
+      if (!this.mode) return;
+      const snapped = this.snapAt(e);
+      this.points.push(snapped ? snapped.lngLat : [e.lngLat.lng, e.lngLat.lat]);
+      this.cursor = null;
+      this.draw();
+    };
+    this.onMeasureMove = (e) => {
+      if (!this.mode) return;
+      cancelAnimationFrame(this.moveFrame);
+      this.moveFrame = requestAnimationFrame(() => {
+        const snapped = this.snapAt(e);
+        this.showSnap(snapped);
+        this.cursor = snapped ? snapped.lngLat : [e.lngLat.lng, e.lngLat.lat];
+        if (this.points.length) this.draw();
+      });
+    };
+    this.map.on("mousemove", this.onMeasureMove);
     this.onDblClick = (e) => { if (this.mode) { e.preventDefault(); this.finish(); } };
     this.onKey = (e) => {
       if (!this.mode) return;
@@ -86,13 +128,31 @@ export class Tools {
     document.addEventListener("keydown", this.onKey);
   }
 
+  // The snapped point under the pointer (Alt: no snapping for this click).
+  snapAt(e) {
+    if (!this.snapping || (e.originalEvent && e.originalEvent.altKey)) return null;
+    return this.snapper.snap([e.point.x, e.point.y], this.snapRadius);
+  }
+
+  showSnap(snapped) {
+    const source = this.map.getSource(SNAP_SOURCE);
+    if (!source) return;
+    source.setData({ type: "FeatureCollection", features: snapped ? [{ type: "Feature",
+      properties: { kind: snapped.kind }, geometry: { type: "Point", coordinates: snapped.lngLat } }] : [] });
+  }
+
   ensureSource() {
     if (this.map.getSource(SOURCE)) return;
+    this.map.addSource(SNAP_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    this.map.addLayer({ id: SNAP_SOURCE, type: "circle", source: SNAP_SOURCE, paint: {
+      "circle-radius": ["match", ["get", "kind"], "vertex", 7, 5], "circle-color": "rgba(0,0,0,0)",
+      "circle-stroke-color": "#ff3b30", "circle-stroke-width": 2 } });
     this.map.addSource(SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     this.map.addLayer({ id: `${SOURCE}_fill`, type: "fill", source: SOURCE, filter: ["==", ["geometry-type"], "Polygon"],
       paint: { "fill-color": "#ff3b30", "fill-opacity": 0.12 } });
     this.map.addLayer({ id: `${SOURCE}_line`, type: "line", source: SOURCE,
-      paint: { "line-color": "#ff3b30", "line-width": 2, "line-dasharray": [2, 1] } });
+      paint: { "line-color": "#ff3b30", "line-width": 2, "line-dasharray": [2, 1],
+               "line-opacity": ["case", ["boolean", ["get", "preview"], false], 0.5, 1] } });
     this.map.addLayer({ id: `${SOURCE}_points`, type: "circle", source: SOURCE, filter: ["==", ["geometry-type"], "Point"],
       paint: { "circle-radius": 4, "circle-color": "#ff3b30" } });
   }
@@ -110,6 +170,9 @@ export class Tools {
 
   finish() {
     this.mode = null;
+    this.cursor = null;
+    this.showSnap(null);
+    if (this.map.getSource(SOURCE) && this.points.length) this.draw();
     this.viewer.measuring = false;
     this.map.doubleClickZoom.enable();
     this.map.getCanvas().style.cursor = "";
@@ -139,6 +202,10 @@ export class Tools {
     }
     if (this.lastMode === "area" && this.points.length >= 3) {
       features.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[...this.points, this.points[0]]] } });
+    }
+    if (this.mode && this.cursor && this.points.length) {  // the next segment, to the (snapped) pointer
+      features.push({ type: "Feature", properties: { preview: true },
+        geometry: { type: "LineString", coordinates: [this.points[this.points.length - 1], this.cursor] } });
     }
     this.map.getSource(SOURCE).setData({ type: "FeatureCollection", features });
     if (this.result) this.result.textContent = this.points.length >= 2 ? this.measurement() : "";
@@ -177,6 +244,7 @@ export class Tools {
     if (this.onMove) this.map.off("mousemove", this.onMove);
     if (this.onMoveEnd) this.map.off("moveend", this.onMoveEnd);
     if (this.onClick) this.map.off("click", this.onClick);
+    if (this.onMeasureMove) this.map.off("mousemove", this.onMeasureMove);
     if (this.onDblClick) this.map.off("dblclick", this.onDblClick);
     if (this.onKey) document.removeEventListener("keydown", this.onKey);
   }

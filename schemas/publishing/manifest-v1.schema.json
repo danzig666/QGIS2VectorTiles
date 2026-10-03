@@ -289,6 +289,9 @@
           "labelAlways": {
             "type": "boolean"
           },
+          "snap": {
+            "type": "boolean"
+          },
           "featureKeyProperty": {
             "type": [
               "string",

@@ -242,6 +242,8 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 .q2vt-tool-output { font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--q2vt-fg); }
 .q2vt-card .q2vt-tool-output[aria-live] { font-size: 18px; font-weight: 600; margin: 4px 2px; }
 .q2vt-card p.q2vt-muted { font-size: 12px; margin: 6px 2px 0; }
+.q2vt-snap-choice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 2px 0; font-size: 13px; cursor: pointer; }
+.q2vt-snap-choice input { margin: 2px 0 0; accent-color: var(--q2vt-accent); }
 .q2vt-print-choice { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13px; }
 .q2vt-print-choice select { flex: 1 1 auto; min-width: 0; min-height: 36px; padding: 4px 8px; border-radius: 10px;
   border: 1px solid var(--q2vt-border); background: var(--q2vt-surface-solid); color: var(--q2vt-fg); }
