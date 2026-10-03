@@ -82,6 +82,9 @@ class LayerConfig:
     legend: bool = True
     opacity: float = 1.0
     deep_links: bool = True
+    # Every feature gets its label in the web map: one that does not fit is
+    # drawn smaller, at worst at the roomiest point (never dropped).
+    label_always: bool = False
     toggleable: bool = True            # the viewer's user may switch it off
     # Web map only, on top of the layer's own QGIS scale range (QGIS scale
     # denominators, 0 = no limit): hidden when zoomed out beyond 1:min_scale

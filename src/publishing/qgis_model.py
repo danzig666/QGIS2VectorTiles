@@ -86,9 +86,17 @@ def feature_keys(profile: PublicationProfile) -> Tuple[Dict[str, str], Dict[str,
 
 
 def tile_fields(profile: PublicationProfile) -> Dict[str, List[str]]:
-    """Approved filter fields written to the tiles of their layer."""
-    return {layer.layer_id: [f.field for f in layer.filter_fields]
-            for layer in profile.layers if layer.included and layer.filter_fields}
+    """Approved filter fields written to the tiles of their layer, plus the
+    precomputed label anchors of "label every feature" layers."""
+    from ..core.rules_exporter import LABEL_ANCHOR_MARKER  # pylint: disable=import-outside-toplevel
+    out = {}
+    for layer in profile.layers:
+        if not layer.included:
+            continue
+        names = [f.field for f in layer.filter_fields] + ([LABEL_ANCHOR_MARKER] if layer.label_always else [])
+        if names:
+            out[layer.layer_id] = names
+    return out
 
 
 def split_profile(profile: PublicationProfile, project: QgsProject):
@@ -221,6 +229,7 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
             "initialVisibility": bool(config.initially_visible),
             "toggleable": bool(config.toggleable),
             "opacity": float(config.opacity), "legend": bool(config.legend),
+            "labelAlways": bool(config.label_always),
             "featureKeyProperty": "q2vt_feature_key",
             "identityScope": key_expression(config.key_fields)[1],
             "popupFields": [{"field": p.field, "title": p.alias or p.field, "type": p.type}

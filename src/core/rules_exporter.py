@@ -181,6 +181,18 @@ _SERIAL_READ_PROVIDERS = frozenset(
 # Temp files prefered to be parquet but in linux which not support parquet they are became gpkg.
 _TEMP_LAYER_FORMAT = 'sqlite'
 _TEMP_RULE_FORMAT = 'gpkg'
+# "Label every feature" layers (publication): each polygon's roomiest point
+# (pole of inaccessibility), its free radius and the polygon's direction
+# (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
+# cannot fit there at once instead of searching (a narrow or tiny parcel).
+LABEL_ANCHOR_MARKER = "q2vt:label-anchor"
+_POLE = "pole_of_inaccessibility($geometry, 0.2)"
+LABEL_ANCHOR_FIELDS = [
+    (6, f"round(x({_POLE}), 2)", "q2vt_pole_x"),
+    (6, f"round(y({_POLE}), 2)", "q2vt_pole_y"),
+    (6, f"round(distance({_POLE}, boundary($geometry)), 2)", "q2vt_pole_r"),
+    (6, "round(main_angle($geometry), 1)", "q2vt_pole_a"),
+]
 # ============================================================================
 # Snapshots — pure-Python data, no QObject references
 # ============================================================================
@@ -1363,6 +1375,10 @@ class RulesExporter:
         if source_fields.indexFromName(FEATURE_KEY_FIELD) >= 0:
             mapping.append((10, f'"{FEATURE_KEY_FIELD}"', FEATURE_KEY_FIELD))
         for name in self.extra_tile_fields.get(grp.layer_id, []):
+            if name == LABEL_ANCHOR_MARKER:
+                if grp.rule_type == 1 and grp.source_geometry == 2:
+                    mapping.extend(LABEL_ANCHOR_FIELDS)
+                continue
             index = source_fields.indexFromName(name)
             if index >= 0 and name not in [m[2] for m in mapping]:
                 mapping.append((source_fields.at(index).type(), f'"{name}"', name))

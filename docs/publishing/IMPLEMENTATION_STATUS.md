@@ -537,3 +537,44 @@ frame.
 | `pytest tests/browser/test_web_viewer_basemap_raster.py` | 6 passed |
 | `pytest tests/integration/test_publish_dialog_extent.py` | 5 passed |
 | profile, web builder, indexes, validation, dialog, viewer suites | 104 passed |
+
+## 4.7.1: label every feature
+
+Owner (HU): "a helyrajzi számokat mindenképpen ki kell írni" (the parcel numbers must always be
+shown; hrsz 1119, a 118 × 5 m strip, had no label), "kisebb is lehet" (it can be smaller);
+then: pre-generate the placement of these small parcels for speed.
+
+- `LayerConfig.label_always` (profile `labelAlways`) appears as manifest `layers[].labelAlways`.
+  The viewer (`app.mjs`) collects the style layer ids of those layers into
+  `enableVisibleLabels(..., {always})`.
+- Placer (`visible_labels.mjs`, groups with `always`):
+  1. **Precomputed spot:** used when the label cannot fit even at the pole, i.e. its half
+     height is more than `q2vt_pole_r`. It takes the point and angle as they are, with scale
+     room / height, at least 0.5, and no search.
+  2. **Free placement:** otherwise; when it fails, it retries at `SHRINK_STEPS` 0.8 / 0.65 / 0.5,
+     skipping steps whose half height exceeds the best room.
+  3. **Forced:** finally the roomiest point at 0.5 along `localDirection`.
+  4. **Whole polygons:** a polygon wholly on the screen is no longer skipped as a sliver.
+
+  The factor is written as `q2vt_label_scale`. `scaledTextSize` multiplies `text-size` by it.
+  A numeric zoom curve first gets a stop at every whole zoom: MapLibre evaluates a feature-dependent
+  size at the curve's stops and packs it into a narrow range, so stops at 0 and 24 shrank the
+  framed zone codes to nothing.
+- **Export:** `qgis_model.tile_fields` adds the marker `q2vt:label-anchor`.
+  `RulesExporter._build_field_mapping` then writes `q2vt_pole_x/y` (EPSG:3857, cm),
+  `q2vt_pole_r` and `q2vt_pole_a` (`main_angle`) on the layer's polygon label datasets. The
+  marker is part of the dataset cache key; the fields pass the disclosure check as generated
+  `q2vt_` values.
+- **Timing** (test plan, 1280 × 800, `labels.update()`):
+
+  | Zoom | Without the option | Live search | Precomputed |
+  |---|---|---|---|
+  | 16 | 390 ms | 500 ms | 450 ms |
+  | 17 | 148 ms | 194 ms | 158 ms |
+  | 18 | 43 ms | 53 ms | 45 ms |
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 26 passed |
+| `pytest tests/integration/test_publishing_label_always.py` | 1 passed |
+| related suites | 114 passed |

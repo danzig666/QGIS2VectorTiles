@@ -54,6 +54,10 @@ const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
 export const OVERLAP_SUFFIX = "_q2vt_overlap";
 const FREE_ROTATION = "q2vt_free_rotation";
+// "Always label" layers: a label that does not fit is drawn smaller (this
+// factor of its size), at worst at the roomiest point at the smallest size.
+const LABEL_SCALE = "q2vt_label_scale";
+const SHRINK_STEPS = [0.8, 0.65, 0.5];
 const EDGE_PX = 24; // a kept label must stay this far inside the screen
 // Recompute at most this often while polygon tiles arrive / the map moves.
 // Unchanged labels keep their fade state across the GeoJSON reloads
@@ -90,6 +94,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
     if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
+    if (options.always && options.always.has(layer.id)) groups.get(polygons).always = true;
     const rank = layer.metadata["q2vt:label-rank"];
     if (Array.isArray(rank)) {
       const old = groups.get(polygons).rank || [-Infinity, -Infinity];
@@ -129,6 +134,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       // MapLibre must not shift the label a box width off it (that pushed
       // labels out of their polygon and off the screen).
       moved.layout = { ...moved.layout, "text-anchor": "center" };
+      if (group.always) moved.layout["text-size"] = scaledTextSize(moved.layout["text-size"]);
       delete moved.layout["text-variable-anchor"];
       delete moved.layout["text-radial-offset"];
       // Line labels are placed here clear of the other labels (by their
@@ -203,6 +209,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
+        always: !!group.always,
       });
       write(map.getSource(group.source), data, polygons);
       if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
@@ -416,8 +423,29 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       for (const box of near) min = Math.min(min, rectDistance(x, y, box));
       return min;
     };
-    if (label && area(rings) < 4 * label[0] * label[1]) continue;  // only a sliver in view
+    // "Always label" with the polygon's roomiest point precomputed at export:
+    // a label that cannot fit even there goes there at once, smaller and
+    // along the polygon - no search (narrow strips, tiny parcels).
     let point;
+    const pre = options.always && label ? precomputedSpot(properties, label) : null;
+    if (pre) {
+      if (!within(reach, pre.point)) continue;
+      const angle = options.orient === "free" && options.rotationField ? pre.angle : 0;
+      point = pre.point;
+      half = envelope([label[0] * pre.scale, label[1] * pre.scale], angle);
+      properties = { ...properties, [LABEL_SCALE]: pre.scale };
+      if (options.orient === "free" && options.rotationField) properties[options.rotationField] = angle * 180 / Math.PI;
+      const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
+      boxes.push(box);
+      avoid.push(box);
+      points.set(key, { point, properties });
+      continue;
+    }
+    // "Always label": a polygon wholly on the screen keeps its label even
+    // when it is smaller than the label (drawn smaller, see below).
+    const whole = options.always && area(rings) >= 0.98 * area(loaded);
+    if (label && area(rings) < 4 * label[0] * label[1] && !whole) continue;  // only a sliver in view
+    let scale = 1;
     if (pole) {
       const search = () => {
         const room = (extra) => roomiestPoint(rings, options.precision, extra);
@@ -426,6 +454,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         if (!(best.room > 0)) {  // no free spot: the best spot that fits (overlapping)
           score = fit;
           best = room(score);
+        }
+        if (!(best.room > 0) && whole) {  // too small for the label: the roomiest point
+          score = () => Infinity;
+          best = room(null);
         }
         return { best, score };
       };
@@ -441,18 +473,40 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const flatOld = old && !Number(old.properties?.[field]) && within(inner, old.point)
           && fitsFlat(rings, old.point, roomAt(rings, old.point), label) && fine(old.point)
           && roomAt(rings, old.point) >= KEEP_ROOM * best.room;
-        let placed = null;
-        if (flatOld) placed = { point: old.point, angle: 0 };
-        else if (fitsFlat(rings, best.point, best.room, label) && fit(...best.point) >= 0) {
-          placed = { point: best.point, angle: 0 };
-        } else {
-          const angle = localDirection(loaded, best.point, label[0]);
-          placed = placeTurned(rings, angle, label, view, avoid, best.point, old, field, options.precision);
+        const oldScale = Number(old?.properties?.[LABEL_SCALE]) || 1;
+        const place = (box, keepOld) => {
+          if (keepOld && flatOld) return { point: old.point, angle: 0 };
+          if (fitsFlat(rings, best.point, best.room, box) && fit(...best.point) >= 0) {
+            return { point: best.point, angle: 0 };
+          }
+          const angle = localDirection(loaded, best.point, box[0]);
+          return placeTurned(rings, angle, box, view, avoid, best.point, oldScale === scale ? old : null,
+                             field, options.precision);
+        };
+        let placed = place(label, true);
+        if (!placed && options.always) {
+          // Smaller until it fits; at worst the smallest size at the roomiest
+          // point, along the polygon (a narrow strip) - never no label.
+          for (const step of SHRINK_STEPS) {
+            scale = step;
+            // Not even its height fits at the roomiest point: no spot will.
+            if (label[1] * step > best.room) continue;
+            placed = place([label[0] * step, label[1] * step], false);
+            if (placed) break;
+          }
+          if (!placed) {
+            const small = [label[0] * scale, label[1] * scale];
+            const angle = fitsFlat(rings, best.point, best.room, small) ? 0
+              : localDirection(loaded, best.point, small[0]);
+            placed = { point: best.point, angle };
+          }
         }
         if (!placed) continue;
         point = placed.point;
-        half = envelope(label, placed.angle);
+        half = envelope([label[0] * scale, label[1] * scale], placed.angle);
         properties = { ...properties, [field]: placed.angle * 180 / Math.PI };
+        if (scale < 1) properties[LABEL_SCALE] = scale;
+        else delete properties[LABEL_SCALE];
       } else {
         const keep = old && within(inner, old.point) && (unchecked(old.point)
           || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
@@ -486,6 +540,62 @@ export function labelPoints(features, view, maplibregl, options = {}) {
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out, boxes };
+}
+
+// The export's pole of inaccessibility (EPSG:3857 metres, ``q2vt_pole_*``)
+// when the label cannot fit even there: {point (world units), angle (radians,
+// y down, along the polygon), scale}; else null (placed live).
+const MERCATOR_SIZE = 2 * 20037508.342789244;
+function precomputedSpot(properties, [hx, hy]) {
+  const x = Number(properties.q2vt_pole_x), y = Number(properties.q2vt_pole_y);
+  const room = Number(properties.q2vt_pole_r) / MERCATOR_SIZE;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !(room > 0) || hy <= room) return null;
+  const point = [x / MERCATOR_SIZE + 0.5, 0.5 - y / MERCATOR_SIZE];
+  // main_angle: azimuth of the long side (degrees clockwise from north).
+  const azimuth = (Number(properties.q2vt_pole_a) || 0) * Math.PI / 180;
+  let angle = Math.atan2(-Math.cos(azimuth), Math.sin(azimuth));
+  if (angle >= Math.PI / 2) angle -= Math.PI;
+  if (angle < -Math.PI / 2) angle += Math.PI;
+  return { point, angle, scale: Math.max(SHRINK_STEPS[SHRINK_STEPS.length - 1], Math.min(1, room / hy)) };
+}
+
+// ``text-size`` times the feature's LABEL_SCALE (1 when absent); a zoom
+// curve stays a top-level zoom curve (MapLibre requires it), each output scaled.
+export function scaledTextSize(size) {
+  const factor = ["to-number", ["coalesce", ["get", LABEL_SCALE], 1], 1];
+  if (size === undefined || size === null) size = 16;
+  if (typeof size === "number") return ["*", size, factor];
+  if (!Array.isArray(size)) return size;  // a legacy function object: unchanged
+  const zoomCurve = (size[0] === "interpolate" || size[0] === "interpolate-hcl" || size[0] === "interpolate-lab")
+    && Array.isArray(size[2]) && size[2][0] === "zoom";
+  if (zoomCurve) {
+    // A per-feature size on a zoom curve is evaluated by MapLibre at the
+    // curve's stops and packed into a narrow range: stops far apart (0 and
+    // 24) ruin it. Numeric curves get a stop at every whole zoom first.
+    const stops = [];
+    for (let i = 3; i + 1 < size.length; i += 2) stops.push([size[i], size[i + 1]]);
+    if (stops.length >= 2 && stops.every(([z, v]) => typeof z === "number" && typeof v === "number")) {
+      const base = size[1][0] === "exponential" ? size[1][1] : 1;
+      const at = (z) => {
+        let k = 0;
+        while (k < stops.length - 2 && z > stops[k + 1][0]) k++;
+        const [[z0, v0], [z1, v1]] = [stops[k], stops[k + 1]];
+        const d = z1 - z0, x = z - z0;
+        const t = d === 0 ? 0 : (base === 1 ? x / d : (base ** x - 1) / (base ** d - 1));
+        return v0 + (v1 - v0) * t;
+      };
+      const dense = [];
+      for (let z = Math.ceil(stops[0][0]); z <= Math.floor(stops[stops.length - 1][0]); z++) {
+        dense.push(z, ["*", at(z), factor]);
+      }
+      return [size[0], size[1], size[2], ...dense];
+    }
+    return size.map((v, i) => (i >= 4 && i % 2 === 0 ? ["*", v, factor] : v));
+  }
+  if (size[0] === "step" && Array.isArray(size[1]) && size[1][0] === "zoom") {
+    return size.map((v, i) => (i >= 2 && i % 2 === 0 ? ["*", v, factor] : v));
+  }
+  return ["*", size, factor];
 }
 
 // Half extents of the axis-aligned envelope of a box turned by ``angle`` (radians).

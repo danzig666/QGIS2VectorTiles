@@ -587,6 +587,9 @@
         "legend": {
           "type": "boolean"
         },
+        "labelAlways": {
+          "type": "boolean"
+        },
         "opacity": {
           "type": "number",
           "minimum": 0,
