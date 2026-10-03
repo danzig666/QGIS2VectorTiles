@@ -922,13 +922,16 @@ class RulesExporter:
                            for k, v in dict(operations).items()},
         }
 
-    def _dataset_key(self, context: dict, src: _SourceSnapshot, grp: _RuleGroupSnapshot) -> str:
+    def _dataset_key_parts(self, src: _SourceSnapshot, grp: _RuleGroupSnapshot):
         group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
                  if f.name not in ("flat_rules", "output_dataset", "layer_name")}
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
                   if f.name not in ("layer_id", "name")}
-        return export_cache.make_key("dataset", context, source,
-                                     self.extra_tile_fields.get(grp.layer_id, []), group)
+        return source, self.extra_tile_fields.get(grp.layer_id, []), group
+
+    def _dataset_key(self, context: dict, src: _SourceSnapshot, grp: _RuleGroupSnapshot) -> str:
+        source, extra, group = self._dataset_key_parts(src, grp)
+        return export_cache.make_key("dataset", context, source, extra, group)
 
     def _reuse_cached(self, sources: Dict[str, _SourceSnapshot],
                       rule_groups: List[_RuleGroupSnapshot]) -> Dict[str, Optional[str]]:
@@ -939,23 +942,43 @@ class RulesExporter:
         if self.cache is None:
             return reused
         context = self._cache_context()
+        last = self.cache.last_components()
+        last_context = last.get("_context") or {}
+        components = {"_context": context}
+        code, context_hash = export_cache.code_fingerprint()[:16], export_cache.part_hash(context)
+        redone: Dict[str, set] = {}
         for grp in rule_groups:
             src = sources.get(grp.layer_id)
             if src is None or not src.data_fingerprint:
                 continue
             key = self._dataset_key(context, src, grp)
             self.dataset_keys[grp.output_dataset] = key
+            source, extra, group = self._dataset_key_parts(src, grp)
+            now = {"code": code, "context": context_hash, "source": export_cache.part_hash(source),
+                   "rule": export_cache.part_hash([extra, group])}
+            components[grp.output_dataset] = now
             target = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")
             meta = self.cache.get_dataset(key, target)
             if meta is None:
+                for reason in export_cache.miss_reasons(last.get(grp.output_dataset), now,
+                                                        last_context, context):
+                    redone.setdefault(reason, set()).add(grp.layer_name or grp.layer_id)
                 continue
             reused[grp.output_dataset] = None if meta.get("empty") else target
             stored = meta.get("diagnostics") or []
             old = next((d.get("component") for d in stored if d.get("component")), "")
             export_cache.replay_diagnostics(self.diagnostics, stored, old, grp.output_dataset)
+        try:
+            self.cache.save_components(components)
+        except (OSError, TypeError, ValueError):
+            pass
         if reused:
             self._post("pushInfo", f"   Reused {len(reused)} of {len(rule_groups)} datasets of "
                                    "unchanged layers (export cache)")
+        for reason, layers in sorted(redone.items()):  # why the others are redone
+            names = sorted(layers)
+            self._post("pushInfo", f"   Redone ({reason}): " + ", ".join(names[:12])
+                       + (f" and {len(names) - 12} more" if len(names) > 12 else ""))
         return reused
 
     def _store_cached(self, groups: List[_RuleGroupSnapshot],

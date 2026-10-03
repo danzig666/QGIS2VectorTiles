@@ -687,7 +687,8 @@ class PublishDialog(QDialog):
                 ("popups", tr("Popups")), ("permalinks", tr("Shareable links")),
                 ("coordinates", tr("Coordinates (WGS84 / EOV)")), ("measure", tr("Measurement")),
                 ("print", tr("Print")),
-                ("legend_visible_only", tr("Legend: only what is visible in the current view"))]):
+                ("legend_visible_only", tr("Legend: only what is visible in the current view")),
+                ("layers_panel", tr("Layers tab (off: the legend only)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)

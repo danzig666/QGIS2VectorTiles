@@ -138,6 +138,9 @@ def test_unchanged_layers_are_reused_and_results_match(plugin, tmp_path):
     hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
     assert 0 < hits < total                     # some redone, the rest reused
     assert any("Reading layer" in l and "Övezetek" in l for l in edited_log.lines)
+    redone = [l for l in edited_log.lines if "Redone (" in l]
+    assert any("layer data changed" in l and "Övezetek" in l for l in redone), redone
+    assert any("style, labels or fields changed" in l for l in redone), redone
 
     profile.output.reuse_unchanged = False      # reference: no cache at all
     profile.output.local_directory = str(tmp_path / "fresh")

@@ -128,6 +128,9 @@
         },
         "legendVisibleOnly": {
           "type": "boolean"
+        },
+        "layersPanel": {
+          "type": "boolean"
         }
       }
     },

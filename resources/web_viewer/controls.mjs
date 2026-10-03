@@ -23,7 +23,8 @@ const THEME_KEY = "q2vt:ui-theme";
 const PANES = { layers: "layers", parcel: "pin", legend: "legend", filters: "filter", tools: "tools", share: "share" };
 
 function panes(manifest) {
-  const list = [["layers", "app.layers"]];
+  // The Layers tab can be switched off in the plugin: the legend only.
+  const list = manifest.interaction?.layersPanel === false ? [] : [["layers", "app.layers"]];
   if (manifest.parcelInfo) list.push(["parcel", "app.parcel"]);
   list.push(["legend", "app.legend"]);
   if (manifest.interaction?.filters !== false && manifest.layers.some((l) => (l.filterFields || []).length)) list.push(["filters", "app.filters"]);
@@ -75,7 +76,7 @@ function buildPanel(manifest) {
     select(next[0]);
     next[1].focus();
   });
-  select("layers");
+  select(result.layers ? "layers" : (result.legend ? "legend" : panes(manifest)[0][0]));
   const panel = document.getElementById("q2vt-panel");
   const menu = document.getElementById("q2vt-menu");
   menu.replaceChildren(icon("menu", 22));
@@ -326,14 +327,18 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   const identify = manifest.interaction?.popups === false ? null
     : new Identify({ map, manifest, maplibregl, control, state, lookup, viewer });
   const parts = { state, control, permalink, lookup, identify, panel, basemap };
-  parts.layers = new LayerControls({ map, manifest, state, control, container: panel.panes.layers, releaseBase });
+  if (panel.panes.layers) {
+    parts.layers = new LayerControls({ map, manifest, state, control, container: panel.panes.layers, releaseBase });
+  }
   if (panel.panes.parcel) {
     const report = new ParcelReport({ map, manifest, manifestUrl, releaseBase, maplibregl,
       container: panel.panes.parcel, panel, permalink });
     parts.parcel = report;
     viewer.parcel = report;
     if (identify) {
-      // A parcel opens its report in the panel instead of a popup.
+      // A click opens the parcel (no chooser), and its report in the panel
+      // instead of a popup.
+      identify.prefer = report.layerId;
       identify.intercept = (layerId, key) => {
         if (layerId !== report.layerId) return false;
         report.show(key).catch((error) => warn("feature.notFound", String(error)));

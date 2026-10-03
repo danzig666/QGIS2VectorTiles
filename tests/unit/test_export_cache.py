@@ -47,6 +47,26 @@ def test_source_fingerprint(tmp_path):
     _gpkg(gpkg, "2026-01-02T00:00:00.000Z")  # an edit (even if still in the -wal)
     os.utime(gpkg, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     assert ec.source_fingerprint("ogr", str(gpkg)) != one
+    two = ec.source_fingerprint("ogr", str(gpkg))
+    # QGIS opening and closing it rewrites the file (time, size) without an
+    # edit: the same fingerprint (else every layer was redone every time).
+    with sqlite3.connect(gpkg) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS qgis_scratch (x)")
+        conn.execute("INSERT INTO qgis_scratch VALUES (1)")
+    os.utime(gpkg, None)
+    assert ec.source_fingerprint("ogr", str(gpkg)) == two
+
+
+def test_miss_reasons():
+    before = {"code": "a", "context": "c", "source": "s", "rule": "r"}
+    assert ec.miss_reasons({}, before, {}, {}) == ["first export into this folder (or a new layer / rule)"]
+    assert ec.miss_reasons(before, {**before, "source": "s2"}, {}, {}) == ["layer data changed"]
+    assert ec.miss_reasons(before, {**before, "rule": "r2", "code": "b"}, {}, {}) == [
+        "plugin, QGIS or GDAL updated", "style, labels or fields changed"]
+    reasons = ec.miss_reasons(before, {**before, "context": "c2"},
+                              {"extent": [0, 0, 1, 1], "variables": {"x": 1}},
+                              {"extent": [0, 0, 2, 2], "variables": {"x": 2}})
+    assert reasons == ["export settings changed (extent, @x)"]
 
 
 def test_stable_values_and_canonical_xml():

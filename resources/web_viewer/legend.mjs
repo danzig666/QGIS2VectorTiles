@@ -79,12 +79,14 @@ export class Legend {
       if (drawn && !drawn.layers.has(layer.id)) continue;
       let rules = this.manifest.rules.filter((r) => r.layerId === layer.id && this.control.ruleEnabled(r.id, state));
       if (drawn && rules.length) rules = rules.filter((r) => drawn.rules.has(r.id));
-      const items = rules.length ? rules : [{ title: layer.title, swatch: layer.swatch, componentIds: layer.componentIds }];
-      const block = el("section", "q2vt-legend-layer");
-      block.append(el("h3", "", layer.title));
+      const items = (rules.length ? rules : [{ title: layer.title, swatch: layer.swatch, componentIds: layer.componentIds }])
+        .filter((rule) => rule.swatch || !rules.length);
+      // One symbol: one row with the layer's name (no heading repeating it).
+      const single = items.length === 1;
+      const block = el("section", single ? "q2vt-legend-layer q2vt-legend-single" : "q2vt-legend-layer");
+      if (!single) block.append(el("h3", "", layer.title));
       const list = el("ul", "q2vt-legend-items");
       for (const rule of items) {
-        if (!rule.swatch && rules.length) continue;
         const item = el("li", "q2vt-legend-item");
         if (rule.swatch) {
           const img = document.createElement("img");
@@ -93,8 +95,10 @@ export class Legend {
           item.append(img);
         } else if (layer.geometry === "raster") {
           item.append(icon("image", 22));
+        } else {
+          item.append(el("span", "q2vt-legend-blank"));  // labels only: aligned with the others
         }
-        item.append(el("span", "", rule.title));
+        item.append(el("span", "", single ? layer.title : rule.title));
         if (!this.control.availableAt(rule.componentIds, zoom)) {
           item.classList.add("q2vt-muted");
           item.title = t("app.outOfScale");

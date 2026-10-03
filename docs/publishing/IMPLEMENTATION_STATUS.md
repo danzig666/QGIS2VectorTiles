@@ -362,3 +362,29 @@ dragging, 3 easing). Label placement: z15 ≈ 0.7 s, z16 ≈ 0.3 s (only when th
 |---|---|
 | `pytest tests/browser/test_visible_labels.py` | 23 passed |
 | browser and web builder suites | 82 passed |
+
+## 4.6.2: cache reuse after QGIS opened GeoPackages; legend and click fixes
+
+Owner reports: "Are you sure caching works right? It seems to regenerate everything all the
+time"; legend line types too thick; a bold heading plus a repeated row for single-symbol
+layers; an option to switch off the Layers tab; no hover highlight; "always pick one" instead of
+the "several items here - choose" list (the parcel of the parcel report).
+
+| Item | Cause / change |
+|---|---|
+| Cache misses | `source_fingerprint` hashed the GeoPackage file's size and mtime besides `gpkg_contents.last_change`; SQLite rewrites the file when QGIS opens and closes it, so every layer looked changed in the owner's QGIS (never in the tests, whose copies QGIS desktop never opens). GeoPackages: path + `last_change` only. `last-keys.json` keeps each dataset's key parts (code, context, source, rule); a miss is logged with its reasons (`miss_reasons`) |
+| Legend swatches | `symbolPreviewPixmap` without a render context: map-unit widths had no scale. `swatch_context`: the scale of the max tile zoom, map units per pixel of the project CRS, 96 dpi × 32/24 (shown 24 CSS px) |
+| Legend rows | one symbol: one row with the layer name, no heading; label-only rows aligned |
+| Layers tab | `interaction.layersPanel` (dialog checkbox); off: no tab, the viewer opens on the legend |
+| Hover | no mousemove handler / hover overlay |
+| Click | one feature: `identify.prefer` = the parcel report's layer, else the topmost hit; no chooser |
+
+Owner project: two exports in a row - 242 s (all redone after the code change, the reason
+logged) then 23 s (154/154 datasets and 40/40 tile sets reused). A click on parcel 862 under a
+zone opens its report directly.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_export_cache.py tests/integration/test_export_cache.py` | 8 passed |
+| browser, web builder and profile suites | 112 passed |
+| Publish window, publishing pipeline and cache suites | 27 passed |
