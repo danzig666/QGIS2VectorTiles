@@ -386,21 +386,37 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 /* Print: the current view, its legend, title, date and attribution. */
+/* Print: one A4 landscape page (281 × 194 mm inside 8 mm margins) - the map
+   at its printed size on the left, title + legend (or the parcel report) on
+   the right (print.mjs). The same sizes on screen while printing, so the map
+   is drawn at its paper size before the browser prints it. */
+#q2vt-print-sheet { display: none; }
+body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: 186mm; height: 190mm; }
 @media print {
-  @page { size: landscape; margin: 10mm; }
-  body { overflow: visible; background: #fff; }
-  #q2vt-app { position: static; }
-  #q2vt-map { position: relative; height: 150mm; width: 100%; border: 1px solid #000; }
-  #q2vt-side { position: static; width: auto; display: block; }
-  #q2vt-header { box-shadow: none; border: none; padding: 0 0 4mm; background: none; }
-  #q2vt-menu, #q2vt-searchbox, #q2vt-tabs, #q2vt-themes, .maplibregl-ctrl-top-right, #q2vt-warning,
-  .q2vt-basemap, .q2vt-sheet-bar, #q2vt-about-actions, .q2vt-loading { display: none !important; }
-  #q2vt-panel { display: block !important; position: static; box-shadow: none; border: none; background: none; max-height: none; height: auto; }
-  #q2vt-panel .q2vt-pane { display: none; }
-  #q2vt-panel .q2vt-pane[data-pane="legend"] { display: block !important; columns: 3; }
-  #q2vt-print-meta { display: block !important; font-size: 11px; }
+  @page { size: A4 landscape; margin: 8mm; }
+  html, body { background: #fff !important; color: #000; overflow: visible; height: auto; }
+  body.q2vt-printing #q2vt-app { position: static; display: grid; grid-template-columns: 186mm 1fr;
+    column-gap: 5mm; align-items: start; height: auto; }
+  body.q2vt-printing #q2vt-app > *:not(#q2vt-map):not(#q2vt-print-sheet) { display: none !important; }
+  body.q2vt-printing #q2vt-map { position: relative; width: 186mm; height: 190mm; border: 0.3mm solid #000;
+    break-inside: avoid; }
+  body.q2vt-printing .maplibregl-ctrl-top-left, body.q2vt-printing .maplibregl-ctrl-top-right,
+  body.q2vt-printing .maplibregl-ctrl-bottom-left .maplibregl-ctrl-group { display: none !important; }
+  body.q2vt-printing #q2vt-print-sheet { display: block; font-size: 8pt; line-height: 1.25; color: #000; }
+  .q2vt-print-head h1 { font-size: 12pt; margin: 0 0 1mm; color: #000; }
+  .q2vt-print-head p { margin: 0 0 3mm; font-size: 7.5pt; color: #333; }
+  .q2vt-legend-print { columns: 2; column-gap: 4mm; }
+  .q2vt-legend-print .q2vt-legend-layer { margin: 0 0 1.5mm; break-inside: avoid; }
+  .q2vt-legend-print .q2vt-legend-layer h3 { font-size: 8pt; margin: 0 0 0.5mm; color: #000; break-after: avoid; }
+  .q2vt-legend-print .q2vt-legend-item { min-height: 0; padding: 0.3mm 0; gap: 1.5mm; font-size: 7.5pt;
+    color: #000; break-inside: avoid; }
+  .q2vt-legend-print .q2vt-legend-item img, .q2vt-legend-print .q2vt-legend-blank { width: 4.5mm; height: 4.5mm; }
+  #q2vt-print-sheet .q2vt-pr { font-size: 8pt; gap: 2mm; padding: 0; }
+  #q2vt-print-sheet .q2vt-pr-part, #q2vt-print-sheet .q2vt-pr-restriction { padding: 1.5mm 2mm; border-radius: 2mm;
+    border: 0.2mm solid #bbb; background: none; break-inside: avoid; }
+  #q2vt-print-sheet .q2vt-pr-head h2 { font-size: 13pt; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
-#q2vt-print-meta { display: none; }
 
 /* Parcel report */
 .q2vt-pr { display: flex; flex-direction: column; gap: 12px; padding: 2px 2px 8px; }
@@ -439,8 +455,3 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 .q2vt-pr-disclaimer { font-size: 11.5px; color: var(--q2vt-muted); border-top: 1px solid var(--q2vt-border);
   padding-top: 8px; margin: 0; }
 .q2vt-empty .q2vt-icon { color: var(--q2vt-muted); margin: 0 auto 6px; }
-@media print {
-  .q2vt-print-parcel #q2vt-panel .q2vt-pane[data-pane="legend"] { display: none !important; }
-  .q2vt-print-parcel #q2vt-panel .q2vt-pane[data-pane="parcel"] { display: block !important; }
-  .q2vt-print-parcel .q2vt-chips { display: none; }
-}

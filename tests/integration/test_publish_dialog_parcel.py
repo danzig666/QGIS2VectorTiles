@@ -44,3 +44,25 @@ def test_regulation_table_code_field(plugin, monkeypatch):
     profile.parcel_info.enabled = True
     assert not [e for e in validate(profile) if "regulations table" in e]
     dialog.close()
+
+
+def test_zone_code_is_never_a_feature_id(plugin, tmp_path):
+    """The parts were titled with fid numbers ("241") when the zone code field
+    was the id: the field the zone layer is styled by is used instead."""
+    from qgis.core import (QgsCategorizedSymbolRenderer, QgsFeature, QgsField, QgsFillSymbol,  # pylint: disable=import-outside-toplevel
+                           QgsGeometry, QgsRendererCategory, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.publishing.parcel_report import guess_zone_field, looks_like_id  # pylint: disable=import-error
+    layer = QgsVectorLayer("Polygon?crs=EPSG:23700", "zones", "memory")
+    layer.dataProvider().addAttributes([QgsField("fid", QVariant.Int), QgsField("nev", QVariant.String),
+                                        QgsField("szab_ov", QVariant.String)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([241, "x", "Gip"])
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0,1 0,1 1,0 0))"))
+    layer.dataProvider().addFeatures([feature])
+    assert looks_like_id(layer, "fid") and not looks_like_id(layer, "szab_ov")
+    assert guess_zone_field(layer) == "szab_ov"                 # by its name
+    layer.setRenderer(QgsCategorizedSymbolRenderer("nev", [
+        QgsRendererCategory("x", QgsFillSymbol.createSimple({}), "x")]))
+    assert guess_zone_field(layer) == "nev"                     # the field it is styled by wins

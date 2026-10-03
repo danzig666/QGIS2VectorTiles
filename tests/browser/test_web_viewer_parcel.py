@@ -86,3 +86,31 @@ def test_legend_lists_only_what_is_visible(site, tmp_path):
     assert results[1] >= 1                 # the parcels in view are listed
     assert results[3][:-2] == []            # nothing drawn far away: nothing listed
     assert results[4] is False and results[5] >= 1  # switched off: the full legend again
+
+
+PRINT_STATE = """const sheet = document.getElementById('q2vt-print-sheet');
+  return { classes: document.body.className, title: sheet?.querySelector('h1')?.textContent || '',
+    card: !!sheet?.querySelector('article.q2vt-pr'), parts: [...(sheet?.querySelectorAll('.q2vt-pr-part strong') || [])].map((s) => s.textContent),
+    buttons: sheet ? sheet.querySelectorAll('button').length : -1,
+    legend: sheet ? sheet.querySelectorAll('.q2vt-legend-print .q2vt-legend-item').length : -1 };"""
+
+
+def test_print_fills_one_sheet_and_restores(site, tmp_path):
+    anchor = site["records"]["100/1"]["p"][0]["x"]
+    results = _run(site["url"], [
+        {"eval": "window.print = () => { window.__printed = (window.__printed || 0) + 1; }; q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;" % json.dumps(anchor)},
+        {"idle": True},
+        {"clickLngLat": anchor}, {"wait": 800},
+        {"eval": "await q2vtViewer.printer.print('parcel'); return window.__printed;"},
+        {"eval": PRINT_STATE},
+        {"eval": "window.dispatchEvent(new Event('afterprint')); await new Promise((r) => setTimeout(r, 100)); return 1;"},
+        {"eval": PRINT_STATE},
+        {"eval": "await q2vtViewer.printer.print('map'); return window.__printed;"},
+        {"eval": PRINT_STATE},
+    ], tmp_path)
+    parcel, restored, legend = results[2], results[4], results[6]
+    assert results[1] == 1 and results[5] == 2
+    assert "q2vt-printing-parcel" in parcel["classes"] and parcel["title"]
+    assert parcel["card"] and parcel["parts"] == ["Lke-1", "Gksz", "Köu"] and parcel["buttons"] == 0
+    assert "q2vt-printing" not in restored["classes"] and not restored["card"]
+    assert "q2vt-printing-map" in legend["classes"] and legend["legend"] > 0 and not legend["card"]

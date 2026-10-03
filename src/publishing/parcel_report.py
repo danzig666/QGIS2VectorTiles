@@ -19,6 +19,7 @@ restriction overlaps below ``min_share`` are ignored. Records are sharded by
 FNV-1a of the parcel key like the feature lookup; no geometry is written.
 """
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -247,6 +248,60 @@ class ParcelReportResult:
     warnings: List[str] = field(default_factory=list)
 
 
+ID_NAMES = {"fid", "id", "ogc_fid", "objectid", "object_id", "gid", "pk", "rowid", "oid", "feature_id"}
+CODE_NAMES = ("szab_ov", "szab_kod", "ovezet", "övezet", "ovezetkod", "övezetkód", "kod", "kód",
+              "zone", "zone_code", "zonecode", "zoning", "code")
+
+
+def looks_like_id(layer, name: str) -> bool:
+    """A feature id field (fid, id, objectid, the primary key): numbers that
+    mean nothing to a reader."""
+    if not name:
+        return True
+    index = layer.fields().indexOf(name)
+    if index < 0:
+        return True
+    try:
+        if index in layer.primaryKeyAttributes():
+            return True
+    except (AttributeError, TypeError):
+        pass
+    return name.lower() in ID_NAMES
+
+
+def guess_zone_field(layer) -> str:
+    """The zone code field of a zone layer, from how QGIS uses the layer: the
+    categorized renderer's field, the field its rules / labels test, a usual
+    code name; never a feature id. "" if none."""
+    from qgis.core import QgsExpression  # pylint: disable=import-outside-toplevel
+    names = [f.name() for f in layer.fields()]
+    score = {name: 0.0 for name in names if not looks_like_id(layer, name)}
+    renderer = layer.renderer()
+    attribute = getattr(renderer, "classAttribute", lambda: "")() if renderer is not None else ""
+    if attribute in score:
+        score[attribute] += 100
+    expressions = []
+    root = getattr(renderer, "rootRule", lambda: None)() if renderer is not None else None
+    if root is not None:
+        expressions += [rule.filterExpression() for rule in root.descendants() if rule.filterExpression()]
+    labeling = layer.labeling() if layer.labelsEnabled() else None
+    if labeling is not None:
+        try:
+            settings = labeling.settings()
+            expressions.append(settings.fieldName if settings.isExpression else f'"{settings.fieldName}"')
+        except (AttributeError, TypeError):
+            pass
+    for text in expressions:
+        for column in QgsExpression(text).referencedColumns():
+            if column in score:
+                score[column] += 10
+    for name in score:
+        if name.lower() in CODE_NAMES:
+            score[name] += 5 + (len(CODE_NAMES) - CODE_NAMES.index(name.lower())) / 100
+    best = max(score.items(), key=lambda item: item[1], default=("", 0))
+    return best[0] if best[1] > 0 else ""
+
+
 def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRectangle, out_dir: str,
                         legend_dir: str, progress: Optional[Progress] = None) -> ParcelReportResult:
     """Write ``parcels/`` (catalog, manifest, shards) into ``out_dir``."""
@@ -256,7 +311,18 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
     zoning = project.mapLayer(info.zoning_layer_id)
     if parcels is None or zoning is None:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "Parcel report: choose the parcel and zone layers.")
-    if parcels.fields().indexOf(info.key_field) < 0 or zoning.fields().indexOf(info.zoning_code_field) < 0:
+    warnings: List[str] = []
+    # The zone code names the parts; a feature id there showed meaningless
+    # numbers ("241") with the real code only in a row below.
+    code_field = info.zoning_code_field
+    if looks_like_id(zoning, code_field):
+        guessed = guess_zone_field(zoning)
+        if guessed:
+            warnings.append(f"Parcel report: zone code field {code_field or '(none)'} is a feature id; "
+                            f"using {guessed}.")
+            code_field = guessed
+            info = dataclasses.replace(info, zoning_code_field=guessed)
+    if parcels.fields().indexOf(info.key_field) < 0 or zoning.fields().indexOf(code_field) < 0:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
                               "Parcel report: the parcel id or the zone code field does not exist.")
     os.makedirs(out_dir, exist_ok=True)
@@ -266,10 +332,9 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
     wgs = QgsCoordinateReferenceSystem("EPSG:4326")
     area = QgsCoordinateTransform(web, crs, project.transformContext()).transformBoundingBox(extent_3857)
     to_wgs = QgsCoordinateTransform(crs, wgs, project.transformContext())
-    warnings: List[str] = []
 
     zone_legend = _Legend(zoning, legend_dir)
-    zones = _Index(project, zoning, crs, [info.zoning_code_field] + [f.field for f in info.zoning_fields],
+    zones = _Index(project, zoning, crs, [code_field] + [f.field for f in info.zoning_fields],
                    zone_legend, area=area)
     cuts = []
     for cut in info.cut_lines:

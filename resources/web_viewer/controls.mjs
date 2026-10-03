@@ -7,6 +7,7 @@ import { ViewerState, defaults as defaultState, presetMatches, presets, sanitize
 import { StyleControl } from "./style_control.mjs";
 import { LayerControls } from "./layer_controls.mjs";
 import { Legend } from "./legend.mjs";
+import { Printer } from "./print.mjs";
 import { Filters } from "./filters.mjs";
 import { Identify } from "./identify.mjs";
 import { FeatureLookup } from "./features.mjs";
@@ -348,6 +349,11 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     }
   }
   parts.legend = new Legend({ map, manifest, state, control, container: panel.panes.legend, releaseBase });
+  // Print: the map with the legend of what it draws, or the parcel report.
+  parts.printer = new Printer({ map, manifest, content: (mode) =>
+    (mode === "parcel" && parts.parcel ? parts.parcel.printCard() : null) || parts.legend.printList() });
+  viewer.printer = parts.printer;
+  if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel");
   if (panel.panes.filters) parts.filters = new Filters({ manifest, state, container: panel.panes.filters });
   if (panel.panes.tools) parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });
   if (panel.panes.share) shareBlock(panel.panes.share, permalink);
