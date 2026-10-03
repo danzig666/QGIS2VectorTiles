@@ -92,7 +92,10 @@ PRINT_STATE = """const sheet = document.getElementById('q2vt-print-sheet');
   return { classes: document.body.className, title: sheet?.querySelector('h1')?.textContent || '',
     card: !!sheet?.querySelector('article.q2vt-pr'), parts: [...(sheet?.querySelectorAll('.q2vt-pr-part strong') || [])].map((s) => s.textContent),
     buttons: sheet ? sheet.querySelectorAll('button').length : -1,
-    legend: sheet ? sheet.querySelectorAll('.q2vt-legend-print .q2vt-legend-item').length : -1 };"""
+    legend: sheet ? sheet.querySelectorAll('.q2vt-legend-print .q2vt-legend-item').length : -1,
+    scale: sheet?.querySelector('.q2vt-print-scale')?.textContent || '',
+    metres: (() => { const m = q2vtViewer.map, w = m.getCanvas().getBoundingClientRect().width, h = m.getCanvas().getBoundingClientRect().height;
+      return { px: w, m: m.unproject([0, h / 2]).distanceTo(m.unproject([w, h / 2])) }; })() };"""
 
 
 def test_print_fills_one_sheet_and_restores(site, tmp_path):
@@ -105,7 +108,7 @@ def test_print_fills_one_sheet_and_restores(site, tmp_path):
         {"eval": PRINT_STATE},
         {"eval": "window.dispatchEvent(new Event('afterprint')); await new Promise((r) => setTimeout(r, 100)); return 1;"},
         {"eval": PRINT_STATE},
-        {"eval": "await q2vtViewer.printer.print('map'); return window.__printed;"},
+        {"eval": "window.dispatchEvent(new Event('afterprint')); q2vtViewer.printer.scale = 1000; await q2vtViewer.printer.print('map'); return window.__printed;"},
         {"eval": PRINT_STATE},
     ], tmp_path)
     parcel, restored, legend = results[2], results[4], results[6]
@@ -114,3 +117,11 @@ def test_print_fills_one_sheet_and_restores(site, tmp_path):
     assert parcel["card"] and parcel["parts"] == ["Lke-1", "Gksz", "Köu"] and parcel["buttons"] == 0
     assert "q2vt-printing" not in restored["classes"] and not restored["card"]
     assert "q2vt-printing-map" in legend["classes"] and legend["legend"] > 0 and not legend["card"]
+    # Map scale: the screen's, rounded to a standard scale, or the chosen one, exact on paper
+    # (a CSS pixel is 0.0254 / 96 m at 100 %).
+    standard = {250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 500000}
+    shown = int("".join(ch for ch in parcel["scale"].split(":")[-1] if ch.isdigit()))
+    assert shown in standard
+    assert "".join(ch for ch in legend["scale"].split(":")[-1] if ch.isdigit()) == "1000"
+    paper = legend["metres"]["px"] * 0.0254 / 96
+    assert abs(legend["metres"]["m"] / paper / 1000 - 1) < 0.01

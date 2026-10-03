@@ -69,7 +69,7 @@
   "tools.measureMethod": "Geodesic (WGS 84 ellipsoid approximation); not survey accuracy.",
   "tools.clear": "Clear",
   "tools.print": "Print",
-  "tools.printNote": "Prints the current view with the legend.",
+  "tools.printNote": "Prints the current view at the chosen scale with the legend (A4 landscape). The scale is exact when printing at 100%.",
   "legend.empty": "No legend",
   "layers.group": "Group",
   "search.typeMore": "Type a few more characters",
@@ -97,5 +97,8 @@
   "parcel.print": "Print parcel report",
   "legend.visibleOnly": "Only what is visible in the view",
   "legend.noneVisible": "Nothing is drawn in this view.",
-  "parcel.disclaimer": "Information only, not an official certificate. The regulations in force are those of the adopted decree."
+  "parcel.disclaimer": "Information only, not an official certificate. The regulations in force are those of the adopted decree.",
+  "print.scale": "Scale 1:{scale}",
+  "print.scaleLabel": "Scale",
+  "print.scaleScreen": "As on screen (rounded)"
 }

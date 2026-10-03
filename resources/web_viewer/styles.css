@@ -242,6 +242,9 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 .q2vt-tool-output { font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--q2vt-fg); }
 .q2vt-card .q2vt-tool-output[aria-live] { font-size: 18px; font-weight: 600; margin: 4px 2px; }
 .q2vt-card p.q2vt-muted { font-size: 12px; margin: 6px 2px 0; }
+.q2vt-print-choice { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13px; }
+.q2vt-print-choice select { flex: 1 1 auto; min-width: 0; min-height: 36px; padding: 4px 8px; border-radius: 10px;
+  border: 1px solid var(--q2vt-border); background: var(--q2vt-surface-solid); color: var(--q2vt-fg); }
 
 /* Share */
 .q2vt-share { display: flex; flex-direction: column; gap: 8px; }
@@ -405,6 +408,7 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: 186mm; h
   body.q2vt-printing #q2vt-print-sheet { display: block; font-size: 8pt; line-height: 1.25; color: #000; }
   .q2vt-print-head h1 { font-size: 12pt; margin: 0 0 1mm; color: #000; }
   .q2vt-print-head p { margin: 0 0 3mm; font-size: 7.5pt; color: #333; }
+  .q2vt-print-head p.q2vt-print-scale { margin: 0 0 1mm; font-size: 10pt; font-weight: 700; color: #000; }
   .q2vt-legend-print { columns: 2; column-gap: 4mm; }
   .q2vt-legend-print .q2vt-legend-layer { margin: 0 0 1.5mm; break-inside: avoid; }
   .q2vt-legend-print .q2vt-legend-layer h3 { font-size: 8pt; margin: 0 0 0.5mm; color: #000; break-after: avoid; }
