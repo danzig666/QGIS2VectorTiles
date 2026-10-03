@@ -266,3 +266,31 @@ def test_unchanged_files_are_copied_from_the_previous_release(env):
     copied = meta[f"maps/felho/releases/{second.release_id}/{item['path']}"]
     assert copied["Metadata"]["sha256"] == item["sha256"] and copied["CacheControl"] == item["cacheControl"]
     assert second.checks.ok  # the copied release works at its public URL
+
+
+def test_short_address_objects_on_object_storage():
+    """R2/S3 have no directory index: /maps/arlo/ and /maps/arlo are objects of
+    their own - the stable entry itself, and a redirect to it."""
+    from publishing.models import DestinationConfig
+    calls = []
+
+    class Client:
+        def put_object(self, **params):
+            calls.append(params)
+            return {"ETag": '"x"'}
+    provider = R2Provider(DestinationConfig(kind="r2", account_id="a1", bucket="maps"),
+                          Credentials("AKIAEXAMPLE", SECRET), "maps/arlo", client=Client(), sleep=lambda s: None)
+    assert provider.put_entry_aliases(b"<!doctype html>entry", "no-cache")
+    by_key = {c["Key"]: c for c in calls}
+    assert set(by_key) == {"maps/arlo/", "maps/arlo"}
+    assert by_key["maps/arlo/"]["Body"] == b"<!doctype html>entry"
+    assert b'url=arlo/' in by_key["maps/arlo"]["Body"] and b"<script" not in by_key["maps/arlo"]["Body"]
+    assert all(c["ContentType"].startswith("text/html") and c["CacheControl"] == "no-cache" for c in calls)
+
+
+def test_short_address_is_optional(env):
+    # This test bucket keeps objects as files: no key ending in "/" - the
+    # publish still succeeds and the stable link stays .../index.html.
+    result = _publish(env, _release(env))
+    assert result.state == ReleaseState.PUBLISHED, result.message
+    assert result.stable_url.endswith("/maps/felho/index.html")

@@ -156,18 +156,24 @@ def upload_release(provider, release_dir: str, release_id: str, journal_path: st
     return sent[0]
 
 
-def upload_stable_entry(provider, publication_dir: str) -> None:
-    """index.html (no-cache) and the content-hashed bootstrap module."""
+def upload_stable_entry(provider, publication_dir: str) -> bool:
+    """index.html (no-cache) and the content-hashed bootstrap module, plus
+    the short addresses ``<prefix>/`` and ``<prefix>`` where the host has no
+    directory index (object storage). Returns whether those exist."""
     from .bundle import sha256_path  # pylint: disable=import-outside-toplevel
+    aliases = False
     for name in stable_files(publication_dir):
         if name == "current.json":
             continue
         path = os.path.join(publication_dir, name)
         if name == "index.html":
             with open(path, "rb") as handle:
-                provider.put_bytes(name, handle.read(), content_type(name), NO_CACHE)
+                data = handle.read()
+            provider.put_bytes(name, data, content_type(name), NO_CACHE)
+            aliases = bool(provider.put_entry_aliases(data, NO_CACHE))
         else:
             provider.put_file(name, path, content_type(name), IMMUTABLE, sha256_path(path))
+    return aliases
 
 
 def activate(provider, profile: PublicationProfile, release_id: str, expected_etag: Optional[str],
@@ -223,7 +229,8 @@ def publish(release, profile: PublicationProfile, provider, work_dir: str, progr
         result.uploaded_bytes = upload_release(provider, release.release_dir, release_id, journal,
                                                progress.sub(0.0, 0.8),
                                                previous_release=result.previous_release)
-        upload_stable_entry(provider, release.publication_dir)
+        if upload_stable_entry(provider, release.publication_dir):
+            result.stable_url = stable_url[:-len("index.html")]  # the short address: <base>/
         result.state = ReleaseState.UPLOADED_NOT_ACTIVE
         if verify:
             progress.update(0.82, "Checking the public URL...", force=True)

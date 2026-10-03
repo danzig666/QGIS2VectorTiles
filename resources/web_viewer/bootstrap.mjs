@@ -1,6 +1,8 @@
 // Stable entry point of a publication: reads current.json (never from a
 // stale cache) and opens the exact release it names, keeping the query and
-// hash (camera / layer / feature state of a shared link).
+// hash (camera / layer / feature state of a shared link). The release page
+// then shows this address again (sessionStorage "q2vt:entry"): visitors
+// see and share the short, stable address, not the release's own.
 const RELEASE = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
 const status = document.getElementById("q2vt-status");
 
@@ -25,6 +27,9 @@ try {
   }
   target.search = location.search;
   target.hash = location.hash;
+  try {
+    sessionStorage.setItem("q2vt:entry", JSON.stringify({ entry: location.pathname, release: target.pathname }));
+  } catch { /* storage unavailable: the release address stays */ }
   location.replace(target.href);
 } catch (error) {
   fail(`The map could not be opened: ${error.message}`);

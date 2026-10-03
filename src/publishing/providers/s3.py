@@ -205,6 +205,28 @@ class S3Provider(Provider):
         response = self._call("put_object", **params)
         return response.get("ETag", "")
 
+    def put_entry_aliases(self, index_html: bytes, cache_control: str) -> bool:
+        """Object storage has no directory index: ``/maps/arlo/`` and
+        ``/maps/arlo`` are objects of their own. ``<prefix>/`` gets the stable
+        entry itself (its relative links resolve inside the publication);
+        ``<prefix>`` a redirect to it (relative links there would resolve one
+        level up)."""
+        folder = self.prefix.rsplit("/", 1)[-1]
+        redirect = (
+            '<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta http-equiv="refresh" content="0; url={folder}/">'
+            '<meta name="referrer" content="no-referrer"><title>…</title></head>'
+            f'<body><a href="{folder}/">{folder}/</a></body></html>').encode("utf-8")
+        # Optional: a host that cannot store a key ending in "/" or a key
+        # that is also a prefix (some S3-compatible servers) keeps index.html.
+        for key, body in ((f"{self.prefix}/", index_html), (self.prefix, redirect)):
+            try:
+                self._call("put_object", Bucket=self.bucket, Key=key, Body=body,
+                           ContentType="text/html; charset=utf-8", CacheControl=cache_control)
+            except PublishingError:
+                return key == self.prefix  # the redirect alone is optional
+        return True
+
     def get_bytes(self, relative: str) -> Optional[Tuple[bytes, str]]:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=self.key(relative))

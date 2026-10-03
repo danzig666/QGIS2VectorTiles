@@ -125,3 +125,21 @@ def test_print_fills_one_sheet_and_restores(site, tmp_path):
     assert "".join(ch for ch in legend["scale"].split(":")[-1] if ch.isdigit()) == "1000"
     paper = legend["metres"]["px"] * 0.0254 / 96
     assert abs(legend["metres"]["m"] / paper / 1000 - 1) < 0.01
+
+
+def test_the_address_bar_keeps_the_stable_entry(site, tmp_path):
+    """Opened through the publication's stable address, the page shows that
+    address (not releases/<id>/index.html); data still loads from the release,
+    and both links are right: the stable one and this version's own."""
+    results = _run(site["url"], [
+        {"idle": True},
+        {"eval": """const links = q2vtViewer.permalink.links();
+          return { path: location.pathname, base: document.baseURI, stable: links.stable, versioned: links.versioned,
+            tiles: q2vtViewer.map.querySourceFeatures(q2vtViewer.map.getStyle().layers.find((l) => l.source)?.source || '').length };"""},
+    ], tmp_path)
+    state = results[0]
+    entry = "/" + site["url"].split("/", 3)[3]
+    assert state["path"] == entry and "/releases/" not in state["path"]
+    assert "/releases/r-" in state["base"]                     # relative URLs: the release
+    assert state["stable"].split("#")[0].endswith(entry)
+    assert "/releases/r-" in state["versioned"] and "#" in state["versioned"]
