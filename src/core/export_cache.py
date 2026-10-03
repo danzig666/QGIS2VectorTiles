@@ -120,13 +120,17 @@ def source_fingerprint(provider: str, uri: str) -> Optional[str]:
         return None
     parts = []
     for path in files:
-        stat = os.stat(path)
-        parts.append(f"{os.path.abspath(path)}|{stat.st_size}|{stat.st_mtime_ns}")
         if path.lower().endswith(".gpkg"):
+            # Only GeoPackage's own edit stamps: SQLite rewrites the file (time,
+            # size) when QGIS merely opens and closes it, which made every
+            # layer look changed in the user's QGIS.
             changes = _gpkg_changes(path)
             if changes is None:
                 return None
-            parts.append(changes)
+            parts.append(f"{os.path.abspath(path)}|{changes}")
+            continue
+        stat = os.stat(path)
+        parts.append(f"{os.path.abspath(path)}|{stat.st_size}|{stat.st_mtime_ns}")
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
@@ -172,6 +176,35 @@ def stable_value(value):
             except Exception:  # pylint: disable=broad-except
                 return UNSTABLE
     return UNSTABLE
+
+
+def part_hash(part) -> str:
+    """Digest of one key part (to compare exports part by part)."""
+    return hashlib.sha256(json.dumps(_plain(part), sort_keys=True, ensure_ascii=False,
+                                     default=repr).encode("utf-8")).hexdigest()[:16]
+
+
+def miss_reasons(before: dict, now: dict, context_before: dict, context_now: dict) -> List[str]:
+    """Why a dataset's key changed, in words."""
+    if not before:
+        return ["first export into this folder (or a new layer / rule)"]
+    reasons = []
+    if before.get("code") != now.get("code"):
+        reasons.append("plugin, QGIS or GDAL updated")
+    if before.get("source") != now.get("source"):
+        reasons.append("layer data changed")
+    if before.get("rule") != now.get("rule"):
+        reasons.append("style, labels or fields changed")
+    if before.get("context") != now.get("context"):
+        changed = sorted(k for k in set(context_before) | set(context_now)
+                         if context_before.get(k) != context_now.get(k))
+        if "variables" in changed and isinstance(context_now.get("variables"), dict):
+            names = sorted(k for k in set(context_before.get("variables") or {})
+                           | set(context_now["variables"])
+                           if (context_before.get("variables") or {}).get(k) != context_now["variables"].get(k))
+            changed = [c for c in changed if c != "variables"] + [f"@{n}" for n in names[:5]]
+        reasons.append("export settings changed (" + ", ".join(changed[:6]) + ")")
+    return reasons or ["unknown"]
 
 
 def make_key(*parts) -> str:
@@ -335,6 +368,25 @@ class ExportCache:
                 except OSError:
                     pass
         return removed
+
+    # -- why a dataset was redone ---------------------------------------------------
+    LAST = "last-keys.json"
+
+    def last_components(self) -> dict:
+        """The key parts of each dataset of the previous export (to tell why
+        a dataset is redone)."""
+        try:
+            with open(os.path.join(self.root, self.LAST), encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return {}
+
+    def save_components(self, data: dict) -> None:
+        os.makedirs(self.root, exist_ok=True)
+        path = os.path.join(self.root, self.LAST)
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, sort_keys=True)
+        os.replace(path + ".tmp", path)
 
     def clear(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

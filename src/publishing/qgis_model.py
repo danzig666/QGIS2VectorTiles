@@ -22,7 +22,7 @@ import math
 import os
 from typing import Dict, List, Optional, Tuple
 
-from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsExpression,
+from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsExpression,
                        QgsExpressionContext, QgsExpressionContextUtils, QgsFeatureRequest,
                        QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject, QgsRasterLayer, QgsRectangle,
                        QgsRuleBasedRenderer, QgsSymbolLayerUtils, QgsVectorLayer, QgsWkbTypes)
@@ -535,11 +535,38 @@ def raise_identity_problems(result: RecordsResult) -> None:
 
 # --- legend swatches ---------------------------------------------------------------------
 
+def swatch_context(project: QgsProject, profile: PublicationProfile, size: int = 32,
+                   shown_px: float = 24.0):
+    """Render context of the legend swatches, as QGIS's legend uses the map
+    canvas: symbols sized in map units are drawn at the map scale of the most
+    detailed tiles (without a context they came out far too thick), the
+    others at their size on screen (the swatch is shown ``shown_px`` CSS px)."""
+    from qgis.core import QgsMapToPixel, QgsRenderContext, QgsUnitTypes  # pylint: disable=import-outside-toplevel
+    from ..core.fidelity import zoom as fidelity_zoom  # pylint: disable=import-outside-toplevel
+    px_per_mm = 96.0 / 25.4 * size / shown_px
+    scale = fidelity_zoom.zoom_to_scale(float(profile.view.max_zoom))
+    try:
+        metres = QgsUnitTypes.fromUnitToUnitFactor(project.crs().mapUnits(), Qgis.DistanceUnit.Meters)
+    except (AttributeError, TypeError):
+        metres = 1.0
+    context = QgsRenderContext()
+    context.setScaleFactor(px_per_mm)
+    context.setRendererScale(scale)
+    # One pixel is 1 / px_per_mm mm on screen: that many mm × scale on the ground.
+    context.setMapToPixel(QgsMapToPixel(scale / px_per_mm / 1000.0 / (metres or 1.0)))
+    try:
+        context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+    except AttributeError:
+        pass
+    return context
+
+
 def render_swatches(project: QgsProject, profile: PublicationProfile, out_dir: str,
                     size: int = 32) -> Dict[str, str]:
     """PNG swatch of every legend item (QGIS renders the original symbol):
     {rule or layer logical id: "legend/<id>.png"}. UI assets, not map tiles."""
     os.makedirs(out_dir, exist_ok=True)
+    context = swatch_context(project, profile, size)
     swatches = {}
     for config in profile.layers:
         if not config.included:
@@ -559,7 +586,7 @@ def render_swatches(project: QgsProject, profile: PublicationProfile, out_dir: s
                 continue
             rid = rule_logical_id(layer.id(), item.ruleKey() or "single")
             name = f"{rid}.png"
-            pixmap = QgsSymbolLayerUtils.symbolPreviewPixmap(symbol, QSize(size, size), 2)
+            pixmap = QgsSymbolLayerUtils.symbolPreviewPixmap(symbol, QSize(size, size), 2, context)
             if pixmap.isNull() or not pixmap.save(os.path.join(out_dir, name), "PNG"):
                 continue
             swatches[rid] = f"legend/{name}"

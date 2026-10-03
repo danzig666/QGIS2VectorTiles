@@ -195,6 +195,7 @@ class InteractionConfig:
     measure: bool = False
     print: bool = True
     legend_visible_only: bool = False  # legend lists only what is drawn in the current view
+    layers_panel: bool = True          # the Layers tab (off: visitors see the legend only)
 
 
 @dataclass
