@@ -84,6 +84,12 @@ class Provider:
     def delete_release(self, release_id: str) -> int:
         raise NotImplementedError
 
+    def put_entry_aliases(self, index_html: bytes, cache_control: str) -> bool:
+        """The publication's short addresses (``<prefix>/`` and ``<prefix>``)
+        on hosts without directory indexes; False when the provider cannot
+        (a folder on disk: a web server serves its index.html itself)."""
+        return False
+
     def incomplete_uploads(self) -> List[dict]:
         return []
 

@@ -578,3 +578,32 @@ then: pre-generate the placement of these small parcels for speed.
 | `pytest tests/browser/test_visible_labels.py` | 26 passed |
 | `pytest tests/integration/test_publishing_label_always.py` | 1 passed |
 | related suites | 114 passed |
+
+## 4.7.2: short publication address; the address bar keeps it
+
+Owner (R2): `https://maps.koszeghy.art/maps/arlo/index.html` works, `…/maps/arlo` does not, and
+the page shows `…/releases/r-…/index.html`.
+
+**Short address:**
+- `Provider.put_entry_aliases`: S3/R2 write `<prefix>/` (the stable `index.html` bytes, so its
+  relative links resolve inside the publication) and `<prefix>` (a meta-refresh to
+  `<last segment>/`, no script), both `no-cache`. A failing write (a host that cannot store such
+  keys) returns False and the publish goes on.
+- `upload_stable_entry` returns whether the aliases exist; if so, `publish` reports
+  `<base>/` as `stable_url`.
+
+**Address bar:**
+1. `bootstrap.mjs` records `{entry: location.pathname, release: target.pathname}` in
+   sessionStorage (`q2vt:entry`) before `location.replace`.
+2. `app.mjs` (`showEntryAddress`), when the release path matches, prepends
+   `<base href="<release page>">` and `history.replaceState` to the entry path plus search and
+   hash.
+3. `viewer.releaseUrl` keeps the release's own address.
+4. `permalink.links()` uses it for the versioned link, and the current address for the stable
+   one.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_publishing_providers.py` | 16 passed |
+| `pytest tests/browser/test_web_viewer_parcel.py` | 4 passed |
+| browser, S3 and pipeline suites | 41 passed, 4 skipped |

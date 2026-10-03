@@ -79,11 +79,31 @@ function applyBranding(manifest, pageUrl) {
   }
 }
 
+// Opened through the publication's stable entry: show that (short, stable)
+// address again. Relative URLs keep resolving in the release (<base>); the
+// release's own address stays known for "this version" links.
+function showEntryAddress(releasePage) {
+  let entry = null;
+  try {
+    entry = JSON.parse(sessionStorage.getItem("q2vt:entry") || "null");
+    sessionStorage.removeItem("q2vt:entry");
+  } catch { return; }
+  if (!entry || entry.release !== location.pathname || typeof entry.entry !== "string"
+      || !entry.entry.startsWith("/") || entry.entry.startsWith("//")) return;
+  const base = document.createElement("base");
+  base.href = releasePage.href;
+  document.head.prepend(base);
+  history.replaceState(history.state, "", entry.entry + location.search + location.hash);
+}
+
 async function start() {
-  const pageUrl = new URL(".", location.href);
+  const releasePage = new URL(location.href);
+  const pageUrl = new URL(".", releasePage);
+  showEntryAddress(releasePage);
   const assetsUrl = new URL("./", import.meta.url);  // locales, legend code, workers
   const manifestUrl = new URL("manifest.json", pageUrl).href;
-  const viewer = (window.q2vtViewer = { ready: false, diagnostics, maplibreVersion: maplibregl.getVersion() });
+  const viewer = (window.q2vtViewer = { ready: false, diagnostics, maplibreVersion: maplibregl.getVersion(),
+    releaseUrl: releasePage.href });
   let manifest;
   try {
     manifest = validateManifest(await fetchChecked(manifestUrl));

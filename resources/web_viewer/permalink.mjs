@@ -116,10 +116,16 @@ export class Permalink {
   // current release) — both keep the same state.
   links(extra = {}) {
     const hash = `#${this.hash(extra)}`;
-    const versioned = new URL(location.href);
+    const here = new URL(location.href);
+    // The release's own page (the address bar may show the stable entry).
+    const versioned = new URL((window.q2vtViewer && window.q2vtViewer.releaseUrl) || here.href);
+    versioned.search = here.search;
     versioned.hash = hash;
     let stable = null;
-    if (RELEASE_PATH.test(versioned.pathname)) {
+    if (!RELEASE_PATH.test(here.pathname)) {  // already the stable address
+      stable = new URL(here.href);
+      stable.hash = hash;
+    } else if (RELEASE_PATH.test(versioned.pathname)) {
       stable = new URL("../../index.html", versioned);
       stable.search = versioned.search;
       stable.hash = hash;
