@@ -49,6 +49,15 @@ export class ParcelReport {
 
   get layerId() { return this.info && this.info.layerId; }
 
+  // The shown report for the print sheet (without its buttons).
+  printCard() {
+    const card = this.container && this.container.querySelector("article.q2vt-pr");
+    if (!card) return null;
+    const copy = card.cloneNode(true);
+    for (const node of copy.querySelectorAll(".q2vt-chips, button")) node.remove();
+    return copy;
+  }
+
   async load() {
     if (!this.ready) {
       this.ready = Promise.all([fetch(this.base), fetch(this.catalogUrl)]).then(async ([a, b]) => {
@@ -148,7 +157,8 @@ export class ParcelReport {
       const rows = [];
       for (const f of c.zoneFields || []) {
         const v = part.z ? part.z[f.field] : undefined;
-        if (v !== null && v !== undefined && v !== "") rows.push([f.title || f.field, v]);
+        // Not the zone code again (it is the part's title).
+        if (v !== null && v !== undefined && v !== "" && String(v) !== String(part.c)) rows.push([f.title || f.field, v]);
       }
       const regulation = (c.regulations || {})[part.c];
       if (regulation) {
@@ -202,11 +212,7 @@ export class ParcelReport {
       actions.append(link);
     }
     const print = button("q2vt-chip q2vt-chip-ghost", null, "print", { text: t("parcel.print") });
-    print.addEventListener("click", () => {
-      document.body.classList.add("q2vt-print-parcel");
-      window.addEventListener("afterprint", () => document.body.classList.remove("q2vt-print-parcel"), { once: true });
-      window.print();
-    });
+    print.addEventListener("click", () => (this.onPrint ? this.onPrint() : window.print()));
     actions.append(print);
     card.append(actions);
     card.append(el("p", "q2vt-pr-disclaimer", c.disclaimer || t("parcel.disclaimer")));

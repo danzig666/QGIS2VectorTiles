@@ -69,9 +69,21 @@ export class Legend {
 
   render() {
     const state = this.state.value;
-    const zoom = this.map.getZoom();
     const drawn = this.visibleOnly ? this.drawn(state) : null;
-    this.body.replaceChildren();
+    const { node, shown } = this.list(state, drawn, false);
+    this.body.replaceChildren(node);
+    if (!shown) this.body.append(el("p", "q2vt-empty", t(this.visibleOnly ? "legend.noneVisible" : "legend.empty")));
+  }
+
+  // The legend of what the map draws now (print: the printed area).
+  printList() {
+    const state = this.state.value;
+    return this.list(state, this.drawn(state), true).node;
+  }
+
+  list(state, drawn, print) {
+    const zoom = this.map.getZoom();
+    const node = el("div", print ? "q2vt-legend q2vt-legend-print" : "q2vt-legend");
     let shown = 0;
     const layers = [...this.manifest.layers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const layer of layers) {
@@ -81,6 +93,7 @@ export class Legend {
       if (drawn && rules.length) rules = rules.filter((r) => drawn.rules.has(r.id));
       const items = (rules.length ? rules : [{ title: layer.title, swatch: layer.swatch, componentIds: layer.componentIds }])
         .filter((rule) => rule.swatch || !rules.length);
+      if (print && !items.length) continue;
       // One symbol: one row with the layer's name (no heading repeating it).
       const single = items.length === 1;
       const block = el("section", single ? "q2vt-legend-layer q2vt-legend-single" : "q2vt-legend-layer");
@@ -99,17 +112,17 @@ export class Legend {
           item.append(el("span", "q2vt-legend-blank"));  // labels only: aligned with the others
         }
         item.append(el("span", "", single ? layer.title : rule.title));
-        if (!this.control.availableAt(rule.componentIds, zoom)) {
+        if (!print && !this.control.availableAt(rule.componentIds, zoom)) {
           item.classList.add("q2vt-muted");
           item.title = t("app.outOfScale");
         }
         list.append(item);
       }
       block.append(list);
-      this.body.append(block);
+      node.append(block);
       shown++;
     }
-    if (!shown) this.body.append(el("p", "q2vt-empty", t(this.visibleOnly ? "legend.noneVisible" : "legend.empty")));
+    return { node, shown };
   }
 
   destroy() {

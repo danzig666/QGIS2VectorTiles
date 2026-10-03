@@ -966,6 +966,7 @@ class PublishDialog(QDialog):
         self.p_code = self._field_combo(self.p_zoning)
         self.p_zone_fields = self._fields_table()
         self.p_zoning.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_zone_fields, layer, []))
+        self.p_zoning.layerChanged.connect(self._guess_zone_code)
         self.p_cuts = QListWidget()
         self.p_cuts.setMaximumHeight(90)
         form.addRow(tr("Zone layer (its style gives the zone colours)"), self.p_zoning)
@@ -1023,6 +1024,17 @@ class PublishDialog(QDialog):
         layout.addLayout(bottom)
         return scroll
 
+    def _guess_zone_code(self, layer):
+        """Zone code field: the field QGIS styles / labels the zone layer by
+        (e.g. szab_ov), unless one is chosen already - never a feature id
+        (the report showed fid numbers instead of the zone codes)."""
+        from ..publishing.parcel_report import guess_zone_field, looks_like_id  # pylint: disable=import-outside-toplevel
+        if layer is None or not looks_like_id(layer, self.p_code.currentField()):
+            return
+        guessed = guess_zone_field(layer)
+        if guessed:
+            self.p_code.setField(guessed)
+
     def _guess_regulation_code(self, layer):
         """A regulations table chosen: pick its zone code field — the one named
         like the zone layer's code field (e.g. szab_ov), else a usual code name."""
@@ -1052,6 +1064,7 @@ class PublishDialog(QDialog):
             self.p_key.setField(info.key_field)
         if info.zoning_code_field:
             self.p_code.setField(info.zoning_code_field)
+        self._guess_zone_code(self.p_zoning.currentLayer())  # an id field saved before: the real code
         if info.regulation_code_field:
             self.p_regulation_code.setField(info.regulation_code_field)
         cuts = {c.layer_id: c for c in info.cut_lines}

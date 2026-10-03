@@ -408,3 +408,33 @@ raster pages).
 |---|---|
 | `pytest tests/integration/test_plugin_package.py` | 1 passed |
 | `pytest tests/integration/test_publish_scale_limits.py tests/integration/test_publish_dialog*.py` | 19 passed |
+
+## 4.6.4: one-page print; zone code instead of feature IDs
+
+Print: the old `@media print` rules stretched the map canvas and printed the full, partly faded
+legend, which came to 3 pages. The new `print.mjs` (`Printer`) handles the Tools tab's *Print*,
+the parcel report's *Print* and the browser's own print (`beforeprint`/`afterprint`):
+1. It resizes the map to 186 × 190 mm and waits for `idle` (6 s at most).
+2. It fills `#q2vt-print-sheet` with the title, date and attribution, plus either the legend of
+   what is drawn (`Legend.printList()`) or the parcel card (`ParcelReport.printCard()`, without
+   buttons).
+3. It calls `window.print()`, then restores the view.
+
+The page is A4 landscape with 8 mm margins and a `186mm 1fr` grid. The legend has two columns,
+with `break-inside: avoid` on each entry.
+
+Zone code: the owner's parcel report listed 241, 488, 487 as zone codes, because
+`zoning_code_field` was the zoning layer's feature ID.
+- `parcel_report.looks_like_id` recognises fid, id, objectid and the primary key.
+- `guess_zone_field` scores the other fields: the categorized renderer attribute +100, a field
+  used in rule filters or labels +10, a code-like name +5.
+- `build_parcel_report` warns and uses the guess. The Publish window applies the same guess when
+  the zoning layer changes or a profile is loaded.
+- The viewer shows the code in bold as each part's title and skips it among the zone values.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_parcel.py` | 3 passed |
+| `pytest tests/integration/test_publish_dialog_parcel.py tests/integration/test_publishing_parcel_report.py` | 6 passed |
+| browser features, static package, web builder + the parcel suites | 27 passed |
+| Chromium PDF of the test plan (map print, parcel print) | 1 page each |

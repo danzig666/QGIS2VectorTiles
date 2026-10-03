@@ -152,16 +152,8 @@ export class Tools {
   }
 
   print() {
-    let meta = document.getElementById("q2vt-print-meta");
-    if (!meta) {
-      meta = el("div");
-      meta.id = "q2vt-print-meta";
-      document.getElementById("q2vt-app").append(meta);
-    }
-    const date = new Date().toLocaleString(document.documentElement.lang || undefined);
-    meta.textContent = `${this.manifest.title} — ${date}${this.manifest.attribution ? ` — ${this.manifest.attribution}` : ""}`;
-    document.dispatchEvent(new CustomEvent("q2vt:print"));
-    window.print();
+    if (this.viewer && this.viewer.printer) this.viewer.printer.print("map");
+    else window.print();
   }
 
   destroy() {
