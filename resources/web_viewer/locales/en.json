@@ -100,5 +100,6 @@
   "parcel.disclaimer": "Information only, not an official certificate. The regulations in force are those of the adopted decree.",
   "print.scale": "Scale 1:{scale}",
   "print.scaleLabel": "Scale",
-  "print.scaleScreen": "As on screen (rounded)"
+  "print.scaleScreen": "As on screen (rounded)",
+  "search.street": "Street (OpenStreetMap)"
 }

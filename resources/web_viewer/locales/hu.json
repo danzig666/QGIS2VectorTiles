@@ -100,5 +100,6 @@
   "parcel.disclaimer": "Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat a hatályos rendelet tartalmazza.",
   "print.scale": "M 1:{scale}",
   "print.scaleLabel": "Méretarány",
-  "print.scaleScreen": "A képernyő szerint (kerekítve)"
+  "print.scaleScreen": "A képernyő szerint (kerekítve)",
+  "search.street": "Utca (OpenStreetMap)"
 }

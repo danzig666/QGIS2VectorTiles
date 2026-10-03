@@ -22,8 +22,8 @@ import traceback
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
-                       QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsTask,
-                       QgsVectorLayer)
+                       QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
+                       QgsTask, QgsVectorLayer)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
@@ -133,6 +133,7 @@ class PublishDialog(QDialog):
         self.project = QgsProject.instance()
         self.setWindowTitle(tr("Publish Web Map — QGIS2VectorTiles (fork)"))
         self.resize(980, 760)
+        self._restore_geometry()
         self.layer_configs = {}
         self.current_layer_id = None
         self.local_result = None
@@ -713,10 +714,16 @@ class PublishDialog(QDialog):
                 ("coordinates", tr("Coordinates (WGS84 / EOV)")), ("measure", tr("Measurement")),
                 ("print", tr("Print")),
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
-                ("layers_panel", tr("Layers tab (off: the legend only)"))]):
+                ("layers_panel", tr("Layers tab (off: the legend only)")),
+                ("street_search", tr("Search street names (OpenStreetMap)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)
+        self.i_flags["street_search"].setToolTip(tr(
+            "The search also finds the named streets of OpenStreetMap inside the extent layer "
+            "(Map tab; without one, inside the export extent). They are read from the basemap, or "
+            "without a basemap from the Protomaps build (internet needed while exporting). Only the "
+            "names, a point and the bounds of each street are published."))
         layout.addWidget(options)
         split = QSplitter()
         split.setChildrenCollapsible(False)
@@ -2050,7 +2057,36 @@ class PublishDialog(QDialog):
         else:
             self._fail(result.code or result.state.value, result.message or result.state.value)
 
+    # Size and position of the window, kept between QGIS sessions (QGIS settings).
+    GEOMETRY_KEY = "QGIS2VectorTilesFork/publishDialog/geometry"
+
+    def _restore_geometry(self):
+        try:
+            saved = QgsSettings().value(self.GEOMETRY_KEY)
+            if not saved or not self.restoreGeometry(saved):
+                return
+        except (TypeError, ValueError):
+            return
+        # A screen that is gone (laptop undocked): back to the default size and place.
+        frame = self.frameGeometry()
+        if not any(screen.availableGeometry().intersects(frame) for screen in QGuiApplication.screens()):
+            self.resize(980, 760)
+            primary = QGuiApplication.primaryScreen()
+            if primary is not None:
+                self.move(primary.availableGeometry().center() - self.rect().center())
+
+    def _save_geometry(self):
+        try:
+            QgsSettings().setValue(self.GEOMETRY_KEY, self.saveGeometry())
+        except (TypeError, ValueError):
+            pass
+
+    def done(self, result):  # Escape / reject() close without a closeEvent
+        self._save_geometry()
+        super().done(result)
+
     def closeEvent(self, event):  # noqa: N802
+        self._save_geometry()
         if self.task is not None:
             QMessageBox.information(self, tr("Web map"), tr("Publishing is still running in the "
                                                             "background; see the task bar."))

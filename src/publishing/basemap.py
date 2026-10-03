@@ -230,12 +230,8 @@ def text_keys(flavor_layers: Iterable[dict]) -> Set[str]:
     return keys
 
 
-def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom: int,
-            keys: Set[str], progress: Optional[Progress] = None,
-            max_tiles: int = MAX_TILES) -> BasemapExtract:
-    """Copy the tiles of the area from ``reader`` into ``output`` (PMTiles,
-    same MVT payloads) and collect the label characters."""
-    progress = progress or Progress()
+def _open_archive(reader) -> Tuple[dict, dict, list]:
+    """Header, metadata and root directory of a Protomaps-schema MVT archive."""
     header = deserialize_header(reader.get(0, 127))
     if header["tile_type"] != TileType.MVT:
         raise PublishingError("Q2VT_PUB_NOT_MVT", "The basemap source does not hold vector tiles.")
@@ -249,13 +245,13 @@ def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom:
     if not any(isinstance(l, dict) and l.get("id") == "earth" for l in metadata.get("vector_layers", [])):
         raise PublishingError("Q2VT_PUB_BASEMAP",
                               "The basemap source is not in the Protomaps schema (no 'earth' layer).")
-    top = min(max_zoom, header["max_zoom"])
-    wanted = wanted_tiles(detail, overview, top, min(overview_zoom, top))
-    if len(wanted) > max_tiles:
-        raise PublishingError("Q2VT_PUB_BASEMAP",
-                              f"The basemap area needs {len(wanted)} tiles (limit {max_tiles}); "
-                              "lower its maximum zoom, padding or overview size.")
     root = deserialize_directory(reader.get(header["root_offset"], header["root_length"]))
+    return header, metadata, root
+
+
+def _fetch(reader, header: dict, root: list, wanted: List[Tuple[int, int, int]], progress: Progress,
+           share: float = 1.0):
+    """([(z, x, y), offset, length] of the tiles that exist, {(offset, length): bytes})."""
     leaves: Dict[int, list] = {}
     located: List[Tuple[Tuple[int, int, int], int, int]] = []
     for index, (z, x, y) in enumerate(wanted):
@@ -275,9 +271,8 @@ def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom:
             entries = leaves[entry.offset]
         if index % 256 == 0:
             progress.check()
-            progress.update(0.25 * index / max(1, len(wanted)), f"Basemap: locating {index}/{len(wanted)} tiles")
-    if not located:
-        raise PublishingError("Q2VT_PUB_BASEMAP", "The basemap source has no tiles in this area.")
+            progress.update(share * 0.25 * index / max(1, len(wanted)),
+                            f"Basemap: locating {index}/{len(wanted)} tiles")
     # Fetch payloads in merged ranges (adjacent tiles are usually stored together).
     spans = sorted({(offset, length) for _, offset, length in located})
     blobs: Dict[Tuple[int, int], bytes] = {}
@@ -297,9 +292,30 @@ def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom:
                       or offset + length - group[0][0] > 8 * 1024 * 1024):
             flush()
             progress.check()
-            progress.update(0.25 + 0.6 * len(blobs) / len(spans), f"Basemap: {len(blobs)}/{len(spans)} tiles")
+            progress.update(share * (0.25 + 0.6 * len(blobs) / len(spans)),
+                            f"Basemap: {len(blobs)}/{len(spans)} tiles")
         group.append((offset, length))
     flush()
+    return located, blobs
+
+
+def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom: int,
+            keys: Set[str], progress: Optional[Progress] = None,
+            max_tiles: int = MAX_TILES) -> BasemapExtract:
+    """Copy the tiles of the area from ``reader`` into ``output`` (PMTiles,
+    same MVT payloads) and collect the label characters."""
+    progress = progress or Progress()
+    header, metadata, root = _open_archive(reader)
+    compression = header["tile_compression"]
+    top = min(max_zoom, header["max_zoom"])
+    wanted = wanted_tiles(detail, overview, top, min(overview_zoom, top))
+    if len(wanted) > max_tiles:
+        raise PublishingError("Q2VT_PUB_BASEMAP",
+                              f"The basemap area needs {len(wanted)} tiles (limit {max_tiles}); "
+                              "lower its maximum zoom, padding or overview size.")
+    located, blobs = _fetch(reader, header, root, wanted, progress)
+    if not located:
+        raise PublishingError("Q2VT_PUB_BASEMAP", "The basemap source has no tiles in this area.")
     chars: Set[str] = set()
     decoded = set()
     with TileSink(output) as sink:
@@ -324,6 +340,128 @@ def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom:
                                 validate_kind="mvt")
     return BasemapExtract(descriptor, chars, reader.requests, getattr(reader, "bytes", 0),
                           str(metadata.get("attribution", "")))
+
+
+# --- street names for the search ----------------------------------------------------------
+
+STREETS_LAYER = "q2vt-streets"   # pseudo layer of the search index (no tiles, no style)
+STREET_ZOOM = 15                 # Protomaps' most detailed zoom
+STREET_JOIN_M = 300.0            # pieces of one name closer than this are one street
+
+
+def _tile_lonlat(z: int, x: int, y: int, extent: int):
+    n = float(1 << z)
+
+    def convert(px: float, py: float) -> Tuple[float, float]:
+        lon = (x + px / extent) / n * 360.0 - 180.0
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + py / extent) / n))))
+        return lon, lat
+    return convert
+
+
+def _metres(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    lat = math.radians((a[1] + b[1]) / 2)
+    return math.hypot((b[0] - a[0]) * 111320.0 * math.cos(lat), (b[1] - a[1]) * 110540.0)
+
+
+def _bbox(points) -> List[float]:
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _gap_m(a: List[float], b: List[float]) -> float:
+    """Ground distance between two lon/lat boxes (0 when they touch)."""
+    dx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    dy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    lat = math.radians((a[1] + a[3]) / 2)
+    return math.hypot(dx * 111320.0 * math.cos(lat), dy * 110540.0)
+
+
+def _middle(line: List[Tuple[float, float]]) -> List[float]:
+    """The point halfway along a line (on the street, not beside a bend)."""
+    lengths = [_metres(a, b) for a, b in zip(line, line[1:])]
+    half, walked = sum(lengths) / 2, 0.0
+    for (a, b), length in zip(zip(line, line[1:]), lengths):
+        if walked + length >= half and length > 0:
+            t = (half - walked) / length
+            return [round(a[0] + (b[0] - a[0]) * t, 6), round(a[1] + (b[1] - a[1]) * t, 6)]
+        walked += length
+    return [round(line[0][0], 6), round(line[0][1], 6)]
+
+
+def street_records(reader, bbox, clip: Optional[Callable] = None, locale: str = "hu",
+                   progress: Optional[Progress] = None, max_tiles: int = MAX_TILES) -> List[dict]:
+    """Search records of the named streets (Protomaps ``roads`` layer) in
+    ``bbox`` (lon/lat). ``clip(line) -> [lines]`` keeps the parts inside the
+    area (an extent layer's polygon); pieces of one name within
+    ``STREET_JOIN_M`` of each other are one street: its bounds and a point
+    halfway along its longest piece. Only names leave the export, never the
+    geometry."""
+    progress = progress or Progress()
+    header, _metadata, root = _open_archive(reader)
+    z = min(STREET_ZOOM, header["max_zoom"])
+    wanted = [(z, x, y) for x, y in tiles_in(bbox, z)]
+    if len(wanted) > max_tiles:
+        raise PublishingError("Q2VT_PUB_BASEMAP", f"Street search: the area needs {len(wanted)} "
+                                                  f"tiles (limit {max_tiles}).")
+    located, blobs = _fetch(reader, header, root, wanted, progress, share=0.8)
+    names: Dict[str, dict] = {}
+    for (tz, tx, ty), offset, length in located:
+        try:
+            roads = mvt.decode(blobs[(offset, length)], geometry=True, layers_wanted={"roads"}).get("roads")
+        except mvt.MvtDecodeError as error:
+            raise PublishingError("Q2VT_PUB_NOT_MVT", f"Basemap tile {tz}/{tx}/{ty}: {error}") from error
+        if not roads:
+            continue
+        convert = _tile_lonlat(tz, tx, ty, roads["extent"])
+        for feature in roads["features"]:
+            props = feature["properties"]
+            local, plain = props.get(f"name:{locale}"), props.get("name")
+            name = local if isinstance(local, str) and local.strip() else plain
+            if feature["type"] != 2 or not isinstance(name, str) or not name.strip():
+                continue
+            name = " ".join(name.split())
+            entry = names.setdefault(name, {"terms": {name}, "pieces": []})
+            if isinstance(plain, str) and plain.strip():
+                entry["terms"].add(" ".join(plain.split()))
+            for part in mvt.lines(feature.get("geometry") or []):
+                line = [convert(px, py) for px, py in part]
+                for piece in (clip(line) if clip else [line]):
+                    if len(piece) >= 2:
+                        entry["pieces"].append(piece)
+    progress.update(0.9, "Street names: grouping")
+    records = []
+    for name in sorted(names):
+        pieces = names[name]["pieces"]
+        if not pieces:
+            continue
+        boxes = [_bbox(piece) for piece in pieces]
+        cluster = list(range(len(pieces)))
+
+        def find(i):
+            while cluster[i] != i:
+                cluster[i] = cluster[cluster[i]]
+                i = cluster[i]
+            return i
+        order = sorted(range(len(boxes)), key=lambda i: boxes[i][0])
+        for position, i in enumerate(order):  # boxes sorted by west edge: compare neighbours only
+            for j in order[position + 1:]:
+                if boxes[j][0] - boxes[i][2] > STREET_JOIN_M / 50000.0:
+                    break
+                if _gap_m(boxes[i], boxes[j]) <= STREET_JOIN_M:
+                    cluster[find(i)] = find(j)
+        groups: Dict[int, List[int]] = {}
+        for i in range(len(pieces)):
+            groups.setdefault(find(i), []).append(i)
+        terms = sorted(names[name]["terms"], key=lambda t: (t != name, t))
+        for number, members in enumerate(sorted(groups.values(), key=lambda m: min(boxes[i][0] for i in m))):
+            longest = max(members, key=lambda i: sum(_metres(a, b) for a, b in zip(pieces[i], pieces[i][1:])))
+            bounds = [round(v, 6) for v in (min(boxes[i][0] for i in members), min(boxes[i][1] for i in members),
+                                             max(boxes[i][2] for i in members), max(boxes[i][3] for i in members))]
+            records.append({"layerId": STREETS_LAYER, "featureKey": f"{name}#{number + 1}", "label": name,
+                            "terms": terms, "anchor": _middle(pieces[longest]), "bounds": bounds,
+                            "suggestedZoom": 17})
+    return records
 
 
 # --- styles ---------------------------------------------------------------------------------

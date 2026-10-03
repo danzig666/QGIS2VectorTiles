@@ -112,3 +112,23 @@ def test_settings_file_export_and_import_into_another_project(plugin, monkeypatc
     assert not other.import_settings_file(str(bad), same_map=True)
     assert other.collect().title == "Arló terv"
     other.close()
+
+
+def test_window_remembers_its_size_and_position(plugin, monkeypatch, tmp_path):
+    from qgis.core import QgsSettings  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QGuiApplication  # pylint: disable=import-outside-toplevel
+    dialog, _parcels = _dialog(plugin, monkeypatch, tmp_path)
+    QgsSettings().remove(dialog.GEOMETRY_KEY)
+    screen = QGuiApplication.primaryScreen().availableGeometry()
+    dialog.resize(700, 520)
+    dialog.move(screen.left() + 40, screen.top() + 30)
+    dialog.close()  # the Close button
+    assert QgsSettings().value(dialog.GEOMETRY_KEY)
+    again, _ = _dialog(plugin, monkeypatch, tmp_path / "again")
+    assert (again.width(), again.height()) == (700, 520)
+    assert abs(again.pos().x() - (screen.left() + 40)) <= 1 and abs(again.pos().y() - (screen.top() + 30)) <= 1
+    again.resize(760, 600)
+    again.reject()  # Escape
+    third, _ = _dialog(plugin, monkeypatch, tmp_path / "third")
+    assert (third.width(), third.height()) == (760, 600)
+    QgsSettings().remove(dialog.GEOMETRY_KEY)

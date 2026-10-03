@@ -12,6 +12,7 @@ Local export never needs credentials; a failed or cancelled stage leaves the
 previous local (and public) release current.
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -26,7 +27,7 @@ from .progress import Progress
 from .search_index import build_search_index
 from .web_builder import ReleaseResult, build_release, write_zip
 
-STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "BUILD_RELEASE",
+STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "STREETS", "BUILD_RELEASE",
           "UPLOAD", "VERIFY_PUBLIC", "ACTIVATE", "COMPLETE"]
 
 
@@ -114,6 +115,9 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         progress.info(f"[{name}]")
 
     stage("PLAN")
+    # Before the tile export (it drops layers that are not in the layer tree).
+    street_area = _street_area(project, profile, extent_3857) \
+        if profile.interaction.search and profile.interaction.street_search else None
     problems = qgis_model.check_profile_against_project(profile, project)
     if problems:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", " ".join(problems[:6]),
@@ -190,8 +194,12 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     lookup = {layer_logical_id(c.layer_id): {"popup": [p.field for p in c.popup_fields]}
               for c in profile.layers if c.included and (c.popup_fields or c.deep_links)}
 
+    streets: List[dict] = []  # street name records (filled in the STREETS stage)
+
     def indexes(staging: str, manifest: dict) -> None:
-        search = build_search_index(_iter_records(records.path), searchable,
+        from .basemap import STREETS_LAYER  # pylint: disable=import-outside-toplevel
+        wanted = dict(searchable, **({STREETS_LAYER: ["name"]} if streets else {}))
+        search = build_search_index(itertools.chain(_iter_records(records.path), streets), wanted,
                                     os.path.join(staging, "search"))
         if search:
             with open(os.path.join(staging, "search", "manifest.json"), "w", encoding="utf-8") as h:
@@ -249,6 +257,11 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     if profile.basemap.kind == "protomaps":
         stage("BASEMAP")
         bundle.basemap = _prepare_basemap(profile, extent_3857, work_dir, progress)
+        progress.check()
+
+    if profile.interaction.search and profile.interaction.street_search:
+        stage("STREETS")
+        streets.extend(_street_records(street_area, profile, bundle.basemap, progress, bundle.warnings))
         progress.check()
 
     stage("BUILD_RELEASE")
@@ -318,6 +331,79 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
                     "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
                     "descriptor": descriptor, "tileSize": 256})
     return out
+
+
+def _street_area(project, profile, extent_3857):
+    """The street search area in EPSG:4326: the extent layer's polygons
+    (merged), or the export extent."""
+    from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                           QgsRectangle, QgsVectorLayer, QgsWkbTypes)
+    wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+    layer = project.mapLayer(profile.view.extent_layer) if profile.view.extent_layer else None
+    if isinstance(layer, QgsVectorLayer) and layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+        to_wgs84 = QgsCoordinateTransform(layer.crs(), wgs84, project)
+        parts = []
+        for feature in layer.getFeatures():
+            geometry = QgsGeometry(feature.geometry())
+            if geometry.isEmpty():
+                continue
+            geometry.transform(to_wgs84)
+            parts.append(geometry.makeValid())
+        if parts:
+            return QgsGeometry.unaryUnion(parts), layer.name()
+    box = extent_3857 if hasattr(extent_3857, "xMinimum") else QgsRectangle(*extent_3857)
+    if isinstance(layer, QgsVectorLayer):  # lines / points: the layer's extent
+        box = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:3857"),
+                                     project).transformBoundingBox(layer.extent())
+    geometry = QgsGeometry.fromRect(box)
+    geometry.transform(QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"), wgs84, project))
+    return geometry, ""
+
+
+def _street_records(street_area, profile, prepared_basemap, progress, warnings) -> List[dict]:
+    """Named OpenStreetMap streets inside the extent layer for the search
+    (from the bundled basemap, or read from its source when there is none).
+    A failure is a warning: the map is published without street search."""
+    from qgis.core import QgsGeometry, QgsPointXY  # pylint: disable=import-outside-toplevel
+    from . import basemap  # pylint: disable=import-outside-toplevel
+    area, area_name = street_area
+    if area.isEmpty():
+        return []
+    engine = QgsGeometry.createGeometryEngine(area.constGet())
+    engine.prepareGeometry()
+
+    def clip(line):
+        geometry = QgsGeometry.fromPolylineXY([QgsPointXY(x, y) for x, y in line])
+        if engine.contains(geometry.constGet()):
+            return [line]
+        if not engine.intersects(geometry.constGet()):
+            return []
+        inside = geometry.intersection(area)
+        if inside.isEmpty():
+            return []
+        parts = inside.asMultiPolyline() if inside.isMultipart() else [inside.asPolyline()]
+        return [[(p.x(), p.y()) for p in part] for part in parts if len(part) >= 2]
+
+    box = area.boundingBox()
+    bbox = (box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum())
+    source = prepared_basemap["archive"] if prepared_basemap else profile.basemap.source
+    progress.info("Street names: reading " + ("the basemap" if prepared_basemap else
+                                              (source or "the latest Protomaps build")) +
+                  (f' inside "{area_name}"' if area_name else " in the export extent") + " ...")
+    try:
+        reader = basemap.LocalReader(source) if prepared_basemap else basemap.open_source(source)
+        try:
+            records = basemap.street_records(reader, bbox, clip, profile.locale, progress.sub(0.0, 1.0))
+        finally:
+            reader.close()
+    except (PublishingError, OSError, ValueError) as error:
+        warnings.append(f"Street search: the street names could not be read ({error}); "
+                        "the map is published without them.")
+        return []
+    progress.info(f"Street names: {len(records)} streets for the search")
+    if not records:
+        warnings.append("Street search: no named street was found in the area.")
+    return records
 
 
 def _prepare_basemap(profile, extent_3857, work_dir, progress) -> dict:
