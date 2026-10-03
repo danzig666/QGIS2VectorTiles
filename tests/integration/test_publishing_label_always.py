@@ -19,10 +19,13 @@ from test_publishing_basemap_themes import EXTENT, _setup  # noqa: E402  pylint:
 def test_label_every_feature_marks_the_layer_and_precomputes_spots(tmp_path):
     project, profile, parcels, second = _setup(tmp_path)
     profile.layers[0].label_always = True
+    profile.layers[0].snap = True  # measurement snapping (viewer)
     result = export_local(project, profile, EXTENT)
     manifest = json.load(open(os.path.join(result.release.release_dir, "manifest.json"), encoding="utf-8"))
     flags = {layer["id"]: layer.get("labelAlways") for layer in manifest["layers"]}
     assert flags[layer_logical_id(parcels.id())] is True and flags[layer_logical_id(second.id())] is False
+    snaps = {layer["id"]: layer.get("snap") for layer in manifest["layers"]}
+    assert snaps[layer_logical_id(parcels.id())] is True and snaps[layer_logical_id(second.id())] is False
     keys = {}
     with sqlite3.connect(os.path.join(result.export_dir, "tiles.mbtiles")) as conn:
         for (data,) in conn.execute("SELECT tile_data FROM tiles"):

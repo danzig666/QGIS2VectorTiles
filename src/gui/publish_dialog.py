@@ -750,6 +750,10 @@ class PublishDialog(QDialog):
             "Web map: every feature of this layer gets its label (e.g. every parcel number). A label "
             "that does not fit its polygon is drawn smaller (down to half size), at worst at the "
             "roomiest point of the polygon; it is never left out."))
+        self.i_snap = QCheckBox(tr("Measurements snap to this layer (corners and edges)"))
+        self.i_snap.setToolTip(tr(
+            "Web map: while measuring, points snap to the nearest corner of this layer's "
+            "features, else to their nearest edge or line (as drawn on the map)."))
         form.addRow(tr("Title in the viewer"), self.i_title)
         form.addRow(tr("Feature title (display expression)"), self.i_display)
         form.addRow(tr("Initial opacity"), self.i_opacity)
@@ -757,6 +761,7 @@ class PublishDialog(QDialog):
         self.i_legend.toggled.connect(self._legend_box_toggled)
         form.addRow("", self.i_links)
         form.addRow("", self.i_label_always)
+        form.addRow("", self.i_snap)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
         self.i_fields.setHorizontalHeaderLabels([tr("Field"), tr("Popup"), tr("Popup title"), tr("Type"),
@@ -1493,6 +1498,7 @@ class PublishDialog(QDialog):
         self.i_opacity.setValue(config.opacity)
         self.i_legend.setChecked(config.legend)
         self.i_label_always.setChecked(config.label_always)
+        self.i_snap.setChecked(config.snap)
         self.i_links.setChecked(config.deep_links)
         popups = {p.field: p for p in config.popup_fields}
         filters = {f.field: f for f in config.filter_fields}
@@ -1553,6 +1559,7 @@ class PublishDialog(QDialog):
         config.opacity = float(self.i_opacity.value())
         config.legend = self.i_legend.isChecked()
         config.label_always = self.i_label_always.isChecked()
+        config.snap = self.i_snap.isChecked()
         config.deep_links = self.i_links.isChecked()
         popups, search, keys, filters = [], [], [], []
         for row in range(self.i_fields.rowCount()):

@@ -607,3 +607,30 @@ the page shows `…/releases/r-…/index.html`.
 | `pytest tests/unit/test_publishing_providers.py` | 16 passed |
 | `pytest tests/browser/test_web_viewer_parcel.py` | 4 passed |
 | browser, S3 and pipeline suites | 41 passed, 4 skipped |
+
+## 4.7.3: measurement snapping
+
+Owner request: measurement tools snap to chosen layers' boundaries and lines.
+
+- `LayerConfig.snap` (profile `snap`) → manifest `layers[].snap`. Publish window: Interaction
+  tab, "Measurements snap to this layer".
+- `resources/web_viewer/snap.mjs` (`Snapper`):
+  1. Takes the style layers (fill, line or circle only) of the components of the snap layers.
+  2. Queries `queryRenderedFeatures` in a box of ±radius around the pointer: only what is drawn.
+  3. Works on each tile feature's own geometry (`loadGeometry`, tile units → Web Mercator world
+     → screen), limited to the tile's own square. A vertex on the tile edge is skipped, and
+     segments are clipped to the square (Liang–Barsky), skipping those along its edge. Cuts are
+     therefore never corners or edges.
+  4. `nearest`: a vertex within the radius first, else the nearest point on a segment
+     (interpolated in Web Mercator).
+- `tools.mjs`:
+  - radius 12 px, 22 px for a coarse pointer;
+  - the snapped point is used on click, Alt gives a free point;
+  - ring marker (`q2vt_measure_snap` runtime source), preview segment to the pointer;
+  - on/off switch remembered in localStorage (`q2vt:snap`).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_snap.py` | 2 passed |
+| related suites | 126 passed |
+| Test plan in Chromium | corner snap ≈2 cm from the tile vertex; edge snap; Alt off |
