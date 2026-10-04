@@ -17,6 +17,7 @@ PLUGIN_NAME = "QWebMap"
 # The plugin's folder before the rename: when both are installed, the old one
 # registers the same Processing provider and adds a second menu.
 OLD_FOLDER = "QGIS2VectorTilesFork"
+PROVIDER_ID = "QGIS2VectorTilesFork"  # QGIS2VectorTilesPorvider.id()
 
 
 class QGIS2VectorTiles:
@@ -28,9 +29,22 @@ class QGIS2VectorTiles:
         self.iface = iface
 
     def initProcessing(self):
-        """Initialize processing provider"""
+        """Register the Processing provider (once).
+
+        QGIS calls this itself (``hasProcessingProvider=yes``) and initGui
+        calls it again for older QGIS versions. A second ``addProvider``
+        with the same id makes QGIS delete that provider, so unload crashed
+        on it. A provider left registered by an earlier version (its unload
+        failed) is replaced, so an upgrade runs the new code."""
+        if self.provider is not None:
+            return
+        registry = QgsApplication.processingRegistry()
+        stale = registry.providerById(PROVIDER_ID)
+        if stale is not None:
+            registry.removeProvider(stale)
         self.provider = QGIS2VectorTilesPorvider()
-        QgsApplication.processingRegistry().addProvider(self.provider)
+        if not registry.addProvider(self.provider):
+            self.provider = None  # QGIS deleted it
 
     def initGui(self):
         """Initialize GUI: Processing provider + "Publish Web Map" window."""
@@ -80,7 +94,10 @@ class QGIS2VectorTiles:
 
     def unload(self):
         """Unload plugin: remove the provider, the action and stop previews."""
-        QgsApplication.processingRegistry().removeProvider(self.provider)
+        if self.provider is not None:
+            # By id: never touches a deleted Python wrapper.
+            QgsApplication.processingRegistry().removeProvider(PROVIDER_ID)
+            self.provider = None
         action = getattr(self, "publish_action", None)
         if action is not None and self.iface is not None:
             self.iface.removeWebToolBarIcon(action)
