@@ -147,3 +147,17 @@ def test_group_lock_raster_and_basemap_settings_round_trip(setup):
     assert profile.basemap.kind == "protomaps" and profile.basemap.initial == "dark"
     assert "dark" in profile.basemap.flavors and profile.basemap.source == "/data/hungary.pmtiles"
     assert QgsProject.instance().layerTreeRoot().findLayer(zones_id) is not None
+
+
+def test_scales_column_shows_the_qgis_range(setup):
+    """No web limit set: the column shows the layer's own QGIS range, not just "(QGIS)"."""
+    dialog, project, parcels, zones, ortho = setup
+    parcels.setScaleBasedVisibility(True)
+    parcels.setMinimumScale(2000)  # QGIS: visible from 1:2000 down to more detail
+    parcels.setMaximumScale(0)
+    item = _items(dialog)[parcels.id()]
+    dialog._set_item_scales(item, 0, 0)  # pylint: disable=protected-access
+    text = item.text(5)
+    assert text.startswith("(QGIS 1:2") and "000 –" in text and text.endswith(")"), text
+    dialog._set_item_scales(item, 5000, 0)  # pylint: disable=protected-access
+    assert "QGIS" not in item.text(5) and "QGIS layer: 1:2" in item.toolTip(5)

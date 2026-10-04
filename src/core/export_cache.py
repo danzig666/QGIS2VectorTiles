@@ -99,20 +99,37 @@ def _source_files(provider: str, uri: str) -> Optional[List[str]]:
     return sorted(set(files))
 
 
-def _gpkg_changes(path: str) -> Optional[str]:
+def _gpkg_changes(path: str, table: Optional[str] = None) -> Optional[str]:
     """GeoPackage edit stamps (``gpkg_contents.last_change``, set by GDAL on
-    every write). Read through SQLite, so edits still held in the ``-wal``
-    file count; the ``-wal`` file itself is not used (QGIS creates and
-    removes it as layers open and close, which says nothing about edits)."""
+    every write) of ``table``, or of every table when the layer does not name
+    one. Per table: an edit (or a style saved into the file) in one layer of
+    a shared GeoPackage left the other layers looking changed. Read through
+    SQLite, so edits still held in the ``-wal`` file count; the ``-wal`` file
+    itself is not used (QGIS creates and removes it as layers open and close,
+    which says nothing about edits)."""
     import sqlite3  # pylint: disable=import-outside-toplevel
     try:
         uri = "file:" + urllib_quote(os.path.abspath(path)) + "?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=5) as conn:
-            rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
-                                "ORDER BY table_name").fetchall()
+            rows = []
+            if table:
+                rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
+                                    "WHERE lower(table_name) = lower(?)", (table,)).fetchall()
+            if not rows:
+                rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
+                                    "ORDER BY table_name").fetchall()
         return json.dumps(rows)
     except sqlite3.Error:
         return None
+
+
+def _layer_name(uri: str) -> Optional[str]:
+    """``layername=`` of an OGR source ("path.gpkg|layername=parcels")."""
+    for part in uri.split("|")[1:]:
+        key, _, value = part.partition("=")
+        if key.strip().lower() == "layername" and value:
+            return value
+    return None
 
 
 def source_fingerprint(provider: str, uri: str) -> Optional[str]:
@@ -127,7 +144,7 @@ def source_fingerprint(provider: str, uri: str) -> Optional[str]:
             # Only GeoPackage's own edit stamps: SQLite rewrites the file (time,
             # size) when QGIS merely opens and closes it, which made every
             # layer look changed in the user's QGIS.
-            changes = _gpkg_changes(path)
+            changes = _gpkg_changes(path, _layer_name(uri) if provider == "ogr" else None)
             if changes is None:
                 return None
             parts.append(f"{os.path.abspath(path)}|{changes}")
@@ -196,6 +213,8 @@ def miss_reasons(before: dict, now: dict, context_before: dict, context_now: dic
         reasons.append("plugin, QGIS or GDAL updated")
     if before.get("source") != now.get("source"):
         reasons.append("layer data changed")
+    if "key" in before and before.get("key") != now.get("key"):
+        reasons.append("feature key (unique id) changed")
     if before.get("rule") != now.get("rule"):
         reasons.append("style, labels or fields changed")
     if before.get("context") != now.get("context"):

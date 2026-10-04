@@ -1010,3 +1010,27 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_plugin_package.py` | 1 passed (QGIS's order initProcessing + initGui, unload leaves no provider, an upgrade over a leftover provider; fails without the fix with "Duplicate provider") |
 | `pytest tests/integration/test_publish_dialog.py` | 4 passed |
+
+## 4.13.2: early key check, per-table GeoPackage cache stamps
+
+- **Early key check** (`qgis_model.check_keys`, PLAN stage): the keys of every included vector
+  layer with key fields are evaluated for the features its renderer draws inside the extent
+  (`willRenderFeature`, as the export writes them). NULL or repeated keys raise
+  `Q2VT_PUB_IDENTITY` before the tile export, naming the key fields and where to change them.
+  `collect_records` still checks the exported features afterwards. The parcel report's layers
+  and fields are checked in PLAN too (`parcel_report.resolve_layers`).
+- **Export cache:**
+  - A GeoPackage layer's fingerprint uses the `gpkg_contents.last_change` of its own table
+    (`layername=`). Before, the stamps of all tables in the file were used, so an edit in one
+    layer (or a style saved into the file) re-exported every layer of that GeoPackage.
+  - The feature key is its own key part. A changed key is logged as "feature key (unique id)
+    changed" instead of "layer data changed".
+  - This exporter code change invalidates the cache once.
+- **Scales column:** without a web limit it shows the layer's QGIS range, e.g. "(QGIS 1:2 000 –)".
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_pipeline.py` | 6 passed (duplicate keys stop the export in PLAN; features no category draws are not checked) |
+| `pytest tests/integration/test_export_cache.py` | 4 passed (new: two layers in one GeoPackage, one edited and the other's key changed, each redone for its own reason; fails without the fix: both layers redone) |
+| `pytest tests/integration/test_publish_dialog_layers.py` | 4 passed (new: the Scales column shows the QGIS range) |
+| Parcel report, publish dialog and raster tests | 25 passed |

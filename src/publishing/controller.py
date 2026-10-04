@@ -117,9 +117,6 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     stage("PLAN")
     from .crs import project_crs_info  # pylint: disable=import-outside-toplevel
     crs_info = project_crs_info(project)
-    # Before the tile export (it drops layers that are not in the layer tree).
-    street_area = _street_area(project, profile, extent_3857) \
-        if profile.interaction.search and profile.interaction.street_search else None
     problems = qgis_model.check_profile_against_project(profile, project)
     if problems:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", " ".join(problems[:6]),
@@ -131,6 +128,16 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
             raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
                                   "Parcel report: publish the parcel layer (Map tab).")
         config.key_fields = [info.key_field]
+        from .parcel_report import resolve_layers  # pylint: disable=import-outside-toplevel
+        resolve_layers(project, info)  # layers and fields exist: fail now, not after tiling
+    # Unique feature keys: checked now, not after the (long) tile export.
+    key_problems = qgis_model.check_keys(project, profile, extent_3857, progress)
+    if key_problems:
+        raise PublishingError("Q2VT_PUB_IDENTITY", " ".join(key_problems[:-1][:4] + key_problems[-1:]),
+                              detail="\n".join(key_problems))
+    # Before the tile export (it drops layers that are not in the layer tree).
+    street_area = _street_area(project, profile, extent_3857) \
+        if profile.interaction.search and profile.interaction.street_search else None
     # Vector layers: MVT compiler; QGIS raster layers: their own raster archives.
     vector_profile, raster_configs = qgis_model.split_profile(profile, project)
     if not vector_profile.included_layer_ids():
