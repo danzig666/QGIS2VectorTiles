@@ -1150,8 +1150,22 @@ class TextPropertyExtractor:
         """
         font = text_format.font()
         info = QFontInfo(font)
-        candidates = [
-            (font.family(), font.styleName()),
+        candidates = [(font.family(), font.styleName())]
+        # Bold/italic set with the text format's B/I buttons (forcedBold,
+        # forcedItalic) or as the font's weight leave the style name empty:
+        # look for the matching face before falling back to the regular one.
+        bold = font.bold() or bool(getattr(text_format, "forcedBold", lambda: False)())
+        italic = font.italic() or bool(getattr(text_format, "forcedItalic", lambda: False)())
+        if not font.styleName() and (bold or italic):
+            styles = (["Bold Italic", "Bold Oblique"] if bold and italic else
+                      ["Bold"] if bold else ["Italic", "Oblique"])
+            for style in styles:  # only a face that really is bold/italic (Qt may fall back)
+                stack = GlyphGenerator.resolve_fontstack(font.family(), style) or ""
+                face = stack[len(font.family()):].lower()
+                if stack and (not bold or "bold" in face) and \
+                        (not italic or "italic" in face or "oblique" in face):
+                    return stack
+        candidates += [
             (info.family(), info.styleName()),
             (font.family(), ""),
             (info.family(), ""),

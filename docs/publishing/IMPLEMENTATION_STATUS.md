@@ -754,3 +754,27 @@ trademark found, and every checked domain was free; checked 4 Oct 2026).
 | `pytest tests/integration/test_plugin_package.py` | passed (zip folder `QWebMap/`, menu "QWebMap", warning with the old copy present) |
 | `test_presets_and_variants`, `test_publish_dialog_r2`, `test_publishing_export`, `test_publish_dialog_extent`, `test_end_to_end` | all passed |
 | `pytest tests/unit` | 237 passed, 5 skipped |
+
+## 4.9.1: bold/italic label faces, README demo
+
+- **Bug:** `TextPropertyExtractor.get_text_font` ignored bold/italic that was set without a style
+  name: QgsTextFormat `forcedBold`/`forcedItalic` (the B/I buttons) or `QFont.setBold`. Those
+  labels fell back to the regular face ("DejaVu Sans Book").
+- **Fix:** when the style name is empty and the font is bold/italic, try "Bold", "Italic",
+  "Oblique", "Bold Italic" or "Bold Oblique". A face is accepted only if it really is bold/italic,
+  because Qt falls back to the regular face for a missing style. Otherwise the old candidates apply.
+- **Test:** `tests/integration/test_label_font_style.py`.
+- **README demo:**
+  - `docs/images/qwebmap-demo.gif` and `docs/images/qgis-vs-web.png`, made from the QGIS
+    training data (Swellendam, GPL-2.0).
+  - Frames come from QGIS renders, the Publish window (`grab()`, after a real *Export locally*)
+    and the exported viewer (Playwright).
+  - The README leads with the symbology conversion.
+- **Known gap seen while making the demo:** polygon labels with *Around point* placement are
+  centred on the polygon by the viewer's visible-polygon label placer. The QGIS label distance
+  is not applied, so the label can cover a centroid marker. Not changed in this release.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_label_font_style.py` | 6 passed (4 fail without the fix) |
+| `pytest tests/integration -k "label or glyph or font or text"` | 37 passed |
