@@ -284,13 +284,21 @@
           }
         },
         "initial": {
-          "enum": [
-            "none",
-            "light",
-            "dark",
-            "white",
-            "grayscale",
-            "black"
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "light",
+                "dark",
+                "white",
+                "grayscale",
+                "black"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^xyz-[0-9]+$"
+            }
           ]
         },
         "maxZoom": {
@@ -312,6 +320,34 @@
           "type": "number",
           "minimum": 0,
           "maximum": 5000
+        },
+        "xyz": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              },
+              "minZoom": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 24
+              },
+              "maxZoom": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 24
+              }
+            }
+          }
         }
       }
     },

@@ -46,7 +46,7 @@ export function defaults(manifest) {
   }
   const groups = Object.fromEntries(manifest.groups.map((g) => [g.id, g.initialVisibility !== false || g.toggleable === false]));
   const rules = Object.fromEntries(manifest.rules.map((r) => [r.id, true]));
-  const basemap = manifest.basemap && manifest.basemap.flavors && manifest.basemap.flavors.length
+  const basemap = manifest.basemap && ((manifest.basemap.flavors || []).length || (manifest.basemap.xyz || []).length)
     ? (manifest.basemap.initial || "none") : "none";
   let value = { layers, groups, rules, labels: true, opacity, filters: {}, selected: null, basemap, theme: null };
   const initial = manifest.themes && manifest.themes.initial;
@@ -60,7 +60,8 @@ export class ViewerState {
     this.manifest = manifest;
     this.key = `q2vt:${manifest.publicationId}:v${STORAGE_VERSION}`;
     this.locked = lockedIds(manifest);
-    this.basemaps = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id)]);
+    this.basemaps = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id),
+      ...((manifest.basemap && manifest.basemap.xyz) || []).map((x) => x.id)]);
     this.value = defaults(manifest);
     this.listeners = new Set();
   }

@@ -35,7 +35,7 @@ from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialo
                                  QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..publishing.errors import PublishingError
-from ..publishing.models import (BASEMAP_FLAVORS, FIELD_TYPES, CutLineConfig, FilterField, GroupConfig,
+from ..publishing.models import (XyzBasemap, BASEMAP_FLAVORS, FIELD_TYPES, CutLineConfig, FilterField, GroupConfig,
                                  LayerConfig, PopupField, PublicationProfile, ReleaseState,
                                  RestrictionConfig, slugify)
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
@@ -894,7 +894,79 @@ class PublishDialog(QDialog):
             "release (data/basemap.pmtiles) with fonts generated for its labels, so visitors never load "
             "anything from another site. Visitors can switch styles or turn it off. Map data © "
             "OpenStreetMap contributors (ODbL), shown automatically in the attribution.")))
+        # Web basemaps: XYZ tile addresses loaded by the visitor's browser.
+        self.b_xyz = QTableWidget(0, 5)
+        self.b_xyz.setHorizontalHeaderLabels([tr("Title"), tr("XYZ tile address"), tr("Attribution"),
+                                              tr("Min zoom"), tr("Max zoom")])
+        header = self.b_xyz.horizontalHeader()
+        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
+        self.b_xyz.setMinimumHeight(130)
+        self.b_xyz.itemChanged.connect(self._refresh_basemap_initial)
+        buttons = QHBoxLayout()
+        add = QPushButton(tr("Add"))
+        add.clicked.connect(lambda: self._add_xyz_row(XyzBasemap(max_zoom=19)))
+        from_qgis = QPushButton(tr("From QGIS XYZ connections…"))
+        from_qgis.clicked.connect(lambda: self._xyz_from_qgis(from_qgis))
+        remove = QPushButton(tr("Remove"))
+        remove.clicked.connect(self._remove_xyz_rows)
+        for button in (add, from_qgis, remove):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        form.addRow(tr("Web basemaps (XYZ)"), self.b_xyz)
+        form.addRow("", buttons)
+        form.addRow("", _note(tr(
+            "Web basemaps are XYZ tile addresses, e.g. https://tile.openstreetmap.org/{z}/{x}/{y}.png "
+            "({-y}: TMS rows, {s}: a/b/c servers; https only). Visitors choose them in the map's "
+            "basemap menu; their browser loads the tiles from that server while browsing (nothing is "
+            "copied into the release, and the page allows exactly these servers). Use only addresses "
+            "you are allowed to use, with the attribution the service requires. They are saved in the "
+            "project, in the exported settings file, and as QGIS XYZ connections (Browser → XYZ Tiles).")))
         return widget
+
+    def _add_xyz_row(self, entry):
+        self.b_xyz.blockSignals(True)
+        row = self.b_xyz.rowCount()
+        self.b_xyz.insertRow(row)
+        for column, value in enumerate((entry.title, entry.url, entry.attribution,
+                                        str(entry.min_zoom), str(entry.max_zoom))):
+            self.b_xyz.setItem(row, column, QTableWidgetItem(value))
+        self.b_xyz.blockSignals(False)
+        self._refresh_basemap_initial()
+
+    def _xyz_from_qgis(self, anchor):
+        from qgis.PyQt.QtWidgets import QMenu  # pylint: disable=import-outside-toplevel
+        from .xyz_connections import qgis_xyz_connections  # pylint: disable=import-outside-toplevel
+        connections = qgis_xyz_connections()
+        menu = QMenu(self)
+        if not connections:
+            menu.addAction(tr("(no XYZ connections in QGIS)")).setEnabled(False)
+        have = {entry.title for entry in self._xyz_rows()}
+        for entry in connections:
+            action = menu.addAction(entry.title)
+            action.setToolTip(entry.url)
+            action.setEnabled(entry.title not in have)
+            action.triggered.connect(lambda _checked=False, e=entry: self._add_xyz_row(e))
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _remove_xyz_rows(self):
+        for row in sorted({index.row() for index in self.b_xyz.selectedIndexes()}, reverse=True):
+            self.b_xyz.removeRow(row)
+        self._refresh_basemap_initial()
+
+    def _xyz_rows(self):
+        out = []
+        for row in range(self.b_xyz.rowCount()):
+            cell = lambda column: (self.b_xyz.item(row, column).text().strip()  # noqa: E731
+                                   if self.b_xyz.item(row, column) else "")
+            if not cell(1):
+                continue
+            try:
+                low, high = int(cell(3) or 0), int(cell(4) or 19)
+            except ValueError:
+                low, high = 0, 19
+            out.append(XyzBasemap(title=cell(0) or f"XYZ {row + 1}", url=cell(1), attribution=cell(2),
+                                  min_zoom=low, max_zoom=high))
+        return out
 
     # ------------------------------------------------------------------ parcel report
     def _layer_combo(self, geometry=None, allow_empty=False, any_layer=False, empty_text=None):
@@ -1169,6 +1241,8 @@ class PublishDialog(QDialog):
         for flavor, box in self.b_flavors.items():
             if box.isChecked():
                 self.b_initial.addItem(box.text(), flavor)
+        for number, entry in enumerate(self._xyz_rows() if hasattr(self, "b_xyz") else [], start=1):
+            self.b_initial.addItem(f"{tr('Web')}: {entry.title}", f"xyz-{number}")
         index = self.b_initial.findData(current) if current else -1
         self.b_initial.setCurrentIndex(index if index >= 0 else min(1, self.b_initial.count() - 1))
         self.b_initial.blockSignals(False)
@@ -1411,6 +1485,9 @@ class PublishDialog(QDialog):
         self.b_source.setText(basemap.source)
         for flavor, box in self.b_flavors.items():
             box.setChecked(flavor in basemap.flavors)
+        self.b_xyz.setRowCount(0)
+        for entry in basemap.xyz:
+            self._add_xyz_row(entry)
         self._refresh_basemap_initial()
         self.b_initial.setCurrentIndex(max(0, self.b_initial.findData(basemap.initial)))
         self.b_max.setValue(basemap.max_zoom)
@@ -1623,9 +1700,16 @@ class PublishDialog(QDialog):
         basemap.kind = self.b_kind.currentData()
         basemap.source = self.b_source.text().strip() if self.b_custom.isChecked() else ""
         basemap.flavors = [f for f, box in self.b_flavors.items() if box.isChecked()] or ["light"]
+        basemap.xyz = self._xyz_rows()
         basemap.initial = self.b_initial.currentData() or "none"
-        if basemap.initial != "none" and basemap.initial not in basemap.flavors:
+        xyz_ids = [f"xyz-{n}" for n in range(1, len(basemap.xyz) + 1)]
+        if basemap.initial != "none" and basemap.initial not in basemap.flavors + xyz_ids:
             basemap.initial = basemap.flavors[0]
+        try:  # the same web basemaps as QGIS XYZ connections
+            from .xyz_connections import save_qgis_xyz_connections  # pylint: disable=import-outside-toplevel
+            save_qgis_xyz_connections(basemap.xyz)
+        except Exception:  # noqa: BLE001 - settings are a convenience; never block the window
+            pass
         basemap.max_zoom = self.b_max.value()
         basemap.padding = self.b_padding.value() / 100.0
         basemap.overview_zoom = min(self.b_overview_zoom.value(), basemap.max_zoom)
@@ -1759,6 +1843,14 @@ class PublishDialog(QDialog):
             self.log(note)
         if keys is not None:
             self._import_credentials(keys)
+        if profile.basemap.xyz:  # web basemaps: also QGIS XYZ connections at once
+            try:
+                from .xyz_connections import save_qgis_xyz_connections  # pylint: disable=import-outside-toplevel
+                save_qgis_xyz_connections(profile.basemap.xyz)
+                self.log(tr("{} web basemap(s) imported (also as QGIS XYZ connections).").format(
+                    len(profile.basemap.xyz)))
+            except Exception:  # noqa: BLE001 - settings are a convenience
+                pass
         self.status.setText(tr("Settings imported from {}. Check them, then Save settings to keep them "
                                "in the project.").format(os.path.basename(path)))
         return True

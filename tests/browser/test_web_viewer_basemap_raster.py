@@ -73,11 +73,15 @@ def site(tmp_path_factory):
     profile.basemap.flavors, profile.basemap.initial = ["light", "dark"], "light"
     profile.accent_color = "#0f766e"
     profile.interaction.street_search = True  # OpenStreetMap street names in the search
+    from publishing.models import XyzBasemap  # pylint: disable=import-outside-toplevel
+    profile.basemap.xyz = [XyzBasemap("Teszt műhold", "https://{s}.tiles.example.test/{z}/{x}/{-y}.png",
+                                      "© Példa", 0, 18)]  # a web basemap (never loaded in these tests)
     result = export_local(project, profile, EXTENT)
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),
                "parcels": layer_logical_id(parcels.id()), "zones": layer_logical_id(zones.id()),
-               "ortho": layer_logical_id(ortho.id()), "plan": group_logical_id(("Szabályozás",))}
+               "ortho": layer_logical_id(ortho.id()), "plan": group_logical_id(("Szabályozás",)),
+               "publication": result.publication_dir, "release": result.release.release_id}
 
 
 PRELUDE = "const v = q2vtViewer, m = v.map, s = v.controls.state, man = v.manifest;"
@@ -184,3 +188,28 @@ def test_one_search_box_finds_fields_and_streets(site, tmp_path):
     assert streets and all(label == "Fő utca" and kind == "Utca (OpenStreetMap)" for label, kind in streets)
     assert chosen["popups"] == 0 and chosen["marker"] == 1 and chosen["value"] == "Fő utca"
     assert parcels and "Utca (OpenStreetMap)" not in parcels  # the same box finds the parcels
+
+
+def test_web_basemap_in_the_menu_page_policy_and_raster_layer(site, tmp_path):
+    page = open(os.path.join(site["publication"], "releases", site["release"], "index.html"), encoding="utf-8").read()
+    for server in "abc":
+        assert f"https://{server}.tiles.example.test" in page  # connect-src and img-src allow exactly it
+    assert 'content="strict-origin-when-cross-origin"' in page  # tile services may need the origin
+    results = _run(site["url"], [
+        {"eval": """const v = q2vtViewer;
+          document.querySelector('.q2vt-basemap-btn').click();
+          const titles = [...document.querySelectorAll('.q2vt-basemap-option')].map((b) => b.textContent);
+          const option = [...document.querySelectorAll('.q2vt-basemap-option')].find((b) => b.textContent.includes('Teszt műhold'));
+          option.click();
+          await new Promise((r) => setTimeout(r, 500));
+          const layer = v.map.getLayer('q2vt-bm-xyz-1');
+          const source = layer && v.map.getSource(layer.source);
+          return { titles, active: v.basemap.active, type: layer && layer.type, tiles: source && source.tiles,
+            scheme: source && source.scheme, attribution: document.querySelector('.q2vt-attribution')?.textContent || '',
+            below: v.map.getStyle().layers.findIndex((l) => l.id === 'q2vt-bm-xyz-1')
+              < v.map.getStyle().layers.findIndex((l) => l.source === 'q2vt_tiles') };"""},
+    ], tmp_path)
+    state = results[0]
+    assert any("Teszt műhold" in t for t in state["titles"]) and state["active"] == "xyz-1"
+    assert state["type"] == "raster" and state["scheme"] == "tms" and len(state["tiles"]) == 3
+    assert "© Példa" in state["attribution"] and state["below"]  # under the plan's layers

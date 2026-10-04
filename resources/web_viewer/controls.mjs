@@ -183,7 +183,7 @@ class BasemapControl {
     toggleButton.type = "button";
     toggleButton.setAttribute("aria-haspopup", "true");
     toggleButton.setAttribute("aria-expanded", "false");
-    const options = [{ id: "none", title: t("basemap.none") }, ...this.basemap.flavors.values()];
+    const options = [{ id: "none", title: t("basemap.none") }, ...this.basemap.options()];
     this.optionButtons = new Map();
     for (const option of options) {
       const node = el("button", "q2vt-basemap-option");
@@ -194,6 +194,10 @@ class BasemapControl {
         const blank = el("span", "q2vt-basemap-none");
         blank.append(icon("close", 18));
         thumb.append(blank);
+      } else if (option.tiles) {  // a web basemap (XYZ tiles)
+        const web = el("span", "q2vt-basemap-none");
+        web.append(icon("image", 20));
+        thumb.append(web);
       } else {
         thumb.append(preview(option.colors || {}));
       }
@@ -220,10 +224,10 @@ class BasemapControl {
   }
 
   sync(active) {
-    const flavor = this.basemap.flavors.get(active);
-    this.toggleButton.replaceChildren(flavor ? preview(flavor.colors || {}) : (() => {
+    const flavor = this.basemap.option(active);
+    this.toggleButton.replaceChildren(flavor && !flavor.tiles ? preview(flavor.colors || {}) : (() => {
       const blank = el("span", "q2vt-basemap-none");
-      blank.append(icon("map", 22));
+      blank.append(icon(flavor ? "image" : "map", 22));
       return blank;
     })(), el("span", "q2vt-basemap-caption", t("basemap.title")));
     this.toggleButton.setAttribute("aria-label", `${t("basemap.title")}: ${flavor ? flavor.title : t("basemap.none")}`);
@@ -363,7 +367,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   parts.themes = themeBar(manifest, state);
   // Bottom right: basemap switcher above the scale and the attribution.
   const attribution = new AttributionControl([manifest.attribution,
-    basemap.available && state.value.basemap !== "none" ? manifest.basemap.attribution : null]);
+    basemap.available && state.value.basemap !== "none" ? basemap.attribution(state.value.basemap) : null]);
   map.addControl(attribution, "bottom-right");
   map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
   if (basemap.available) {
@@ -375,7 +379,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
       shown = value.basemap;
       basemap.set(shown).then(() => {
         switcher.sync(shown);
-        attribution.parts = [manifest.attribution, shown !== "none" ? manifest.basemap.attribution : null];
+        attribution.parts = [manifest.attribution, shown !== "none" ? basemap.attribution(shown) : null];
         attribution.render();
       }).catch((error) => warn("error.basemap", String(error)));
     });

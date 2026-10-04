@@ -160,3 +160,35 @@ def test_settings_file_carries_the_object_storage_keys(plugin, monkeypatch, tmp_
     assert (keys.access_key_id, keys.secret_access_key) == ("AKIAEXAMPLEKEY", "s3cr3t/EXAMPLE+key")
     assert other.collect().destination.kind == "r2"
     other.close()
+
+
+def test_web_basemaps_saved_in_qgis_and_in_the_settings_file(plugin, monkeypatch, tmp_path):
+    """XYZ addresses: kept in the profile, written as QGIS XYZ connections
+    (Browser -> XYZ Tiles), carried by the settings file and offered back."""
+    import json  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsSettings  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.xyz_connections import qgis_xyz_connections  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.models import XyzBasemap  # pylint: disable=import-error
+    QgsSettings().remove("connections/xyz/items/Teszt műhold")
+    dialog, _parcels = _dialog(plugin, monkeypatch, tmp_path)
+    dialog.e_title.setText("Arló terv")
+    dialog._add_xyz_row(XyzBasemap("Teszt műhold", "https://{s}.tiles.example.hu/{z}/{x}/{y}.jpg",  # pylint: disable=protected-access
+                                   "© Példa Kft.", 0, 20))
+    dialog.b_initial.setCurrentIndex(dialog.b_initial.findData("xyz-1"))
+    basemap = dialog.collect().basemap
+    assert [(x.title, x.max_zoom) for x in basemap.xyz] == [("Teszt műhold", 20)] and basemap.initial == "xyz-1"
+    saved = {x.title: x for x in qgis_xyz_connections()}
+    assert saved["Teszt műhold"].url == "https://{s}.tiles.example.hu/{z}/{x}/{y}.jpg"
+    assert saved["Teszt műhold"].attribution == "© Példa Kft." and saved["Teszt műhold"].max_zoom == 20
+    path = str(tmp_path / "arlo.q2vt.json")
+    assert dialog.export_settings_file(path)
+    assert json.load(open(path, encoding="utf-8"))["profile"]["basemap"]["xyz"][0]["title"] == "Teszt műhold"
+    dialog.close()
+
+    QgsSettings().remove("connections/xyz/items/Teszt műhold")  # another computer
+    other, _ = _dialog(plugin, monkeypatch, tmp_path / "other")
+    assert other.import_settings_file(path, same_map=True)
+    assert [x.url for x in other.collect().basemap.xyz] == ["https://{s}.tiles.example.hu/{z}/{x}/{y}.jpg"]
+    assert "Teszt műhold" in {x.title for x in qgis_xyz_connections()}  # saved in QGIS on import
+    other.close()
+    QgsSettings().remove("connections/xyz/items/Teszt műhold")
