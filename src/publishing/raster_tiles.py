@@ -25,7 +25,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsMapRendererCustomPainterJob,
+from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsMapRendererParallelJob,
                        QgsMapSettings, QgsRasterLayer, QgsRectangle)
 from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice, QRect, QSize
 from qgis.PyQt.QtGui import QColor, QImage, QImageWriter, QPainter
@@ -144,11 +144,17 @@ def _transparent(image: QImage) -> bool:
 
 def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: str,
                  progress: Optional[Progress] = None, metatile: int = 8,
-                 title: str = "", blend: str = "normal") -> Optional[ArchiveDescriptor]:
+                 title: str = "", blend: str = "normal", threads: int = 1) -> Optional[ArchiveDescriptor]:
     """Render ``layer`` into ``output`` (PMTiles). Returns None when the layer
     draws nothing in the export extent. ``blend`` "multiply" / "screen":
     the tiles are converted to the equivalent normal image (blend_to_alpha);
-    a colour (not grey) layer is then approximate (added to plan.warnings)."""
+    a colour (not grey) layer is then approximate (added to plan.warnings).
+
+    ``threads``: metatiles rendered at once (QGIS map render jobs, as QGIS's
+    own XYZ tile tool runs them, started and collected on this thread) and
+    tiles cut and encoded at once (Qt releases the GIL while encoding).
+    Results are written in a fixed order: the archive is the same for any
+    number of threads."""
     progress = progress or Progress()
     if plan.tiles > MAX_TILES_PER_LAYER:
         raise PublishingError(
@@ -158,6 +164,8 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
             f"(limit {MAX_TILES_PER_LAYER}).")
     if plan.tiles == 0:
         return None
+    from collections import deque  # pylint: disable=import-outside-toplevel
+    from concurrent.futures import ThreadPoolExecutor  # pylint: disable=import-outside-toplevel
     writer_format = _encoder(config.raster_format)
     tile_px = 512 if config.raster_hidpi else 256
     settings = QgsMapSettings()
@@ -174,45 +182,80 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
         plan.warnings.append(f'Raster layer "{layer.name()}": its {blend} blend mode needs transparency; '
                              "JPEG has none, so it is drawn as normal. Choose PNG or WebP.")
         blend = "normal"
-    colour_blend = False
-    done = 0
-    with TileSink(output) as sink:
+    threads = max(1, int(threads))
+
+    def cut(image: QImage, z: int, mx: int, my: int, nx: int, ny: int):
+        """Worker: the metatile's non-empty tiles, encoded."""
+        grey = True
+        if blend in ("multiply", "screen"):
+            image, grey = blend_to_alpha(image, blend)
+        tiles = []
+        for ix in range(nx):
+            for iy in range(ny):
+                tile = image.copy(QRect(ix * tile_px, iy * tile_px, tile_px, tile_px))
+                if _transparent(tile):
+                    continue
+                if jpeg:  # no alpha: composite on white
+                    flat = QImage(tile.size(), QImage.Format.Format_RGB32)
+                    flat.fill(QColor(255, 255, 255))
+                    p = QPainter(flat)
+                    p.drawImage(0, 0, tile)
+                    p.end()
+                    tile = flat
+                tiles.append((z, mx + ix, my + iy, _encode(tile, writer_format, config.raster_quality)))
+        return tiles, grey, nx * ny
+
+    def metatiles():
         for z in range(plan.min_zoom, plan.max_zoom + 1):
             x0, y0, x1, y1 = tile_span(plan.extent_3857, z)
             size = 2 * ORIGIN / (1 << z)
             for mx in range(x0, x1 + 1, metatile):
                 for my in range(y0, y1 + 1, metatile):
                     nx, ny = min(metatile, x1 - mx + 1), min(metatile, y1 - my + 1)
-                    progress.check()
                     rect = QgsRectangle(-ORIGIN + mx * size, ORIGIN - (my + ny) * size,
                                         -ORIGIN + (mx + nx) * size, ORIGIN - my * size)
-                    settings.setExtent(rect)
-                    settings.setOutputSize(QSize(nx * tile_px, ny * tile_px))
-                    image = QImage(nx * tile_px, ny * tile_px, QImage.Format.Format_ARGB32_Premultiplied)
-                    image.fill(QColor(0, 0, 0, 0))
-                    painter = QPainter(image)
-                    job = QgsMapRendererCustomPainterJob(settings, painter)
-                    job.renderSynchronously()
-                    painter.end()
-                    if blend in ("multiply", "screen"):
-                        image, grey = blend_to_alpha(image, blend)
-                        colour_blend = colour_blend or not grey
-                    for ix in range(nx):
-                        for iy in range(ny):
-                            tile = image.copy(QRect(ix * tile_px, iy * tile_px, tile_px, tile_px))
-                            if _transparent(tile):
-                                continue
-                            if jpeg:  # no alpha: composite on white
-                                flat = QImage(tile.size(), QImage.Format.Format_RGB32)
-                                flat.fill(QColor(255, 255, 255))
-                                p = QPainter(flat)
-                                p.drawImage(0, 0, tile)
-                                p.end()
-                                tile = flat
-                            sink.add(z, mx + ix, my + iy, _encode(tile, writer_format, config.raster_quality))
-                    done += nx * ny
-                    progress.update(0.9 * done / max(1, plan.tiles),
-                                    f'Raster "{layer.name()}": {done}/{plan.tiles} tiles')
+                    yield z, mx, my, nx, ny, rect
+
+    colour_blend = False
+    done = 0
+    rendering = deque()  # (job, z, mx, my, nx, ny), in start order
+    cutting = deque()    # futures of cut(), in start order
+    with TileSink(output) as sink, ThreadPoolExecutor(max_workers=threads,
+                                                      thread_name_prefix="q2vt-raster") as pool:
+        def write_ready(block: bool) -> None:
+            nonlocal colour_blend, done
+            while cutting and (block or cutting[0].done()):
+                tiles, grey, count = cutting.popleft().result()
+                for tile in tiles:
+                    sink.add(*tile)
+                colour_blend = colour_blend or not grey
+                done += count
+                progress.update(0.9 * done / max(1, plan.tiles),
+                                f'Raster "{layer.name()}": {done}/{plan.tiles} tiles')
+
+        def finish_oldest() -> None:
+            job, z, mx, my, nx, ny = rendering.popleft()
+            job.waitForFinished()
+            cutting.append(pool.submit(cut, job.renderedImage(), z, mx, my, nx, ny))
+            write_ready(len(cutting) > 2 * threads)
+
+        try:
+            for z, mx, my, nx, ny, rect in metatiles():
+                progress.check()
+                job_settings = QgsMapSettings(settings)
+                job_settings.setExtent(rect)
+                job_settings.setOutputSize(QSize(nx * tile_px, ny * tile_px))
+                job = QgsMapRendererParallelJob(job_settings)
+                job.start()
+                rendering.append((job, z, mx, my, nx, ny))
+                while len(rendering) >= threads:
+                    finish_oldest()
+            while rendering:
+                finish_oldest()
+            write_ready(True)
+        finally:
+            for job, *_ in rendering:  # cancelled or failed: stop the renders still running
+                job.cancel()
         if colour_blend:
             plan.warnings.append(f'Raster layer "{layer.name()}": {blend} blend mode with colours is '
                                  "approximated in the web map (by brightness); grey layers such as a "
@@ -270,3 +313,75 @@ def raster_source_id(logical_id: str) -> str:
 
 def raster_style_layer_id(logical_id: str) -> str:
     return f"q2vt-raster-{logical_id}"
+
+
+# -- export cache ---------------------------------------------------------------
+# Files next to a raster that change how GDAL / QGIS read or draw it.
+_RASTER_SIDECARS = (".aux.xml", ".ovr", ".msk", ".tfw", ".tifw", ".wld", ".jgw", ".pgw", ".prj")
+
+
+def _raster_files(layer) -> Optional[List[str]]:
+    """The local files of a GDAL raster layer (with its sidecars), or None
+    when it is not a plain local file (web, database, virtual sources)."""
+    if layer.providerType() != "gdal":
+        return None
+    path = layer.source().split("|")[0]
+    if not path or not os.path.isfile(path):
+        return None
+    files = [path]
+    stem = os.path.splitext(path)[0]
+    for side in _RASTER_SIDECARS:
+        for candidate in (path + side, stem + side):
+            if os.path.isfile(candidate):
+                files.append(candidate)
+    return sorted(set(files))
+
+
+def raster_cache_key(project, layer, config: LayerConfig, plan: RasterPlan, blend: str) -> Optional[str]:
+    """Content key of a rendered raster archive: the source files (size and
+    modification time), the layer's whole QGIS style (renderer, resampling,
+    brightness/contrast, opacity...), CRS and datum transformations, the
+    tiles (extent, zooms) and the image settings; the plugin's raster code and
+    QGIS/GDAL versions. None: not cacheable (online, database or virtual
+    sources)."""
+    from qgis.core import QgsMapLayerStyle  # pylint: disable=import-outside-toplevel
+    from ..core import export_cache  # pylint: disable=import-outside-toplevel
+    files = _raster_files(layer)
+    if files is None:
+        return None
+    sources = []
+    for path in files:
+        stat = os.stat(path)
+        sources.append([os.path.abspath(path), stat.st_size, stat.st_mtime_ns])
+    style = QgsMapLayerStyle()
+    style.readFromLayer(layer)
+    here = os.path.dirname(os.path.abspath(__file__))
+    code = []
+    for name in ("raster_tiles.py", "pmtiles_builder.py"):
+        with open(os.path.join(here, name), "rb") as handle:
+            code.append(export_cache.hashlib.sha256(handle.read()).hexdigest())
+    try:
+        operations = sorted(project.transformContext().coordinateOperations().items())
+    except AttributeError:
+        operations = []
+    return export_cache.make_key(
+        "raster", code, sources, style.xmlData(), layer.crs().toWkt(), operations,
+        [plan.min_zoom, plan.max_zoom, list(plan.extent_3857)],
+        [config.raster_format, int(config.raster_quality), bool(config.raster_hidpi)],
+        config.title or layer.name(), blend)
+
+
+def descriptor_to_dict(descriptor: ArchiveDescriptor) -> dict:
+    data = dict(descriptor.__dict__)
+    data.pop("path", None)
+    data["zoom_counts"] = {str(k): v for k, v in descriptor.zoom_counts.items()}
+    return data
+
+
+def descriptor_from_dict(data: dict, path: str) -> ArchiveDescriptor:
+    data = dict(data)
+    for name in ("bounds", "center"):
+        if name in data:
+            data[name] = tuple(data[name])
+    data["zoom_counts"] = {int(k): v for k, v in data.get("zoom_counts", {}).items()}
+    return ArchiveDescriptor(path=path, **data)

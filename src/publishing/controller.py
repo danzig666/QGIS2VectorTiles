@@ -247,7 +247,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 
     stage("RASTER")
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
-                                             work_dir, progress, bundle.warnings)
+                                             work_dir, progress, bundle.warnings, cache)
     bundle.warnings.extend(_vector_blend_warnings(project, profile))
     progress.check()
     published = {r["layerId"] for r in bundle.raster_archives}
@@ -304,10 +304,13 @@ def _plan_rasters(project, profile, configs, extent_3857) -> Dict[str, object]:
     return plans
 
 
-def _render_rasters(project, profile, configs, plans, work_dir, progress, warnings) -> List[dict]:
-    """Render each raster layer into ``<work>/rasters/<id>.pmtiles``."""
+def _render_rasters(project, profile, configs, plans, work_dir, progress, warnings,
+                    cache=None) -> List[dict]:
+    """Render each raster layer into ``<work>/rasters/<id>.pmtiles`` (reused
+    from the export cache while the layer, its style and its settings are
+    unchanged)."""
     from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
-    from .raster_tiles import blend_name, raster_source_id, raster_style_layer_id, render_layer  # pylint: disable=import-outside-toplevel
+    from .raster_tiles import blend_name, raster_source_id, raster_style_layer_id  # pylint: disable=import-outside-toplevel
     out = []
     folder = os.path.join(work_dir, "rasters")
     if os.path.isdir(folder):
@@ -315,6 +318,8 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
     os.makedirs(folder)
     total = max(1, sum(plans[c.layer_id].tiles for c in configs))
     done = 0
+    # Metatiles rendered / tiles encoded at once (the CPU share of the export).
+    threads = max(1, int((os.cpu_count() or 1) * profile.output.cpu_percent / 100))
     for config in configs:
         layer = project.mapLayer(config.layer_id)
         plan = plans[config.layer_id]
@@ -322,10 +327,9 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
         start = done / total
         done += plan.tiles
         blend = _raster_blend(project, profile, layer, blend_name(layer), plan.warnings)
-        descriptor = render_layer(project, layer, config, plan,
-                                  os.path.join(folder, f"{lid}.pmtiles"),
-                                  progress.sub(start, done / total), title=config.title or layer.name(),
-                                  blend=blend)
+        descriptor = _cached_raster(cache, project, layer, config, plan, blend,
+                                    os.path.join(folder, f"{lid}.pmtiles"),
+                                    progress.sub(start, done / total), threads)
         warnings.extend(plan.warnings)
         if descriptor is None:
             warnings.append(f'Raster layer "{layer.name()}" draws nothing in the export extent; '
@@ -337,6 +341,40 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
                     "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
                     "descriptor": descriptor, "tileSize": 256})
     return out
+
+
+def _cached_raster(cache, project, layer, config, plan, blend: str, output: str, progress,
+                   threads: int = 1):
+    """render_layer, or its archive from an earlier export with the same key
+    (raster_tiles.raster_cache_key): rendering is the slow part and rasters
+    rarely change."""
+    from .raster_tiles import (descriptor_from_dict, descriptor_to_dict,  # pylint: disable=import-outside-toplevel
+                               raster_cache_key, render_layer)
+    key = raster_cache_key(project, layer, config, plan, blend) if cache is not None else None
+    if key:
+        hit = cache.get_bundle("rasters", key)
+        if hit is not None:
+            meta, folder = hit
+            plan.warnings.extend(meta.get("warnings", []))
+            progress.info(f'Raster layer "{layer.name()}": unchanged, reused from the export cache')
+            if meta.get("empty"):
+                return None
+            source = os.path.join(folder, "layer.pmtiles")
+            try:
+                os.link(source, output)  # same disk: no copy of a large archive
+            except OSError:
+                shutil.copyfile(source, output)
+            return descriptor_from_dict(meta["descriptor"], output)
+    before = len(plan.warnings)
+    descriptor = render_layer(project, layer, config, plan, output, progress,
+                              title=config.title or layer.name(), blend=blend, threads=threads)
+    if key:
+        meta = {"warnings": plan.warnings[before:], "empty": descriptor is None}
+        if descriptor is not None:
+            meta["descriptor"] = descriptor_to_dict(descriptor)
+        cache.put_bundle("rasters", key, meta,
+                         {"layer.pmtiles": descriptor.path} if descriptor is not None else {})
+    return descriptor
 
 
 def _raster_blend(project, profile, layer, mode: str, warnings: List[str]) -> str:

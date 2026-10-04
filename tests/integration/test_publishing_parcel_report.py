@@ -131,6 +131,11 @@ def test_parts_and_areas(site):
             assert part["x"] and 18 < part["x"][0] < 20 and 47 < part["x"][1] < 48
             assert os.path.exists(os.path.join(site["rel"], part["sw"]))
     assert first["f"] == {"kivett": "lakóház"}
+    # The parcel's WGS 84 extent (the print zooms on it): it holds the parts.
+    for record in (first, second):
+        west, south, east, north = record["bb"]
+        assert 18 < west < east < 20 and 47 < south < north < 48
+        assert all(west <= p["x"][0] <= east and south <= p["x"][1] <= north for p in record["p"])
 
 
 def test_restrictions(site):

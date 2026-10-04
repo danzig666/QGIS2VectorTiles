@@ -5,13 +5,14 @@
 // distorted or clipped); a long legend continues on the next page between
 // entries, never inside one. The map prints at a map scale (M 1:500): the
 // chosen one, or the screen's rounded to a standard scale; the sheet says it.
+// A parcel report prints zoomed on the parcel (focusView), down to 1:100.
 import { el } from "./icons.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 
 const SHEET = "q2vt-print-sheet";
 const EARTH = 40075016.686;      // m, equator (Web Mercator)
 const PAPER_PX = 0.0254 / 96;    // m, one CSS pixel on paper at 100 %
-export const PRINT_SCALES = [250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 500000];
+export const PRINT_SCALES = [100, 200, 250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 500000];
 
 // Scale denominator of the map at a zoom (512 px tiles) and latitude, on paper.
 export function scaleAt(zoom, lat) {
@@ -20,6 +21,27 @@ export function scaleAt(zoom, lat) {
 
 export function zoomFor(scale, lat) {
   return Math.log2(EARTH * Math.cos(lat * Math.PI / 180) / (512 * scale * PAPER_PX));
+}
+
+// A parcel printed on its own: the margin (share of the map on each side)
+// left around it, so the neighbouring parcels' edges show, no more.
+const FOCUS_MARGIN = 0.12;
+
+// The closest standard scale showing [west, south, east, north] (WGS 84)
+// whole on a map of width x height CSS px, with FOCUS_MARGIN around it, and
+// its centre; null for an empty box.
+export function focusView(bounds, width, height) {
+  const [w, s, e, n] = bounds || [];
+  if (![w, s, e, n].every(Number.isFinite) || !(e > w) || !(n > s) || !(width > 0) || !(height > 0)) return null;
+  const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  const lat = (s + n) / 2;
+  const dx = (e - w) / 360, dy = (merc(n) - merc(s)) / (2 * Math.PI);  // world fractions
+  const room = 1 - 2 * FOCUS_MARGIN;
+  const zoom = Math.log2(Math.min((width * room) / (dx * 512), (height * room) / (dy * 512)));
+  const fit = scaleAt(zoom, lat);  // the largest scale with the whole parcel on paper
+  const scale = PRINT_SCALES.find((candidate) => candidate >= fit) || PRINT_SCALES[PRINT_SCALES.length - 1];
+  const centerLat = (Math.atan(Math.sinh((merc(s) + merc(n)) / 2)) * 180) / Math.PI;
+  return { center: { lng: (w + e) / 2, lat: centerLat }, scale };
 }
 
 // The standard scale nearest to a scale (on a log scale).
@@ -58,14 +80,20 @@ export class Printer {
     return sheet;
   }
 
-  prepare(mode) {
+  // ``focus`` ([west, south, east, north], a parcel): printed zoomed on it
+  // (unless a print scale was chosen), else the screen's view.
+  prepare(mode, focus = null) {
     this.active = true;
     this.view = { center: this.map.getCenter(), zoom: this.map.getZoom(), bearing: this.map.getBearing() };
     document.body.classList.add("q2vt-printing", `q2vt-printing-${mode}`);
     this.map.resize();
-    const lat = this.view.center.lat;
-    const wanted = this.scale || standardScale(scaleAt(this.view.zoom, lat));
-    this.map.jumpTo({ ...this.view, zoom: zoomFor(wanted, lat) });  // the same centre, at the scale on paper
+    const canvas = this.map.getContainer();
+    const fitted = focus ? focusView(focus, canvas.clientWidth, canvas.clientHeight) : null;
+    const center = fitted && !this.scale ? fitted.center : this.view.center;
+    const lat = center.lat;
+    const wanted = this.scale || (fitted ? fitted.scale : standardScale(scaleAt(this.view.zoom, lat)));
+    // The centre (the parcel's, or the screen's), at the scale on paper.
+    this.map.jumpTo({ ...this.view, center, zoom: zoomFor(wanted, lat) });
     const actual = scaleAt(this.map.getZoom(), lat);  // the map's zoom limits may not reach it
     this.printScale = Math.abs(actual / wanted - 1) < 0.005 ? wanted : Math.round(actual);
     this.fill(mode);
@@ -82,9 +110,9 @@ export class Printer {
     this.sheet().replaceChildren(head, body);
   }
 
-  async print(mode = "map") {
+  async print(mode = "map", focus = null) {
     if (this.active) return;
-    this.prepare(mode);
+    this.prepare(mode, focus);
     await idle(this.map);
     this.fill(mode);  // the legend of what the printed map draws
     window.print();

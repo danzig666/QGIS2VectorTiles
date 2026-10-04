@@ -220,3 +220,51 @@ def test_hillshade_multiply_over_a_dem_is_published_as_shading(tmp_path):
     assert len(visible) and visible[:, 3].min() == 255 and visible[:, :3].max() > 0  # the DEM's own colours
     assert any("Földrészletek" in w and "multiply" in w for w in result.warnings)
     assert not any("Hillshade" in w or "Ortofotó" in w for w in result.warnings)
+
+
+def test_unchanged_raster_layers_are_reused_from_the_export_cache(tmp_path, monkeypatch):
+    """Rendering rasters is slow and they rarely change: a second export with
+    the same raster, style and settings reuses the archive; a style or image
+    setting change renders it again."""
+    from q2vt_plugin.src.publishing import raster_tiles  # pylint: disable=import-error
+    rendered = []
+    original = raster_tiles.render_layer
+
+    def counting(*args, **kwargs):
+        rendered.append(args[1].id())
+        return original(*args, **kwargs)
+    monkeypatch.setattr(raster_tiles, "render_layer", counting)
+    project, profile, parcels, ortho = _project(tmp_path)
+    profile.output.reuse_unchanged = True
+    lid = layer_logical_id(ortho.id())
+
+    def export():
+        rel = export_local(project, profile, EXTENT).release.release_dir
+        with open(os.path.join(rel, "data", f"raster-{lid}.pmtiles"), "rb") as handle:
+            return handle.read()
+    first = export()
+    second = export()
+    assert len(rendered) == 1 and first == second  # reused, same archive
+    ortho.renderer().setOpacity(0.5)  # style changed
+    export()
+    assert len(rendered) == 2
+    profile.layer(ortho.id()).raster_quality = 60  # image setting changed
+    export()
+    assert len(rendered) == 3
+
+
+def test_raster_tiles_are_the_same_with_any_number_of_threads(tmp_path):
+    """Metatiles are rendered and encoded in parallel, then written in a
+    fixed order: the archive is byte for byte the one a single thread makes
+    (so the export cache and unchanged-file uploads keep working)."""
+    from q2vt_plugin.src.publishing import raster_tiles  # pylint: disable=import-error
+    project, profile, parcels, ortho = _project(tmp_path)
+    config = profile.layer(ortho.id())
+    archives = []
+    for threads in (1, 4):
+        plan = raster_tiles.plan_layer(project, ortho, config, profile, EXTENT)
+        out = str(tmp_path / f"r{threads}.pmtiles")
+        raster_tiles.render_layer(project, ortho, config, plan, out, metatile=2, threads=threads)
+        with open(out, "rb") as handle:
+            archives.append(handle.read())
+    assert archives[0] == archives[1] and len(archives[0]) > 1000

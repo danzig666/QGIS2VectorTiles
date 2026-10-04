@@ -118,11 +118,12 @@ window that turns the project into a public, self-contained web map:
   several themes one after the other) and become one-click views in the web map; layers and groups can be marked as *always shown*; many rows can be changed at once.
 - **Parcel report**: clicking a parcel shows its area, its parts cut by the zoning and the
   regulation lines, its zones and every restriction touching it, with legend graphics
-  (computed in QGIS from the exact geometry when exporting).
+  (computed in QGIS from the exact geometry when exporting); printed zoomed on the parcel.
 - A modern viewer: floating panels on desktop, a bottom sheet on phones, light and dark
   appearance, your accent colour.
-- **Fast re-exports**: unchanged layers are reused from earlier exports, and unchanged files are
-  copied inside the bucket instead of uploaded again (a 3-minute plan re-exports in ~15 s).
+- **Fast re-exports**: unchanged layers (raster layers too) are reused from earlier exports,
+  raster tiles are rendered on all CPU cores, and unchanged files are copied inside the bucket
+  instead of uploaded again (a 3-minute plan re-exports in ~15 s).
 
 The Processing algorithm is unchanged; it gained an optional *Tile archive format*
 (MBTiles, PMTiles or both).

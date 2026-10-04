@@ -437,11 +437,28 @@ def _anchor(geometry: QgsGeometry, to_wgs) -> Optional[list]:
     return [round(p.x(), 7), round(p.y(), 7)]
 
 
+def _wgs_bounds(geometry: QgsGeometry, to_wgs) -> Optional[list]:
+    """[west, south, east, north] of a geometry in WGS 84 (7 decimals)."""
+    shape = QgsGeometry(geometry)
+    try:
+        shape.transform(to_wgs)
+    except Exception:  # noqa: BLE001
+        return None
+    box = shape.boundingBox()
+    if box.isEmpty():
+        return None
+    return [round(box.xMinimum(), 7), round(box.yMinimum(), 7),
+            round(box.xMaximum(), 7), round(box.yMaximum(), 7)]
+
+
 def _parcel(key, feature, geometry, info, zones, zone_legend, cuts, restrictions, to_wgs) -> dict:
     total = _area(geometry)
     record = {"k": key, "a": round(total, 2),
               "f": {f.field: _json_value(feature[f.field]) for f in info.fields
                     if feature.fields().indexOf(f.field) >= 0}}
+    bounds = _wgs_bounds(geometry, to_wgs)
+    if bounds:
+        record["bb"] = bounds  # the parcel's extent: printed zoomed on it
     # Parts: parcel x zone polygons, split by the cut lines.
     outer = QgsGeometry(geometry.constGet().boundary()).buffer(EDGE_TOLERANCE / 2, 2)
     parts = []

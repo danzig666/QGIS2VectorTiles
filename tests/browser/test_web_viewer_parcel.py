@@ -94,6 +94,7 @@ PRINT_STATE = """const sheet = document.getElementById('q2vt-print-sheet');
     buttons: sheet ? sheet.querySelectorAll('button').length : -1,
     legend: sheet ? sheet.querySelectorAll('.q2vt-legend-print .q2vt-legend-item').length : -1,
     scale: sheet?.querySelector('.q2vt-print-scale')?.textContent || '',
+    bounds: q2vtViewer.map.getBounds().toArray().flat(),
     metres: (() => { const m = q2vtViewer.map, w = m.getCanvas().getBoundingClientRect().width, h = m.getCanvas().getBoundingClientRect().height;
       return { px: w, m: m.unproject([0, h / 2]).distanceTo(m.unproject([w, h / 2])) }; })() };"""
 
@@ -119,9 +120,16 @@ def test_print_fills_one_sheet_and_restores(site, tmp_path):
     assert "q2vt-printing-map" in legend["classes"] and legend["legend"] > 0 and not legend["card"]
     # Map scale: the screen's, rounded to a standard scale, or the chosen one, exact on paper
     # (a CSS pixel is 0.0254 / 96 m at 100 %).
-    standard = {250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 500000}
+    standard = [100, 200, 250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000,
+                100000, 200000, 500000]
     shown = int("".join(ch for ch in parcel["scale"].split(":")[-1] if ch.isdigit()))
     assert shown in standard
+    # A parcel prints zoomed on it: wholly on the map, at the closest standard
+    # scale that shows it (not the screen's zoom 18), filling much of the map.
+    west, south, east, north = site["records"]["100/1"]["bb"]
+    w, s, e, n = parcel["bounds"]
+    assert w < west and e > east and s < south and n > north
+    assert max((east - west) / (e - w), (north - south) / (n - s)) > 0.3
     assert "".join(ch for ch in legend["scale"].split(":")[-1] if ch.isdigit()) == "1000"
     paper = legend["metres"]["px"] * 0.0254 / 96
     assert abs(legend["metres"]["m"] / paper / 1000 - 1) < 0.01

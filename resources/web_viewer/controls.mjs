@@ -357,7 +357,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   parts.printer = new Printer({ map, manifest, content: (mode) =>
     (mode === "parcel" && parts.parcel ? parts.parcel.printCard() : null) || parts.legend.printList() });
   viewer.printer = parts.printer;
-  if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel");
+  if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel", parts.parcel.bounds());
   if (panel.panes.filters) parts.filters = new Filters({ manifest, state, container: panel.panes.filters });
   if (panel.panes.tools) parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });
   if (panel.panes.share) shareBlock(panel.panes.share, permalink);
