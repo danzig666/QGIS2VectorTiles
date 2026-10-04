@@ -711,3 +711,21 @@ exported/imported JSON. Google Map Tiles API and MapTiler were not wanted.
 | `pytest tests/integration/test_publishing_label_always.py` | 2 passed |
 | related suites | 77 passed |
 | Test plan, a web basemap only and shown at start (Chromium) | raster layer added, tiles requested from the configured server, no page errors |
+
+## 4.8.1: web basemap table = QGIS XYZ connections
+
+Owner request: use QGIS's own XYZ store as the option list.
+
+- **Table:** `_fill_xyz_table(used)` lists the profile's web basemaps (ticked), then every
+  other `qgis_xyz_connections()` entry (unticked).
+- **Rows:** the columns are Use, Name, address, attribution, min and max zoom. An existing
+  connection's name is read-only, and an `http://` address cannot be ticked.
+- **Collect:** `_xyz_rows(used_only)` returns the ticked rows as `basemap.xyz`, in table order;
+  ids `xyz-<n>` follow that order. Every row is saved back with `save_qgis_xyz_connections`
+  (only changed keys are written).
+- **Layout:** the Basemap tab is a QScrollArea with a group for the bundled extract and one for
+  web basemaps; "Basemap shown at start" sits on top.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publish_dialog_extent.py` | 8 passed |
