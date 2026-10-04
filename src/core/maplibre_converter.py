@@ -3298,6 +3298,11 @@ class QgisMapLibreStyleExporter:
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around
+            char_width = self._char_width(label_settings)
+            if char_width:
+                # The font's mean advance per character (em): the viewer's
+                # label boxes (a generic 0.6 em made narrow fonts too wide).
+                layer_def["metadata"]["q2vt:char-width"] = char_width
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
     # MapLibre checks that a line label fits along its line with the
@@ -3624,6 +3629,24 @@ class QgisMapLibreStyleExporter:
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
         })
+
+    # Text whose mean character width stands for label text (lower case,
+    # Hungarian accents, digits, spaces and punctuation).
+    _CHAR_SAMPLE = "the quick brown fox jumps over the lazy dog, árvíztűrő tükörfúrógép 1203/4"
+
+    @classmethod
+    def _char_width(cls, label_settings) -> Optional[float]:
+        """Mean advance per character of the label font, in em (Qt's font
+        metrics, as QGIS measures labels), rounded to 0.01."""
+        try:
+            font = QFont(label_settings.format().font())
+            font.setPixelSize(100)
+            from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+            advance = QFontMetricsF(font).horizontalAdvance(cls._CHAR_SAMPLE)
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        width = advance / 100.0 / len(cls._CHAR_SAMPLE)
+        return round(width, 2) if 0.2 <= width <= 1.2 else None
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:

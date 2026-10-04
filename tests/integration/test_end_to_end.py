@@ -7,7 +7,7 @@ import pytest
 from qgis.core import (QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
                        QgsFeature, QgsFillSymbol, QgsGeometry, QgsLinePatternFillSymbolLayer,
                        QgsPalLayerSettings, QgsProcessingException, QgsProcessingFeedback,
-                       QgsProperty, QgsRectangle, QgsShapeburstFillSymbolLayer,
+                       QgsLineburstSymbolLayer, QgsProperty, QgsRectangle,
                        QgsSingleSymbolRenderer, QgsSymbolLayer, QgsTextFormat,
                        QgsVectorLayerSimpleLabeling, Qgis)
 from qgis.PyQt.QtGui import QColor
@@ -156,7 +156,7 @@ def test_other_processing_temp_outputs_are_kept(plugin):
 def test_strict_mode_fails_before_publication(export, tmp_path):
     layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
     symbol = QgsFillSymbol()
-    symbol.changeSymbolLayer(0, QgsShapeburstFillSymbolLayer())
+    symbol.changeSymbolLayer(0, QgsLineburstSymbolLayer())  # an unsupported outline
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     with pytest.raises(QgsProcessingException, match="Strict export failed"):
         export(layer, fidelity_mode=1)
@@ -172,7 +172,7 @@ def test_strict_mode_fails_before_publication(export, tmp_path):
 def test_unsupported_fill_is_reported_not_drawn_black(export, tmp_path):
     layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
     symbol = QgsFillSymbol()
-    symbol.changeSymbolLayer(0, QgsShapeburstFillSymbolLayer())
+    symbol.changeSymbolLayer(0, QgsLineburstSymbolLayer())  # an unsupported outline
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     exporter, result = export(layer)
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
@@ -420,6 +420,22 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
     labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
     assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
+
+    # Free (angled) with "whole polygon" (a user's QML): QGIS places Free
+    # labels on the polygon clipped to the extent whatever the centroid
+    # setting, angled where they do not fit flat: the viewer places them
+    # (they used to stay static and horizontal).
+    layer = zoning_layer(path=str(tmp_path / "vp_free.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings.placement = Qgis.LabelPlacement.Free
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    metadata = labels[0].get("metadata", {})
+    assert metadata.get("q2vt:visible-polygons", "").endswith("_vp")
+    assert metadata["q2vt:label-orient"] == "free" and metadata["q2vt:label-anchor"] == "pole"
 
 
 def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_path):

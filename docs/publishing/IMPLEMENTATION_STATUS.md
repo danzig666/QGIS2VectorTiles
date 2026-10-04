@@ -901,3 +901,30 @@ shapes) and comparing QGIS with the browser.
 | `pytest tests/integration/test_publish_dialog_layers.py` (two themes in a row) | 3 passed |
 | unit tests, `test_sprites.py`, `test_materialize.py`, `test_gradient_fills.py`, `test_plugin_package.py` | 355 passed |
 | gallery of the style library, QGIS vs MapLibre | Barb Wire, Bricks, Organic Blocks, Dormido, Fantasia and the rainbow gradients match (see release notes for what remains) |
+
+## 4.11.1: Free (angled) polygon labels as QGIS turns them
+
+Found with a user's parcel label layer (Free placement, *Centroid: whole polygon*, 3 map-unit
+italic Liberation Sans) that was horizontal on the web.
+
+- `rules_exporter._labels_visible_polygon`: Free labels always go to the viewer placer.
+  *Centroid: whole polygon* only moves centroid placements in QGIS; Free and Horizontal labels
+  are placed on the polygon clipped to the extent (`QgsPalLayerSettings::registerFeature`).
+- `visible_labels.freeAngle` ports PAL `Feature::createCandidatesForPolygon`, using the oriented
+  bounding box of the convex hull (`orientedBox`, rotating calipers):
+  - horizontal when a label twice the size, centred on the box, has its corners inside;
+  - else along the box axis nearest horizontal when both sides exceed 1.5 label widths;
+  - else along the long side.
+
+  The label size has no margin here, as PAL measures it. It replaced "horizontal if it fits
+  at the roomiest point, else the local edge direction".
+- `q2vt:char-width` (`_char_width`): the label font's mean advance per character, measured
+  with `QFontMetricsF` on a sample text; the viewer's label boxes use it instead of 0.6 em.
+- `test_pmtiles_transport.test_stable_entry_routes_to_the_release_with_state` still expected
+  the `/releases/<id>/` address, which 4.7.2 deliberately replaced with the stable address.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 32 passed (3 new: Free angles against QGIS 3.34 for 3 shapes × 19 angles) |
+| `pytest tests/integration/test_end_to_end.py` | 21 passed (Free + whole polygon case new; two tests moved from the now supported shapeburst fill to an unsupported Lineburst outline) |
+| `pytest tests/browser` | 90 passed |

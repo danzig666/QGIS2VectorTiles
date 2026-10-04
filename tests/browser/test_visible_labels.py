@@ -492,3 +492,34 @@ def test_around_point_distance_in_map_units_follows_the_zoom():
                      "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
     diagonal = 0.04 * math.sqrt(0.5)
     assert sum(candidates, []) == pytest.approx([0.5, 0.44, 0.36, 0.5, 0.6 + diagonal, 0.52 + diagonal])
+
+
+# QGIS 3.34 Free (angled) label angles for rectangles w x h turned by the box
+# angle (counter-clockwise, map y up), "free label" at 20 map units (about
+# 95 x 26), read from QgsLabelingResults; normalised to [-90, 90) degrees.
+_QGIS_FREE = {
+    (300, 200): {a: 0 for a in range(0, 181, 10)},
+    (400, 150): {0: 0, 10: 0, 20: 0, 30: 0, 40: -40, 50: 40, 60: 30, 70: 20, 80: 10, 90: 0,
+                 100: -10, 110: -20, 120: -30, 130: -40, 140: 40, 150: 0, 160: 0, 170: 0, 180: 0},
+    (300, 60): {0: 0, 10: -10, 20: -20, 30: -30, 40: -40, 50: -50, 60: -60, 70: -70, 80: -80,
+                90: -90, 100: 80, 110: 70, 120: 60, 130: 50, 140: 40, 150: 30, 160: 20,
+                170: 10, 180: 0},
+}
+
+
+@pytest.mark.parametrize("size", list(_QGIS_FREE))
+def test_free_angle_follows_qgis(size):
+    """Free (angled) labels as QGIS's PAL turns them: horizontal when a
+    label twice the size fits around the box centre, else along the box axis
+    nearest horizontal (both sides long enough) or along the long side."""
+    w, h = size
+    rings = []
+    for angle in _QGIS_FREE[size]:
+        a = math.radians(angle)
+        ring = [[x * math.cos(a) - y * math.sin(a), -(x * math.sin(a) + y * math.cos(a))]  # y down
+                for x, y in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2))]
+        rings.append(ring)
+    got = _js(f"{json.dumps(rings)}.map((ring) => m.freeAngle([ring], [47.5, 13]) * 180 / Math.PI)")
+    for (box_angle, expected), angle in zip(_QGIS_FREE[size].items(), got):
+        expected = -90 if expected == 90 else expected
+        assert min(abs(angle - expected), abs(abs(angle - expected) - 180)) < 1, (box_angle, angle, expected)
