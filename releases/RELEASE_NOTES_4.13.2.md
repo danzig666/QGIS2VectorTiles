@@ -17,7 +17,7 @@ For layers with no web scale limit, the *Scales* column in the Map tab showed on
 
 | Run | Result |
 |---|---|
-| Pipeline tests | 6 passed (duplicate keys stop the export before the tile export) |
+| Pipeline tests | 5 passed (duplicate keys stop the export before the tile export) |
 | Export cache tests | 4 passed (new: two layers in one GeoPackage, each redone only for its own change; fails without the fix) |
 | Publish window layer tests | 4 passed (new: the Scales column shows the QGIS range) |
-| Parcel report, publish dialog and raster tests | 25 passed |
+| Pipeline, parcel report, publish dialog, raster and cache unit tests together | 31 passed |

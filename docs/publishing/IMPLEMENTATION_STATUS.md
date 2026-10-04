@@ -1030,7 +1030,7 @@ italic Liberation Sans) that was horizontal on the web.
 
 | Run | Result |
 |---|---|
-| `pytest tests/integration/test_publishing_pipeline.py` | 6 passed (duplicate keys stop the export in PLAN; features no category draws are not checked) |
+| `pytest tests/integration/test_publishing_pipeline.py` | 5 passed (duplicate keys stop the export in PLAN; features no category draws are not checked) |
 | `pytest tests/integration/test_export_cache.py` | 4 passed (new: two layers in one GeoPackage, one edited and the other's key changed, each redone for its own reason; fails without the fix: both layers redone) |
 | `pytest tests/integration/test_publish_dialog_layers.py` | 4 passed (new: the Scales column shows the QGIS range) |
-| Parcel report, publish dialog and raster tests | 25 passed |
+| Pipeline, parcel report, publish dialog, raster and cache unit tests together | 31 passed |
