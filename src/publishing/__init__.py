@@ -1,5 +1,5 @@
 """
-Web publishing for QGIS2VectorTiles (fork).
+Web publishing for QWebMap.
 
 Pure-Python core (no QGIS imports in this package's top-level modules except
 ``qgis_*.py`` adapters): publication profiles, MBTiles -> PMTiles packaging of

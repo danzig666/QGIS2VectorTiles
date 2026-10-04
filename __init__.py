@@ -1,4 +1,4 @@
-"""QGIS2VectorTiles (fork) plugin for QGIS"""
+"""QWebMap plugin for QGIS (formerly QGIS2VectorTiles fork)"""
 
 import sys as _sys
 
@@ -13,9 +13,14 @@ for _name in [name for name in _sys.modules if name.startswith(__name__ + ".")]:
 from qgis.core import QgsApplication  # noqa: E402  pylint: disable=wrong-import-position
 from .src.processing.provider import QGIS2VectorTilesPorvider  # noqa: E402  pylint: disable=wrong-import-position
 
+PLUGIN_NAME = "QWebMap"
+# The plugin's folder before the rename: when both are installed, the old one
+# registers the same Processing provider and adds a second menu.
+OLD_FOLDER = "QGIS2VectorTilesFork"
+
 
 class QGIS2VectorTiles:
-    """QGIS2VectorTiles main class"""
+    """QWebMap main class"""
 
     def __init__(self, iface):
         """Constructor"""
@@ -39,12 +44,26 @@ class QGIS2VectorTiles:
         self.publish_action = QAction(QIcon(join(dirname(__file__), "icon.png")),
                                       "Publish Web Map…", self.iface.mainWindow())
         self.publish_action.setObjectName("q2vtPublishWebMap")
-        self.publish_action.setToolTip("QGIS2VectorTiles (fork): publish the project as a vector-tile "
-                                       "web map (PMTiles)")
+        self.publish_action.setToolTip(f"{PLUGIN_NAME}: publish the project as a web map")
         self.publish_action.triggered.connect(self.show_publish_dialog)
         self.iface.addWebToolBarIcon(self.publish_action)
-        self.iface.addPluginToWebMenu("QGIS2VectorTiles (fork)", self.publish_action)
+        self.iface.addPluginToWebMenu(PLUGIN_NAME, self.publish_action)
         self.dialog = None
+        self._warn_old_plugin()
+
+    def _warn_old_plugin(self):
+        """Tell the user to remove the plugin's pre-rename copy if it is installed."""
+        try:
+            from qgis.utils import available_plugins  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            return
+        if OLD_FOLDER not in available_plugins or __name__ == OLD_FOLDER:
+            return
+        from qgis.core import Qgis  # pylint: disable=import-outside-toplevel
+        self.iface.messageBar().pushMessage(
+            PLUGIN_NAME, "QGIS2VectorTiles (fork) is the old name of QWebMap and is still installed. "
+            "Uninstall it in Plugins > Manage and Install Plugins (your settings are kept).",
+            Qgis.MessageLevel.Warning, 0)
 
     def show_publish_dialog(self):
         """Open (or raise) the Publish Web Map window."""
@@ -65,7 +84,7 @@ class QGIS2VectorTiles:
         action = getattr(self, "publish_action", None)
         if action is not None and self.iface is not None:
             self.iface.removeWebToolBarIcon(action)
-            self.iface.removePluginWebMenu("QGIS2VectorTiles (fork)", action)
+            self.iface.removePluginWebMenu(PLUGIN_NAME, action)
             action.deleteLater()
         if getattr(self, "dialog", None) is not None:
             self.dialog.close()

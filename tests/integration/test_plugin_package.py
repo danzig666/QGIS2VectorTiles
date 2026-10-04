@@ -11,7 +11,7 @@ import textwrap
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-FOLDER = "QGIS2VectorTilesFork"
+FOLDER = "QWebMap"
 
 SMOKE = textwrap.dedent("""
     import os, sys
@@ -38,9 +38,14 @@ SMOKE = textwrap.dedent("""
         def removePluginWebMenu(self, menu, action): calls.append(("unmenu",))
         canvas = QgsMapCanvas()
         def mapCanvas(self): return self.canvas
-        def messageBar(self): return None
+        def messageBar(self): return Bar()
 
-    import QGIS2VectorTilesFork as plugin_package
+    class Bar:
+        def pushMessage(self, title, text, *args): calls.append(("message", title, text[:40]))
+
+    import qgis.utils
+    qgis.utils.available_plugins.append("QGIS2VectorTilesFork")  # the pre-rename copy
+    import QWebMap as plugin_package
     assert plugin_package.__file__.startswith(sys.argv[1]), plugin_package.__file__
     plugin = plugin_package.classFactory(Iface())
     plugin.initGui()
@@ -48,18 +53,18 @@ SMOKE = textwrap.dedent("""
     plugin.show_publish_dialog()
     assert plugin.dialog is not None and plugin.dialog.isVisible()
 
-    from QGIS2VectorTilesFork.src.publishing.providers.s3 import sdk_versions
-    from QGIS2VectorTilesFork.src.publishing.pmtiles_builder import build_pmtiles  # noqa: F401
-    from QGIS2VectorTilesFork.src.publishing import controller, deployments  # noqa: F401
+    from QWebMap.src.publishing.providers.s3 import sdk_versions
+    from QWebMap.src.publishing.pmtiles_builder import build_pmtiles  # noqa: F401
+    from QWebMap.src.publishing import controller, deployments  # noqa: F401
     versions = sdk_versions()
     plugin.unload()
     # Updated without restarting QGIS: QGIS imports the package again; a
     # module first imported late (the export cache) must not stay old.
-    import QGIS2VectorTilesFork.src.core.export_cache as old_cache
+    import QWebMap.src.core.export_cache as old_cache
     old_cache.STALE = True
-    del sys.modules["QGIS2VectorTilesFork"]
-    import QGIS2VectorTilesFork  # noqa: F811
-    import QGIS2VectorTilesFork.src.core.export_cache as new_cache
+    del sys.modules["QWebMap"]
+    import QWebMap  # noqa: F811
+    import QWebMap.src.core.export_cache as new_cache
     assert not hasattr(new_cache, "STALE"), "stale module after a plugin reload"
     print("CALLS", calls)
     print("SDK", versions)
@@ -96,7 +101,9 @@ def test_release_zip_installs_and_loads(tmp_path):
                             cwd=str(tmp_path), env={**os.environ, "PYTHONPATH": ""})
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
     assert "('toolbar', 'Publish Web Map…')" in result.stdout
-    assert "('menu', 'QGIS2VectorTiles (fork)')" in result.stdout
+    assert "('menu', 'QWebMap')" in result.stdout
+    # the pre-rename copy is reported
+    assert "('message', 'QWebMap', 'QGIS2VectorTiles (fork) is the old name " in result.stdout
     assert "('untoolbar',)" in result.stdout and "('unmenu',)" in result.stdout
     if "'vendored': True" not in result.stdout:  # a system boto3 takes precedence
         assert "'boto3'" in result.stdout

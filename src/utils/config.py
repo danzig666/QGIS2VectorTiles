@@ -13,8 +13,8 @@ from qgis.PyQt.QtCore import qVersion
 # =====================================================================
 # PLUGIN PATHS
 # The folder this plugin is installed in (src/utils/ is two levels down),
-# whatever its name: the fork installs as QGIS2VectorTilesFork next to the
-# official QGIS2VectorTiles, and a development checkout may be linked in.
+# whatever its name: the plugin installs as QWebMap (QGIS2VectorTilesFork
+# before the rename), and a development checkout may be linked in.
 # =====================================================================
 _PLUGIN_DIR = dirname(dirname(dirname(abspath(__file__))))
 _RESOURCES = join(_PLUGIN_DIR, "resources")

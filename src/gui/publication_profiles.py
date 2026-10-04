@@ -20,7 +20,7 @@ from qgis.core import QgsProject
 from ..publishing.models import PublicationProfile
 from ..publishing.profile import dumps, load_profile
 
-SCOPE = "QGIS2VectorTilesFork"
+SCOPE = "QGIS2VectorTilesFork"  # the plugin's pre-rename name: kept so saved projects load
 KEY_PROFILES = "publication_profiles"
 KEY_ACTIVE = "active_publication_profile"
 

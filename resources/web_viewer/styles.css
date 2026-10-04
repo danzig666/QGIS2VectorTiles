@@ -1,4 +1,4 @@
-/* QGIS2VectorTiles web map viewer: floating glass panels over a full-bleed
+/* QWebMap web map viewer: floating glass panels over a full-bleed
    map on desktop, a bottom sheet on phones; light and dark themes. */
 :root {
   --q2vt-accent: #2563eb;

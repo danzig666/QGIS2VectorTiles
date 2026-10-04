@@ -1,10 +1,10 @@
 [general]
-name=QGIS2VectorTiles (fork)
+name=QWebMap
 qgisMinimumVersion=3.44
 qgisMaximumVersion=4.99
-description=Pack a QGIS project into a lightweight vector tile package with a matching web style and a ready-to-use web viewer. (Fork focused on QGIS-accurate styling.)
-about=This is a fork of QGIS2VectorTiles by Jossef Kanter (https://github.com/GallPeters/QGIS2VectorTiles) that makes the web map match the QGIS styling much more closely: exact marker-line positions, patterns, dashes, labels and a fidelity report. Its Publish Web Map window turns the project into a public web map: vector tiles in one PMTiles archive, raster layers as image tiles, an optional OpenStreetMap vector basemap, map themes as views, a full modern viewer (layers, legend, popups, search, filters, permalinks, measuring) and verified publishing to Cloudflare R2 or other S3-compatible storage, all settings saved in the project. QGIS2VectorTiles converts a QGIS project into a vector tile package with a single vector tile source, a web style matching the original QGIS styling, and a ready-to-use web viewer. It enables fast client-side rendering, lightweight publishing, and easy sharing - without servers or third-party libraries.
-version=4.8.1
+description=Publish a QGIS project as a fast web map that looks like it does in QGIS: vector tiles, a full web viewer and one-click publishing to Cloudflare R2 or other S3-compatible storage.
+about=QWebMap turns a QGIS project into a public web map that looks like it does in QGIS. Its Publish Web Map window builds vector tiles in one PMTiles archive (QGIS-accurate styling: marker-line positions, patterns, dashes, labels, with a fidelity report), raster layers as image tiles, an optional OpenStreetMap vector basemap or web (XYZ) basemaps, map themes as views and a full modern viewer (layers, legend, popups, search, filters, permalinks, measuring with snapping, printing). It publishes with verification to Cloudflare R2 or other S3-compatible storage at a stable address, and keeps all settings in the project. No map server needed. QWebMap started as a fork of QGIS2VectorTiles by Jossef Kanter (https://github.com/GallPeters/QGIS2VectorTiles); its Processing tool still exports a static vector tile package.
+version=4.9.0
 author=Jossef Kanter
 email=jossefkan@gmail.com
 experimental=False
@@ -12,7 +12,7 @@ deprecated=False
 homepage=https://github.com/danzig666/QGIS2VectorTiles
 repository=https://github.com/danzig666/QGIS2VectorTiles
 tracker=https://github.com/danzig666/QGIS2VectorTiles/issues
-tags=vector tile, vectortile, vector tiles, vectortiles, cartography, style, styles, tile, tiles, web, webmaps, webmapping, wms, wmts, mapbox, maptiler, openlayers, maplibre, leaflet, geoserver, server, share, sharing, mbtiles, pmtiles, r2, s3, publish, qlr
+tags=vector tile, vectortile, vector tiles, vectortiles, cartography, style, styles, tile, tiles, web, webmaps, webmapping, wms, wmts, mapbox, maptiler, openlayers, maplibre, leaflet, geoserver, server, share, sharing, mbtiles, pmtiles, r2, s3, publish, qlr, web map, webmap, qwebmap, cloudflare
 icon=icon.png
 hasProcessingProvider=yes
 changelog=https://github.com/danzig666/QGIS2VectorTiles/releases

@@ -1,4 +1,4 @@
-// Transport binding for published QGIS2VectorTiles maps.
+// Transport binding for published QWebMap maps.
 //
 // The manifest is the authority: the style file on disk carries the vector
 // source without tile URLs; here each manifest source is bound to an

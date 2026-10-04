@@ -288,7 +288,7 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
                   "coordinates": profile.interaction.coordinates,
                   "print": profile.interaction.print},
         "diagnostics": "public-diagnostics.json",
-        "generator": {"name": "QGIS2VectorTiles (fork)", "version": plugin_version()},
+        "generator": {"name": "QWebMap", "version": plugin_version()},
     }
     manifest.update(extra or {})
     return manifest
