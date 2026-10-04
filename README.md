@@ -27,7 +27,7 @@ a full web viewer · no map server, database or Docker
 > in your projects, the window position and saved keys carry over.
 
 <kbd>
-<img width="840" alt="QWebMap demo: the QGIS project and the web map side by side, the Publish Web Map window, then the web viewer (layers, popups, search, measuring, dark mode, phone)" src="docs/images/qwebmap-demo.gif" />
+<img width="840" alt="QWebMap demo: the QGIS project and the web map side by side, close-ups of QGIS symbology and its vector-tile version (hatches, point-pattern fills, SVG icons, marker-line arrows, road casings, labels), the fidelity report, the Publish Web Map window, then the web viewer (layers, popups, search, measuring, dark mode, phone)" src="docs/images/qwebmap-demo.gif" />
 </kbd>
 
 <sub>Demo data: Swellendam from the <a href="https://github.com/qgis/QGIS-Training-Data">QGIS training data</a> (GPL-2.0, from OpenStreetMap).</sub>
