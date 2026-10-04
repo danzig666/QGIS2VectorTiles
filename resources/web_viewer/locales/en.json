@@ -116,5 +116,8 @@
   "streetview.unavailable": "Street View could not be loaded (check the internet connection or the API key).",
   "streetview.drag": "Drag to move the viewpoint",
   "streetview.expand": "Larger / smaller",
-  "streetview.close": "Close Street View"
+  "streetview.close": "Close Street View",
+  "streetview.coverageFailed": "The blue Street View lines cannot be shown ({reason}). Tapping still opens the nearest Street View.",
+  "streetview.reasonKey": "Google refused the API key for the Map Tiles API: enable that API in Google Cloud and allow it in the key's API restrictions",
+  "streetview.reasonNetwork": "no connection to Google"
 }

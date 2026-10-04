@@ -142,6 +142,7 @@ export class StreetView {
   // transparent overlay. Without that API enabled the lines are missing and
   // a tap still finds (or not) the nearest panorama.
   async showCoverage() {
+    if (this.coverageMissing) return;  // refused before: a reload after fixing the key retries
     if (this.map.getLayer(COVERAGE)) {
       this.map.setLayoutProperty(COVERAGE, "visibility", "visible");
       return;
@@ -154,7 +155,12 @@ export class StreetView {
                                layerTypes: ["layerStreetview"], overlay: true,
                                scale: window.devicePixelRatio > 1 ? "scaleFactor2x" : "scaleFactor1x" }),
       });
-      if (!response.ok) throw new Error(`Map Tiles API: HTTP ${response.status}`);
+      if (!response.ok) {
+        let message = "";
+        try { message = (await response.json())?.error?.message || ""; } catch { /* not JSON */ }
+        throw Object.assign(new Error(`Map Tiles API: HTTP ${response.status} ${message}`.trim()),
+                            { status: response.status, google: message });
+      }
       const { session } = await response.json();
       if (!session || !this.active) return;
       this.map.addSource(COVERAGE, {
@@ -163,11 +169,27 @@ export class StreetView {
         attribution: "Street View © Google",
       });
       this.map.addLayer({ id: COVERAGE, type: "raster", source: COVERAGE, paint: { "raster-opacity": 0.85 } });
+      // Tiles refused one by one (e.g. a key restriction): said once.
+      this.map.on("error", (event) => {
+        if (event.sourceId === COVERAGE && !this.coverageMissing) this.coverageFailed(event.error);
+      });
     } catch (error) {
-      this.coverageMissing = true;
-      this.viewer.diagnostics?.warnings?.push({ key: "streetview-coverage", detail: String(error).slice(0, 300) });
-      if (this.active && !this.panorama) this.hint(this.baseHint());
+      this.coverageFailed(error);
     }
+  }
+
+  // The blue lines cannot be shown: say why (the map's owner needs Google's
+  // reason, e.g. the Map Tiles API not enabled for the key); a tap still works.
+  coverageFailed(error) {
+    this.coverageMissing = true;
+    const status = error?.status;
+    const detail = error?.google || String(error?.message || error || "");
+    console.warn("Street View coverage (Google Map Tiles API):", detail);
+    this.viewer.diagnostics?.warnings?.push({ key: "streetview-coverage", detail: detail.slice(0, 300) });
+    if (this.map.getLayer(COVERAGE)) this.map.setLayoutProperty(COVERAGE, "visibility", "none");
+    const reason = status === 403 || status === 401 ? t("streetview.reasonKey")
+      : status ? `HTTP ${status}: ${detail.slice(0, 160)}` : t("streetview.reasonNetwork");
+    if (this.active) this.hint(t("streetview.coverageFailed", { reason }), true, false, 9000);
   }
 
   // The nearest panorama to ``target``, looking at it.
@@ -284,7 +306,7 @@ export class StreetView {
     return t(this.coverageMissing ? "streetview.hintNoCoverage" : "streetview.hint");
   }
 
-  hint(text, alert = false, sticky = false) {
+  hint(text, alert = false, sticky = false, ms = 3500) {
     if (!this.active) return;
     if (!this.hintNode) {
       this.hintNode = el("div", "q2vt-sv-hint");
@@ -294,6 +316,6 @@ export class StreetView {
     this.hintNode.classList.toggle("q2vt-sv-alert", alert);
     this.hintNode.textContent = text;
     clearTimeout(this.hintTimer);
-    if (alert && !sticky) this.hintTimer = setTimeout(() => this.hint(this.baseHint()), 3500);
+    if (alert && !sticky) this.hintTimer = setTimeout(() => this.hint(this.baseHint()), ms);
   }
 }

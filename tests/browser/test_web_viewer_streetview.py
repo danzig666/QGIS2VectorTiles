@@ -48,6 +48,8 @@ const realFetch = window.fetch.bind(window);
 window.fetch = (url, options) => {
   if (String(url).startsWith('https://tile.googleapis.com/v1/createSession')) {
     calls.session = { url: String(url), body: JSON.parse(options.body) };
+    if (window.__svRefuse) return Promise.resolve(new Response(JSON.stringify({ error: { code: 403,
+      message: 'This API key is not authorized to use this service or API.' } }), { status: 403 }));
     return Promise.resolve(new Response(JSON.stringify({ session: 'S1' }), { status: 200 }));
   }
   return realFetch(url, options);
@@ -171,3 +173,20 @@ def test_phone_layout(site, tmp_path):
     assert tapped["marker"][1] > bottom  # the viewpoint stays in sight below the panorama
     assert full["panel"][3] >= 799  # full screen
 
+
+
+def test_refused_coverage_says_why(site, tmp_path):
+    """Map Tiles API refused (not enabled for the key): the visitor reads why the
+    blue lines are missing; a tap still opens the nearest panorama."""
+    lng, lat = _anchor(site)
+    start = _start(site)
+    start.insert(3, {"eval": "window.__svRefuse = true; return 1;"})
+    results = _run(site["url"], start + [
+        {"eval": STATE},
+        _pano_at(lng, lat - 0.0002), {"clickLngLat": [lng, lat]}, {"wait": 500}, {"eval": STATE},
+    ], tmp_path)
+    refused, tapped = results[-3], results[-1]
+    assert refused["coverage"] is None and refused["alert"]
+    assert refused["hint"].startswith("A kék utcakép-vonalak nem jeleníthetők meg")
+    assert "Map Tiles API" in refused["hint"]
+    assert tapped["panoramas"] == 1 and tapped["pano"] == "P1"

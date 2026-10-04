@@ -116,5 +116,8 @@
   "streetview.unavailable": "Az utcakép nem tölthető be (internetkapcsolat vagy API-kulcs).",
   "streetview.drag": "Húzza a nézőpont áthelyezéséhez",
   "streetview.expand": "Nagyobb / kisebb",
-  "streetview.close": "Utcakép bezárása"
+  "streetview.close": "Utcakép bezárása",
+  "streetview.coverageFailed": "A kék utcakép-vonalak nem jeleníthetők meg ({reason}). Koppintásra a legközelebbi utcakép így is megnyílik.",
+  "streetview.reasonKey": "a Google elutasította az API-kulcsot a Map Tiles API-hoz: engedélyezze ezt az API-t a Google Cloudban, és vegye fel a kulcs API-korlátozásai közé",
+  "streetview.reasonNetwork": "nincs kapcsolat a Google-lal"
 }
