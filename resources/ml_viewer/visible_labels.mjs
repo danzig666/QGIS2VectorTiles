@@ -479,12 +479,16 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           && fitsFlat(rings, old.point, roomAt(rings, old.point), label) && fine(old.point)
           && roomAt(rings, old.point) >= KEEP_ROOM * best.room;
         const oldScale = Number(old?.properties?.[LABEL_SCALE]) || 1;
+        // QGIS decides the angle from the label's own size (no margin).
+        const bare = (box) => box.map((h) => Math.max(h - LABEL_MARGIN_PX * (options.precision || 0), h / 2));
         const place = (box, keepOld) => {
-          if (keepOld && flatOld) return { point: old.point, angle: 0 };
-          if (fitsFlat(rings, best.point, best.room, box) && fit(...best.point) >= 0) {
-            return { point: best.point, angle: 0 };
+          const angle = freeAngle(rings, bare(box));
+          if (!angle) {
+            if (keepOld && flatOld) return { point: old.point, angle: 0 };
+            if (fitsFlat(rings, best.point, best.room, box) && fit(...best.point) >= 0) {
+              return { point: best.point, angle: 0 };
+            }
           }
-          const angle = localDirection(loaded, best.point, box[0]);
           return placeTurned(rings, angle, box, view, avoid, best.point, oldScale === scale ? old : null,
                              field, options.precision);
         };
@@ -501,8 +505,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           }
           if (!placed) {
             const small = [label[0] * scale, label[1] * scale];
-            const angle = fitsFlat(rings, best.point, best.room, small) ? 0
-              : localDirection(loaded, best.point, small[0]);
+            const angle = freeAngle(rings, bare(small));
             placed = { point: best.point, angle };
           }
         }
@@ -744,6 +747,67 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
     return { point: old.point, angle };
   }
   return { point: found.p, angle };
+}
+
+// The angle QGIS gives a Free (angled) polygon label (PAL
+// Feature::createCandidatesForPolygon), from the oriented bounding box of the
+// polygon's convex hull: horizontal when a label twice the size, centred on
+// that box, has its corners inside the polygon; else along the box axis
+// nearest horizontal when both sides are over 1.5 label widths; else along
+// the long side. Radians, y down, in [-90°, 90°).
+export function freeAngle(rings, [hx, hy]) {
+  const box = orientedBox(rings);
+  if (!box) return 0;
+  const [cx, cy] = box.center;
+  const corners = [[cx - 2 * hx, cy - 2 * hy], [cx + 2 * hx, cy - 2 * hy],
+                   [cx + 2 * hx, cy + 2 * hy], [cx - 2 * hx, cy + 2 * hy]];
+  if (corners.every((corner) => inside(rings, corner))) return 0;
+  const width = 2 * hx;
+  const normal = (angle) => {
+    while (angle >= Math.PI / 2) angle -= Math.PI;
+    while (angle < -Math.PI / 2) angle += Math.PI;
+    return angle;
+  };
+  const a = normal(box.angle), b = normal(box.angle + Math.PI / 2);  // extents box.along, box.across
+  if (box.along > 1.5 * width && box.across > 1.5 * width) return Math.abs(a) <= Math.abs(b) ? a : b;
+  return box.along >= box.across ? a : b;
+}
+
+// Minimum-area rectangle around the rings' convex hull (rotating calipers):
+// {angle (of the side measured by ``along``), along, across, center}.
+function orientedBox(rings) {
+  const points = rings.flat().slice().sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  if (points.length < 3) return null;
+  const cross = (o, p, q) => (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0]);
+  const half = (list) => {
+    const out = [];
+    for (const point of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], point) <= 0) out.pop();
+      out.push(point);
+    }
+    out.pop();
+    return out;
+  };
+  const hull = half(points).concat(half(points.slice().reverse()));
+  if (hull.length < 3) return null;
+  let best = null;
+  for (let i = 0; i < hull.length; i++) {
+    const [ax, ay] = hull[i], [bx, by] = hull[(i + 1) % hull.length];
+    const angle = Math.atan2(by - ay, bx - ax);
+    const c = Math.cos(angle), s = Math.sin(angle);
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const [x, y] of hull) {
+      const u = x * c + y * s, v = -x * s + y * c;
+      if (u < u0) u0 = u; if (u > u1) u1 = u;
+      if (v < v0) v0 = v; if (v > v1) v1 = v;
+    }
+    const area = (u1 - u0) * (v1 - v0);
+    if (!best || area < best.area) {
+      const u = (u0 + u1) / 2, v = (v0 + v1) / 2;
+      best = { area, angle, along: u1 - u0, across: v1 - v0, center: [u * c - v * s, u * s + v * c] };
+    }
+  }
+  return best;
 }
 
 // boxInside, decided by the free room around the point where that settles it.
@@ -1147,10 +1211,15 @@ function groupShown(map, group, zoom) {
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
 function labelBoxes(map, group, zoom, perPx) {
-  return layoutBoxes(activeLayer(group, zoom).layout || {}, zoom, perPx);
+  const layer = activeLayer(group, zoom);
+  return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6);
 }
 
-function layoutBoxes(layout, zoom, perPx) {
+// Half width / height (world units) of a label's box, with LABEL_MARGIN_PX
+// around it; ``charWidth``: the font's mean advance per character (em,
+// metadata["q2vt:char-width"] measured at export).
+const LABEL_MARGIN_PX = 2;
+function layoutBoxes(layout, zoom, perPx, charWidth = 0.6) {
   return (properties) => {
     const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
     if (!text) return null;
@@ -1159,9 +1228,9 @@ function layoutBoxes(layout, zoom, perPx) {
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
     const lines = text.split("\n");
-    const width = Math.max(...lines.map((line) => line.length)) * 0.6 * size + pad[1] + pad[3];
+    const width = Math.max(...lines.map((line) => line.length)) * charWidth * size + pad[1] + pad[3];
     const height = lines.length * 1.2 * size + pad[0] + pad[2];
-    return [(width / 2 + 2) * perPx, (height / 2 + 2) * perPx];
+    return [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
   };
 }
 

@@ -1889,6 +1889,12 @@ class RulesExporter:
             return False
         if self.cent_source == 1:
             return True
+        # Free (angled): the angle depends on whether the label fits the
+        # polygon at the current scale, so the viewer places it. QGIS places
+        # Free (and Horizontal) labels on the polygon clipped to the map
+        # extent; "Centroid: whole polygon" only moves centroid placements.
+        if _enum_value(settings.placement) == _enum_value(Qgis.LabelPlacement.Free):
+            return True
         return not settings.centroidWhole
 
     def _visible_polygon_group(self, label: "_RuleGroupSnapshot",
