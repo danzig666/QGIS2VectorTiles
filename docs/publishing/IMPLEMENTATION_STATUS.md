@@ -996,3 +996,17 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/browser/test_web_viewer_streetview.py` (new, Google stubbed) | 5 passed: CSP/referrer/manifest, key left out without Street View, the coverage session and layer, heading toward the tap, cone follows the panorama, second search radius, no-panorama alert, close gives the parcel report back, measuring ends the mode, phone layout |
 | Publish dialog, profile, web builder, parcel and viewer feature tests | 59 passed (the dialog saves and reloads the switch and key) |
+
+## 4.13.1: plugin unload on upgrade
+
+- QGIS calls `initProcessing()` itself (`hasProcessingProvider=yes`) and `initGui()` called it
+  again. The second `addProvider` had a duplicate id, so QGIS deleted that provider, and
+  `unload()` failed on it ("wrapped C/C++ object … has been deleted"). The first provider
+  stayed registered with the old code.
+- `initProcessing()` now registers once and replaces a provider with the same id left by an
+  earlier version. `unload()` removes the provider by id.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_plugin_package.py` | 1 passed (QGIS's order initProcessing + initGui, unload leaves no provider, an upgrade over a leftover provider; fails without the fix with "Duplicate provider") |
+| `pytest tests/integration/test_publish_dialog.py` | 4 passed |
