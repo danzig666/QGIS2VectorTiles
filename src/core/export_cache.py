@@ -18,6 +18,9 @@ stops being looked up):
 * **tiles** — the MBTiles of one QGIS layer's datasets (see
   tiles_generator), keyed by its datasets' keys and names, the fields the
   style needs, zoom ranges and the tiler settings.
+* **rasters** (publishing) — the rendered image archive of one raster layer
+  (publishing.raster_tiles.raster_cache_key): its files, style, extent,
+  zooms and image settings.
 
 Only file-based sources are cached (their files' size and modification time
 show a change); database, web and memory layers are always exported. The
@@ -336,7 +339,7 @@ class ExportCache:
     # -- housekeeping ------------------------------------------------------------
     def entries(self) -> List[Tuple[float, int, str]]:
         found = []
-        for kind in ("datasets", "tiles", "parcels"):
+        for kind in ("datasets", "tiles", "parcels", "rasters"):
             for root, _, files in os.walk(os.path.join(self.root, kind)):
                 for name in files:
                     path = os.path.join(root, name)

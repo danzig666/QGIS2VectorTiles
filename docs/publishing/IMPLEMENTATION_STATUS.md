@@ -928,3 +928,37 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/browser/test_visible_labels.py` | 32 passed (3 new: Free angles against QGIS 3.34 for 3 shapes × 19 angles) |
 | `pytest tests/integration/test_end_to_end.py` | 21 passed (Free + whole polygon case new; two tests moved from the now supported shapeburst fill to an unsupported Lineburst outline) |
 | `pytest tests/browser` | 90 passed |
+
+## 4.12.0: raster cache, parallel raster rendering, parcel print zoom
+
+- **Raster cache** (`raster_tiles.raster_cache_key`, `controller._cached_raster`, entry kind
+  `rasters` in `ExportCache`): one entry per raster layer archive. The key covers:
+  - the source file(s) with their size and modification time (and `.aux.xml`, `.ovr`, `.msk`
+    and world files);
+  - the layer's whole QGIS style (`QgsMapLayerStyle`: renderer, resampling,
+    brightness/contrast, opacity…);
+  - the CRS and datum transformations;
+  - the zooms and extent;
+  - format, quality, HiDPI, title and blend;
+  - the raster/PMTiles code and the QGIS/GDAL versions.
+
+  Online, database and virtual rasters are never cached. A hit hard-links the archive into
+  the export (a copy across disks) and restores the render warnings.
+- **Parallel rendering** (`render_layer(threads=…)`, from the export's CPU share):
+  - Up to *n* `QgsMapRendererParallelJob`s (one per metatile) run at once. They are started
+    and collected on the calling thread, as QGIS's XYZ tile tool does.
+  - Cutting, blend conversion and PNG/WebP/JPEG encoding run in a thread pool; Qt releases the
+    GIL while encoding.
+  - Results are written in start order, so the archive is byte-identical for any number of
+    threads, which keeps the cache and the unchanged-file uploads working.
+  - 271 tiles: 2.15 s with 1 thread, 0.89 s with 4.
+- **Parcel print** (`print.focusView`): parcel records carry their WGS 84 extent (`bb`). The
+  parcel print fits it to the paper's map area with a 12 % margin each side, at the largest
+  standard scale that shows it whole. 1:100 and 1:200 were added to the standard scales. A
+  print scale chosen in Tools still wins.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_raster.py` | 8 passed (new: cache reuse / re-render on style and quality change; identical archives for 1 and 4 threads) |
+| `pytest tests/integration/test_publishing_parcel_report.py tests/browser/test_web_viewer_parcel.py` | 9 passed (record extent; the parcel print shows the whole parcel, filling much of the map) |
+| browser, publishing, publish dialog and unit tests | 372 passed |

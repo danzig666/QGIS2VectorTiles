@@ -49,6 +49,9 @@ export class ParcelReport {
 
   get layerId() { return this.info && this.info.layerId; }
 
+  // [west, south, east, north] of the shown parcel (the print zooms on it).
+  bounds() { return (this.record && this.record.bb) || null; }
+
   // The shown report for the print sheet (without its buttons).
   printCard() {
     const card = this.container && this.container.querySelector("article.q2vt-pr");
@@ -85,6 +88,7 @@ export class ParcelReport {
   }
 
   empty() {
+    this.record = null;
     this.clearMarkers();
     const box = el("div", "q2vt-empty");
     box.append(icon("pin", 28), el("p", "", t("parcel.hint")));
@@ -102,10 +106,12 @@ export class ParcelReport {
     this.clearMarkers();
     this.container.replaceChildren();
     if (this.panel) { this.panel.select("parcel"); this.panel.setOpen(true); }
+    this.record = null;
     if (!record) {
       this.container.append(el("p", "q2vt-empty", t("parcel.notFound")));
       return null;
     }
+    this.record = record;
     this.render(record);
     return record;
   }
