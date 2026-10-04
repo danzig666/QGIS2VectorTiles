@@ -2,8 +2,8 @@
 
 | Branch | What it is | Releases |
 |---|---|---|
-| `main` | The **generic** plugin: no country- or office-specific settings. All shared development lands here. | `v<version>`, `QGIS2VectorTilesFork-<version>.zip` |
-| `hu-hesz` | **Hungarian zoning-plan variant**: `main` plus the Hungarian HÉSZ / `szab_ov` preset (layer and field conventions, Hungarian restriction catalogue with legal references, building-code fields), later the HÉSZ import. | `v<version>-hu`, `QGIS2VectorTilesFork-<version>-hu.zip` |
+| `main` | The **generic** plugin: no country- or office-specific settings. All shared development lands here. | `v<version>`, `QWebMap-<version>.zip` |
+| `hu-hesz` | **Hungarian zoning-plan variant**: `main` plus the Hungarian HÉSZ / `szab_ov` preset (layer and field conventions, Hungarian restriction catalogue with legal references, building-code fields), later the HÉSZ import. | `v<version>-hu`, `QWebMap-<version>-hu.zip` (plugin name *QWebMap HÉSZ*) |
 
 ## Rules that keep the two in sync
 

@@ -1,4 +1,4 @@
-// QGIS2VectorTiles web map viewer (release entry point).
+// QWebMap web map viewer (release entry point).
 //
 // Loads manifest.json (relative to this page), validates it (schema 1,
 // vector-only), binds the vector tile transport (PMTiles over HTTP ranges or

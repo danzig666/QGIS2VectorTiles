@@ -1,4 +1,4 @@
-"""QGIS2VectorTiles provider implementation."""
+"""QWebMap Processing provider."""
 
 from qgis.core import QgsProcessingProvider
 from .algorithms import QGIS2VectorTilesAlgorithm, _ICON
@@ -6,7 +6,7 @@ from .algorithms import QGIS2VectorTilesAlgorithm, _ICON
 
 # Create a proper temporary provider class
 class QGIS2VectorTilesPorvider(QgsProcessingProvider):
-    """Provider for QGIS2VectorTiles plugin, integrating the QGIS2VectorTilesAlgorithm
+    """QWebMap's Processing provider, integrating the QGIS2VectorTilesAlgorithm
     into the QGIS Processing framework."""
 
     def __init__(self):
@@ -14,12 +14,13 @@ class QGIS2VectorTilesPorvider(QgsProcessingProvider):
 
     def id(self):
         """Returns the unique ID of the provider (distinct from the official
-        QGIS2VectorTiles plugin, so both can be installed)."""
+        QGIS2VectorTiles plugin, so both can be installed; the pre-rename id,
+        kept so saved models and scripts still find the algorithm)."""
         return "QGIS2VectorTilesFork"
 
     def name(self):
         """Returns the display name of the provider."""
-        return "QGIS2VectorTiles (fork)"
+        return "QWebMap"
 
     def icon(self):
         """Returns the provider icon."""

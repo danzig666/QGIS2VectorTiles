@@ -1,10 +1,11 @@
 # Publishes a GitHub Release from the plugin zip committed in releases/.
 # Run it from the Actions tab (or the API) on a branch with the version, e.g.
 # 4.4.1. On the generic branch (main) it tags the commit v<version> and
-# attaches releases/QGIS2VectorTilesFork-<version>.zip. On a variant branch
+# attaches releases/QWebMap-<version>.zip (QGIS2VectorTilesFork-<version>.zip up
+# to 4.8.1, before the rename). On a variant branch
 # (a variant.json at the root, e.g. hu-hesz, see docs/BRANCHES.md) the tag
 # and zip carry the variant suffix: v<version>-<suffix>,
-# QGIS2VectorTilesFork-<version>-<suffix>.zip. Notes:
+# QWebMap-<version>-<suffix>.zip. Notes:
 # releases/RELEASE_NOTES_<version>[-<suffix>].md (the variant file if it
 # exists, else the generic one). "replace" first deletes an existing release
 # and tag of that version. "notes_only" only rewrites the title and notes of
@@ -44,13 +45,18 @@ jobs:
         run: |
           SUFFIX=""
           LATEST="true"
-          TITLE="QGIS2VectorTiles ${VERSION} (fork)"
+          TITLE="QWebMap ${VERSION}"
           if [ -f variant.json ]; then
             SUFFIX="-$(python3 -c 'import json; print(json.load(open("variant.json"))["suffix"])')"
-            TITLE="$(python3 -c 'import json; v = json.load(open("variant.json")); print(v.get("releaseTitle") or v.get("name", "QGIS2VectorTiles (fork)"))') ${VERSION}${SUFFIX}"
+            TITLE="$(python3 -c 'import json; v = json.load(open("variant.json")); print(v.get("releaseTitle") or v.get("name", "QWebMap"))') ${VERSION}${SUFFIX}"
             LATEST="false"
           fi
-          ZIP="releases/QGIS2VectorTilesFork-${VERSION}${SUFFIX}.zip"
+          FOLDER="QWebMap"
+          ZIP="releases/QWebMap-${VERSION}${SUFFIX}.zip"
+          if [ ! -f "${ZIP}" ] && [ -f "releases/QGIS2VectorTilesFork-${VERSION}${SUFFIX}.zip" ]; then
+            FOLDER="QGIS2VectorTilesFork"  # releases before the rename
+            ZIP="releases/QGIS2VectorTilesFork-${VERSION}${SUFFIX}.zip"
+          fi
           NOTES="releases/RELEASE_NOTES_${VERSION}${SUFFIX}.md"
           [ -f "${NOTES}" ] || NOTES="releases/RELEASE_NOTES_${VERSION}.md"
           test -f "${NOTES}"
@@ -58,7 +64,7 @@ jobs:
             grep -qx "version=${VERSION}" metadata.txt
             test -f "${ZIP}"
             # The zipped metadata is this commit's (only the variant name may differ).
-            unzip -p "${ZIP}" QGIS2VectorTilesFork/metadata.txt | grep -v '^name=' > zipped.txt
+            unzip -p "${ZIP}" "${FOLDER}/metadata.txt" | grep -v '^name=' > zipped.txt
             grep -v '^name=' metadata.txt | cmp - zipped.txt
           fi
           {

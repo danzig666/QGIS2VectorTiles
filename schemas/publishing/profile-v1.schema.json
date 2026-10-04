@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/danzig666/QGIS2VectorTiles/schemas/publishing/profile-v1.schema.json",
-  "title": "QGIS2VectorTiles publication profile (non-secret)",
+  "title": "QWebMap publication profile (non-secret)",
   "type": "object",
   "required": [
     "schemaVersion",
