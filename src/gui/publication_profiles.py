@@ -93,16 +93,39 @@ def dumps_profile(profile: PublicationProfile) -> str:
 FILE_FORMAT = "q2vtPublicationSettings"
 
 
-def export_document(profile: PublicationProfile, project: QgsProject) -> str:
+def export_document(profile: PublicationProfile, project: QgsProject, credentials=None) -> str:
     """The settings as a file: the profile plus the names of the layers it
     refers to (layer ids differ between projects; names let another project
-    take the settings over). No secrets: profiles never hold any."""
+    take the settings over). The profile never holds secrets; the object
+    storage keys (``credentials``: access key id, secret) are added only when
+    given, in plain text, at the owner's request - keep such a file private."""
     names = {layer_id: layer.name() for layer_id, layer in project.mapLayers().items()}
     data = json.loads(dumps(profile))
     used = {value for value in _strings(data) if value in names}
-    return json.dumps({FILE_FORMAT: 1, "profile": data,
-                       "layerNames": {layer_id: names[layer_id] for layer_id in sorted(used)}},
-                      ensure_ascii=False, sort_keys=True, indent=1)
+    document = {FILE_FORMAT: 1, "profile": data,
+                "layerNames": {layer_id: names[layer_id] for layer_id in sorted(used)}}
+    if credentials is not None and credentials.access_key_id and credentials.secret_access_key:
+        document["credentials"] = {"accessKeyId": credentials.access_key_id,
+                                   "secretAccessKey": credentials.secret_access_key}
+        if getattr(credentials, "session_token", ""):
+            document["credentials"]["sessionToken"] = credentials.session_token
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, indent=1)
+
+
+def document_credentials(text: str):
+    """The object storage keys of a settings file (``Credentials``), or None."""
+    from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    found = data.get("credentials") if isinstance(data, dict) else None
+    if not isinstance(found, dict):
+        return None
+    key, secret = str(found.get("accessKeyId") or "").strip(), str(found.get("secretAccessKey") or "")
+    if not key or not secret:
+        return None
+    return Credentials(key, secret, str(found.get("sessionToken") or ""))
 
 
 def import_document(text: str, project: QgsProject) -> Tuple[PublicationProfile, List[str]]:

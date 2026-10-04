@@ -634,3 +634,25 @@ Owner request: measurement tools snap to chosen layers' boundaries and lines.
 | `pytest tests/browser/test_snap.py` | 2 passed |
 | related suites | 126 passed |
 | Test plan in Chromium | corner snap ≈2 cm from the tile vertex; edge snap; Alt off |
+
+## 4.7.4: keys in the settings file
+
+Owner request: export and import the R2 API keys (secret included) with the settings file,
+explicitly accepting the risk.
+
+- **Export:** `publication_profiles.export_document(profile, project, credentials)` adds a
+  top-level `credentials` object (`accessKeyId`, `secretAccessKey`, optional `sessionToken`)
+  when keys are given. The profile itself never holds them, and `profile` validation is
+  unchanged.
+- **Reading the keys back:** `document_credentials(text)` returns them.
+- **Export (Publish window):** takes the session keys, else `from_auth_config(credential_ref)`;
+  a failure is logged and the file is written without keys. A local destination exports none.
+- **Import (Publish window):**
+  1. Clears the foreign `credential_ref` and sets the session keys.
+  2. Tries `store_auth_config` (encrypted Basic configuration).
+  3. On success selects that configuration and clears the session fields; otherwise the keys
+     stay as session keys.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publish_dialog_extent.py` | 6 passed |

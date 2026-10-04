@@ -1689,14 +1689,37 @@ class PublishDialog(QDialog):
                                                   tr("Publication settings (*.q2vt.json *.json)"))
         if not path:
             return False
+        profile = self.collect()
+        keys = self._exportable_credentials(profile)
         try:
             with open(path, "w", encoding="utf-8") as handle:
-                handle.write(store.export_document(self.collect(), self.project))
+                handle.write(store.export_document(profile, self.project, keys))
         except OSError as error:
             QMessageBox.warning(self, tr("Export settings"), str(error))
             return False
-        self.status.setText(tr("Settings exported to {} (no passwords or keys are included).").format(path))
+        self.status.setText(
+            tr("Settings exported to {} with the object storage keys (secret included: keep the file "
+               "private).").format(path) if keys else
+            tr("Settings exported to {} (no object storage keys).").format(path))
         return True
+
+    def _exportable_credentials(self, profile):
+        """The destination's keys for the settings file (the owner wants them
+        there): the pasted session keys, else the saved QGIS configuration."""
+        if profile.destination.kind == "local":
+            return None
+        from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
+        key, secret = self.d_session_key.text().strip(), self.d_session_secret.text()
+        if key and secret:
+            return Credentials(key, secret)
+        if not profile.destination.credential_ref:
+            return None
+        try:
+            from ..publishing.credentials import from_auth_config  # pylint: disable=import-outside-toplevel
+            return from_auth_config(profile.destination.credential_ref)
+        except PublishingError as error:
+            self.log(tr("The keys were not exported: {}").format(error.message))
+            return None
 
     def import_settings_file(self, path=None, same_map=None) -> bool:
         if not path:
@@ -1707,7 +1730,9 @@ class PublishDialog(QDialog):
             return False
         try:
             with open(path, encoding="utf-8") as handle:
-                profile, notes = store.import_document(handle.read(), self.project)
+                text = handle.read()
+            profile, notes = store.import_document(text, self.project)
+            keys = store.document_credentials(text)
         except (OSError, ValueError, KeyError, PublishingError) as error:
             QMessageBox.warning(self, tr("Import settings"),
                                 tr("Not a publication settings file:\n{}").format(error))
@@ -1726,13 +1751,37 @@ class PublishDialog(QDialog):
             layer = node.layer()
             if publishable(layer) and layer.id() not in known:
                 profile.layers.append(LayerConfig(layer.id(), included=False, initially_visible=False))
+        if keys is not None:
+            profile.destination.credential_ref = ""  # an id of the other computer's QGIS
         self.profile = profile
         self._populate(profile)
         for note in notes:
             self.log(note)
+        if keys is not None:
+            self._import_credentials(keys)
         self.status.setText(tr("Settings imported from {}. Check them, then Save settings to keep them "
                                "in the project.").format(os.path.basename(path)))
         return True
+
+    def _import_credentials(self, keys):
+        """Keys from a settings file: usable at once (session keys), and saved
+        encrypted in QGIS when possible (kept after a restart)."""
+        self.d_session_key.setText(keys.access_key_id)
+        self.d_session_secret.setText(keys.secret_access_key)
+        from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
+        bucket = self.d_bucket.text().strip() or "maps"
+        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QGIS2VectorTiles)"
+        try:
+            config_id = store_auth_config(name, keys.access_key_id, keys.secret_access_key)
+        except PublishingError as error:
+            self.log(tr("Object storage keys imported for this session ({}).").format(error.message))
+            return
+        if self.d_auth is not None:
+            self.d_auth.setConfigId(config_id)
+        self.profile.destination.credential_ref = config_id
+        self.d_session_key.clear()
+        self.d_session_secret.clear()
+        self.log(tr("Object storage keys imported and saved encrypted in QGIS as “{}”.").format(name))
 
     def _busy(self, busy: bool):
         for button in (self.btn_save, self.btn_export, self.btn_publish, self.btn_close):

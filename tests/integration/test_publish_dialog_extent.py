@@ -132,3 +132,31 @@ def test_window_remembers_its_size_and_position(plugin, monkeypatch, tmp_path):
     third, _ = _dialog(plugin, monkeypatch, tmp_path / "third")
     assert (third.width(), third.height()) == (760, 600)
     QgsSettings().remove(dialog.GEOMETRY_KEY)
+
+
+def test_settings_file_carries_the_object_storage_keys(plugin, monkeypatch, tmp_path):
+    """At the owner's request the settings file also holds the R2/S3 keys
+    (secret in plain text); importing them makes them usable at once."""
+    import json  # pylint: disable=import-outside-toplevel
+    dialog, _parcels = _dialog(plugin, monkeypatch, tmp_path)
+    dialog.e_title.setText("Arló terv")
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("r2"))
+    dialog.d_account.setText("0123456789abcdef0123456789abcdef")
+    dialog.d_bucket.setText("maps")
+    dialog.d_public.setText("https://maps.example.hu")
+    dialog.d_session_key.setText("AKIAEXAMPLEKEY")
+    dialog.d_session_secret.setText("s3cr3t/EXAMPLE+key")
+    path = str(tmp_path / "arlo.q2vt.json")
+    assert dialog.export_settings_file(path)
+    data = json.load(open(path, encoding="utf-8"))
+    assert data["credentials"] == {"accessKeyId": "AKIAEXAMPLEKEY", "secretAccessKey": "s3cr3t/EXAMPLE+key"}
+    assert "credentials" not in data["profile"]  # the profile itself never holds them
+    assert "secret included" in dialog.status.text()
+    dialog.close()
+
+    other, _ = _dialog(plugin, monkeypatch, tmp_path / "other")
+    assert other.import_settings_file(path, same_map=True)
+    keys = other._credentials()  # pylint: disable=protected-access
+    assert (keys.access_key_id, keys.secret_access_key) == ("AKIAEXAMPLEKEY", "s3cr3t/EXAMPLE+key")
+    assert other.collect().destination.kind == "r2"
+    other.close()
