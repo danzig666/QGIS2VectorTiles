@@ -192,3 +192,34 @@ def test_web_basemaps_saved_in_qgis_and_in_the_settings_file(plugin, monkeypatch
     assert "Teszt műhold" in {x.title for x in qgis_xyz_connections()}  # saved in QGIS on import
     other.close()
     QgsSettings().remove("connections/xyz/items/Teszt műhold")
+
+
+
+def test_web_basemap_table_lists_the_qgis_xyz_connections(plugin, monkeypatch, tmp_path):
+    """Every XYZ connection saved in QGIS is listed (not ticked); ticking one
+    offers it in the web map; an http:// one cannot be ticked."""
+    from qgis.core import QgsSettings  # pylint: disable=import-outside-toplevel
+    settings = QgsSettings()
+    settings.setValue("connections/xyz/items/QGIS ortó/url", "https://ortho.example.hu/{z}/{x}/{y}.jpg")
+    settings.setValue("connections/xyz/items/QGIS ortó/zmax", 20)
+    settings.setValue("connections/xyz/items/Régi http/url", "http://old.example.hu/{z}/{x}/{y}.png")
+    try:
+        dialog, _parcels = _dialog(plugin, monkeypatch, tmp_path)
+        rows = {dialog.b_xyz.item(r, 1).text(): r for r in range(dialog.b_xyz.rowCount())}
+        assert "QGIS ortó" in rows and "Régi http" in rows
+        ortho, old = rows["QGIS ortó"], rows["Régi http"]
+        assert dialog.b_xyz.item(ortho, 0).checkState() == Qt.CheckState.Unchecked
+        assert not dialog.b_xyz.item(ortho, 1).flags() & Qt.ItemFlag.ItemIsEditable  # QGIS's name stays
+        assert not dialog.b_xyz.item(old, 0).flags() & Qt.ItemFlag.ItemIsEnabled      # http: not offered
+        assert dialog.collect().basemap.xyz == []
+        dialog.b_xyz.item(ortho, 0).setCheckState(CHECKED)
+        dialog.b_xyz.item(ortho, 3).setText("© Lechner")
+        xyz = dialog.collect().basemap.xyz
+        assert [(x.title, x.url, x.max_zoom, x.attribution) for x in xyz] == [
+            ("QGIS ortó", "https://ortho.example.hu/{z}/{x}/{y}.jpg", 20, "© Lechner")]
+        assert dialog.b_initial.findData("xyz-1") >= 0
+        assert settings.value("connections/xyz/items/QGIS ortó/q2vt-attribution") == "© Lechner"
+        dialog.close()
+    finally:
+        settings.remove("connections/xyz/items/QGIS ortó")
+        settings.remove("connections/xyz/items/Régi http")

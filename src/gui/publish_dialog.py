@@ -843,8 +843,12 @@ class PublishDialog(QDialog):
             plan.tiles, plan.min_zoom, plan.max_zoom) + ("\n⚠ " + "; ".join(plan.warnings) if plan.warnings else ""))
 
     def _basemap_tab(self):
-        widget = QWidget()
-        form = QFormLayout(widget)
+        from qgis.PyQt.QtWidgets import QScrollArea  # pylint: disable=import-outside-toplevel
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        bundled = QGroupBox(tr("OpenStreetMap vector basemap (copied into the release)"))
+        form = QFormLayout(bundled)
+        outer.addWidget(bundled)
         self.b_kind = QComboBox()
         self.b_kind.addItem(tr("No basemap (only the project's layers)"), "none")
         self.b_kind.addItem(tr("OpenStreetMap vector basemap (Protomaps)"), "protomaps")
@@ -884,7 +888,6 @@ class PublishDialog(QDialog):
         form.addRow("", self.b_custom)
         form.addRow("", source_row)
         form.addRow(tr("Styles offered"), flavors_row)
-        form.addRow(tr("Shown at start"), self.b_initial)
         form.addRow(tr("Most detailed zoom"), self.b_max)
         form.addRow(tr("Area around the extent"), self.b_padding)
         form.addRow(tr("Overview zooms (0 to)"), self.b_overview_zoom)
@@ -894,77 +897,107 @@ class PublishDialog(QDialog):
             "release (data/basemap.pmtiles) with fonts generated for its labels, so visitors never load "
             "anything from another site. Visitors can switch styles or turn it off. Map data © "
             "OpenStreetMap contributors (ODbL), shown automatically in the attribution.")))
-        # Web basemaps: XYZ tile addresses loaded by the visitor's browser.
-        self.b_xyz = QTableWidget(0, 5)
-        self.b_xyz.setHorizontalHeaderLabels([tr("Title"), tr("XYZ tile address"), tr("Attribution"),
-                                              tr("Min zoom"), tr("Max zoom")])
+        # Web basemaps: QGIS's own XYZ connections (Browser -> XYZ Tiles),
+        # each with "Use in web map"; loaded by the visitor's browser.
+        web = QGroupBox(tr("Web basemaps (XYZ tiles, loaded from their server while browsing)"))
+        web_layout = QVBoxLayout(web)
+        self.b_xyz = QTableWidget(0, 6)
+        self.b_xyz.setHorizontalHeaderLabels([tr("Use"), tr("Name"), tr("XYZ tile address"),
+                                              tr("Attribution"), tr("Min z"), tr("Max z")])
+        self.b_xyz.horizontalHeaderItem(0).setToolTip(tr("Offered in the web map's basemap menu"))
+        self.b_xyz.horizontalHeaderItem(1).setToolTip(tr("The name of the QGIS XYZ connection"))
         header = self.b_xyz.horizontalHeader()
-        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
-        self.b_xyz.setMinimumHeight(130)
+        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, header.ResizeMode.Stretch)
+        for column, width in ((1, 190), (3, 170), (4, 55), (5, 55)):
+            self.b_xyz.setColumnWidth(column, width)
+        self.b_xyz.setMinimumHeight(170)
+        self.b_xyz.setWordWrap(False)
         self.b_xyz.itemChanged.connect(self._refresh_basemap_initial)
         buttons = QHBoxLayout()
-        add = QPushButton(tr("Add"))
-        add.clicked.connect(lambda: self._add_xyz_row(XyzBasemap(max_zoom=19)))
-        from_qgis = QPushButton(tr("From QGIS XYZ connections…"))
-        from_qgis.clicked.connect(lambda: self._xyz_from_qgis(from_qgis))
-        remove = QPushButton(tr("Remove"))
-        remove.clicked.connect(self._remove_xyz_rows)
-        for button in (add, from_qgis, remove):
+        add = QPushButton(tr("Add new…"))
+        add.setToolTip(tr("A new XYZ connection: saved in QGIS too (Browser → XYZ Tiles)."))
+        add.clicked.connect(lambda: self._add_xyz_row(XyzBasemap(max_zoom=19), used=True, editable_name=True))
+        reload_button = QPushButton(tr("Reload from QGIS"))
+        reload_button.setToolTip(tr("List the XYZ connections saved in QGIS again (added meanwhile in the Browser)."))
+        reload_button.clicked.connect(lambda: self._fill_xyz_table(self._xyz_rows()))
+        for button in (add, reload_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
-        form.addRow(tr("Web basemaps (XYZ)"), self.b_xyz)
-        form.addRow("", buttons)
-        form.addRow("", _note(tr(
-            "Web basemaps are XYZ tile addresses, e.g. https://tile.openstreetmap.org/{z}/{x}/{y}.png "
-            "({-y}: TMS rows, {s}: a/b/c servers; https only). Visitors choose them in the map's "
-            "basemap menu; their browser loads the tiles from that server while browsing (nothing is "
-            "copied into the release, and the page allows exactly these servers). Use only addresses "
-            "you are allowed to use, with the attribution the service requires. They are saved in the "
-            "project, in the exported settings file, and as QGIS XYZ connections (Browser → XYZ Tiles).")))
-        return widget
+        web_layout.addWidget(self.b_xyz)
+        web_layout.addLayout(buttons)
+        web_layout.addWidget(_note(tr(
+            "The list is QGIS's own XYZ tile connections (Browser → XYZ Tiles): tick the ones the web map "
+            "offers. New ones and edited attributions are saved there too. Addresses use {z}, {x}, {y} "
+            "({-y}: TMS rows, {s}: a/b/c servers) and must be https://. Visitors choose them in the map's "
+            "basemap menu; their browser loads the tiles from that server while browsing (nothing is copied "
+            "into the release, and the page allows exactly these servers). Use only addresses you are "
+            "allowed to use, with the attribution the service requires. The ticked ones are also kept in "
+            "the project and in the exported settings file.")))
+        outer.addWidget(web)
+        start = QFormLayout()
+        start.addRow(tr("Basemap shown at start"), self.b_initial)
+        outer.insertLayout(0, start)
+        outer.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
 
-    def _add_xyz_row(self, entry):
+    def _add_xyz_row(self, entry, used=True, editable_name=True):
+        """One web basemap row; the name of an existing QGIS connection is fixed
+        (editing it would make another connection)."""
         self.b_xyz.blockSignals(True)
         row = self.b_xyz.rowCount()
         self.b_xyz.insertRow(row)
+        use = QTableWidgetItem()
+        https = str(entry.url).startswith("https://") or not entry.url
+        flags = Qt.ItemFlag.ItemIsUserCheckable | (Qt.ItemFlag.ItemIsEnabled if https else Qt.ItemFlag.NoItemFlags)
+        use.setFlags(flags)
+        use.setCheckState(_check(used and https))
+        if not https:
+            use.setToolTip(tr("Web pages can only load https:// tiles."))
+        self.b_xyz.setItem(row, 0, use)
         for column, value in enumerate((entry.title, entry.url, entry.attribution,
-                                        str(entry.min_zoom), str(entry.max_zoom))):
-            self.b_xyz.setItem(row, column, QTableWidgetItem(value))
+                                        str(entry.min_zoom), str(entry.max_zoom)), start=1):
+            item = QTableWidgetItem(value)
+            if column == 1 and not editable_name:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.b_xyz.setItem(row, column, item)
         self.b_xyz.blockSignals(False)
         self._refresh_basemap_initial()
 
-    def _xyz_from_qgis(self, anchor):
-        from qgis.PyQt.QtWidgets import QMenu  # pylint: disable=import-outside-toplevel
-        from .xyz_connections import qgis_xyz_connections  # pylint: disable=import-outside-toplevel
-        connections = qgis_xyz_connections()
-        menu = QMenu(self)
-        if not connections:
-            menu.addAction(tr("(no XYZ connections in QGIS)")).setEnabled(False)
-        have = {entry.title for entry in self._xyz_rows()}
-        for entry in connections:
-            action = menu.addAction(entry.title)
-            action.setToolTip(entry.url)
-            action.setEnabled(entry.title not in have)
-            action.triggered.connect(lambda _checked=False, e=entry: self._add_xyz_row(e))
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+    def _fill_xyz_table(self, used):
+        """The web map's basemaps (ticked, in their order), then every other
+        XYZ connection saved in QGIS (not ticked)."""
+        try:
+            from .xyz_connections import qgis_xyz_connections  # pylint: disable=import-outside-toplevel
+            saved = qgis_xyz_connections()
+        except Exception:  # noqa: BLE001 - settings are a convenience
+            saved = []
+        in_qgis = {entry.title for entry in saved}
+        self.b_xyz.setRowCount(0)
+        for entry in used:
+            self._add_xyz_row(entry, used=True, editable_name=entry.title not in in_qgis)
+        titles = {entry.title for entry in used}
+        for entry in saved:
+            if entry.title not in titles:
+                self._add_xyz_row(entry, used=False, editable_name=False)
 
-    def _remove_xyz_rows(self):
-        for row in sorted({index.row() for index in self.b_xyz.selectedIndexes()}, reverse=True):
-            self.b_xyz.removeRow(row)
-        self._refresh_basemap_initial()
-
-    def _xyz_rows(self):
+    def _xyz_rows(self, used_only=True):
+        """The ticked web basemaps (or every row), in table order."""
         out = []
         for row in range(self.b_xyz.rowCount()):
             cell = lambda column: (self.b_xyz.item(row, column).text().strip()  # noqa: E731
                                    if self.b_xyz.item(row, column) else "")
-            if not cell(1):
+            ticked = self.b_xyz.item(row, 0) is not None and self.b_xyz.item(row, 0).checkState() == CHECKED
+            if not cell(2) or (used_only and not ticked):
                 continue
             try:
-                low, high = int(cell(3) or 0), int(cell(4) or 19)
+                low, high = int(cell(4) or 0), int(cell(5) or 19)
             except ValueError:
                 low, high = 0, 19
-            out.append(XyzBasemap(title=cell(0) or f"XYZ {row + 1}", url=cell(1), attribution=cell(2),
+            out.append(XyzBasemap(title=cell(1) or f"XYZ {row + 1}", url=cell(2), attribution=cell(3),
                                   min_zoom=low, max_zoom=high))
         return out
 
@@ -1485,9 +1518,7 @@ class PublishDialog(QDialog):
         self.b_source.setText(basemap.source)
         for flavor, box in self.b_flavors.items():
             box.setChecked(flavor in basemap.flavors)
-        self.b_xyz.setRowCount(0)
-        for entry in basemap.xyz:
-            self._add_xyz_row(entry)
+        self._fill_xyz_table(basemap.xyz)
         self._refresh_basemap_initial()
         self.b_initial.setCurrentIndex(max(0, self.b_initial.findData(basemap.initial)))
         self.b_max.setValue(basemap.max_zoom)
@@ -1707,7 +1738,7 @@ class PublishDialog(QDialog):
             basemap.initial = basemap.flavors[0]
         try:  # the same web basemaps as QGIS XYZ connections
             from .xyz_connections import save_qgis_xyz_connections  # pylint: disable=import-outside-toplevel
-            save_qgis_xyz_connections(basemap.xyz)
+            save_qgis_xyz_connections(self._xyz_rows(used_only=False))
         except Exception:  # noqa: BLE001 - settings are a convenience; never block the window
             pass
         basemap.max_zoom = self.b_max.value()
