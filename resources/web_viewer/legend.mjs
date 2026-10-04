@@ -86,8 +86,31 @@ export class Legend {
     const node = el("div", print ? "q2vt-legend q2vt-legend-print" : "q2vt-legend");
     let shown = 0;
     const layers = [...this.manifest.layers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // Without the Layers tab the legend switches layers on and off (an
+    // orthophoto or other background, ...): a layer switched off stays
+    // listed - one row - so it can be switched on again.
+    const switches = !print && this.manifest.interaction?.layersPanel === false;
+    const layerSwitch = (layer) => {
+      const { wrap, input } = toggle(layer.title, (checked) => this.state.setIn("layers", layer.id, checked));
+      input.checked = state.layers[layer.id] !== false;
+      wrap.classList.add("q2vt-legend-switch");
+      return wrap;
+    };
     for (const layer of layers) {
-      if (layer.legend === false || !this.control.layerEnabled(layer.id, state)) continue;
+      if (layer.legend === false) continue;
+      const canSwitch = switches && layer.toggleable !== false;
+      if (!this.control.layerEnabled(layer.id, state)) {
+        if (!canSwitch || state.layers[layer.id] !== false) continue;  // off by its group: not here
+        const block = el("section", "q2vt-legend-layer q2vt-legend-single q2vt-legend-off");
+        const list = el("ul", "q2vt-legend-items");
+        const item = el("li", "q2vt-legend-item");
+        item.append(layerSwitch(layer), el("span", "", layer.title));
+        list.append(item);
+        block.append(list);
+        node.append(block);
+        shown++;
+        continue;
+      }
       if (drawn && !drawn.layers.has(layer.id)) continue;
       let rules = this.manifest.rules.filter((r) => r.layerId === layer.id && this.control.ruleEnabled(r.id, state));
       if (drawn && rules.length) rules = rules.filter((r) => drawn.rules.has(r.id));
@@ -97,10 +120,16 @@ export class Legend {
       // One symbol: one row with the layer's name (no heading repeating it).
       const single = items.length === 1;
       const block = el("section", single ? "q2vt-legend-layer q2vt-legend-single" : "q2vt-legend-layer");
-      if (!single) block.append(el("h3", "", layer.title));
+      if (!single) {
+        const heading = el("h3", canSwitch ? "q2vt-legend-heading" : "");
+        if (canSwitch) heading.append(layerSwitch(layer));
+        heading.append(el("span", "", layer.title));
+        block.append(heading);
+      }
       const list = el("ul", "q2vt-legend-items");
       for (const rule of items) {
         const item = el("li", "q2vt-legend-item");
+        if (single && canSwitch) item.append(layerSwitch(layer));
         if (rule.swatch) {
           const img = document.createElement("img");
           img.alt = "";

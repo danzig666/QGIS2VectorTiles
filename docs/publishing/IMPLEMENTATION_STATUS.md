@@ -656,3 +656,22 @@ explicitly accepting the risk.
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_publish_dialog_extent.py` | 6 passed |
+
+## 4.7.5: legend layer switches without the Layers tab
+
+Owner request: background layers must be able to be switched off even when the Layers tab is
+off ("maybe from the legend").
+
+`Legend.list()` changes when `manifest.interaction.layersPanel === false` (screen only, not
+print):
+- **Switches:** each toggleable layer gets a `toggle()` switch writing
+  `state.setIn("layers", id, …)`. It sits in the heading of a layer with several entries, or on
+  the single row.
+- **Layers switched off by the visitor** (`state.layers[id] === false`) stay listed as one
+  `.q2vt-legend-off` row with the switch off. This also holds in "only visible" mode.
+- **Layers off only because of their group** are not listed.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_parcel.py` | 5 passed |
+| viewer suites | 21 passed |
