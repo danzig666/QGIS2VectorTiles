@@ -248,6 +248,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     stage("RASTER")
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
                                              work_dir, progress, bundle.warnings)
+    bundle.warnings.extend(_vector_blend_warnings(project, profile))
     progress.check()
     published = {r["layerId"] for r in bundle.raster_archives}
     dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
@@ -306,7 +307,7 @@ def _plan_rasters(project, profile, configs, extent_3857) -> Dict[str, object]:
 def _render_rasters(project, profile, configs, plans, work_dir, progress, warnings) -> List[dict]:
     """Render each raster layer into ``<work>/rasters/<id>.pmtiles``."""
     from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
-    from .raster_tiles import raster_source_id, raster_style_layer_id, render_layer  # pylint: disable=import-outside-toplevel
+    from .raster_tiles import blend_name, raster_source_id, raster_style_layer_id, render_layer  # pylint: disable=import-outside-toplevel
     out = []
     folder = os.path.join(work_dir, "rasters")
     if os.path.isdir(folder):
@@ -317,13 +318,15 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
     for config in configs:
         layer = project.mapLayer(config.layer_id)
         plan = plans[config.layer_id]
-        warnings.extend(plan.warnings)
         lid = layer_logical_id(layer.id())
         start = done / total
         done += plan.tiles
+        blend = _raster_blend(project, profile, layer, blend_name(layer), plan.warnings)
         descriptor = render_layer(project, layer, config, plan,
                                   os.path.join(folder, f"{lid}.pmtiles"),
-                                  progress.sub(start, done / total), title=config.title or layer.name())
+                                  progress.sub(start, done / total), title=config.title or layer.name(),
+                                  blend=blend)
+        warnings.extend(plan.warnings)
         if descriptor is None:
             warnings.append(f'Raster layer "{layer.name()}" draws nothing in the export extent; '
                             "it is not published.")
@@ -333,6 +336,56 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
         out.append({"layerId": lid, "sourceId": raster_source_id(lid),
                     "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
                     "descriptor": descriptor, "tileSize": 256})
+    return out
+
+
+def _raster_blend(project, profile, layer, mode: str, warnings: List[str]) -> str:
+    """How a raster layer's QGIS blend mode is drawn in the browser (which has
+    none): "multiply" / "screen" are converted to an equivalent normal image
+    (raster_tiles.blend_to_alpha). A multiply layer with nothing published
+    below it on a white map background is the same as normal."""
+    if mode == "normal":
+        return "normal"
+    if mode in ("multiply", "screen"):
+        if mode == "multiply" and not _published_below(project, profile, layer) \
+                and project.backgroundColor().name().lower() == "#ffffff":
+            return "normal"
+        return mode
+    warnings.append(f'Raster layer "{layer.name()}": the {mode} blend mode has no web equivalent; '
+                    "it is drawn as normal.")
+    return "normal"
+
+
+def _published_below(project, profile, layer) -> bool:
+    """Whether a published layer (or a basemap) is drawn below ``layer``."""
+    if profile.basemap.kind != "none" or profile.basemap.xyz:
+        return True
+    included = {c.layer_id for c in profile.layers if c.included}
+    order = [l.id() for l in project.layerTreeRoot().layerOrder()]  # top first
+    if layer.id() not in order:
+        return True
+    return any(lid in included for lid in order[order.index(layer.id()) + 1:])
+
+
+def _vector_blend_warnings(project, profile) -> List[str]:
+    """Vector layers drawn with a blend mode: the browser draws them normally."""
+    from qgis.core import QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from .raster_tiles import blend_name  # pylint: disable=import-outside-toplevel
+    out = []
+    for config in profile.layers:
+        layer = project.mapLayer(config.layer_id)
+        if not config.included or not isinstance(layer, QgsVectorLayer):
+            continue
+        modes = {blend_name(layer)}
+        try:
+            feature_mode = int(getattr(layer.featureBlendMode(), "value", layer.featureBlendMode()))
+            modes.add("normal" if feature_mode == 0 else f"feature {feature_mode}")
+        except (AttributeError, TypeError, ValueError):
+            pass
+        modes.discard("normal")
+        if modes:
+            out.append(f'Layer "{layer.name()}": its blend mode ({", ".join(sorted(modes))}) has no web '
+                       "equivalent; it is drawn as normal (opacity is kept).")
     return out
 
 

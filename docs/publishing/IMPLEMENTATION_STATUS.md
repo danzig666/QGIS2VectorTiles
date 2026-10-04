@@ -803,3 +803,30 @@ trademark found, and every checked domain was free; checked 4 Oct 2026).
 | `pytest tests/browser/test_visible_labels.py` | 29 passed |
 | `pytest tests/browser/test_coordinates_crs.py` | 3 passed |
 | `pytest tests/integration/test_end_to_end.py` (new: around-point metadata) and related viewer/publishing suites | 80 passed |
+
+## 4.9.3: raster blend modes, basemap glyph font names
+
+Found by publishing a real terrain project (TerrainForge: CanVec vectors and a CDEM DEM with a
+multiply hillshade, NAD83 / UTM 17N). The vector styling already matched QGIS; the hillshade did
+not.
+
+- **Raster blend modes:**
+  - `raster_tiles.blend_to_alpha` turns a rendered *multiply* metatile into black with alpha
+    `a·(1 − luminance)` and a *screen* metatile into white with alpha `a·luminance`. This is
+    exact for grey pixels; `grey` is False if any visible pixel differs by more than 2 levels
+    between channels.
+  - `controller._raster_blend`: a multiply layer with no published layer or basemap below
+    (`_published_below`) on a white project background is rendered normally (identical result).
+    Other modes give a warning and are drawn normally; JPEG with multiply/screen gets a warning.
+  - `_vector_blend_warnings`: vector layers with a layer or feature blend mode get a warning.
+  - Plan warnings are now collected after rendering, so warnings from rendering are reported too.
+- **Basemap glyphs:** `basemap.generate_glyphs` used `fontstack_name(family, style)` as the
+  generated folder, but the generator resolves fonts on its own. Older Open Sans has a separate
+  "Open Sans Semibold" family, so it writes "Open Sans Semibold Regular". The folder now comes
+  from `GlyphGenerator.resolve_fontstack`.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_raster.py` | 5 passed (2 new, both fail without the fix) |
+| `pytest tests/integration/test_basemap_glyph_fonts.py` | 1 passed (fails without the fix with that font installed) |
+| related raster/basemap/export suites | 44 passed |

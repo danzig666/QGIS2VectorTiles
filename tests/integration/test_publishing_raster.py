@@ -138,3 +138,85 @@ def test_raster_outside_the_extent_is_dropped_and_runaway_sizes_refused(tmp_path
     profile.layers[-1].raster_max_zoom = 22
     with pytest.raises(PublishingError, match="tiles"):
         export_local(project, profile, QgsRectangle(2000000, 5900000, 2200000, 6100000))
+
+
+def _image(rgba):
+    """QImage (ARGB32) from an (h, w, 4) uint8 RGBA array."""
+    from qgis.PyQt.QtGui import QImage
+    h, w = rgba.shape[:2]
+    bgra = np.ascontiguousarray(rgba[..., [2, 1, 0, 3]])
+    return QImage(bgra.tobytes(), w, h, w * 4, QImage.Format.Format_ARGB32).copy()
+
+
+def _pixels(image):
+    from qgis.PyQt.QtGui import QImage
+    image = image.convertToFormat(QImage.Format.Format_ARGB32)
+    ptr = image.constBits()
+    ptr.setsize(image.sizeInBytes())
+    bgra = np.frombuffer(ptr, dtype=np.uint8).reshape(image.height(), image.bytesPerLine())
+    bgra = bgra[:, :image.width() * 4].reshape(image.height(), image.width(), 4)
+    return bgra[..., [2, 1, 0, 3]].astype(float)
+
+
+def test_blend_modes_become_the_same_normal_image():
+    """Multiply by grey g = black with alpha 1 - g; screen = white with
+    alpha g: drawn normally over any colour, the result is the blend."""
+    from publishing.raster_tiles import blend_to_alpha
+    grey = np.linspace(0, 255, 16).round().astype(np.uint8)
+    rgba = np.zeros((1, 16, 4), np.uint8)
+    rgba[0, :, 0] = rgba[0, :, 1] = rgba[0, :, 2] = grey
+    rgba[0, :, 3] = 255
+    below = np.array([200.0, 120.0, 40.0])  # a DEM colour
+    g = grey.astype(float)[:, None] / 255
+    for mode, expected in (("multiply", below * g), ("screen", 255 - (255 - below) * (1 - g))):
+        image, is_grey = blend_to_alpha(_image(rgba), mode)
+        px = _pixels(image)[0]
+        a = px[:, 3:4] / 255
+        drawn = px[:, :3] * a + below * (1 - a)
+        assert is_grey and np.abs(drawn - expected).max() <= 1.0, mode
+    rgba[0, :, 0] = 255  # a colour layer: approximated by its brightness
+    assert blend_to_alpha(_image(rgba), "multiply")[1] is False
+
+
+def test_hillshade_multiply_over_a_dem_is_published_as_shading(tmp_path):
+    """The TerrainForge case: a grey hillshade in multiply mode over a colour
+    DEM (also multiply, lowest, on a white map). The hillshade tiles become
+    black with alpha 1 - grey; the DEM is drawn normally (the same over
+    white); a vector layer's blend mode is reported, not silently dropped."""
+    from qgis.PyQt.QtGui import QImage, QPainter
+    project, profile, parcels, dem = _project(tmp_path)
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(str(tmp_path / "hillshade.tif"), 400, 400, 1, gdal.GDT_Byte)
+    ds.SetGeoTransform([2119000, 10.0, 0, 6023000, 0, -10.0])
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(3857)
+    ds.SetProjection(srs.ExportToWkt())
+    ds.GetRasterBand(1).WriteArray((np.mgrid[0:400, 0:400][1] * 255 // 399).astype(np.uint8))
+    ds = None
+    shade = QgsRasterLayer(str(tmp_path / "hillshade.tif"), "Hillshade")
+    assert shade.isValid() and shade.renderer().type() == "singlebandgray"
+    multiply = QPainter.CompositionMode.CompositionMode_Multiply
+    shade.setBlendMode(multiply)
+    dem.setBlendMode(multiply)
+    parcels.setBlendMode(multiply)
+    project.addMapLayer(shade, False)
+    project.layerTreeRoot().insertLayer(1, shade)  # parcels, hillshade, DEM (bottom)
+    profile.layers.append(LayerConfig(shade.id(), raster_format="png", raster_max_zoom=13))
+    profile.layers[-2].raster_format = "png"
+    result = export_local(project, profile, EXTENT)
+    rel = result.release.release_dir
+    manifest = json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))
+    href = {s["id"]: s["href"] for s in manifest["sources"] if s.get("role") == "raster"}
+    shade_href = next(h for h in href.values() if layer_logical_id(shade.id()) in h)
+    dem_href = next(h for h in href.values() if layer_logical_id(dem.id()) in h)
+    with open_pmtiles(os.path.join(rel, shade_href)) as archive:
+        _, data = next(iter(archive.tiles()))
+    px = _pixels(QImage.fromData(data))
+    assert px[..., :3].max() == 0 and 0 < px[..., 3].max() <= 255  # black shading only
+    with open_pmtiles(os.path.join(rel, dem_href)) as archive:
+        _, data = next(iter(archive.tiles()))
+    px = _pixels(QImage.fromData(data))
+    visible = px[px[..., 3] > 0]
+    assert len(visible) and visible[:, 3].min() == 255 and visible[:, :3].max() > 0  # the DEM's own colours
+    assert any("Földrészletek" in w and "multiply" in w for w in result.warnings)
+    assert not any("Hillshade" in w or "Ortofotó" in w for w in result.warnings)
