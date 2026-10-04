@@ -47,9 +47,11 @@ SMOKE = textwrap.dedent("""
     qgis.utils.available_plugins.append("QGIS2VectorTilesFork")  # the pre-rename copy
     import QWebMap as plugin_package
     assert plugin_package.__file__.startswith(sys.argv[1]), plugin_package.__file__
+    registry = QgsApplication.processingRegistry()
     plugin = plugin_package.classFactory(Iface())
+    plugin.initProcessing()  # QGIS does this first (hasProcessingProvider=yes), then initGui
     plugin.initGui()
-    assert QgsApplication.processingRegistry().providerById(plugin.provider.id())
+    assert registry.providerById("QGIS2VectorTilesFork") is plugin.provider
     plugin.show_publish_dialog()
     assert plugin.dialog is not None and plugin.dialog.isVisible()
 
@@ -58,6 +60,7 @@ SMOKE = textwrap.dedent("""
     from QWebMap.src.publishing import controller, deployments  # noqa: F401
     versions = sdk_versions()
     plugin.unload()
+    assert registry.providerById("QGIS2VectorTilesFork") is None
     # Updated without restarting QGIS: QGIS imports the package again; a
     # module first imported late (the export cache) must not stay old.
     import QWebMap.src.core.export_cache as old_cache
@@ -66,6 +69,16 @@ SMOKE = textwrap.dedent("""
     import QWebMap  # noqa: F811
     import QWebMap.src.core.export_cache as new_cache
     assert not hasattr(new_cache, "STALE"), "stale module after a plugin reload"
+    # An upgrade over a version that left its provider registered (its unload
+    # failed): the new provider replaces it and unloads cleanly.
+    stale = QWebMap.QGIS2VectorTilesPorvider()
+    registry.addProvider(stale)
+    again = QWebMap.classFactory(Iface())
+    again.initProcessing()
+    again.initGui()
+    assert registry.providerById("QGIS2VectorTilesFork") is again.provider
+    again.unload()
+    assert registry.providerById("QGIS2VectorTilesFork") is None
     print("CALLS", calls)
     print("SDK", versions)
     app.exitQgis()
