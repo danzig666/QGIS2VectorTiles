@@ -1086,6 +1086,10 @@ class RulesExporter:
             check = QgsVectorLayer(current_input, "check", "ogr")
             if not check.isValid() or check.featureCount() <= 0:
                 return None
+        elif grp.recipe is not None and grp.recipe.kind == "color_bands":
+            current_input = self._color_bands(current_input, grp.recipe)
+            if current_input is None:
+                return None
 
         # Field mapping.
         field_mapping = self._build_field_mapping(grp, current_input)
@@ -1245,6 +1249,61 @@ class RulesExporter:
                                  MAX_NODES=mat.PIECE_MAX_NODES)
         return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
 
+    def _color_bands(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: every colour band of a gradient / shapeburst fill as its
+        own polygon (BAND_FIELD, COLOR_FIELD), all in one dataset, bands in
+        order (see materialize.color_bands_recipe)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        from .fidelity.bands import BandBuilder  # pylint: disable=import-outside-toplevel
+        layer = QgsVectorLayer(source, "bands_src", "ogr")
+        if not layer.isValid():
+            return None
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}")
+        colors = recipe.param("colors")
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        fields.append(QgsField(mat.BAND_FIELD, QVariant.Int))
+        fields.append(QgsField(mat.COLOR_FIELD, QVariant.String))
+        out = self._temp_path("bands")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # an index reorders the bands
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        # Band order: the whole layer's band 0 first, then band 1, ...
+        # (also fill-sort-key in the style).
+        per_band = [[] for _ in colors]
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            for band, geometry in builder.build(feature.geometry()):
+                if QgsWkbTypes.geometryType(geometry.wkbType()) != QgsWkbTypes.PolygonGeometry:
+                    parts = [g for g in geometry.asGeometryCollection()
+                             if QgsWkbTypes.geometryType(g.wkbType()) == QgsWkbTypes.PolygonGeometry]
+                    if not parts:
+                        continue
+                    geometry = QgsGeometry.collectGeometry(parts)
+                geometry.convertToMultiType()
+                out_feature = QgsFeature(fields)
+                for field in fields:
+                    if field.name() not in (mat.BAND_FIELD, mat.COLOR_FIELD):
+                        out_feature[field.name()] = feature[field.name()]
+                out_feature[mat.BAND_FIELD] = band
+                out_feature[mat.COLOR_FIELD] = colors[band]
+                out_feature.setGeometry(geometry)
+                per_band[band].append(out_feature)
+        written = 0
+        for features in per_band:
+            for out_feature in features:
+                writer.addFeature(out_feature)
+                written += 1
+        del writer
+        return out if written else None
+
     def _random_points(self, source: str, recipe: Recipe) -> str:
         """Worker: random marker fill points with QGIS's native (prepared
         geometry) random points in polygons: ``count`` per feature, or
@@ -1385,6 +1444,8 @@ class RulesExporter:
         for anchor in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD):
             if source_fields.indexFromName(anchor) >= 0:
                 mapping.append((6, f'"{anchor}"', anchor))
+        if source_fields.indexFromName(mat.BAND_FIELD) >= 0:  # colour-band draw order
+            mapping.append((2, f'"{mat.BAND_FIELD}"', mat.BAND_FIELD))
         return [
             {"type": m[0], "expression": m[1], "name": m[2]} for m in mapping
         ]
@@ -1736,10 +1797,8 @@ class RulesExporter:
             return [0, "@geometry"]  # points already materialized
         if recipe is not None and recipe.kind == "hatch_lines":
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
-        if recipe is not None and recipe.kind == "gradient_band":
-            return [2, mat.gradient_expression(recipe, f"EPSG:{_EPSG_CRS}")]
-        if recipe is not None and recipe.kind == "shapeburst_band":
-            return [2, mat.shapeburst_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "color_bands":
+            return [2, "@geometry"]  # bands already materialized (_color_bands)
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
             kind = 2 if recipe.param("fill") or recipe.param("stroke") else \

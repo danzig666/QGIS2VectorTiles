@@ -31,6 +31,7 @@ from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
 from .fidelity import expressions as ex
 from .fidelity import html_labels
+from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
@@ -2951,6 +2952,12 @@ class QgisMapLibreStyleExporter:
                     "fill-translate": FillPropertyExtractor.get_fill_translate(),
                     "fill-translate-anchor": FillPropertyExtractor.get_fill_translate_anchor(),
                 })
+                color_prop = symbol_layer.dataDefinedProperties().property(
+                    QgsSymbolLayer.Property.PropertyFillColor)
+                if color_prop and color_prop.isActive():
+                    # Materialized colour bands (gradient / shapeburst fills) are
+                    # drawn in band order; other features have no band (key 0).
+                    layer_def["layout"]["fill-sort-key"] = ["to-number", ["get", mat.BAND_FIELD], 0]
 
             else:
                 layer_def["paint"].update({

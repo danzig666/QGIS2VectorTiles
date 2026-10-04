@@ -155,12 +155,12 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
                "reflect / repeat) as solid colour bands per feature, from the QGIS reference "
                "points of its bounding box.",
-               ("Smooth colour change becomes steps of about 6 levels (up to 32 bands).",
+               ("Smooth colour change becomes steps of about 4 levels (up to 64 bands).",
                 "Viewport-relative gradients are drawn relative to each feature (reported).")),
     Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
                "Shading by distance to the boundary as inset colour bands (whole shape or a "
                "set distance, rings ignored when set).",
-               ("Smooth colour change becomes steps (up to 32 bands); blur is not applied.",
+               ("Smooth colour change becomes steps (up to 64 bands); blur is not applied.",
                 "A distance in screen units is fixed at the middle of the visible zooms.")),
     Capability("InterpolatedLine", "line", Strategy.UNSUPPORTED, "Not supported."),
     Capability("RasterLine", "line", Strategy.APPROXIMATE,

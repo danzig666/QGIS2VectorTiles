@@ -34,6 +34,7 @@ from qgis.core import (
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleMarkerSymbolLayerBase,
     QgsSymbolLayer,
+    QgsSymbolLayerUtils,
 )
 from qgis.PyQt.QtCore import QPointF
 
@@ -1331,16 +1332,16 @@ class SymbolMaterializer:
 
     # -- map-unit hatches ------------------------------------------------------
     # -- gradient / shapeburst fills: colour bands (fidelity/materialize.py) --------------
-    MAX_BANDS = 32
+    MAX_BANDS = 64
 
     @classmethod
     def _band_count(cls, colors) -> int:
-        """Bands so neighbours differ by ~6 levels (at most MAX_BANDS)."""
+        """Bands so neighbours differ by ~4 levels (at most MAX_BANDS)."""
         spread = 0
         for a, b in zip(colors, colors[1:]):
             spread += max(abs(a.red() - b.red()), abs(a.green() - b.green()),
                           abs(a.blue() - b.blue()), abs(a.alpha() - b.alpha()))
-        return max(2, min(cls.MAX_BANDS, math.ceil(spread / 6)))
+        return max(2, min(cls.MAX_BANDS, math.ceil(spread / 4)))
 
     @staticmethod
     def _ramp_of(layer):
@@ -1353,23 +1354,24 @@ class SymbolMaterializer:
         return QgsGradientColorRamp(layer.color(), layer.color2())
 
     def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True):
+        """One rule drawing every colour band of the fill: a solid fill whose
+        colour is the band's (COLOR_FIELD), from one materialized dataset."""
         from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
         probe = [ramp.color(i / 16) for i in range(17)]
         bands = self._band_count(probe)
         colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
         overlap = overlap_ok and all(c.alpha() == 255 for c in colors)
-        opacity = flat_rule.rule.symbol().opacity()
-        rules = []
-        for band, color in enumerate(colors):
-            fill = QgsSimpleFillSymbolLayer(color, Qt.BrushStyle.SolidPattern, color,
-                                            Qt.PenStyle.NoPen)
-            fill.setOffset(layer.offset())
-            fill.setOffsetUnit(layer.offsetUnit())
-            symbol = QgsFillSymbol([fill])
-            symbol.setOpacity(opacity)
-            rules.append(self._with_symbol(flat_rule, symbol, 2, band + 1,
-                                           recipe_of(band, bands, overlap)))
-        return rules
+        encoded = [QgsSymbolLayerUtils.encodeColor(c) for c in colors]  # "r,g,b,a", as QGIS reads it
+        fill = QgsSimpleFillSymbolLayer(colors[0], Qt.BrushStyle.SolidPattern, colors[0],
+                                        Qt.PenStyle.NoPen)
+        fill.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                    QgsProperty.fromField(mat.COLOR_FIELD))
+        fill.setOffset(layer.offset())
+        fill.setOffsetUnit(layer.offsetUnit())
+        symbol = QgsFillSymbol([fill])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        recipe = mat.color_bands_recipe([recipe_of(band, bands, overlap) for band in range(bands)], encoded)
+        return [self._with_symbol(flat_rule, symbol, 2, 1, recipe)]
 
     def _gradient(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A gradient fill as solid colour bands (linear strips, radial rings,
@@ -1385,12 +1387,13 @@ class SymbolMaterializer:
         crs = self.project_crs or flat_rule.layer.crs().authid()
         p1, p2 = layer.referencePoint1(), layer.referencePoint2()
 
-        def recipe(band, bands, overlap):
+        def recipe(band, bands, opaque):
+            overlap = opaque and spread == 0 and gradient_type != 2
             return mat.gradient_band_recipe(
                 gradient_type, (p1.x(), p1.y()), (p2.x(), p2.y()),
                 layer.referencePoint1IsCentroid(), layer.referencePoint2IsCentroid(),
-                layer.angle(), spread, band, bands,
-                overlap and spread == 0 and gradient_type != 2, crs)
+                layer.angle(), spread, band, bands, overlap, crs,
+                0.5 if opaque and not overlap else 0.0)
         return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
 
     def _shapeburst(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
@@ -1404,7 +1407,11 @@ class SymbolMaterializer:
                 # Screen units: the map distance at the middle of the rule's
                 # zoom range (Web Mercator metres; 96 dpi CSS pixels).
                 low, high = flat_rule.get_attr("o"), flat_rule.get_attr("i")
-                zoom = (float(low) + float(high)) / 2 if low is not None and high is not None else 16.0
+                if low is not None and high is not None:
+                    high = min(float(high), float(self.max_zoom))
+                    zoom = (min(float(low), high) + high) / 2
+                else:
+                    zoom = 16.0
                 distance = mm * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** zoom)
                 self._report("Q2VT_GRADIENT_APPROXIMATE",
                              f"Shapeburst distance in screen units is fixed at zoom {zoom:g}.", flat_rule)
