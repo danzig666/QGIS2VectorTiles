@@ -794,3 +794,149 @@ def coerce_to_symbol_type(expression: str, symbol_type: int) -> str:
         return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
                 f"'Point', @q2vt_coerce, nodes_to_points(@q2vt_coerce)))")
     return expression
+
+
+# --- gradient and shapeburst fills as colour bands ------------------------------------------
+#
+# The browser has no gradient fill. A QGIS gradient (linear, radial,
+# conical) or shapeburst fill is exported as ``bands`` solid fills: band i
+# covers the part of the polygon where the gradient parameter t lies in
+# [i/n, (i+1)/n] and is filled with the colour at its middle. Opaque fills
+# use overlapping bands (band i = every t >= i/n, drawn bottom to top) so
+# no hairline seams show between neighbours; translucent ones use exact,
+# non-overlapping bands.
+
+def gradient_band_recipe(gradient_type: int, ref1, ref2, centroid1: bool, centroid2: bool,
+                         angle: float, spread: int, band: int, bands: int, overlap: bool,
+                         construction_crs: str) -> Recipe:
+    """``ref1``/``ref2``: QGIS reference points as fractions of the feature's
+    bounding box (x right, y down); ``gradient_type`` 0 linear, 1 radial,
+    2 conical; ``spread`` 0 pad, 1 reflect, 2 repeat (QgsGradientFillSymbolLayer)."""
+    # QGIS rotates the reference points around the box centre by ``angle``
+    # (QTransform::rotate in y-down box fractions: clockwise on screen).
+    a = math.radians(angle or 0.0)
+
+    def rotated(point):
+        x, y = point[0] - 0.5, point[1] - 0.5
+        return (0.5 + x * math.cos(a) - y * math.sin(a), 0.5 + x * math.sin(a) + y * math.cos(a))
+
+    p1, p2 = rotated(ref1), rotated(ref2)
+    return Recipe("gradient_band", (), (
+        ("type", int(gradient_type)), ("p1", (float(p1[0]), float(p1[1]))),
+        ("p2", (float(p2[0]), float(p2[1]))), ("c1", bool(centroid1)), ("c2", bool(centroid2)),
+        ("spread", int(spread)), ("band", int(band)), ("bands", int(bands)),
+        ("overlap", bool(overlap)), ("crs", construction_crs)))
+
+
+def shapeburst_band_recipe(distance: float, whole_shape: bool, ignore_rings: bool, band: int,
+                           bands: int, construction_crs: str) -> Recipe:
+    """Band ``band`` of a shapeburst fill: t = distance to the boundary /
+    ``distance`` (map units of ``construction_crs``), or / the largest
+    distance inside the polygon (``whole_shape``). Bands overlap (inset
+    polygons drawn from the edge inwards)."""
+    return Recipe("shapeburst_band", (), (
+        ("distance", float(distance)), ("whole", bool(whole_shape)), ("ignore_rings", bool(ignore_rings)),
+        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs)))
+
+
+def _band_interval(band: int, bands: int, overlap: bool):
+    """(start, end) of a band's t interval, None = unbounded on that side."""
+    start = None if band == 0 else band / bands
+    end = None if overlap or band == bands - 1 else (band + 1) / bands
+    return start, end
+
+
+def gradient_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Geometry expression: the polygon part of one gradient band."""
+    crs = recipe.param("crs") or export_crs
+    kind, spread = recipe.param("type"), recipe.param("spread")
+    band, bands, overlap = recipe.param("band"), recipe.param("bands"), recipe.param("overlap")
+    (f1x, f1y), (f2x, f2y) = recipe.param("p1"), recipe.param("p2")
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+
+    def point(fx, fy, centroid):
+        if centroid:
+            return "x(centroid(@q2vt_g))", "y(centroid(@q2vt_g))"
+        return f"(@q2vt_x0 + {fx!r} * @q2vt_w)", f"(@q2vt_y1 - {fy!r} * @q2vt_h)"
+
+    (p1x, p1y), (p2x, p2y) = point(f1x, f1y, recipe.param("c1")), point(f2x, f2y, recipe.param("c2"))
+    head = (f"with_variable('q2vt_g', {geom}, with_variable('q2vt_b', bounds(@q2vt_g), "
+            f"with_variable('q2vt_x0', x_min(@q2vt_b), with_variable('q2vt_y1', y_max(@q2vt_b), "
+            f"with_variable('q2vt_w', bounds_width(@q2vt_b), with_variable('q2vt_h', bounds_height(@q2vt_b), "
+            f"with_variable('q2vt_p1x', {p1x}, with_variable('q2vt_p1y', {p1y}, "
+            f"with_variable('q2vt_dx', {p2x} - @q2vt_p1x, with_variable('q2vt_dy', {p2y} - @q2vt_p1y, "
+            f"with_variable('q2vt_l', max(sqrt(@q2vt_dx^2 + @q2vt_dy^2), 1e-9), "
+            f"with_variable('q2vt_r', sqrt(@q2vt_w^2 + @q2vt_h^2) + 1, ")
+    close = "))))))))))))"
+    start, end = _band_interval(band, bands, overlap)
+    big = "(@q2vt_r / @q2vt_l + 2)"  # beyond every corner, in t units
+
+    if kind == 1:  # radial: t = distance from p1 / |p2 - p1|
+        def disc(t):
+            return f"buffer(make_point(@q2vt_p1x, @q2vt_p1y), {t} * @q2vt_l, 24)"
+        if spread == 0:
+            outer = "@q2vt_g" if end is None else f"intersection(@q2vt_g, {disc(end)})"
+            body = outer if start is None else f"difference({outer}, {disc(start)})"
+        else:
+            a, b = band / bands, (band + 1) / bands
+            ring = (f"with_variable('q2vt_ta', if({spread} = 1 AND @element % 2 = 1, @element + 1 - {b!r}, "
+                    f"@element + {a!r}), with_variable('q2vt_tb', if({spread} = 1 AND @element % 2 = 1, "
+                    f"@element + 1 - {a!r}, @element + {b!r}), "
+                    f"difference({disc('@q2vt_tb')}, {disc('@q2vt_ta')})))")
+            body = (f"intersection(@q2vt_g, collect_geometries(array_foreach(generate_series(0, "
+                    f"ceil(@q2vt_r / @q2vt_l) + 1), {ring})))")
+        return _back(head + body + close, crs, export_crs)
+
+    if kind == 2:  # conical: t = angle counter-clockwise from p1 -> p2 / 360 degrees
+        a0 = f"(atan2(@q2vt_dy, @q2vt_dx) + 2 * pi() * {band / bands!r})"
+        a1 = f"(atan2(@q2vt_dy, @q2vt_dx) + 2 * pi() * {(band + 1) / bands!r})"
+        wedge = (f"make_polygon(make_line(array_cat(array(make_point(@q2vt_p1x, @q2vt_p1y)), "
+                 f"array_foreach(generate_series(0, 8), make_point("
+                 f"@q2vt_p1x + 2 * @q2vt_r * cos({a0} + ({a1} - {a0}) * @element / 8), "
+                 f"@q2vt_p1y + 2 * @q2vt_r * sin({a0} + ({a1} - {a0}) * @element / 8))), "
+                 f"array(make_point(@q2vt_p1x, @q2vt_p1y)))))")
+        return _back(head + f"intersection(@q2vt_g, {wedge})" + close, crs, export_crs)
+
+    # linear: t = projection on p1 -> p2 / |p2 - p1|^2
+    def strip(ta, tb):
+        def corner(t, side):
+            return (f"make_point(@q2vt_p1x + @q2vt_dx * {t} - @q2vt_dy / @q2vt_l * @q2vt_r * {side}, "
+                    f"@q2vt_p1y + @q2vt_dy * {t} + @q2vt_dx / @q2vt_l * @q2vt_r * {side})")
+        return (f"make_polygon(make_line({corner(ta, -1)}, {corner(tb, -1)}, {corner(tb, 1)}, "
+                f"{corner(ta, 1)}, {corner(ta, -1)}))")
+
+    if spread == 0:
+        ta = f"(-{big})" if start is None else repr(start)
+        tb = big if end is None else repr(end)
+        body = f"intersection(@q2vt_g, {strip(ta, tb)})"
+    else:
+        a, b = band / bands, (band + 1) / bands
+        ta = f"if({spread} = 1 AND @element % 2 <> 0, @element + 1 - {b!r}, @element + {a!r})"
+        tb = f"if({spread} = 1 AND @element % 2 <> 0, @element + 1 - {a!r}, @element + {b!r})"
+        span = f"floor(-{big}), ceil({big})"
+        body = (f"intersection(@q2vt_g, collect_geometries(array_foreach(generate_series({span}), "
+                f"{strip(ta, tb)})))")
+    return _back(head + body + close, crs, export_crs)
+
+
+def shapeburst_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Geometry expression: the inset polygon of one shapeburst band (every
+    point at least ``band / bands`` of the shading distance inside)."""
+    crs = recipe.param("crs") or export_crs
+    band, bands = recipe.param("band"), recipe.param("bands")
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    shape = "make_polygon(exterior_ring(@q2vt_g))" if recipe.param("ignore_rings") else "@q2vt_g"
+    if recipe.param("whole"):
+        reach = f"distance(pole_of_inaccessibility({shape}, 0.5), boundary({shape}))"
+    else:
+        reach = repr(recipe.param("distance"))
+    if band == 0:
+        body = "@q2vt_g"
+    else:
+        body = (f"intersection(@q2vt_g, buffer({shape}, -{band / bands!r} * @q2vt_reach, 8))")
+    return _back(f"with_variable('q2vt_g', {geom}, with_variable('q2vt_reach', {reach}, {body}))",
+                 crs, export_crs)
+
+
+def _back(body: str, crs: str, export_crs: str) -> str:
+    return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"

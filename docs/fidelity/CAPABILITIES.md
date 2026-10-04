@@ -4,8 +4,8 @@ Generated from `src/core/fidelity/capabilities.py` by `tools/generate_capabiliti
 
 | QGIS symbol layer | Family | Strategy | Behavior | Constraints |
 |---|---|---|---|---|
-| `GradientFill` | fill | unsupported | Feature-relative gradients need geometry bands or raster fallback. | — |
-| `ShapeburstFill` | fill | unsupported | Boundary-distance shading needs feature-aware geometry or raster fallback. | — |
+| `GradientFill` | fill | materialized | Linear, radial and conical gradients (two colours or a colour ramp, pad / reflect / repeat) as solid colour bands per feature, from the QGIS reference points of its bounding box. | Smooth colour change becomes steps of about 6 levels (up to 32 bands).<br>Viewport-relative gradients are drawn relative to each feature (reported). |
+| `ShapeburstFill` | fill | materialized | Shading by distance to the boundary as inset colour bands (whole shape or a set distance, rings ignored when set). | Smooth colour change becomes steps (up to 32 bands); blur is not applied.<br>A distance in screen units is fixed at the middle of the visible zooms. |
 | `SimpleFill` | fill | native | Solid fill color and opacity; outline exported as a separate line layer. | Qt brush styles other than solid/no-brush are drawn solid. |
 | `FontMarker` | font_marker | native | Map-unit markers with a static character on point layers: the glyph outlines QGIS draws, as polygons (exact at every zoom). Otherwise browser text (glyphs generated for the font); data-defined characters, size, colour and angle are kept. Characters beyond U+FFFF or missing from the font, and markers inside marker lines, are sprites. | Browser text baselines are placed half the font's ascent below the point, as QGIS does, to within one glyph pixel (1/24 em). |
 | `ArrowLine` | line | materialized | Straight arrows: body as a line of the arrow width, heads as rotated markers at the line ends. | Curved, per-segment, half or tapered arrows are approximated.<br>Heads sized in map units are omitted (reported). |

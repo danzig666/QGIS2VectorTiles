@@ -1736,6 +1736,10 @@ class RulesExporter:
             return [0, "@geometry"]  # points already materialized
         if recipe is not None and recipe.kind == "hatch_lines":
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "gradient_band":
+            return [2, mat.gradient_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "shapeburst_band":
+            return [2, mat.shapeburst_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
             kind = 2 if recipe.param("fill") or recipe.param("stroke") else \
