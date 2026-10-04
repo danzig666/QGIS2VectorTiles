@@ -572,7 +572,10 @@ def generate_glyphs(characters: Set[str], out_dir: str) -> Dict[str, str]:
             style = next((s for s in ROLE_STYLES[role] if s in styles), styles[0] if styles else "Regular")
             key = f"{family} {style}"
             target = os.path.join(out_dir, stack)
-            source = os.path.join(work, GlyphGenerator.fontstack_name(family, style))
+            # The folder the generator writes: its own resolution of the font
+            # (e.g. "Open Sans Semibold" is its own family in older releases).
+            source = os.path.join(work, GlyphGenerator.resolve_fontstack(family, style)
+                                  or GlyphGenerator.fontstack_name(family, style))
             if not os.path.isdir(source):
                 GlyphGenerator({key: [(None, text)]}, "", work).generate()
             if not os.path.isdir(source):

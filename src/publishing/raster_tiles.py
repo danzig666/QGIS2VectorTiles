@@ -14,6 +14,10 @@ opacity slider multiplies that.
 * Fully transparent tiles are not stored (the viewer shows nothing there).
 * Identical tiles are stored once; the archive is validated (structure,
   image signatures) before it is renamed into place.
+* Layer blend modes (the browser has none): a *multiply* layer becomes black
+  with transparency 1 - brightness, a *screen* layer white with transparency
+  = brightness - exact for grey rasters such as a hillshade, whatever is
+  drawn below. Colour pixels use their luminance (reported as approximate).
 """
 
 import math
@@ -140,9 +144,11 @@ def _transparent(image: QImage) -> bool:
 
 def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: str,
                  progress: Optional[Progress] = None, metatile: int = 8,
-                 title: str = "") -> Optional[ArchiveDescriptor]:
+                 title: str = "", blend: str = "normal") -> Optional[ArchiveDescriptor]:
     """Render ``layer`` into ``output`` (PMTiles). Returns None when the layer
-    draws nothing in the export extent."""
+    draws nothing in the export extent. ``blend`` "multiply" / "screen":
+    the tiles are converted to the equivalent normal image (blend_to_alpha);
+    a colour (not grey) layer is then approximate (added to plan.warnings)."""
     progress = progress or Progress()
     if plan.tiles > MAX_TILES_PER_LAYER:
         raise PublishingError(
@@ -164,6 +170,11 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
     settings.setFlag(QgsMapSettings.Flag.RenderMapTile, True)
     settings.setFlag(QgsMapSettings.Flag.DrawLabeling, False)
     jpeg = config.raster_format == "jpeg"
+    if blend in ("multiply", "screen") and jpeg:
+        plan.warnings.append(f'Raster layer "{layer.name()}": its {blend} blend mode needs transparency; '
+                             "JPEG has none, so it is drawn as normal. Choose PNG or WebP.")
+        blend = "normal"
+    colour_blend = False
     done = 0
     with TileSink(output) as sink:
         for z in range(plan.min_zoom, plan.max_zoom + 1):
@@ -183,6 +194,9 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
                     job = QgsMapRendererCustomPainterJob(settings, painter)
                     job.renderSynchronously()
                     painter.end()
+                    if blend in ("multiply", "screen"):
+                        image, grey = blend_to_alpha(image, blend)
+                        colour_blend = colour_blend or not grey
                     for ix in range(nx):
                         for iy in range(ny):
                             tile = image.copy(QRect(ix * tile_px, iy * tile_px, tile_px, tile_px))
@@ -199,12 +213,55 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
                     done += nx * ny
                     progress.update(0.9 * done / max(1, plan.tiles),
                                     f'Raster "{layer.name()}": {done}/{plan.tiles} tiles')
+        if colour_blend:
+            plan.warnings.append(f'Raster layer "{layer.name()}": {blend} blend mode with colours is '
+                                 "approximated in the web map (by brightness); grey layers such as a "
+                                 "hillshade are exact.")
         if not sink.count:
             return None
         metadata = {"name": title or layer.name(), "format": config.raster_format,
                     "type": "overlay", "description": "QGIS raster layer rendered by QWebMap"}
         return sink.write(IMAGE_TILE_TYPES[config.raster_format], Compression.NONE, metadata,
                           progress=progress.sub(0.9, 1.0))
+
+
+# QPainter composition modes (QgsMapLayer.blendMode) the browser can reproduce.
+BLEND_NAMES = {0: "normal", 13: "multiply", 14: "screen", 15: "overlay", 16: "darken", 17: "lighten",
+               18: "dodge", 19: "burn", 20: "hard light", 21: "soft light", 22: "difference",
+               23: "exclusion", 12: "addition"}
+
+
+def blend_name(layer) -> str:
+    """The layer's blend mode name ("normal", "multiply", ...)."""
+    try:
+        mode = int(getattr(layer.blendMode(), "value", layer.blendMode()))
+    except (AttributeError, TypeError, ValueError):
+        return "normal"
+    return BLEND_NAMES.get(mode, f"mode {mode}")
+
+
+def blend_to_alpha(image: QImage, blend: str) -> Tuple[QImage, bool]:
+    """A rendered multiply/screen layer as a normal (alpha) image with the
+    same result: multiply by grey g = black with alpha 1 - g; screen by g =
+    white with alpha g (both times the pixel's own alpha). Returns the image
+    and whether every visible pixel was grey (else luminance: approximate)."""
+    import numpy as np  # pylint: disable=import-outside-toplevel
+    argb = image.convertToFormat(QImage.Format.Format_ARGB32)
+    width, height = argb.width(), argb.height()
+    ptr = argb.constBits()
+    ptr.setsize(argb.sizeInBytes() if hasattr(argb, "sizeInBytes") else argb.byteCount())
+    rows = np.frombuffer(ptr, dtype=np.uint8).reshape(height, argb.bytesPerLine())
+    pixels = rows[:, :width * 4].reshape(height, width, 4).astype(np.float32)  # B G R A
+    b, g, r, a = pixels[..., 0], pixels[..., 1], pixels[..., 2], pixels[..., 3]
+    visible = a > 0
+    grey = not visible.any() or float(np.max(np.maximum(np.abs(r - g), np.abs(g - b))[visible])) <= 2.0
+    level = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    alpha = a * ((1.0 - level) if blend == "multiply" else level)
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[..., :3] = 0 if blend == "multiply" else 255
+    out[..., 3] = np.clip(np.rint(alpha), 0, 255).astype(np.uint8)
+    result = QImage(out.tobytes(), width, height, width * 4, QImage.Format.Format_ARGB32).copy()
+    return result, grey
 
 
 def raster_source_id(logical_id: str) -> str:
