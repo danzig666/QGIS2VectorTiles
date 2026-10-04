@@ -157,10 +157,26 @@ def test_local_publication_end_to_end(project, tmp_path):
 def test_duplicate_keys_stop_the_publication(project, tmp_path):
     project, parcels = project
     profile = _profile(parcels, tmp_path, key_fields=["terulet"])  # 1000.5 everywhere
+    stages = []
     with pytest.raises(PublishingError) as error:
-        export_local(project, profile, EXTENT)
+        export_local(project, profile, EXTENT, stage_callback=stages.append)
     assert error.value.code == "Q2VT_PUB_IDENTITY"
+    assert stages == ["PLAN"]  # reported at once, before the tile export
+    assert "(terulet) is not unique, e.g. 1000.5" in error.value.message
+    assert "Interaction tab" in error.value.message
     assert not os.path.exists(os.path.join(profile.output.local_directory, "arlo-teszt", "current.json"))
+
+
+def test_key_check_counts_only_drawn_features(project, tmp_path):
+    """The early key check looks at the features the export writes: square C
+    (NULL zone) is drawn by no category, so its NULL key is no problem."""
+    from publishing import qgis_model
+    project, parcels = project
+    profile = _profile(parcels, tmp_path, key_fields=["zone"])
+    assert qgis_model.check_keys(project, profile, EXTENT) == []
+    profile.layers[0].key_fields = ["tulaj"]  # the canary everywhere
+    problems = qgis_model.check_keys(project, profile, EXTENT)
+    assert "(tulaj) is not unique" in problems[0] and problems[-1] == qgis_model.KEY_ADVICE
 
 
 def test_export_scoped_identity_without_key(project, tmp_path):

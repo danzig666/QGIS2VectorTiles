@@ -528,19 +528,78 @@ def collect_records(project: QgsProject, profile: PublicationProfile, rules, ext
             result.counts[lid] = count
             result.filter_domains[lid] = domains
             if scope != EXPORT_SCOPED:
-                issues = validate_keys(keys)
-                if issues["null"]:
-                    result.problems.append(f'Layer "{layer.name()}": {issues["null"][0]} feature(s) '
-                                           f'have no key ({", ".join(config.key_fields)} is NULL).')
-                if issues["duplicate"]:
-                    result.problems.append(f'Layer "{layer.name()}": key not unique, e.g. '
-                                           f'{", ".join(issues["duplicate"][:3])}.')
+                result.problems.extend(key_problems(layer.name(), config.key_fields, validate_keys(keys)))
     return result
+
+
+def key_problems(layer_name: str, key_fields: List[str], issues: Dict[str, List[str]]) -> List[str]:
+    fields = ", ".join(key_fields)
+    problems = []
+    if issues["null"]:
+        problems.append(f'Layer "{layer_name}": {issues["null"][0]} feature(s) have no key '
+                        f'({fields} is NULL).')
+    if issues["duplicate"]:
+        problems.append(f'Layer "{layer_name}": the key ({fields}) is not unique, e.g. '
+                        f'{", ".join(issues["duplicate"][:3])}.')
+    return problems
+
+
+KEY_ADVICE = ("Fix the data, or choose a key that is unique (Interaction tab: key fields; for the "
+              "parcel layer: Parcel report tab).")
+
+
+def check_keys(project: QgsProject, profile: PublicationProfile, extent_3857: QgsRectangle,
+               progress=None) -> List[str]:
+    """Feature keys checked before the export, so a NULL or repeated key is
+    reported at once, not after minutes of tiling. The features are those the
+    layer's renderer draws inside the extent, as the export writes them
+    (``collect_records`` checks the exported features again afterwards)."""
+    from qgis.core import QgsRenderContext, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    web = QgsCoordinateReferenceSystem(WEB_MERCATOR)
+    problems: List[str] = []
+    for config in profile.layers:
+        if not config.included:
+            continue
+        layer = project.mapLayer(config.layer_id)
+        key_expr, scope = key_expression(config.key_fields)
+        if not isinstance(layer, QgsVectorLayer) or scope == EXPORT_SCOPED:
+            continue
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        key = QgsExpression(key_expr)
+        key.prepare(context)
+        request = QgsFeatureRequest()
+        try:
+            request.setFilterRect(QgsCoordinateTransform(web, layer.crs(), project.transformContext())
+                                  .transformBoundingBox(extent_3857))
+        except Exception:  # noqa: BLE001
+            pass
+        render_context = QgsRenderContext()
+        render_context.setExpressionContext(context)
+        renderer = layer.renderer().clone() if layer.renderer() is not None else None
+        keys, count = [], 0
+        if renderer is not None:
+            renderer.startRender(render_context, layer.fields())
+        try:
+            for feature in layer.getFeatures(request):
+                context.setFeature(feature)
+                if renderer is not None and not renderer.willRenderFeature(feature, render_context):
+                    continue
+                value = key.evaluate(context)
+                keys.append(None if value is None or (hasattr(value, "isNull") and value.isNull())
+                            else str(value))
+                count += 1
+                if progress is not None and count % 5000 == 0:
+                    progress.check()
+        finally:
+            if renderer is not None:
+                renderer.stopRender(render_context)
+        problems.extend(key_problems(layer.name(), config.key_fields, validate_keys(keys)))
+    return problems + [KEY_ADVICE] if problems else []
 
 
 def raise_identity_problems(result: RecordsResult) -> None:
     if result.problems:
-        raise PublishingError("Q2VT_PUB_IDENTITY", " ".join(result.problems[:5]))
+        raise PublishingError("Q2VT_PUB_IDENTITY", " ".join(result.problems[:5] + [KEY_ADVICE]))
 
 
 # --- legend swatches ---------------------------------------------------------------------

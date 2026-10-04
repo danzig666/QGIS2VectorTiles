@@ -461,7 +461,7 @@ class PublishDialog(QDialog):
         own = range_text(layer.minimumScale(), layer.maximumScale()) \
             if layer is not None and layer.hasScaleBasedVisibility() else ""
         text = range_text(low, high)
-        item.setText(COL_SCALES, text or (tr("(QGIS)") if own else ""))
+        item.setText(COL_SCALES, text or (tr("(QGIS {})").format(own) if own else ""))
         item.setForeground(COL_SCALES, self.palette().text() if text else self.palette().placeholderText())
         item.setToolTip(COL_SCALES, (tr("Web map: {}").format(text) if text else tr("No web limit"))
                         + (tr("\nQGIS layer: {}").format(own) if own else ""))

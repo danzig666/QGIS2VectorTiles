@@ -938,12 +938,12 @@ class RulesExporter:
         group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
                  if f.name not in ("flat_rules", "output_dataset", "layer_name")}
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
-                  if f.name not in ("layer_id", "name")}
-        return source, self.extra_tile_fields.get(grp.layer_id, []), group
+                  if f.name not in ("layer_id", "name", "feature_key")}
+        return source, src.feature_key, self.extra_tile_fields.get(grp.layer_id, []), group
 
     def _dataset_key(self, context: dict, src: _SourceSnapshot, grp: _RuleGroupSnapshot) -> str:
-        source, extra, group = self._dataset_key_parts(src, grp)
-        return export_cache.make_key("dataset", context, source, extra, group)
+        source, feature_key, extra, group = self._dataset_key_parts(src, grp)
+        return export_cache.make_key("dataset", context, source, feature_key, extra, group)
 
     def _reuse_cached(self, sources: Dict[str, _SourceSnapshot],
                       rule_groups: List[_RuleGroupSnapshot]) -> Dict[str, Optional[str]]:
@@ -965,8 +965,9 @@ class RulesExporter:
                 continue
             key = self._dataset_key(context, src, grp)
             self.dataset_keys[grp.output_dataset] = key
-            source, extra, group = self._dataset_key_parts(src, grp)
+            source, feature_key, extra, group = self._dataset_key_parts(src, grp)
             now = {"code": code, "context": context_hash, "source": export_cache.part_hash(source),
+                   "key": export_cache.part_hash(feature_key),
                    "rule": export_cache.part_hash([extra, group])}
             components[grp.output_dataset] = now
             target = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")

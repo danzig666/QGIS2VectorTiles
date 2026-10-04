@@ -209,3 +209,42 @@ def test_reused_dataset_under_a_new_zoom_range_keeps_its_features(plugin, tmp_pa
     labels = {name for layers in tiles.values() for name, features in layers.items()
               if features and name.startswith(("l00t01", "l01t01"))}
     assert labels, sorted({name for layers in tiles.values() for name in layers})
+
+
+def test_layers_sharing_a_geopackage_and_key_changes(plugin, tmp_path):
+    """Two layers in one GeoPackage: editing one leaves the other cached (the
+    edit stamps of the whole file made every layer of it look changed). A new
+    feature key redoes only its layer, and says so."""
+    from qgis.core import (QgsCoordinateTransformContext, QgsVectorFileWriter,  # pylint: disable=import-outside-toplevel
+                           QgsVectorLayer)
+    project, profile, parcels, zones = _setup(tmp_path)
+    shared = str(tmp_path / "parcels.gpkg")  # parcels' file gets the zones table too
+    options = QgsVectorFileWriter.SaveVectorOptions()
+    options.driverName, options.layerName = "GPKG", "zones_table"
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    assert QgsVectorFileWriter.writeAsVectorFormatV3(
+        zones, shared, QgsCoordinateTransformContext(), options)[0] == QgsVectorFileWriter.NoError
+    moved = QgsVectorLayer(f"{shared}|layername=zones_table", "Övezetek", "ogr")
+    moved.setRenderer(zones.renderer().clone())
+    project.removeMapLayer(zones.id())
+    project.addMapLayer(moved)
+    profile.layers[1].layer_id = moved.id()
+    export_local(project, profile, EXTENT, Log())
+
+    moved.startEditing()  # an edit in the zones table only
+    feature = next(moved.getFeatures())
+    moved.changeAttributeValue(feature.id(), moved.fields().indexOf("hrsz"), "EDITED-2")
+    assert moved.commitChanges()
+    profile.layers[0].key_fields = ["hrsz", "zone"]  # and a new key for the parcels
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    redone = [l for l in log.lines if "Redone (" in l]
+    assert any("layer data changed" in l and "Övezetek" in l and "Földrészletek" not in l for l in redone), redone
+    assert any("feature key (unique id) changed" in l and "Földrészletek" in l
+               and "Övezetek" not in l for l in redone), redone
+
+    log = Log()  # nothing changed: everything reused
+    export_local(project, profile, EXTENT, log)
+    line = log.cache_line()
+    hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
+    assert hits == total > 0, line

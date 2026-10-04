@@ -302,11 +302,9 @@ def guess_zone_field(layer) -> str:
     return best[0] if best[1] > 0 else ""
 
 
-def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRectangle, out_dir: str,
-                        legend_dir: str, progress: Optional[Progress] = None) -> ParcelReportResult:
-    """Write ``parcels/`` (catalog, manifest, shards) into ``out_dir``."""
-    progress = progress or Progress()
-    info: ParcelInfoConfig = profile.parcel_info
+def resolve_layers(project, info: ParcelInfoConfig):
+    """The parcel and zone layers and fields (checked before the export starts):
+    (parcels, zoning, info with the zone code field to use, warnings)."""
     parcels = project.mapLayer(info.parcel_layer_id)
     zoning = project.mapLayer(info.zoning_layer_id)
     if parcels is None or zoning is None:
@@ -325,6 +323,15 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
     if parcels.fields().indexOf(info.key_field) < 0 or zoning.fields().indexOf(code_field) < 0:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
                               "Parcel report: the parcel id or the zone code field does not exist.")
+    return parcels, zoning, info, warnings
+
+
+def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRectangle, out_dir: str,
+                        legend_dir: str, progress: Optional[Progress] = None) -> ParcelReportResult:
+    """Write ``parcels/`` (catalog, manifest, shards) into ``out_dir``."""
+    progress = progress or Progress()
+    parcels, zoning, info, warnings = resolve_layers(project, profile.parcel_info)
+    code_field = info.zoning_code_field
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(legend_dir, exist_ok=True)
     crs = working_crs(parcels)
