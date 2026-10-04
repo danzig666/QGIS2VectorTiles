@@ -219,6 +219,9 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 .q2vt-legend-single { margin: 0 0 2px; }
 .q2vt-legend-layer h3 { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--q2vt-fg); margin: 8px 4px 4px; }
 .q2vt-legend-items { list-style: none; margin: 0; padding: 0; }
+.q2vt-legend-heading { display: flex; align-items: center; gap: 10px; }
+.q2vt-legend-switch { flex: 0 0 auto; transform: scale(0.8); transform-origin: left center; margin-right: -6px; }
+.q2vt-legend-off .q2vt-legend-item > span:last-child { color: var(--q2vt-muted); }
 .q2vt-legend-item { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 2px 4px; font-size: 13px; }
 .q2vt-legend-item img { width: 24px; height: 24px; object-fit: contain; flex: 0 0 auto; }
 .q2vt-legend-blank { width: 24px; flex: 0 0 auto; }

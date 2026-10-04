@@ -143,3 +143,44 @@ def test_the_address_bar_keeps_the_stable_entry(site, tmp_path):
     assert "/releases/r-" in state["base"]                     # relative URLs: the release
     assert state["stable"].split("#")[0].endswith(entry)
     assert "/releases/r-" in state["versioned"] and "#" in state["versioned"]
+
+
+@pytest.fixture(scope="module")
+def legend_only_site(tmp_path_factory):
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_parcel_report import build_site  # pylint: disable=import-error
+    built = build_site(tmp_path_factory.mktemp("legendonly"), layers_panel=False)
+    publication = os.path.dirname(os.path.dirname(built["rel"]))
+    with PreviewServer(os.path.dirname(publication)) as server:
+        built["url"] = server.url(f"{os.path.basename(publication)}/index.html")
+        yield built
+
+
+LEGEND_ROWS = """return [...document.querySelectorAll('#q2vt-pane-legend .q2vt-legend-layer')].map((b) => ({
+  title: (b.querySelector('h3 > span:last-child') || b.querySelector('.q2vt-legend-item > span:last-child')).textContent,
+  on: b.querySelector('input[role=switch]') ? b.querySelector('input[role=switch]').checked : null,
+  off: b.classList.contains('q2vt-legend-off') }));"""
+
+
+def test_without_the_layers_tab_the_legend_switches_layers(legend_only_site, tmp_path):
+    anchor = legend_only_site["records"]["100/1"]["p"][0]["x"]
+    results = _run(legend_only_site["url"], [
+        {"eval": "document.getElementById('q2vt-tab-legend').click(); q2vtViewer.map.jumpTo({ center: %s, zoom: 15 }); return 1;" % json.dumps(anchor)},
+        {"idle": True}, {"wait": 300},
+        {"eval": "return !!document.getElementById('q2vt-tab-layers');"},
+        {"eval": LEGEND_ROWS},
+        {"eval": """const row = [...document.querySelectorAll('#q2vt-pane-legend .q2vt-legend-layer')]
+            .find((b) => b.textContent.includes('Földrészletek'));
+          row.querySelector('input[role=switch]').click(); return 1;"""},
+        {"idle": True}, {"wait": 300},
+        {"eval": LEGEND_ROWS},
+        {"eval": "return location.hash;"},
+    ], tmp_path)
+    tab, before, after = results[1], results[2], results[4]
+    assert tab is False
+    parcels = next(r for r in before if r["title"] == "Földrészletek")
+    assert parcels["on"] is True and not parcels["off"]
+    # Switched off: still listed (one row, switch off), so it can come back.
+    parcels = next(r for r in after if r["title"] == "Földrészletek")
+    assert parcels["on"] is False and parcels["off"]
+    assert len(after) == len(before)
