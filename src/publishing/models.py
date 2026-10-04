@@ -218,6 +218,11 @@ class InteractionConfig:
     # Named OpenStreetMap streets inside the extent layer in the search (read
     # from the basemap; without a basemap from its source: needs internet).
     street_search: bool = False
+    # Google Street View in the viewer (a tap on the map opens the panorama
+    # looking toward the tapped point). The key is public in the page:
+    # restrict it to the site's address (HTTP referrer) in Google Cloud.
+    street_view: bool = False
+    google_api_key: str = ""
 
 
 @dataclass

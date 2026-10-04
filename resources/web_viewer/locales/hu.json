@@ -106,5 +106,15 @@
   "print.scaleScreen": "A képernyő szerint (kerekítve)",
   "search.street": "Utca (OpenStreetMap)",
   "tools.snap": "Illesztés: {layers}",
-  "tools.snapHelp": "A pont ezeknek a rétegeknek a legközelebbi töréspontjára, ennek híján az élére illeszkedik (piros kör). Alt lenyomva: szabad pont."
+  "tools.snapHelp": "A pont ezeknek a rétegeknek a legközelebbi töréspontjára, ennek híján az élére illeszkedik (piros kör). Alt lenyomva: szabad pont.",
+  "streetview.button": "Utcakép (Street View)",
+  "streetview.title": "Utcakép",
+  "streetview.hint": "Koppintson arra, amit látni szeretne. Utcakép a kék vonalak mentén érhető el.",
+  "streetview.hintNoCoverage": "Koppintson arra, amit látni szeretne: a legközelebbi utcáról nyílik meg, arra nézve.",
+  "streetview.hintMove": "A képen húzva körbenézhet, a térképen a jelölőt húzva odébb léphet. Máshová koppintva másik helyet nézhet meg.",
+  "streetview.none": "Itt a közelben nincs utcakép. Próbáljon egy kék vonal mentén.",
+  "streetview.unavailable": "Az utcakép nem tölthető be (internetkapcsolat vagy API-kulcs).",
+  "streetview.drag": "Húzza a nézőpont áthelyezéséhez",
+  "streetview.expand": "Nagyobb / kisebb",
+  "streetview.close": "Utcakép bezárása"
 }

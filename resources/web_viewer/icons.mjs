@@ -28,6 +28,8 @@ const PATHS = {
   road: '<path d="M8 3L4 21M16 3l4 18M12 4v3M12 10.5v3M12 17v3"/>',
   pin: '<path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0113 0c0 4.8-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
   sparkle: '<path d="M12 3.5l1.8 5 5 1.8-5 1.8-1.8 5-1.8-5-5-1.8 5-1.8z"/>',
+  person: '<circle cx="12" cy="5.5" r="2.5"/><path d="M8.5 21v-6l-1.5-1v-4a2 2 0 012-2h6a2 2 0 012 2v4l-1.5 1v6M12 14.5V21"/>',
+  expand: '<path d="M4.5 9.5v-5h5M19.5 9.5v-5h-5M4.5 14.5v5h5M19.5 14.5v5h-5"/>',
 };
 
 export function icon(name, size = 20) {

@@ -391,6 +391,39 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
   .q2vt-attribution { max-width: 60vw; }
   .maplibregl-popup-content { max-height: 42vh; }
 }
+/* Google Street View: map button, viewpoint cone, panorama panel, hint. */
+.q2vt-sv-button { width: 29px; height: 29px; display: grid; place-items: center; color: var(--q2vt-fg); }
+.q2vt-sv-button[aria-pressed="true"] { background: var(--q2vt-accent) !important; color: var(--q2vt-accent-fg); }
+.q2vt-sv-marker { width: 60px; height: 60px; cursor: grab; touch-action: none; }
+.q2vt-sv-marker svg { display: block; overflow: visible; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .35)); }
+.q2vt-sv-cone { fill: var(--q2vt-accent); fill-opacity: .35; stroke: var(--q2vt-accent); stroke-width: 2; }
+.q2vt-sv-dot { fill: #ffffff; stroke: var(--q2vt-accent); stroke-width: 4; }
+.q2vt-sv-panel { position: absolute; z-index: 8; display: flex; flex-direction: column; overflow: hidden;
+  left: calc(var(--q2vt-side-w) + var(--q2vt-gap) * 2); bottom: var(--q2vt-gap);
+  width: min(600px, calc(100vw - var(--q2vt-side-w) - 150px)); height: min(46vh, 440px);
+  min-width: 280px; min-height: 220px; resize: both;
+  background: var(--q2vt-surface-solid); color: var(--q2vt-fg); border: 1px solid var(--q2vt-border);
+  border-radius: var(--q2vt-radius); box-shadow: var(--q2vt-shadow); }
+.q2vt-sv-panel.q2vt-sv-full { left: var(--q2vt-gap); right: var(--q2vt-gap); top: var(--q2vt-gap);
+  bottom: var(--q2vt-gap); width: auto; height: auto; resize: none; }
+.q2vt-sv-head { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 14px; flex: 0 0 auto; }
+.q2vt-sv-head h2 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
+.q2vt-sv-pano { flex: 1; min-height: 0; background: #20242c; }
+.q2vt-sv-hint { position: absolute; z-index: 7; top: var(--q2vt-gap); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: min(520px, calc(100vw - 2 * var(--q2vt-gap))); padding: 9px 14px;
+  border-radius: 12px; background: var(--q2vt-surface-solid); color: var(--q2vt-fg);
+  box-shadow: var(--q2vt-shadow); font-size: 13px; line-height: 1.35; pointer-events: none; }
+.q2vt-sv-hint.q2vt-sv-alert { background: var(--q2vt-warn-bg); color: var(--q2vt-warn-fg); }
+@media (max-width: 760px) {
+  .q2vt-sv-button { width: 44px; height: 44px; }
+  .q2vt-sv-panel { position: fixed; z-index: 9; left: 0; right: 0; top: 0; bottom: auto; width: auto;
+    height: 48vh; min-width: 0; min-height: 0; resize: none; border-radius: 0 0 18px 18px;
+    border-top: none; padding-top: env(safe-area-inset-top); }
+  .q2vt-sv-panel.q2vt-sv-full { inset: 0; height: auto; border-radius: 0; }
+  .q2vt-sv-head { padding: 2px 4px 2px 12px; }
+  .q2vt-sv-head .q2vt-icon-btn { width: var(--q2vt-touch); height: var(--q2vt-touch); }
+  .q2vt-sv-hint { top: auto; bottom: calc(var(--q2vt-gap) * 2 + 64px + env(safe-area-inset-bottom)); font-size: 14px; }
+}
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 /* Print: the current view, its legend, title, date and attribution. */
@@ -401,6 +434,7 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 #q2vt-print-sheet { display: none; }
 body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: 186mm; height: 190mm; }
 @media print {
+  .q2vt-sv-panel, .q2vt-sv-hint, .q2vt-sv-marker { display: none !important; }
   @page { size: A4 landscape; margin: 8mm; }
   html, body { background: #fff !important; color: #000; overflow: visible; height: auto; }
   body.q2vt-printing #q2vt-app { position: static; display: grid; grid-template-columns: 186mm 1fr;

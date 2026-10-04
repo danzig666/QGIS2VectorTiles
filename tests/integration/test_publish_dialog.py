@@ -66,6 +66,9 @@ def _configure(dialog, parcels, tmp_path):
         table.item(row, column).setCheckState(CHECKED)
     table.setItem(row, 2, type(table.item(row, 0))("Helyrajzi szám"))
     table.cellWidget(names.index("zone"), 6).setCurrentIndex(1)  # values filter
+    assert not dialog.i_google_key.isEnabled()  # the key field follows the Street View switch
+    dialog.i_flags["street_view"].setChecked(True)
+    dialog.i_google_key.setText(" AIzaTESTKEY ")
 
 
 def _wait_task(dialog, timeout=120):
@@ -103,11 +106,13 @@ def test_settings_are_saved_in_the_project_file(project, messages, tmp_path):
     assert config.included and config.initially_visible and config.key_fields == ["hrsz"]
     assert [p.alias for p in config.popup_fields] == ["Helyrajzi szám"]
     assert [f.field for f in config.filter_fields] == ["zone"]
+    assert profile.interaction.street_view and profile.interaction.google_api_key == "AIzaTESTKEY"
     raw, _ = QgsProject.instance().readEntry(store.SCOPE, store.KEY_PROFILES, "")
     assert "secret" not in raw.lower() and "password" not in raw.lower()
     # A second window shows the saved settings.
     again = _dialog()
     assert again.e_title.text() == "Arló szabályozási terv" and again.e_slug.text() == "arlo-terv"
+    assert again.i_google_key.text() == "AIzaTESTKEY" and again.i_google_key.isEnabled()
     dialog.close()
     again.close()
 

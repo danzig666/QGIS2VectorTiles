@@ -69,7 +69,7 @@ export class Identify {
   }
 
   async click(event) {
-    if (this.viewer.measuring) return;
+    if (this.viewer.measuring || this.viewer.streetView) return;
     const hits = this.hits(event.point);
     if (!hits.length) {
       this.popup.remove();
