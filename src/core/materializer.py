@@ -34,6 +34,7 @@ from qgis.core import (
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleMarkerSymbolLayerBase,
     QgsSymbolLayer,
+    QgsSymbolLayerUtils,
 )
 from qgis.PyQt.QtCore import QPointF
 
@@ -173,6 +174,10 @@ class SymbolMaterializer:
             return self._hatch(flat_rule, layer)
         if kind == "RandomMarkerFill":
             return self._random_fill(flat_rule, layer)
+        if kind == "GradientFill":
+            return self._gradient(flat_rule, layer)
+        if kind == "ShapeburstFill":
+            return self._shapeburst(flat_rule, layer)
         if kind == "PointPatternFill" and normalize_unit(layer.distanceXUnit()) == "map" \
                 and normalize_unit(layer.distanceYUnit()) == "map" \
                 and not self._tiling_pattern(layer):
@@ -1227,17 +1232,32 @@ class SymbolMaterializer:
         width, start, thick, length = mm
         return Qgis.RenderUnit.Millimeters, (width + start) / 2.0, max(width, start) + 2 * thick, length
 
+    @staticmethod
+    def _arrow_fill_layer(fill):
+        """The fill layer that gives the arrow its look: the top visible solid
+        fill without an offset (an offset one is usually a shadow), else the
+        top visible one, else the first."""
+        if fill is None or not fill.symbolLayerCount():
+            return None
+        layers = [fill.symbolLayer(i) for i in range(fill.symbolLayerCount())]
+        visible = [l for l in layers if l.enabled() and l.color().alpha() > 0 and (
+            l.layerType() != "SimpleFill" or l.brushStyle() != Qt.BrushStyle.NoBrush)]
+        unshifted = [l for l in visible if l.layerType() != "SimpleFill" or l.offset().isNull()
+                     or (abs(l.offset().x()) < 1e-9 and abs(l.offset().y()) < 1e-9)]
+        return (unshifted or visible or layers)[-1]
+
     def _arrow(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """Arrow body (straight, per segment or circular arcs, like QGIS) as a
         line, heads as triangles of the QGIS head length and width at the
         ends of every arrow."""
         from qgis.core import QgsEllipseSymbolLayer  # pylint: disable=import-outside-toplevel
         fill = layer.subSymbol()
-        fill_layer = fill.symbolLayer(0) if fill and fill.symbolLayerCount() else None
+        fill_layer = self._arrow_fill_layer(fill)
         color = fill_layer.color() if fill_layer is not None else None
         if fill_layer is None or fill_layer.layerType() != "SimpleFill" or fill.symbolLayerCount() > 1:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                         "Arrow fill is drawn with its first layer's colour only.", flat_rule)
+                         "Arrow fill is drawn with one colour (its top visible, not offset layer); "
+                         "other fill layers (e.g. an offset shadow) are left out.", flat_rule)
         if int(layer.arrowType()) != 0 or layer.arrowStartWidth() != layer.arrowWidth():
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                          "Half or tapered arrows are drawn with a constant-width body and "
@@ -1311,6 +1331,101 @@ class SymbolMaterializer:
         return [self._with_symbol(flat_rule, symbol, 1, 1)]
 
     # -- map-unit hatches ------------------------------------------------------
+    # -- gradient / shapeburst fills: colour bands (fidelity/materialize.py) --------------
+    MAX_BANDS = 64
+
+    @classmethod
+    def _band_count(cls, colors) -> int:
+        """Bands so neighbours differ by ~4 levels (at most MAX_BANDS)."""
+        spread = 0
+        for a, b in zip(colors, colors[1:]):
+            spread += max(abs(a.red() - b.red()), abs(a.green() - b.green()),
+                          abs(a.blue() - b.blue()), abs(a.alpha() - b.alpha()))
+        return max(2, min(cls.MAX_BANDS, math.ceil(spread / 4)))
+
+    @staticmethod
+    def _ramp_of(layer):
+        """The fill's colours as a ramp: its colour ramp, or color -> color2."""
+        from qgis.core import QgsGradientColorRamp  # pylint: disable=import-outside-toplevel
+        two_colors = _enum_value(layer.gradientColorType() if hasattr(layer, "gradientColorType")
+                                 else layer.colorType()) == 0
+        if not two_colors and layer.colorRamp() is not None:
+            return layer.colorRamp()
+        return QgsGradientColorRamp(layer.color(), layer.color2())
+
+    def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True):
+        """One rule drawing every colour band of the fill: a solid fill whose
+        colour is the band's (COLOR_FIELD), from one materialized dataset."""
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        probe = [ramp.color(i / 16) for i in range(17)]
+        bands = self._band_count(probe)
+        colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
+        overlap = overlap_ok and all(c.alpha() == 255 for c in colors)
+        encoded = [QgsSymbolLayerUtils.encodeColor(c) for c in colors]  # "r,g,b,a", as QGIS reads it
+        fill = QgsSimpleFillSymbolLayer(colors[0], Qt.BrushStyle.SolidPattern, colors[0],
+                                        Qt.PenStyle.NoPen)
+        fill.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                    QgsProperty.fromField(mat.COLOR_FIELD))
+        fill.setOffset(layer.offset())
+        fill.setOffsetUnit(layer.offsetUnit())
+        symbol = QgsFillSymbol([fill])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        recipe = mat.color_bands_recipe([recipe_of(band, bands, overlap) for band in range(bands)], encoded)
+        return [self._with_symbol(flat_rule, symbol, 2, 1, recipe)]
+
+    def _gradient(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """A gradient fill as solid colour bands (linear strips, radial rings,
+        conical wedges) computed per feature from its bounding box."""
+        gradient_type = _enum_value(layer.gradientType())
+        spread = _enum_value(layer.gradientSpread())
+        if _enum_value(layer.coordinateMode()) != 0:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Viewport-relative gradient is drawn relative to each feature.", flat_rule)
+        if gradient_type == 2 and spread:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Conical gradients have no spread; drawn once around the centre.", flat_rule)
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        p1, p2 = layer.referencePoint1(), layer.referencePoint2()
+
+        def recipe(band, bands, opaque):
+            overlap = opaque and spread == 0 and gradient_type != 2
+            return mat.gradient_band_recipe(
+                gradient_type, (p1.x(), p1.y()), (p2.x(), p2.y()),
+                layer.referencePoint1IsCentroid(), layer.referencePoint2IsCentroid(),
+                layer.angle(), spread, band, bands, overlap, crs,
+                0.5 if opaque and not overlap else 0.0)
+        return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
+
+    def _shapeburst(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """A shapeburst fill as inset bands from the edge (colour 1) inwards."""
+        whole = layer.useWholeShape()
+        distance = 0.0
+        if not whole:
+            distance = layer.maxDistance()
+            mm = _to_mm(distance, layer.distanceUnit())
+            if mm is not None:
+                # Screen units: the map distance at the middle of the rule's
+                # zoom range (Web Mercator metres; 96 dpi CSS pixels).
+                low, high = flat_rule.get_attr("o"), flat_rule.get_attr("i")
+                if low is not None and high is not None:
+                    high = min(float(high), float(self.max_zoom))
+                    zoom = (min(float(low), high) + high) / 2
+                else:
+                    zoom = 16.0
+                distance = mm * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** zoom)
+                self._report("Q2VT_GRADIENT_APPROXIMATE",
+                             f"Shapeburst distance in screen units is fixed at zoom {zoom:g}.", flat_rule)
+            if not distance or distance <= 0:
+                return []
+        if layer.blurRadius():
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst blur is not applied (bands are already smooth steps).", flat_rule)
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+
+        def recipe(band, bands, _overlap):
+            return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, bands, crs)
+        return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
+
     def _hatch(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         sub = layer.subSymbol()
         if sub is None:

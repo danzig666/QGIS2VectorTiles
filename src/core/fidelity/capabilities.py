@@ -151,10 +151,17 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Generated geometry is materialized in the layer CRS and coerced to the "
                "sub-symbol type; nested generators are composed as QGIS evaluates them.",
                ("Nested generators in screen units are evaluated in map units.",)),
-    Capability("GradientFill", "fill", Strategy.UNSUPPORTED,
-               "Feature-relative gradients need geometry bands or raster fallback."),
-    Capability("ShapeburstFill", "fill", Strategy.UNSUPPORTED,
-               "Boundary-distance shading needs feature-aware geometry or raster fallback."),
+    Capability("GradientFill", "fill", Strategy.MATERIALIZED,
+               "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
+               "reflect / repeat) as solid colour bands per feature, from the QGIS reference "
+               "points of its bounding box.",
+               ("Smooth colour change becomes steps of about 4 levels (up to 64 bands).",
+                "Viewport-relative gradients are drawn relative to each feature (reported).")),
+    Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
+               "Shading by distance to the boundary as inset colour bands (whole shape or a "
+               "set distance, rings ignored when set).",
+               ("Smooth colour change becomes steps (up to 64 bands); blur is not applied.",
+                "A distance in screen units is fixed at the middle of the visible zooms.")),
     Capability("InterpolatedLine", "line", Strategy.UNSUPPORTED, "Not supported."),
     Capability("RasterLine", "line", Strategy.APPROXIMATE,
                "Emitted as a line pattern from the image preview."),
