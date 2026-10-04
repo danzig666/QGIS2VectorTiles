@@ -1034,3 +1034,19 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/integration/test_export_cache.py` | 4 passed (new: two layers in one GeoPackage, one edited and the other's key changed, each redone for its own reason; fails without the fix: both layers redone) |
 | `pytest tests/integration/test_publish_dialog_layers.py` | 4 passed (new: the Scales column shows the QGIS range) |
 | Pipeline, parcel report, publish dialog, raster and cache unit tests together | 31 passed |
+
+## 4.13.3: Street View coverage errors are shown
+
+- The blue coverage lines come from Google's **Map Tiles API**; the photos come from the
+  Maps JavaScript API. A key that may use only the latter showed the photos but no lines,
+  without a word. Now a refused `createSession` (or refused coverage tiles: the map's `error`
+  event for the source) shows an alert hint with the reason. For HTTP 401/403 it explains
+  how to enable the API and allow it for the key; otherwise it shows Google's message. The
+  full message goes to the browser console and `q2vtViewer.diagnostics`. After a refusal the
+  coverage is not requested again until the page is reloaded.
+- Checked against Google: `createSession` answers CORS preflights from a local
+  `http://127.0.0.1` page, so a local preview is not the reason.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_streetview.py` | 6 passed (new: a 403 from the Map Tiles API shows why the lines are missing; a tap still opens the panorama) |
