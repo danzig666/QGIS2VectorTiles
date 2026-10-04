@@ -11,7 +11,7 @@ or always the newest generic version: [latest release](https://github.com/danzig
 
 QWebMap (formerly QGIS2VectorTiles (fork)) started as a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles) by Jossef Kanter. It is not an official release of the original plugin.
 
-Ez a **magyar HÉSZ változat** (`hu-hesz` ág): a generikus 4.11.0 minden funkciója, plusz a magyar
+Ez a **magyar HÉSZ változat** (`hu-hesz` ág): a generikus 4.11.1 minden funkciója, plusz a magyar
 településrendezési terv előbeállítása. Leírás: `docs/hu/HESZ.md`.
 
 ### Szabad (szögben elforgatott) feliratok úgy fordulnak, mint a QGIS-ben (generikus 4.11.1)
