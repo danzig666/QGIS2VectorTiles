@@ -134,6 +134,12 @@
         },
         "streetSearch": {
           "type": "boolean"
+        },
+        "streetView": {
+          "type": "boolean"
+        },
+        "googleApiKey": {
+          "type": "string"
         }
       }
     },

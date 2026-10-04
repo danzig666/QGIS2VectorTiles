@@ -106,5 +106,15 @@
   "print.scaleScreen": "As on screen (rounded)",
   "search.street": "Street (OpenStreetMap)",
   "tools.snap": "Snap to: {layers}",
-  "tools.snapHelp": "Points snap to the nearest corner of these layers, else to their nearest edge (red ring). Hold Alt for a free point."
+  "tools.snapHelp": "Points snap to the nearest corner of these layers, else to their nearest edge (red ring). Hold Alt for a free point.",
+  "streetview.button": "Street View",
+  "streetview.title": "Street View",
+  "streetview.hint": "Tap what you want to see. Street View is available along the blue lines.",
+  "streetview.hintNoCoverage": "Tap what you want to see: Street View opens on the nearest street, looking at it.",
+  "streetview.hintMove": "Drag the view in the picture to look around, or the marker on the map to move. Tap the map to look somewhere else.",
+  "streetview.none": "No Street View near here. Try a spot on a blue line.",
+  "streetview.unavailable": "Street View could not be loaded (check the internet connection or the API key).",
+  "streetview.drag": "Drag to move the viewpoint",
+  "streetview.expand": "Larger / smaller",
+  "streetview.close": "Close Street View"
 }

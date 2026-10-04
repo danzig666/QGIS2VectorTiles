@@ -962,3 +962,37 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/integration/test_publishing_raster.py` | 8 passed (new: cache reuse / re-render on style and quality change; identical archives for 1 and 4 threads) |
 | `pytest tests/integration/test_publishing_parcel_report.py tests/browser/test_web_viewer_parcel.py` | 9 passed (record extent; the parcel print shows the whole parcel, filling much of the map) |
 | browser, publishing, publish dialog and unit tests | 372 passed |
+
+## 4.13.0: Google Street View in the viewer
+
+- **Profile:** `interaction.street_view` and `interaction.google_api_key` (schema
+  `streetView`, `googleApiKey`). The Publish window has a *Street View (Google)* switch with
+  the key field next to it. The manifest carries the key only while Street View is on and a
+  key is set (`web_builder._interaction`).
+- **Page:** `_render_index(..., street_view=True)` widens the CSP with Google's hosts for the
+  Maps JavaScript API (script, img, connect, style, font, child/frame) and sends the origin as
+  referrer (`strict-origin-when-cross-origin`), so an HTTP-referrer-restricted key works.
+  Without Street View the page is unchanged.
+- **Viewer** (`streetview.mjs`, a MapLibre control under the zoom buttons):
+  - Google's script loads only when the button is first pressed.
+  - **Coverage:** a Map Tiles API session (`layerTypes: ["layerStreetview"]`, overlay)
+    adds the blue Street View lines as a raster layer while the mode is on. Without that
+    API the hint says a tap opens the nearest street.
+  - **A tap** looks for the nearest outdoor panorama within 30, 80, then 200 m. The
+    panorama opens with its heading toward the tapped point (a bearing from the panorama to
+    the tap; a tap within 3 m keeps the heading). Only the last tap counts. No panorama: an
+    alert hint at once.
+  - **The viewpoint** is a draggable marker with a cone. It turns with the panorama
+    (`pov_changed`), follows its moves (`position_changed`), and dragging it opens the
+    panorama there. The map moves the marker out from under the panel (`easeTo` with an
+    offset, not a padding that MapLibre would keep).
+  - **Layout:** desktop: a resizable panel at the bottom, next to the side panel. Phones:
+    the panel sheet closes and the panorama takes the top 48 % of the screen. Both have an
+    expand button (full screen) and close.
+  - Identify and the parcel report are off while the mode is on. Measuring ends Street
+    View and Street View ends measuring. A refused key (`gm_authFailure`) shows an alert.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_streetview.py` (new, Google stubbed) | 5 passed: CSP/referrer/manifest, key left out without Street View, the coverage session and layer, heading toward the tap, cone follows the panorama, second search radius, no-panorama alert, close gives the parcel report back, measuring ends the mode, phone layout |
+| Publish dialog, profile, web builder, parcel and viewer feature tests | 59 passed (the dialog saves and reloads the switch and key) |

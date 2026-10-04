@@ -16,6 +16,7 @@ import { Permalink, decodeState } from "./permalink.mjs";
 import { Tools } from "./tools.mjs";
 import { Basemap } from "./basemap.mjs";
 import { ParcelReport } from "./parcel_report.mjs";
+import { StreetView } from "./streetview.mjs";
 import { warn } from "./diagnostics.mjs";
 import { button, el, icon } from "./icons.mjs";
 
@@ -365,6 +366,13 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     parts.search = new Search({ map, manifest, manifestUrl, assetsUrl, container: document.getElementById("q2vt-searchbox"), identify });
   }
   parts.themes = themeBar(manifest, state);
+  // Google Street View (optional): a map button under the zoom buttons.
+  if (manifest.interaction?.streetView && manifest.interaction?.googleApiKey) {
+    const streetView = new StreetView({ map, maplibregl, manifest, viewer });
+    map.addControl(streetView, "top-right");
+    parts.streetView = streetView;
+    viewer.streetViewControl = streetView;
+  }
   // Bottom right: basemap switcher above the scale and the attribution.
   const attribution = new AttributionControl([manifest.attribution,
     basemap.available && state.value.basemap !== "none" ? basemap.attribution(state.value.basemap) : null]);

@@ -238,12 +238,28 @@ def _viewer_files() -> List[str]:
             if rel not in VIEWER_EXCLUDE and not rel.endswith(".txt")]
 
 
+# Google Street View: the Maps JavaScript API loads scripts, styles, fonts,
+# images and frames from these hosts (Google's CSP guidance for the API).
+GOOGLE_CSP = {
+    "script-src": "https://*.googleapis.com https://*.gstatic.com https://*.google.com "
+                  "https://*.ggpht.com https://*.googleusercontent.com blob:",
+    "img-src": "https://*.googleapis.com https://*.gstatic.com https://*.google.com "
+               "https://*.ggpht.com https://*.googleusercontent.com",
+    "connect-src": "https://*.googleapis.com https://*.google.com https://*.gstatic.com data: blob:",
+    "style-src": "https://fonts.googleapis.com",
+    "font-src": "https://fonts.gstatic.com",
+    "child-src": "https://*.google.com",
+}
+
+
 def _render_index(template_path: str, title: str, connect: Iterable[str] = (),
-                  web_tiles: Iterable[str] = ()) -> str:
+                  web_tiles: Iterable[str] = (), street_view: bool = False) -> str:
     """The release page. ``web_tiles``: origins of web basemaps (XYZ tiles):
     the page may load from them, and sends its origin as referrer (tile
     services such as OpenStreetMap's require one); otherwise nothing leaves
-    the site and no referrer is sent."""
+    the site and no referrer is sent. ``street_view``: the page may load
+    Google's Street View (its key is restricted by referrer, so the page
+    sends its origin)."""
     with open(template_path, encoding="utf-8") as handle:
         text = handle.read()
     valid = re.compile(r"^https://[A-Za-z0-9.-]+(:\d+)?$")
@@ -252,10 +268,28 @@ def _render_index(template_path: str, title: str, connect: Iterable[str] = (),
     text = text.replace("__Q2VT_TITLE__", html.escape(title, quote=True)) \
                .replace("__Q2VT_CONNECT__", origins) \
                .replace("__Q2VT_IMG__", "".join(f" {o}" for o in web_tiles))
-    if web_tiles:
+    if street_view:
+        def widen(match):
+            directive, sources = match.group(1), match.group(2)
+            return f"{directive} {sources} {GOOGLE_CSP[directive]}"
+        text = re.sub(r"(script-src|img-src|connect-src|style-src|font-src|child-src) ([^;\"]*)",
+                      widen, text, count=0)
+        text = text.replace("object-src 'none'", f"frame-src {GOOGLE_CSP['child-src']}; object-src 'none'")
+    if web_tiles or street_view:
         text = text.replace('<meta name="referrer" content="no-referrer">',
                             '<meta name="referrer" content="strict-origin-when-cross-origin">')
     return text
+
+
+def _interaction(profile: PublicationProfile) -> dict:
+    """The viewer switches. The Google key is published only with Street View on."""
+    interaction = profile.to_dict()["interaction"]
+    if not (interaction.get("streetView") and interaction.get("googleApiKey", "").strip()):
+        interaction.pop("googleApiKey", None)
+        interaction["streetView"] = False
+    else:
+        interaction["googleApiKey"] = interaction["googleApiKey"].strip()
+    return interaction
 
 
 def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id: str,
@@ -284,7 +318,7 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
         "groups": bundle.groups, "layers": bundle.layers, "rules": bundle.rules,
         "components": bundle.components,
         "search": None, "featureLookup": None,
-        "interaction": profile.to_dict()["interaction"],
+        "interaction": _interaction(profile),
         "tools": {"measure": profile.interaction.measure,
                   "coordinates": profile.interaction.coordinates,
                   "print": profile.interaction.print},
@@ -495,7 +529,8 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     web_tiles = xyz_origins(url for entry in (basemap_manifest or {}).get("xyz", []) for url in entry["tiles"])
     write_text_atomic(os.path.join(staging, "index.html"),
                       _render_index(os.path.join(WEB_VIEWER, "index.html"), profile.title,
-                                    connect_origins, web_tiles))
+                                    connect_origins, web_tiles,
+                                    profile.interaction.street_view and bool(profile.interaction.google_api_key)))
     # 5. Logo, legend and other UI assets.
     manifest_logo = None
     if profile.logo_path and os.path.isfile(profile.logo_path):

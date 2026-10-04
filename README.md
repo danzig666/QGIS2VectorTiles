@@ -121,6 +121,9 @@ window that turns the project into a public, self-contained web map:
   (computed in QGIS from the exact geometry when exporting); printed zoomed on the parcel.
 - A modern viewer: floating panels on desktop, a bottom sheet on phones, light and dark
   appearance, your accent colour.
+- Optional **Google Street View** (your API key): a map button shows where Street View
+  exists (blue lines); a tap opens the panorama looking toward the tapped spot, with the
+  viewpoint and its direction on the map. Works on phones (panorama on top, map below).
 - **Fast re-exports**: unchanged layers (raster layers too) are reused from earlier exports,
   raster tiles are rendered on all CPU cores, and unchanged files are copied inside the bucket
   instead of uploaded again (a 3-minute plan re-exports in ~15 s).

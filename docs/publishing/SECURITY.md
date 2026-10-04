@@ -55,9 +55,16 @@ beyond 4 GB.
 * No third-party requests (no CDN, no fonts, no telemetry). The basemap is copied into the
   release when exporting (only the export machine contacts the Protomaps build server, and
   only when that source is chosen); visitors never load it from elsewhere.
+* Exceptions you switch on: web (XYZ) basemaps load from their tile servers, and **Google
+  Street View** (*Interaction → Street View*) loads Google's Maps JavaScript API and the
+  Street View coverage tiles, only after a visitor presses the Street View button. The
+  page's CSP then allows Google's hosts, and the page sends its origin as referrer. The
+  Google API key is necessarily **public** in the manifest: restrict it in Google Cloud to
+  your site's address (HTTP referrers) and to the Maps JavaScript API and the Map Tiles API.
+  The key is left out of the manifest while Street View is off.
 * Attribution is plain text (not MapLibre's HTML attribution control).
-* Content-Security-Policy meta tag: scripts only from the release, no `eval`, no inline
-  scripts.
+* Content-Security-Policy meta tag: scripts only from the release (plus Google's hosts with
+  Street View on), no `eval`, no inline scripts.
 * All titles, descriptions, attribution and attribute values are inserted as text
   (`textContent`); links only for `http(s)`/`mailto` URL fields, with `noopener`.
 * URL state is parsed strictly (known ids, ranges, size limits); nothing from the URL is

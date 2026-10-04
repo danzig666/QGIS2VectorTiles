@@ -723,10 +723,24 @@ class PublishDialog(QDialog):
                 ("print", tr("Print")),
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
-                ("street_search", tr("Search street names (OpenStreetMap)"))]):
+                ("street_search", tr("Search street names (OpenStreetMap)")),
+                ("street_view", tr("Street View (Google)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)
+        self.i_google_key = QLineEdit()
+        self.i_google_key.setPlaceholderText(tr("Google Maps API key (needed for Street View)"))
+        self.i_google_key.setEnabled(False)
+        self.i_flags["street_view"].toggled.connect(self.i_google_key.setEnabled)
+        grid.addWidget(self.i_google_key, index // 3, index % 3 + 1, 1, 3 - index % 3 - 1 or 1)
+        street_view_help = tr(
+            "A Street View button on the map: tap a place to see it, the panorama looks toward the "
+            "tapped point. Blue lines on the map show where Street View exists. Needs a Google "
+            "Cloud API key with the Maps JavaScript API and the Map Tiles API (the blue lines) "
+            "enabled. The key is visible in the published page: restrict it in Google Cloud to "
+            "your site's address (HTTP referrers) and to these two APIs.")
+        self.i_flags["street_view"].setToolTip(street_view_help)
+        self.i_google_key.setToolTip(street_view_help)
         self.i_flags["street_search"].setToolTip(tr(
             "The search also finds the named streets of OpenStreetMap inside the extent layer "
             "(Map tab; without one, inside the export extent). They are read from the basemap, or "
@@ -1535,6 +1549,8 @@ class PublishDialog(QDialog):
         self.b_overview_km.setValue(int(basemap.overview_km))
         for key, box in self.i_flags.items():
             box.setChecked(bool(getattr(profile.interaction, key)))
+        self.i_google_key.setText(profile.interaction.google_api_key)
+        self.i_google_key.setEnabled(profile.interaction.street_view)
         self.layer_configs = {c.layer_id: c for c in profile.layers}
         self.o_archive.setCurrentIndex(max(0, self.o_archive.findData(profile.output.archive)))
         self.o_dir.setText(profile.output.local_directory)
@@ -1755,6 +1771,7 @@ class PublishDialog(QDialog):
         basemap.overview_km = float(self.b_overview_km.value())
         for key, box in self.i_flags.items():
             setattr(profile.interaction, key, box.isChecked())
+        profile.interaction.google_api_key = self.i_google_key.text().strip()
         out = profile.output
         out.archive = self.o_archive.currentData()
         out.local_directory = self.o_dir.text().strip()
