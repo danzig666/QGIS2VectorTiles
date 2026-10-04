@@ -39,3 +39,23 @@ def test_label_every_feature_marks_the_layer_and_precomputes_spots(tmp_path):
                                                            "q2vt_pole_a"} <= fields}
     assert with_pole and {name[:3] for name in with_pole} <= prefixes(parcels)
     assert not {name[:3] for name in with_pole} & prefixes(second)
+
+
+def test_web_basemap_without_a_bundled_basemap(tmp_path):
+    """Only a web basemap (no OpenStreetMap extract): the manifest offers it
+    (no bundled source) and starts with it; the page allows that server."""
+    from publishing.models import XyzBasemap
+    from test_publishing_basemap_themes import _validate_manifest  # pylint: disable=import-error
+    project, profile, _parcels, _second = _setup(tmp_path)
+    profile.basemap.kind = "none"
+    profile.basemap.xyz = [XyzBasemap("Ortofotó", "https://ortho.example.hu/{z}/{x}/{y}.jpg", "© Lechner", 0, 20)]
+    profile.basemap.initial = "xyz-1"
+    result = export_local(project, profile, EXTENT)
+    rel = result.release.release_dir
+    manifest = json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))
+    _validate_manifest(manifest)
+    basemap = manifest["basemap"]
+    assert basemap["source"] is None and basemap["flavors"] == [] and basemap["initial"] == "xyz-1"
+    assert basemap["xyz"][0]["tiles"] == ["https://ortho.example.hu/{z}/{x}/{y}.jpg"]
+    page = open(os.path.join(rel, "index.html"), encoding="utf-8").read()
+    assert "https://ortho.example.hu" in page and not os.path.exists(os.path.join(rel, "data", "basemap.pmtiles"))

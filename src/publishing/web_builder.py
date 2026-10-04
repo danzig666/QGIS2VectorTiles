@@ -237,12 +237,24 @@ def _viewer_files() -> List[str]:
             if rel not in VIEWER_EXCLUDE and not rel.endswith(".txt")]
 
 
-def _render_index(template_path: str, title: str, connect: Iterable[str] = ()) -> str:
+def _render_index(template_path: str, title: str, connect: Iterable[str] = (),
+                  web_tiles: Iterable[str] = ()) -> str:
+    """The release page. ``web_tiles``: origins of web basemaps (XYZ tiles):
+    the page may load from them, and sends its origin as referrer (tile
+    services such as OpenStreetMap's require one); otherwise nothing leaves
+    the site and no referrer is sent."""
     with open(template_path, encoding="utf-8") as handle:
         text = handle.read()
-    origins = "".join(f" {o}" for o in connect if re.match(r"^https://[A-Za-z0-9.-]+(:\d+)?$", o))
-    return text.replace("__Q2VT_TITLE__", html.escape(title, quote=True)) \
-               .replace("__Q2VT_CONNECT__", origins)
+    valid = re.compile(r"^https://[A-Za-z0-9.-]+(:\d+)?$")
+    web_tiles = sorted(o for o in web_tiles if valid.match(o))
+    origins = "".join(f" {o}" for o in [*connect, *web_tiles] if valid.match(o))
+    text = text.replace("__Q2VT_TITLE__", html.escape(title, quote=True)) \
+               .replace("__Q2VT_CONNECT__", origins) \
+               .replace("__Q2VT_IMG__", "".join(f" {o}" for o in web_tiles))
+    if web_tiles:
+        text = text.replace('<meta name="referrer" content="no-referrer">',
+                            '<meta name="referrer" content="strict-origin-when-cross-origin">')
+    return text
 
 
 def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id: str,
@@ -476,9 +488,11 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         _copy(os.path.join(WEB_VIEWER, *rel.split("/")), os.path.join(staging, "assets", *rel.split("/")))
     for name, src in LICENSES.items():
         _copy(src, os.path.join(staging, "licenses", name))
+    from .xyz import origins as xyz_origins  # pylint: disable=import-outside-toplevel
+    web_tiles = xyz_origins(url for entry in (basemap_manifest or {}).get("xyz", []) for url in entry["tiles"])
     write_text_atomic(os.path.join(staging, "index.html"),
                       _render_index(os.path.join(WEB_VIEWER, "index.html"), profile.title,
-                                    connect_origins))
+                                    connect_origins, web_tiles))
     # 5. Logo, legend and other UI assets.
     manifest_logo = None
     if profile.logo_path and os.path.isfile(profile.logo_path):
@@ -566,8 +580,14 @@ def _add_basemap(style: dict, bundle: ExportBundle, profile: PublicationProfile,
     """The vector basemap: its archive, one style file per flavor and its
     glyphs. The viewer adds the chosen flavor under the map at runtime."""
     info = bundle.basemap
+    from .xyz import manifest_entries  # pylint: disable=import-outside-toplevel
+    xyz = manifest_entries(profile.basemap.xyz)
+    xyz_ids = [entry["id"] for entry in xyz]
     if not info:
-        return None
+        if not xyz:
+            return None
+        initial = profile.basemap.initial if profile.basemap.initial in xyz_ids else "none"
+        return {"source": None, "flavors": [], "xyz": xyz, "initial": initial, "attribution": ""}
     from .basemap import ATTRIBUTION, FLAVOR_TITLES, SOURCE_ID  # pylint: disable=import-outside-toplevel
     d = info["descriptor"]
     _copy(info["archive"], os.path.join(staging, "data", "basemap.pmtiles"))
@@ -587,7 +607,9 @@ def _add_basemap(style: dict, bundle: ExportBundle, profile: PublicationProfile,
         "source": {"id": SOURCE_ID, "kind": "pmtiles", "tileType": "mvt", "href": "data/basemap.pmtiles",
                    "minTileZoom": d.min_zoom, "maxTileZoom": d.max_zoom,
                    "bounds": [round(v, 7) for v in d.bounds], "sha256": d.sha256, "sizeBytes": d.size_bytes},
-        "flavors": flavors, "initial": info.get("initial", flavors[0]["id"] if flavors else "none"),
+        "flavors": flavors, "xyz": xyz,
+        "initial": profile.basemap.initial if profile.basemap.initial in xyz_ids
+        else info.get("initial", flavors[0]["id"] if flavors else "none"),
         "attribution": ATTRIBUTION,
     }
 

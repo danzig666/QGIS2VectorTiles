@@ -12,7 +12,7 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from .errors import PublishingError
-from .models import (CutLineConfig, ParcelInfoConfig, RestrictionConfig,
+from .models import (XyzBasemap, CutLineConfig, ParcelInfoConfig, RestrictionConfig,
                      ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
                      FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
                      SECRET_KEYS, SLUG, Approval, BasemapConfig, DestinationConfig, FilterField,
@@ -74,8 +74,13 @@ def load_profile(data) -> PublicationProfile:
     }
     top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups", "parcel_info")}
     profile = build(PublicationProfile, top, errors, "profile")
+    raw_basemap = dict(data.get("basemap") or {}) if isinstance(data.get("basemap"), dict) else data.get("basemap")
+    xyz_raw = raw_basemap.pop("xyz", []) if isinstance(raw_basemap, dict) else []
+    data = dict(data, basemap=raw_basemap)
     for key, cls in nested.items():
         setattr(profile, key, build(cls, data.get(key), errors, key))
+    profile.basemap.xyz = [build(XyzBasemap, item, errors, f"basemap.xyz[{index}]")
+                           for index, item in enumerate(xyz_raw or [])]
     layers = []
     for index, raw in enumerate(data.get("layers") or []):
         where = f"layers[{index}]"
@@ -109,6 +114,32 @@ def _parcel_info(raw, errors: List[str]) -> ParcelInfoConfig:
     config.restrictions = [build(RestrictionConfig, item, errors, "parcelInfo.restrictions")
                            for item in lists["restrictions"]]
     return config
+
+
+XYZ_URL = re.compile(r"^https://[A-Za-z0-9.{}-]+(:\d+)?/\S*$")
+
+
+def xyz_problems(entries) -> List[str]:
+    """Problems of the web basemaps (XYZ tile templates)."""
+    errors, titles = [], set()
+    for index, entry in enumerate(entries):
+        where = f"basemap.xyz[{index}]"
+        if not str(entry.title).strip():
+            errors.append(f"{where}.title: required")
+        elif entry.title.strip() in titles:
+            errors.append(f"{where}.title: '{entry.title}' is used twice")
+        titles.add(str(entry.title).strip())
+        url = str(entry.url or "")
+        if not XYZ_URL.match(url):
+            errors.append(f"{where}.url: an https:// tile address")
+        elif "{z}" not in url or "{x}" not in url or ("{y}" not in url and "{-y}" not in url):
+            errors.append(f"{where}.url: needs {{z}}, {{x}} and {{y}} (or {{-y}})")
+        elif "{" in url.split("/")[2].replace("{s}", ""):
+            errors.append(f"{where}.url: only {{s}} may stand in the server name")
+        if not (isinstance(entry.min_zoom, int) and isinstance(entry.max_zoom, int)
+                and 0 <= entry.min_zoom <= entry.max_zoom <= 24):
+            errors.append(f"{where}: 0 <= minZoom <= maxZoom <= 24")
+    return errors
 
 
 def validate(profile: PublicationProfile) -> List[str]:
@@ -180,14 +211,18 @@ def validate(profile: PublicationProfile) -> List[str]:
     if themes.initial and themes.initial not in themes.names:
         errors.append("themes.initial: one of the published themes")
     basemap = profile.basemap
+    xyz_ids = [f"xyz-{index + 1}" for index in range(len(basemap.xyz))]
+    errors.extend(xyz_problems(basemap.xyz))
+    if basemap.kind == "none" and basemap.initial not in ["none", *xyz_ids, *BASEMAP_FLAVORS]:
+        errors.append("basemap.initial: 'none' or a web basemap (xyz-1, ...)")
     if basemap.kind not in BASEMAP_KINDS:
         errors.append(f"basemap.kind: one of {BASEMAP_KINDS}")
     if basemap.kind != "none":
         if not basemap.flavors or any(f not in BASEMAP_FLAVORS for f in basemap.flavors) \
                 or len(set(basemap.flavors)) != len(basemap.flavors):
             errors.append(f"basemap.flavors: distinct values of {BASEMAP_FLAVORS}")
-        if basemap.initial != "none" and basemap.initial not in basemap.flavors:
-            errors.append("basemap.initial: one of the flavors or 'none'")
+        if basemap.initial != "none" and basemap.initial not in basemap.flavors + xyz_ids:
+            errors.append("basemap.initial: one of the flavors, a web basemap or 'none'")
         if not 0 <= basemap.overview_zoom <= basemap.max_zoom <= 15:
             errors.append("basemap: 0 <= overviewZoom <= maxZoom <= 15")
         if not 0 <= float(basemap.padding) <= 10 or not 0 <= float(basemap.overview_km) <= 5000:

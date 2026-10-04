@@ -521,43 +521,50 @@
       "additionalProperties": false,
       "properties": {
         "source": {
-          "type": "object",
-          "required": [
-            "id",
-            "kind",
-            "tileType",
-            "href"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "id": {
-              "const": "q2vt_basemap"
+          "oneOf": [
+            {
+              "type": "null"
             },
-            "kind": {
-              "const": "pmtiles"
-            },
-            "tileType": {
-              "const": "mvt"
-            },
-            "href": {
-              "$ref": "#/$defs/relPath"
-            },
-            "minTileZoom": {
-              "type": "integer"
-            },
-            "maxTileZoom": {
-              "type": "integer"
-            },
-            "bounds": {
-              "type": "array"
-            },
-            "sha256": {
-              "type": "string"
-            },
-            "sizeBytes": {
-              "type": "integer"
+            {
+              "type": "object",
+              "required": [
+                "id",
+                "kind",
+                "tileType",
+                "href"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "q2vt_basemap"
+                },
+                "kind": {
+                  "const": "pmtiles"
+                },
+                "tileType": {
+                  "const": "mvt"
+                },
+                "href": {
+                  "$ref": "#/$defs/relPath"
+                },
+                "minTileZoom": {
+                  "type": "integer"
+                },
+                "maxTileZoom": {
+                  "type": "integer"
+                },
+                "bounds": {
+                  "type": "array"
+                },
+                "sha256": {
+                  "type": "string"
+                },
+                "sizeBytes": {
+                  "type": "integer"
+                }
+              }
             }
-          }
+          ]
         },
         "flavors": {
           "type": "array",
@@ -596,6 +603,53 @@
         },
         "attribution": {
           "type": "string"
+        },
+        "xyz": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title",
+              "tiles"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^xyz-[0-9]+$"
+              },
+              "title": {
+                "type": "string"
+              },
+              "tiles": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "pattern": "^https://"
+                }
+              },
+              "scheme": {
+                "enum": [
+                  "xyz",
+                  "tms"
+                ]
+              },
+              "attribution": {
+                "type": "string"
+              },
+              "minzoom": {
+                "type": "integer"
+              },
+              "maxzoom": {
+                "type": "integer"
+              },
+              "tileSize": {
+                "type": "integer"
+              }
+            }
+          }
         }
       }
     },

@@ -675,3 +675,39 @@ print):
 |---|---|
 | `pytest tests/browser/test_web_viewer_parcel.py` | 5 passed |
 | viewer suites | 21 passed |
+
+## 4.8.0: web basemaps (generic XYZ)
+
+Owner request: generic XYZ tile addresses as basemaps, kept in the QGIS settings and in the
+exported/imported JSON. Google Map Tiles API and MapTiler were not wanted.
+
+- **Profile:** `BasemapConfig.xyz: List[XyzBasemap(title, url, attribution, min_zoom, max_zoom)]`.
+  `initial` may be `xyz-<n>`. `profile.xyz_problems` checks: https only, `{z}`, `{x}` and `{y}` or
+  `{-y}`, only `{s}` in the host, zooms 0–24, unique titles. Profile and manifest schemas are
+  updated.
+- **`publishing/xyz.py`:**
+  - `tile_urls`: `{s}` → a/b/c, `{-y}` → `{y}` with scheme `tms`.
+  - `origins`.
+  - `manifest_entries`: `{id, title, tiles, scheme, attribution, minzoom, maxzoom, tileSize}`.
+- **Build:** `web_builder._add_basemap` writes `basemap.xyz`, with `source: null` when there is
+  no bundled extract. `_render_index` adds the tile origins to `connect-src` and `img-src`
+  (`__Q2VT_IMG__`). With web basemaps, the referrer becomes `strict-origin-when-cross-origin`;
+  otherwise it stays `no-referrer`.
+- **Viewer:**
+  - `basemap.mjs` `options()`, `option()`, `attribution(id)`.
+  - `xyzLayers(id)` adds a raster source `q2vt_xyz_<id>` and a layer `q2vt-bm-<id>` under the
+    project layers.
+  - `state.mjs` and `permalink.mjs` accept the ids.
+  - The switcher shows an image thumbnail, and the attribution follows the active basemap.
+- **QGIS:** `gui/xyz_connections.py` reads and writes `connections/xyz/items/<name>/{url,zmin,zmax}`
+  (QGIS's XYZ connections), plus `q2vt-attribution`. The Publish window table syncs it on
+  collect and import, and has a "From QGIS XYZ connections…" menu.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_publishing_xyz.py` | 6 passed |
+| `pytest tests/integration/test_publish_dialog_extent.py` | 7 passed |
+| `pytest tests/browser/test_web_viewer_basemap_raster.py` | 7 passed |
+| `pytest tests/integration/test_publishing_label_always.py` | 2 passed |
+| related suites | 77 passed |
+| Test plan, a web basemap only and shown at start (Chromium) | raster layer added, tiles requested from the configured server, no page errors |

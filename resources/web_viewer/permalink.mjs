@@ -62,7 +62,8 @@ export function decodeState(manifest, hash) {
   }
   if (params.get("lab") === "0") out.labels = false;
   const basemap = params.get("bm");
-  const flavors = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id)]);
+  const flavors = new Set(["none", ...((manifest.basemap && manifest.basemap.flavors) || []).map((f) => f.id),
+    ...((manifest.basemap && manifest.basemap.xyz) || []).map((x) => x.id)]);
   if (basemap && flavors.has(basemap)) out.basemap = basemap;
   for (const pair of (params.get("o") || "").split(",")) {
     const [id, percent] = pair.split(":");

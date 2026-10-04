@@ -120,6 +120,18 @@ class ThemeConfig:
 
 
 @dataclass
+class XyzBasemap:
+    """A web basemap of XYZ tiles, loaded by the visitor's browser from its
+    own server while browsing (not copied into the release)."""
+
+    title: str = ""
+    url: str = ""                      # https://…/{z}/{x}/{y}.png  ({-y}: TMS rows, {s}: a/b/c servers)
+    attribution: str = ""
+    min_zoom: int = 0
+    max_zoom: int = 19
+
+
+@dataclass
 class BasemapConfig:
     """Optional vector basemap: an OpenStreetMap extract (Protomaps schema)
     bundled into the release as its own PMTiles archive."""
@@ -132,6 +144,8 @@ class BasemapConfig:
     padding: float = 0.5               # detail area = extent grown by this fraction per side
     overview_zoom: int = 7             # zooms 0..overview_zoom cover a wide area
     overview_km: float = 300.0         # side of the wide overview area
+    # Web basemaps (XYZ tiles) offered next to it; "initial" may name one ("xyz-1", ...).
+    xyz: List[XyzBasemap] = field(default_factory=list)
 
 @dataclass
 class CutLineConfig:

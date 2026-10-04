@@ -3,6 +3,8 @@
 // (basemaps/<flavor>.json). The chosen flavor is added under every project
 // layer; the project's own background is hidden while a basemap is shown.
 // Only vector layers of the basemap's own source are accepted.
+// Web basemaps (XYZ tiles, manifest basemap.xyz) are raster tiles loaded by
+// the browser from their own servers (allowed by the page's policy).
 import { ViewerError, checkRelative, registerPmtiles, resolveUrl } from "./transport.mjs";
 
 export const SOURCE_ID = "q2vt_basemap";
@@ -14,18 +16,30 @@ export class Basemap {
     Object.assign(this, { map, manifest, manifestUrl, maplibregl });
     this.config = manifest.basemap || null;
     this.flavors = new Map((this.config?.flavors || []).map((f) => [f.id, f]));
+    this.xyz = new Map((this.config?.xyz || []).filter((x) => Array.isArray(x.tiles) && x.tiles.length
+      && x.tiles.every((u) => typeof u === "string" && u.startsWith("https://"))).map((x) => [x.id, x]));
     this.cache = new Map();
     this.active = "none";
     this.layerIds = [];
     this.listeners = new Set();
   }
 
-  get available() { return !!this.config && this.flavors.size > 0; }
+  get available() { return !!this.config && (this.flavors.size > 0 || this.xyz.size > 0); }
+
+  // Every choice (vector flavors, then web basemaps) and its attribution.
+  options() { return [...this.flavors.values(), ...this.xyz.values()]; }
+
+  option(id) { return this.flavors.get(id) || this.xyz.get(id) || null; }
+
+  attribution(id) {
+    if (this.xyz.has(id)) return this.xyz.get(id).attribution || "";
+    return this.flavors.has(id) ? (this.config.attribution || "") : "";
+  }
 
   onChange(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 
   async init() {
-    if (!this.available) return;
+    if (!this.available || !this.config.source) return;
     const source = this.config.source;
     if (source.tileType !== "mvt" || source.kind !== "pmtiles") {
       throw new ViewerError("Q2VT_PUB_NOT_MVT", "The basemap is not a vector tile archive.");
@@ -66,10 +80,22 @@ export class Basemap {
     return undefined;
   }
 
+  // A web basemap: one raster layer of its own source.
+  xyzLayers(id) {
+    const entry = this.xyz.get(id);
+    const source = `q2vt_xyz_${id.replace(/[^a-z0-9-]/gi, "")}`;
+    if (!this.map.getSource(source)) {
+      this.map.addSource(source, { type: "raster", tiles: entry.tiles, scheme: entry.scheme === "tms" ? "tms" : "xyz",
+        tileSize: entry.tileSize || 256, minzoom: entry.minzoom ?? 0, maxzoom: entry.maxzoom ?? 19,
+        attribution: entry.attribution || "" });
+    }
+    return [{ id: `${LAYER_PREFIX}${id}`, type: "raster", source }];
+  }
+
   async set(id) {
     if (!this.available) return;
-    if (id !== "none" && !this.flavors.has(id)) id = "none";
-    const layers = id === "none" ? [] : await this.layers(id);
+    if (id !== "none" && !this.flavors.has(id) && !this.xyz.has(id)) id = "none";
+    const layers = id === "none" ? [] : this.xyz.has(id) ? this.xyzLayers(id) : await this.layers(id);
     for (const layerId of this.layerIds) if (this.map.getLayer(layerId)) this.map.removeLayer(layerId);
     this.layerIds = [];
     const before = this.beforeId();
