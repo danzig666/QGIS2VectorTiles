@@ -100,7 +100,7 @@ window that turns the project into a public, self-contained web map:
 - The map stays **vector tiles** (MVT). They are packed into one **PMTiles** archive that
   the browser reads with HTTP byte ranges, so you need no tile server, database or Docker.
 - The viewer has a layer tree (including hidden layers you chose to publish), opacity,
-  legend with QGIS-rendered symbols, label switch, filters, popups, search, links to
+  legend with QGIS-rendered symbols (and your legend patch shapes), label switch, filters, popups, search, links to
   features, permalinks, measuring, coordinates in the project's CRS and a phone layout. It is
   available in Hungarian and English.
 - Every setting is **saved in the project**, but credentials are not. Keys stay in the
@@ -114,8 +114,8 @@ window that turns the project into a public, self-contained web map:
   image tile archive (PNG, WebP or JPEG); vector layers always stay vector tiles.
 - An optional **OpenStreetMap vector basemap** (Protomaps) is bundled into the release in
   several styles (light, dark, grayscale…); visitors switch it or turn it off.
-- **QGIS map themes** can select the published layers and become one-click views in the web
-  map; layers and groups can be marked as *always shown*; many rows can be changed at once.
+- **QGIS map themes** can select the published layers (adding up: publish the layers of
+  several themes one after the other) and become one-click views in the web map; layers and groups can be marked as *always shown*; many rows can be changed at once.
 - **Parcel report**: clicking a parcel shows its area, its parts cut by the zoning and the
   regulation lines, its zones and every restriction touching it, with legend graphics
   (computed in QGIS from the exact geometry when exporting).

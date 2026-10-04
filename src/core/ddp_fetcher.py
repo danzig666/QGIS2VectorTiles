@@ -8,7 +8,8 @@ tree and collects all active data-defined properties, returning
 
 import re
 
-from qgis.core import QgsProperty, QgsPropertyDefinition, QgsExpression
+from qgis.core import (QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSymbol,
+                       QgsSymbolLayerUtils)
 
 from ..utils.config import QVariant
 from .fidelity.qgis_expr import with_map_scale
@@ -23,6 +24,22 @@ def _to_color_hex_expr(inner_expr: str) -> str:
         f"with_variable('colo', color_part({inner_expr}, @element),"
         f"@hex[floor(@colo/16)] || @hex[@colo%16])), ''))"
     )
+
+
+_RANDOM_FUNCTIONS = frozenset({"rand", "randf"})
+# Symbol layers whose sub-symbol markers become one repeated texture.
+_TEXTURE_PATTERNS = ("QgsPointPatternFillSymbolLayer", "QgsRandomMarkerFillSymbolLayer")
+
+
+def is_random_only(expression: str) -> bool:
+    """True if ``expression`` varies only by chance (``rand``/``randf``), not
+    with the feature: QGIS draws a new value for every marker it renders."""
+    parsed = QgsExpression(expression)
+    if parsed.hasParserError() or parsed.referencedColumns() - {""} or parsed.needsGeometry():
+        return False
+    functions = {name.lower() for name in parsed.referencedFunctions()}
+    return bool(functions & _RANDOM_FUNCTIONS) and not (
+        set(parsed.referencedVariables()) & DataDefinedPropertiesFetcher.FEATURE_VARIABLES)
 
 
 class DataDefinedPropertiesFetcher:
@@ -53,6 +70,10 @@ class DataDefinedPropertiesFetcher:
         self._objects = 0
         self._diagnostics = diagnostics
         self._context = context or {}
+        # Colour of the symbol being walked: QGIS sets @symbol_color only
+        # while drawing a symbol, so expressions reading it are given it here.
+        self._symbol_colors: list = []
+        self._in_texture = 0  # inside a pattern fill drawn as one texture
 
     def fetch(self) -> list:
         """Return [[field_type, expression, field_name], ...] for all active DDPs."""
@@ -69,6 +90,21 @@ class DataDefinedPropertiesFetcher:
 
     def _walk(self, obj):
         """Recursively introspect obj's QGIS sub-objects for data-defined properties."""
+        texture = type(obj).__name__ in _TEXTURE_PATTERNS
+        self._in_texture += texture
+        try:
+            if isinstance(obj, QgsSymbol):
+                self._symbol_colors.append(obj.color())
+                try:
+                    self._walk_attributes(obj)
+                finally:
+                    self._symbol_colors.pop()
+            else:
+                self._walk_attributes(obj)
+        finally:
+            self._in_texture -= texture
+
+    def _walk_attributes(self, obj):
         for attr in dir(obj):
             if not self._is_safe_attr(attr):
                 continue
@@ -126,6 +162,10 @@ class DataDefinedPropertiesFetcher:
             prop_def = prop_defs.get(key)
             if prop_def is None:
                 continue
+            self._bind_symbol_color(prop)
+            if self._in_texture and prop.propertyType() == 3 and \
+                    is_random_only(prop.expressionString()):
+                continue  # a new value per marker: drawn into the texture
             columns = QgsExpression(prop.asExpression()).referencedColumns()
             if columns and all(c.startswith(f"{self.FIELD_PREFIX}_property_") for c in columns):
                 continue  # already replaced by a generated field
@@ -143,6 +183,17 @@ class DataDefinedPropertiesFetcher:
                     continue
 
             self._results.append([field_type, expression, field_name])
+
+    def _bind_symbol_color(self, prop) -> None:
+        """Replace ``@symbol_color`` with the walked symbol's colour (as
+        QGIS does while drawing it; e.g. sub-symbols following the line colour)."""
+        if prop.propertyType() != 3 or not self._symbol_colors:
+            return
+        expression = prop.expressionString()
+        if "symbol_color" not in QgsExpression(expression).referencedVariables():
+            return
+        color = QgsSymbolLayerUtils.encodeColor(self._symbol_colors[-1])
+        prop.setExpressionString(re.sub(r"@symbol_color\b", f"'{color}'", expression))
 
     @classmethod
     def field_name(cls, prop_def, key, suffix: str) -> str:
@@ -207,7 +258,7 @@ class DataDefinedPropertiesFetcher:
         "aggregate", "relation_aggregate", "rand", "randf", "uuid", "now",
         "represent_value", "is_selected", "num_selected",
     })
-    _FEATURE_VARIABLES = frozenset({
+    FEATURE_VARIABLES = frozenset({
         "feature", "id", "geometry", "geometry_part_num", "geometry_part_count",
         "geometry_point_num", "geometry_point_count", "map_extent", "map_extent_center",
         "map_rotation", "canvas_cursor_point", "symbol_color", "symbol_angle",
@@ -230,7 +281,7 @@ class DataDefinedPropertiesFetcher:
         functions = {name.lower() for name in dependencies.referencedFunctions()}
         if functions & cls._FEATURE_FUNCTIONS:
             return False
-        if set(dependencies.referencedVariables()) & cls._FEATURE_VARIABLES:
+        if set(dependencies.referencedVariables()) & cls.FEATURE_VARIABLES:
             return False
         qexpr.evaluate()
         return not qexpr.hasEvalError()

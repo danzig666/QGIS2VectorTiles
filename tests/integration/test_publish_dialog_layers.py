@@ -89,11 +89,24 @@ def test_raster_layers_are_listed_and_groups_apply_to_their_layers(setup):
 
 def test_map_theme_selects_layers_and_becomes_a_view(setup):
     dialog, project, parcels, zones, ortho = setup
+    items = _items(dialog)
+    dialog.tree.selectAll()
+    dialog.apply_to_selection(1, False)  # start with nothing published
+    dialog.tree.clearSelection()
     dialog.theme_pick.setCurrentText("Csak telkek")
     dialog._apply_theme(publish=True)  # pylint: disable=protected-access
-    items = _items(dialog)
     assert items[parcels.id()].checkState(1) == CHECKED and items[ortho.id()].checkState(1) == CHECKED
     assert items[zones.id()].checkState(1) == UNCHECKED  # hidden in the theme: not published
+    # Additive: a second theme publishes its layers too and unpublishes none.
+    root = project.layerTreeRoot()
+    for layer, shown in ((parcels, False), (zones, True), (ortho, False)):
+        root.findLayer(layer.id()).setItemVisibilityChecked(shown)
+    project.mapThemeCollection().insert("Csak övezetek", QgsMapThemeCollection.createThemeFromCurrentState(
+        root, QgsLayerTreeModel(root)))
+    dialog.theme_pick.addItem("Csak övezetek")
+    dialog.theme_pick.setCurrentText("Csak övezetek")
+    dialog._apply_theme(publish=True)  # pylint: disable=protected-access
+    assert all(items[layer.id()].checkState(1) == CHECKED for layer in (parcels, zones, ortho))
     dialog.themes_list.item(0).setCheckState(CHECKED)
     dialog.theme_initial.setCurrentIndex(dialog.theme_initial.findData("Csak telkek"))
     profile = dialog.collect()

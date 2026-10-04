@@ -253,3 +253,47 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
                     "stretchY": [[fixed, logical - fixed]],
                     "content": [edge, edge, logical - edge, logical - edge]}
     return out, metadata
+
+
+def rotated_lattice_cell(tile_w: float, tile_h: float, angle_deg: float,
+                         max_cell_px: float = 512.0, max_index: int = 12):
+    """A seamless axis-aligned cell for a texture of ``tile_w`` × ``tile_h``
+    tiles rotated by ``angle_deg`` (image coordinates, clockwise on screen,
+    as ``QTransform.rotate``).
+
+    The cell's sides (W, 0) and (0, H) must be whole lattice steps
+    ``i·u + j·v``; with an irrational tangent no small cell is exact, so
+    the lattice is adjusted slightly (``u``, ``v`` solved back from the
+    whole cell). Returns ``(W, H, u, v, error)``: integer cell size, the
+    adjusted tile axes and the largest relative change of a tile axis
+    (about angle error in radians), or None.
+    """
+    a = math.radians(angle_deg)
+    u0 = (tile_w * math.cos(a), tile_w * math.sin(a))
+    v0 = (-tile_h * math.sin(a), tile_h * math.cos(a))
+    rows, cols = [], []
+    for i in range(-max_index, max_index + 1):
+        for j in range(-max_index, max_index + 1):
+            x = i * u0[0] + j * v0[0]
+            y = i * u0[1] + j * v0[1]
+            if 0.5 <= x <= max_cell_px and abs(y) <= 0.15 * x:
+                rows.append((abs(y) / x, i, j, max(1, round(x))))
+            if 0.5 <= y <= max_cell_px and abs(x) <= 0.15 * y:
+                cols.append((abs(x) / y, i, j, max(1, round(y))))
+    rows.sort()
+    cols.sort()
+    best = None
+    for _, i, j, width in rows[:40]:
+        for _, k, l, height in cols[:40]:
+            det = i * l - j * k
+            if det == 0:
+                continue
+            # [W 0; 0 H] = [i j; k l] [u; v]  =>  [u; v] = M^-1 diag(W, H)
+            u = (l * width / det, -j * height / det)
+            v = (-k * width / det, i * height / det)
+            error = max(math.hypot(u[0] - u0[0], u[1] - u0[1]) / tile_w,
+                        math.hypot(v[0] - v0[0], v[1] - v0[1]) / tile_h)
+            score = error + width * height / (max_cell_px * max_cell_px) * 0.002
+            if best is None or score < best[0]:
+                best = (score, width, height, u, v, error)
+    return None if best is None else best[1:]
