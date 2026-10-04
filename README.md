@@ -11,7 +11,10 @@
 [![🌐 Upstream](https://img.shields.io/badge/Upstream-🌐-black?style=for-the-badge)](https://github.com/GallPeters/QGIS2VectorTiles)
 [![📜 License](https://img.shields.io/badge/License-📜-98b023?style=for-the-badge)](https://www.gnu.org/licenses/old-licenses/gpl-2.0-standalone.html)
 
-**Publish your QGIS project to the web in one click: a fast web map that looks like it does in QGIS.**
+**Publish your QGIS project to the web in one click — and it keeps its QGIS look.**
+
+**Your QGIS symbology, converted accurately to vector tiles** · one-click publishing ·
+a full web viewer · no map server, database or Docker
 
 > **QWebMap** started as a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles)
 > by Jossef Kanter and grew into a complete web map publisher. Download builds from
@@ -23,19 +26,54 @@
 > uninstall *QGIS2VectorTiles (fork)* in *Plugins → Manage and Install Plugins*. Settings saved
 > in your projects, the window position and saved keys carry over.
 
-  _- No internet connection or third-party installation required -_
-
 <kbd>
-<img width="670" alt="QGIS2VectorTilesDemo" src="https://github.com/user-attachments/assets/98da33f5-7513-4f84-a8a7-4d0750d7db63" />
+<img width="840" alt="QWebMap demo: the QGIS project and the web map side by side, the Publish Web Map window, then the web viewer (layers, popups, search, measuring, dark mode, phone)" src="docs/images/qwebmap-demo.gif" />
 </kbd>
+
+<sub>Demo data: Swellendam from the <a href="https://github.com/qgis/QGIS-Training-Data">QGIS training data</a> (GPL-2.0, from OpenStreetMap).</sub>
 
 </div>
 
 <br>
 
-## Export fidelity
+## ⭐ Your QGIS symbology, accurately on the web
 
-Every export now writes `fidelity_report.json` and `fidelity_report.html` next to the
+Most web map exporters keep your data and lose your styling. QWebMap converts the **QGIS
+symbology itself** into vector tiles and a MapLibre style, so the web map looks like your QGIS
+map: same colours, widths, patterns, icons, dashes and labels, at every zoom level. The tiles
+stay vector (sharp, small and fast), and anything that cannot be drawn natively in the browser is
+rendered by QGIS into sprites or pre-computed geometry instead of being dropped.
+
+<p align="center">
+<img width="900" alt="The same map in QGIS (left) and in the web viewer (right)" src="docs/images/qgis-vs-web.png" />
+<br><sub>Left: QGIS. Right: the published web map (vector tiles in the browser). Same project, same view.</sub>
+</p>
+
+What carries over:
+
+- **Renderers:** single symbol, categorized, graduated and rule-based (nested rules, scale ranges,
+  ELSE rules), symbol levels and the QGIS drawing order.
+- **Fills:** solid fills and outlines, line-pattern hatches, point-pattern, SVG and raster pattern
+  fills, centroid (point-on-surface) markers, random marker fills (approximated).
+- **Lines:** widths, offsets, caps, joins and dash patterns (including map-unit custom dashes);
+  marker lines with markers at the QGIS positions (interval, vertices, centre point); hash lines,
+  arrows, filled lines and geometry generators.
+- **Markers:** simple markers (native circles when possible), SVG markers (also data-defined
+  variants), font markers, ellipse, filled and raster markers, rendered by QGIS into sprites.
+- **Labels:** your installed fonts (glyphs are generated from them, bold and italic included),
+  buffers, curved, parallel and around-point placement, scale-based visibility, data-defined
+  positions and callouts, and an option to label every feature.
+- **Units:** millimetres, points, pixels and map units, with sizes computed per zoom level.
+
+Not everything has a browser equivalent yet (for example gradient and shapeburst fills,
+interpolated lines). **Every export writes a fidelity report** that lists, layer by layer, what was
+exact, approximated or unsupported, with a suggested fix, and a *Strict* mode refuses to publish
+anything that would not match. The full, generated table is in
+[`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
+
+## Fidelity report
+
+Every export writes `fidelity_report.json` and `fidelity_report.html` next to the
 tiles. Each entry names a stable code (`Q2VT_*`), the layer/rule/symbol layer, the export
 strategy used and a suggested fix, so missing hatches or unsupported symbols are visible
 without reading the log.
