@@ -245,7 +245,7 @@ def _normalized_metadata(info: MbtilesInfo, vector_layers: List[dict], name: Opt
     meta["vector_layers"] = vector_layers
     if isinstance(info.json_metadata.get("tilestats"), dict):
         meta["tilestats"] = info.json_metadata["tilestats"]
-    meta["generator"] = f"QGIS2VectorTiles (fork) via pmtiles-python {PMTILES_LIBRARY_VERSION}"
+    meta["generator"] = f"QWebMap via pmtiles-python {PMTILES_LIBRARY_VERSION}"
     return meta
 
 
@@ -509,7 +509,7 @@ class TileSink:
                     }
                     meta = dict(metadata)
                     meta.setdefault("generator",
-                                    f"QGIS2VectorTiles (fork) via pmtiles-python {PMTILES_LIBRARY_VERSION}")
+                                    f"QWebMap via pmtiles-python {PMTILES_LIBRARY_VERSION}")
                     writer.finalize(header, meta)
                 finally:
                     if not writer.tile_f.closed:

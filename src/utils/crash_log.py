@@ -32,7 +32,7 @@ def start(folder: str, header: str = "") -> str:
         return ""
     with _lock:
         _handle = handle
-    note(f"QGIS2VectorTiles (fork) export log. Python {platform.python_version()}, "
+    note(f"QWebMap export log. Python {platform.python_version()}, "
          f"{platform.platform()}")
     if header:
         note(header)

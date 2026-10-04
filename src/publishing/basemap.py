@@ -44,7 +44,7 @@ NOTO = {"Noto Sans Regular": "regular", "Noto Sans Medium": "medium", "Noto Sans
 FONTSTACKS = {"regular": "Q2VT Basemap Regular", "medium": "Q2VT Basemap Medium",
               "italic": "Q2VT Basemap Italic"}
 MAX_TILES = 200_000
-USER_AGENT = "QGIS2VectorTiles-fork (basemap extract)"
+USER_AGENT = "QWebMap (basemap extract)"
 FLAVOR_TITLES = {
     "en": {"light": "Light", "dark": "Dark", "white": "White", "grayscale": "Grayscale", "black": "Black"},
     "hu": {"light": "Világos", "dark": "Sötét", "white": "Fehér", "grayscale": "Szürke", "black": "Fekete"},

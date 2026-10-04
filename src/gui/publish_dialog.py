@@ -41,7 +41,7 @@ from ..publishing.models import (XyzBasemap, BASEMAP_FLAVORS, FIELD_TYPES, CutLi
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
 from . import publication_profiles as store
 
-TAG = "QGIS2VectorTiles"
+TAG = "QWebMap"
 CHECKED = Qt.CheckState.Checked
 UNCHECKED = Qt.CheckState.Unchecked
 PARTIAL = Qt.CheckState.PartiallyChecked
@@ -131,7 +131,7 @@ class PublishDialog(QDialog):
         super().__init__(parent or (iface.mainWindow() if iface else None))
         self.iface = iface
         self.project = QgsProject.instance()
-        self.setWindowTitle(tr("Publish Web Map — QGIS2VectorTiles (fork)"))
+        self.setWindowTitle(tr("Publish Web Map — QWebMap"))
         self.resize(980, 760)
         self._restore_geometry()
         self.layer_configs = {}
@@ -1893,7 +1893,7 @@ class PublishDialog(QDialog):
         self.d_session_secret.setText(keys.secret_access_key)
         from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
         bucket = self.d_bucket.text().strip() or "maps"
-        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QGIS2VectorTiles)"
+        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QWebMap)"
         try:
             config_id = store_auth_config(name, keys.access_key_id, keys.secret_access_key)
         except PublishingError as error:
@@ -2066,7 +2066,7 @@ class PublishDialog(QDialog):
                                                          "Key of the R2 API token first."))
             return
         bucket = self.d_bucket.text().strip() or "maps"
-        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QGIS2VectorTiles)"
+        name = f"{'R2' if self.d_kind.currentData() == 'r2' else 'S3'} {bucket} (QWebMap)"
         try:
             config_id = store_auth_config(name, key, secret)
         except PublishingError as error:
@@ -2245,7 +2245,7 @@ class PublishDialog(QDialog):
             self._fail(result.code or result.state.value, result.message or result.state.value)
 
     # Size and position of the window, kept between QGIS sessions (QGIS settings).
-    GEOMETRY_KEY = "QGIS2VectorTilesFork/publishDialog/geometry"
+    GEOMETRY_KEY = "QGIS2VectorTilesFork/publishDialog/geometry"  # pre-rename key, kept
 
     def _restore_geometry(self):
         try:

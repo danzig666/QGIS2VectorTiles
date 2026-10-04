@@ -26,7 +26,7 @@ from typing import List, Optional
 from . import mvt
 from .errors import PublishingError
 
-USER_AGENT = "QGIS2VectorTiles-publish-check/1"
+USER_AGENT = "QWebMap-publish-check/1"
 SMALL = 256 * 1024
 
 

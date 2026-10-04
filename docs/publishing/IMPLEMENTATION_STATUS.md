@@ -729,3 +729,28 @@ Owner request: use QGIS's own XYZ store as the option list.
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_publish_dialog_extent.py` | 8 passed |
+
+## 4.9.0: renamed to QWebMap
+
+Owner request: a name that says "QGIS map to the web, easily" (QWebMap: no product, plugin or
+trademark found, and every checked domain was free; checked 4 Oct 2026).
+
+- **Visible names:**
+  - plugin name `QWebMap` (HU edition `QWebMap HÉSZ`, set in `variant.json`);
+  - Web menu, window title, tooltip, Processing provider name, log tab;
+  - manifest/PMTiles generator, user agents;
+  - zip `QWebMap-<version>.zip`, plugin folder `QWebMap`.
+- **Kept, so nothing is lost:**
+  - project property scope `QGIS2VectorTilesFork` (`publication_profiles.SCOPE`);
+  - QgsSettings keys `QGIS2VectorTilesFork/...`;
+  - the Processing ids `QGIS2VectorTilesFork:QGIS2VectorTiles_action`;
+  - Python class names.
+- **Old copy:** the folder changed, so QGIS treats QWebMap as a new plugin.
+  - `__init__._warn_old_plugin` shows a message-bar warning while `QGIS2VectorTilesFork` is in `qgis.utils.available_plugins`.
+  - `release.yml` still finds the pre-rename zips for re-releases.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_plugin_package.py` | passed (zip folder `QWebMap/`, menu "QWebMap", warning with the old copy present) |
+| `test_presets_and_variants`, `test_publish_dialog_r2`, `test_publishing_export`, `test_publish_dialog_extent`, `test_end_to_end` | all passed |
+| `pytest tests/unit` | 237 passed, 5 skipped |

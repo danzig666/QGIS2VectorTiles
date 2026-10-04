@@ -1,9 +1,10 @@
 """
-Build the installable plugin zip: releases/QGIS2VectorTilesFork-<version>.zip.
+Build the installable plugin zip: releases/QWebMap-<version>.zip.
 
 The zip holds the plugin files tracked by git (no tests, tools, docs or
-caches) in a ``QGIS2VectorTilesFork`` folder, so QGIS installs the fork next to
-the official QGIS2VectorTiles plugin instead of replacing it.
+caches) in a ``QWebMap`` folder (the plugin's id in QGIS). Up to 4.8.1 the
+folder was ``QGIS2VectorTilesFork``; the plugin warns when that old copy is
+still installed.
 
 Usage::
 
@@ -12,8 +13,8 @@ Usage::
     python3 tools/build_release.py --variant variant.json
 
 A variant branch (e.g. hu-hesz, see docs/BRANCHES.md) has a ``variant.json``
-at the repository root: ``{"suffix": "hu", "name": "QGIS2VectorTiles (fork, HU)"}``.
-Its zip is ``QGIS2VectorTilesFork-<version>-<suffix>.zip`` and the ``name`` in
+at the repository root: ``{"suffix": "hu", "name": "QWebMap HÉSZ"}``.
+Its zip is ``QWebMap-<version>-<suffix>.zip`` and the ``name`` in
 the zipped metadata.txt is replaced; the folder and the version stay the same
 (installing one replaces the other).
 """
@@ -26,7 +27,7 @@ import sys
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FOLDER = "QGIS2VectorTilesFork"
+FOLDER = "QWebMap"
 CONTENT = ["__init__.py", "metadata.txt", "LICENSE", "icon.png", "icon.svg", "resources", "src"]
 
 

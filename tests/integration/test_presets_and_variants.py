@@ -41,13 +41,13 @@ def test_preset_modules_are_discovered_and_applied(plugin, monkeypatch, tmp_path
 
 def test_variant_zip(tmp_path):
     variant = tmp_path / "variant.json"
-    variant.write_text(json.dumps({"suffix": "xx", "name": "QGIS2VectorTiles (fork, XX)"}))
+    variant.write_text(json.dumps({"suffix": "xx", "name": "QWebMap XX"}))
     out = tmp_path / "plugin.zip"
     subprocess.run([sys.executable, os.path.join(ROOT, "tools", "build_release.py"),
                     "--variant", str(variant), "--out", str(out)], check=True, capture_output=True)
     with zipfile.ZipFile(out) as archive:
-        meta = archive.read("QGIS2VectorTilesFork/metadata.txt").decode("utf-8")
+        meta = archive.read("QWebMap/metadata.txt").decode("utf-8")
     original = open(os.path.join(ROOT, "metadata.txt"), encoding="utf-8").read()
-    assert "name=QGIS2VectorTiles (fork, XX)" in meta
+    assert "name=QWebMap XX" in meta
     strip = lambda text: [l for l in text.split("\n") if not l.startswith("name=")]  # noqa: E731
     assert strip(meta) == strip(original)  # same version and everything else

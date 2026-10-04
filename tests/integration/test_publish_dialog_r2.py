@@ -84,7 +84,7 @@ def test_save_keys_stores_them_encrypted_and_selects_them(plugin, monkeypatch):
     dialog.d_session_key.setText("AKID")
     dialog.d_session_secret.setText("SECRET")
     dialog.save_keys()
-    assert stored == {"name": "R2 maps (QGIS2VectorTiles)", "key": "AKID", "secret": "SECRET"}
+    assert stored == {"name": "R2 maps (QWebMap)", "key": "AKID", "secret": "SECRET"}
     assert dialog.d_session_key.text() == "" and dialog.d_session_secret.text() == ""
     assert dialog.d_auth is None or selected == ["abc1234"]
     assert "saved encrypted" in dialog.status.text()

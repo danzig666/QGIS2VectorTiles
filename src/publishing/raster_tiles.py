@@ -202,7 +202,7 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
         if not sink.count:
             return None
         metadata = {"name": title or layer.name(), "format": config.raster_format,
-                    "type": "overlay", "description": "QGIS raster layer rendered by QGIS2VectorTiles"}
+                    "type": "overlay", "description": "QGIS raster layer rendered by QWebMap"}
         return sink.write(IMAGE_TILE_TYPES[config.raster_format], Compression.NONE, metadata,
                           progress=progress.sub(0.9, 1.0))
 
