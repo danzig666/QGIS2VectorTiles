@@ -68,7 +68,7 @@ the only raster sources a release may contain are those archives.
 |---|---|---|---|---|
 | Raster layers | **Done** | `raster_tiles.py`: QGIS renders each raster layer (metatiles of 8×8, `RenderMapTile`, its own renderer/opacity/scale range) into PNG / WebP / JPEG tiles. Transparent tiles are skipped and identical tiles stored once. Each layer gets `data/raster-<id>.pmtiles`, validated by image signature. Per-layer settings: zooms, quality, 512 px HiDPI. Size is estimated before rendering (400 000-tile limit). A layer that draws nothing in the extent is dropped with a warning. The style layer sits at the layer's tree position, under all labels. The contract (`vector_only_violations(raster_sources=…)`, viewer `bindStyle`) accepts raster sources only for these manifest archives. | `pytest tests/integration/test_publishing_raster.py` → 3 passed (own WebP archive, every tile checked, z-order under parcels; above vectors but under labels; transparent tiles skipped; empty raster dropped; oversized refused). | Blending modes are not reproduced. Online services (WMS/XYZ) are flagged for licence review. |
 | Vector basemap (PUB-17) | **Done; live source not verified** | `basemap.py` discovers the latest build (`build-metadata.protomaps.dev/builds.json`) or uses a given URL or file. It reads directories and tiles with HTTP ranges (retries; whole-file answers are refused), and only the area's tiles are copied: zooms 0..overview over a wide square, detail zooms over the padded extent. The extract is `data/basemap.pmtiles`. Flavors come from the vendored `@protomaps/basemaps` 5.7.2 (hu/en × 5): sprite icons dropped, Noto stacks replaced by glyphs generated for the characters actually in the extract's labels. The viewer adds the chosen flavor under every project layer and hides the project background while one is shown. | `pytest tests/unit/test_publishing_basemap.py` → 15 passed (local extract = the area's tiles with unchanged payloads; HTTP extract with 206 ranges only, fewer bytes than the file; retries; 200-for-range refused; build discovery; wrong schema / too many tiles refused; 10 flavor files vector-only and sprite-free). `tests/integration/test_publishing_basemap_themes.py` → 1 passed (bundled extract, flavor files, glyph folders, manifest schema). | `build.protomaps.com` was not reachable from this environment (proxy policy), so a real planet extract has **not** been run. POI icons and road shields are drawn as text only. |
-| Map themes | **Done** | Dialog: *Publish its layers* and *Use as start view* from a QGIS map theme. Chosen themes become viewer presets (QGIS's effective layer visibility plus checked legend items); one can be the start view. Locked layers stay on. | `test_publishing_basemap_themes.py`, `test_publish_dialog_layers.py`, browser test below. | Themes with a non-current layer style use the current style (warning). |
+| Map themes | **Done** | Dialog: *Publish its layers* (additive: never unpublishes, so several themes add up) and *Use as start view* from a QGIS map theme. Chosen themes become viewer presets (QGIS's effective layer visibility plus checked legend items); one can be the start view. Locked layers stay on. | `test_publishing_basemap_themes.py`, `test_publish_dialog_layers.py`, browser test below. | Themes with a non-current layer style use the current style (warning). |
 | Locked layers/groups, bulk settings | **Done** | Profile `toggleable` per layer and group; *Can be switched off* column; group Publish boxes tri-state; *Selected layers* menu and right-click menu apply to many rows, and a selected group applies to its contents. The viewer shows a lock, and presets, saved state and links cannot switch locked items off. | `pytest tests/integration/test_publish_dialog_layers.py` → 3 passed; `tests/unit/test_publishing_profile.py` → 30 passed. | — |
 | Viewer redesign | **Done** | Floating glass header and panel with icon tabs (desktop); top bar plus bottom sheet (phones); switches, opacity drawers, checklist filters, card popups and legend; basemap switcher with previews; theme chips; plain-text attribution; light/dark switch; accent colour; locate button on https. | `pytest tests/browser/test_web_viewer_features.py tests/browser/test_pmtiles_transport.py` → 14 passed (unchanged behaviour); `tests/browser/test_web_viewer_basemap_raster.py` → 5 passed (basemap under the map, flavor switch, none restores the background, raster drawn, presets, locks vs links, no third-party requests, no overflow at 1366/390/360 px, dark switch). Screenshots reviewed (desktop, phone, dark, basemap menu, popup, search). | Firefox/Safari not tested. |
 
@@ -866,3 +866,38 @@ Found by comparing the QGIS built-in symbol library in QGIS and in the browser
 | `pytest tests/integration/test_gradient_fills.py` (new) | 11 passed in 7 s |
 | unit tests, `test_materialize.py`, `test_plugin_package.py` | all passed |
 | gallery, 10 built-in gradient symbols, QGIS vs MapLibre | shape score 0.0; colour difference mean ~1, p99 2–3 levels |
+
+## 4.11.0: shared style library symbols, additive theme publishing
+
+Found by exporting a user's style library (style XML exports: Barb Wire, Bricks, Cross-Stitch,
+Dormido Rough, Fantasia, Organic Blocks, a rainbow colour ramp and Italian-region legend patch
+shapes) and comparing QGIS with the browser.
+
+- **`@symbol_color`** (`ddp_fetcher._bind_symbol_color`): QGIS sets it only while drawing a
+  symbol; evaluated per feature it was empty and failed the whole layer ("Cannot convert '' to
+  int"). The fetcher now substitutes the colour of the symbol being walked (sub-symbols their
+  own, as QGIS's symbol scope does).
+- **Per-marker random values** (`ddp_fetcher.is_random_only`, `_random_marker_cells`): `rand()` /
+  `randf()` in a point-pattern or random-fill marker get a new value for every marker in QGIS.
+  The fetcher leaves them alone inside texture patterns (a per-polygon field drew every marker
+  the same); the texture holds several pattern cells (about 256 px) with every marker rendered
+  with its own values.
+- **SVG fill textures** (`_svg_cell`): the SVG is drawn to fill its whole tile, as
+  `QgsSVGFillSymbolLayer::applyPattern` does; the marker image placed in a rounded cell left a
+  transparent, anti-aliased edge: white lines along every tile edge.
+- **Rotated SVG fills** (`patterns.rotated_lattice_cell`, `_rotated_texture`): QGIS rotates the
+  whole texture. The cell is now W × H with sides that are whole lattice steps (tile axes
+  adjusted slightly, reported when over 2 %), drawn with a rotated Qt brush: no seams. Before,
+  each SVG was rotated inside an unrotated cell, which broke the texture at every cell edge.
+- **Point pattern clip modes** other than "clip to shape" are reported for screen-unit textures
+  (map-unit grids already keep whole markers).
+- **Legend patch shapes** (`qgis_model._patch_shape`): the web legend swatches use the shape set
+  on the legend item or the layer.
+- **Map themes** (`PublishDialog._apply_theme`): *Publish its layers* only adds layers.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_style_library_symbols.py` (new) | 5 passed (4 fail without the fixes; the fifth is new) |
+| `pytest tests/integration/test_publish_dialog_layers.py` (two themes in a row) | 3 passed |
+| unit tests, `test_sprites.py`, `test_materialize.py`, `test_gradient_fills.py`, `test_plugin_package.py` | 355 passed |
+| gallery of the style library, QGIS vs MapLibre | Barb Wire, Bricks, Organic Blocks, Dormido, Fantasia and the rainbow gradients match (see release notes for what remains) |

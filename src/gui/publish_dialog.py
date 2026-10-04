@@ -342,7 +342,8 @@ class PublishDialog(QDialog):
         self.theme_pick = QComboBox()
         self.theme_pick.setToolTip(tr("A QGIS map theme (View → Map Themes)"))
         publish_theme = QPushButton(tr("Publish its layers"))
-        publish_theme.setToolTip(tr("Publish exactly the layers visible in this map theme"))
+        publish_theme.setToolTip(tr("Also publish the layers visible in this map theme (layers "
+                                    "already published stay published, so several themes add up)"))
         publish_theme.clicked.connect(lambda: self._apply_theme(publish=True))
         start_theme = QPushButton(tr("Use as start view"))
         start_theme.setToolTip(tr("Visible at start: the layers visible in this map theme"))
@@ -495,10 +496,17 @@ class PublishDialog(QDialog):
         for item in self._tree_items():
             shown = item.data(0, LAYER_ROLE) in visible
             if publish:
-                item.setCheckState(COL_PUBLISH, _check(shown))
-            if shown or not publish:
+                # Additive: the theme's layers are published too, none are
+                # unpublished (several themes can be combined).
+                if shown:
+                    item.setCheckState(COL_PUBLISH, CHECKED)
+                    item.setCheckState(COL_VISIBLE, CHECKED)
+            else:
                 item.setCheckState(COL_VISIBLE, _check(shown))
-        self.status.setText(tr('Map theme "{}" applied to the layer list.').format(name))
+        if publish:
+            self.status.setText(tr('Layers of map theme "{}" added to the published layers.').format(name))
+        else:
+            self.status.setText(tr('Map theme "{}" applied to the layer list.').format(name))
 
     def _refresh_initial_theme(self):
         current = self.theme_initial.currentData()

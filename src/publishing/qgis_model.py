@@ -24,7 +24,8 @@ from typing import Dict, List, Optional, Tuple
 
 from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsExpression,
                        QgsExpressionContext, QgsExpressionContextUtils, QgsFeatureRequest,
-                       QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject, QgsRasterLayer, QgsRectangle,
+                       QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMapLayerLegendUtils, QgsProject,
+                       QgsRasterLayer, QgsRectangle,
                        QgsRuleBasedRenderer, QgsSymbolLayerUtils, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QSize
 
@@ -588,14 +589,16 @@ def render_swatches(project: QgsProject, profile: PublicationProfile, out_dir: s
             items = renderer.legendSymbolItems()
         except RuntimeError:
             continue
+        node = project.layerTreeRoot().findLayer(layer.id())
         first = None
-        for item in items:
+        for index, item in enumerate(items):
             symbol = item.symbol()
             if symbol is None:
                 continue
             rid = rule_logical_id(layer.id(), item.ruleKey() or "single")
             name = f"{rid}.png"
-            pixmap = QgsSymbolLayerUtils.symbolPreviewPixmap(symbol, QSize(size, size), 2, context)
+            pixmap = QgsSymbolLayerUtils.symbolPreviewPixmap(
+                symbol, QSize(size, size), 2, context, False, None, _patch_shape(node, index))
             if pixmap.isNull() or not pixmap.save(os.path.join(out_dir, name), "PNG"):
                 continue
             swatches[rid] = f"legend/{name}"
@@ -603,6 +606,17 @@ def render_swatches(project: QgsProject, profile: PublicationProfile, out_dir: s
         if first:
             swatches[layer_logical_id(layer.id())] = first
     return swatches
+
+
+def _patch_shape(node, index: int):
+    """The legend patch shape QGIS draws for legend item ``index`` (set on
+    the item, else on the layer), or None for the default patch."""
+    if node is None:
+        return None
+    shape = QgsMapLayerLegendUtils.legendNodePatchShape(node, index)
+    if shape.isNull():
+        shape = node.patchShape()
+    return None if shape.isNull() else shape
 
 
 def _wkb_name(layer) -> str:

@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+import re
 import os
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -2313,6 +2314,12 @@ class QgisMapLibreStyleExporter:
             self.context.report("Q2VT_PATTERN_APPROXIMATE",
                                 "Random deviation or rotation of pattern markers is ignored.",
                                 strategy=Strategy.APPROXIMATE.value)
+        if hasattr(layer, "clipMode") and \
+                _enum_int(layer.clipMode()) != _enum_int(Qgis.MarkerClipMode.Shape):
+            self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                "Pattern markers are cut at the polygon edge (QGIS draws only "
+                                "whole markers inside it); spacing in map units keeps them whole.",
+                                strategy=Strategy.APPROXIMATE.value)
         dx = self._pattern_px(layer.distanceX(), layer.distanceXUnit(), "spacing")
         dy = self._pattern_px(layer.distanceY(), layer.distanceYUnit(), "spacing")
         if dx <= 0 or dy <= 0:
@@ -2323,16 +2330,77 @@ class QgisMapLibreStyleExporter:
         # the cell by the offset (x right, y down; percentages of the cell).
         off_x, off_y = (self._pattern_offset_px(layer.offsetX(), layer.offsetXUnit(), 2 * dx),
                         self._pattern_offset_px(layer.offsetY(), layer.offsetYUnit(), 2 * dy))
+        _, _, _, error = point_pattern_cell(dx, dy, disp_x, disp_y)
+        if self._random_ddp(marker):
+            cells = self._random_marker_cells(marker, dx, dy, disp_x, disp_y, off_x, off_y)
+            return self._textures(cells[0], cells[1], error, "Point pattern")
         one, two = self._marker_images(marker)
         cells = []
         for ratio, image in ((1, one), (2, two)):
-            width, height, positions, error = point_pattern_cell(
+            width, height, positions, _ = point_pattern_cell(
                 dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio)
             positions = [((x + off_x * ratio) % width, (y + off_y * ratio) % height)
                          for x, y in positions]
             cells.append(tile_markers(image, width, height, positions))
-        _, _, _, error = point_pattern_cell(dx, dy, disp_x, disp_y)
         return self._textures(cells[0], cells[1], error, "Point pattern")
+
+    # A texture of markers with random data-defined values repeats after
+    # about this many pixels (several markers per direction).
+    RANDOM_CELL_PX = 256
+
+    @staticmethod
+    def _random_ddp(marker) -> List[Tuple[int, int, str]]:
+        """[(symbol layer index, property key, expression)] of the marker's
+        data-defined properties that only vary by chance (rand/randf)."""
+        from .ddp_fetcher import is_random_only  # pylint: disable=import-outside-toplevel
+        out = []
+        for index in range(marker.symbolLayerCount()):
+            props = marker.symbolLayer(index).dataDefinedProperties()
+            for key in sorted(props.propertyKeys()):
+                prop = props.property(key)
+                if prop and prop.isActive() and prop.propertyType() == 3 and \
+                        is_random_only(prop.expressionString()):
+                    # @symbol_color is only set while QGIS draws the symbol.
+                    color = "'" + QgsSymbolLayerUtils.encodeColor(marker.color()) + "'"
+                    out.append((index, key, re.sub(r"@symbol_color\b", color,
+                                                    prop.expressionString())))
+        return out
+
+    def _random_marker_cells(self, marker, dx, dy, disp_x, disp_y, off_x, off_y):
+        """1x and 2x cells of a point pattern whose markers take random values
+        (QGIS evaluates rand() for every marker it draws): several pattern
+        cells in one texture, each marker drawn with its own values."""
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsExpression, QgsProperty  # pylint: disable=import-outside-toplevel
+        from .fidelity.patterns import point_pattern_cell, tile_markers  # pylint: disable=import-outside-toplevel
+        width, height, _, _ = point_pattern_cell(dx, dy, disp_x, disp_y)
+        reps_x = max(1, min(16, round(self.RANDOM_CELL_PX / width)))
+        reps_y = max(1, min(16, round(self.RANDOM_CELL_PX / height)))
+        markers = []
+        random_ddp = self._random_ddp(marker)
+        cells = []
+        for ratio in (1, 2):
+            w, h, positions, _ = point_pattern_cell(dx * ratio, dy * ratio,
+                                                    disp_x * ratio, disp_y * ratio)
+            canvas = Image.new("RGBA", (w * reps_x, h * reps_y), (0, 0, 0, 0))
+            index = 0
+            for j in range(reps_y):
+                for i in range(reps_x):
+                    for x, y in positions:
+                        if index == len(markers):  # same values at 1x and 2x
+                            clone = marker.clone()
+                            for layer_index, key, expression in random_ddp:
+                                clone.symbolLayer(layer_index).setDataDefinedProperty(
+                                    key, QgsProperty.fromValue(QgsExpression(expression).evaluate()))
+                            markers.append(self._marker_images(clone))
+                        image = markers[index][ratio - 1]
+                        index += 1
+                        point = ((x + i * w + off_x * ratio) % (w * reps_x),
+                                 (y + j * h + off_y * ratio) % (h * reps_y))
+                        canvas = Image.alpha_composite(
+                            canvas, tile_markers(image, w * reps_x, h * reps_y, [point]))
+            cells.append(canvas)
+        return cells
 
     def _register_random_pattern(self, layer) -> Optional[str]:
         """Seamless texture of a random marker fill at its QGIS density
@@ -2386,14 +2454,87 @@ class QgisMapLibreStyleExporter:
         marker_layer.setStrokeColor(layer.svgStrokeColor())
         marker_layer.setStrokeWidth(layer.svgStrokeWidth())
         marker_layer.setStrokeWidthUnit(layer.svgStrokeWidthUnit())
-        one, two = self._marker_images(QgsMarkerSymbol([marker_layer]))
         cells = []
-        for ratio, image in ((1, one), (2, two)):
-            cell_w = max(1, round(width * ratio))
-            cell_h = max(1, round(width * aspect * ratio))
-            cells.append(tile_markers(image, cell_w, cell_h, [(cell_w / 2.0, cell_h / 2.0)]))
+        # As QGIS (QgsSVGFillSymbolLayer::applyPattern): the SVG drawn to
+        # fill the whole tile, so its edges meet the next tile's without an
+        # anti-aliased (transparent) seam; a rotated fill rotates the whole
+        # texture (brush transform), in a seamless cell of rotated tiles.
+        stroke = self._texture_px(layer.svgStrokeWidth(), layer.svgStrokeWidthUnit())
+        per_mm = self._texture_px(1.0, Qgis.RenderUnit.Millimeters)
+        lattice = None
+        if layer.angle():
+            from .fidelity.patterns import rotated_lattice_cell  # pylint: disable=import-outside-toplevel
+            lattice = rotated_lattice_cell(width, width * aspect, layer.angle())
+            if lattice is not None and lattice[4] > self.profile.tolerance_rel:
+                self.context.report(
+                    "Q2VT_PATTERN_APPROXIMATE",
+                    f"Rotated SVG fill: tiles turned or scaled by up to {lattice[4]:.1%} so the "
+                    "texture repeats without seams.", strategy=Strategy.APPROXIMATE.value)
+        for ratio in (1, 2):
+            tile_w = max(1, round(width * ratio))
+            tile_h = max(1, round(width * aspect * ratio))
+            tile = self._svg_cell(layer, tile_w, tile_h, stroke * ratio, per_mm * ratio)
+            if tile is not None and lattice is not None:
+                tile = self._rotated_texture(tile, lattice, ratio)
+            elif layer.angle():
+                tile = None
+            if tile is None:
+                cells = []
+                break
+            cells.append(tile)
+        if not cells:
+            one, two = self._marker_images(QgsMarkerSymbol([marker_layer]))
+            for ratio, image in ((1, one), (2, two)):
+                cell_w = max(1, round(width * ratio))
+                cell_h = max(1, round(width * aspect * ratio))
+                cells.append(tile_markers(image, cell_w, cell_h, [(cell_w / 2.0, cell_h / 2.0)]))
         error = abs(round(width) - width) / width
         return self._textures(cells[0], cells[1], error, "SVG fill")
+
+    @staticmethod
+    def _rotated_texture(tile, lattice, ratio: int):
+        """``tile`` repeated along the lattice axes ``u``, ``v`` over a
+        seamless ``W`` × ``H`` cell (see ``rotated_lattice_cell``)."""
+        from qgis.PyQt.QtCore import QRectF  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QBrush, QImage, QPainter, QTransform  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        width, height, u, v, _ = lattice
+        source = QImage(tile.tobytes("raw", "RGBA"), tile.width, tile.height,
+                        QImage.Format.Format_RGBA8888).copy()
+        brush = QBrush(source)
+        brush.setTransform(QTransform(u[0] * ratio / tile.width, u[1] * ratio / tile.width,
+                                      v[0] * ratio / tile.height, v[1] * ratio / tile.height, 0, 0))
+        image = QImage(width * ratio, height * ratio, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.fillRect(QRectF(0, 0, width * ratio, height * ratio), brush)
+        painter.end()
+        return SymbolImage._qt_to_pil(image)  # pylint: disable=protected-access
+
+    @staticmethod
+    def _svg_cell(layer, cell_w: int, cell_h: int, stroke_px: float, per_mm: float):
+        """One SVG fill cell: the (parametrized) SVG stretched over the cell."""
+        from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QRectF  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QImage, QPainter  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtSvg import QSvgRenderer  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        content = QgsApplication.svgCache().svgContent(
+            layer.svgFilePath(), cell_w, layer.svgFillColor(), layer.svgStrokeColor(),
+            stroke_px, per_mm)
+        renderer = QSvgRenderer(content)
+        if not renderer.isValid():
+            return None
+        image = QImage(cell_w, cell_h, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        renderer.render(painter, QRectF(0, 0, cell_w, cell_h))
+        painter.end()
+        return SymbolImage._qt_to_pil(image)  # pylint: disable=protected-access
 
     def _register_raster_pattern(self, layer) -> Optional[str]:
         """Texture for a raster image fill (local file or embedded image)."""
