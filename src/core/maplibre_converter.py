@@ -31,7 +31,8 @@ from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
 from .fidelity import expressions as ex
 from .fidelity import html_labels
-from .fidelity.capabilities import classify
+from .fidelity import materialize as mat
+from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
 from .fidelity.patterns import LinePatternSpec, render_line_pattern, solve_periodic_cell
@@ -1857,15 +1858,18 @@ class QgisMapLibreStyleExporter:
                 f"{layer_type}: {result.reason}", symbol_layer_index=index,
                 strategy=result.strategy.value)
         try:
-            effect = symbol_layer.paintEffect()
-            if effect is not None and effect.enabled() and type(effect).__name__ not in (
-                    "QgsDefaultPaintEffect",):
-                stack = getattr(effect, "effectList", lambda: [])()
-                if not (type(effect).__name__ == "QgsEffectStack" and all(
-                        type(e).__name__ == "QgsDrawSourceEffect" for e in stack)):
-                    self.context.report("Q2VT_UNSUPPORTED_EFFECT",
-                                        f"{layer_type}: paint effect is ignored.",
-                                        symbol_layer_index=index)
+            # Markers are rendered by QGIS into sprites, effects included;
+            # a simple line's glow and shadow become extra line layers.
+            handled = {"QgsDrawSourceEffect"}
+            if isinstance(symbol_layer, QgsSimpleLineSymbolLayer):
+                handled |= set(self.LINE_EFFECTS)
+            ignored = sorted({e.type() for e in self._effect_list(symbol_layer)
+                              if type(e).__name__ not in handled})
+            cap = capability(layer_type)
+            if ignored and not (cap is not None and cap.family in SPRITE_FAMILIES):
+                self.context.report("Q2VT_UNSUPPORTED_EFFECT",
+                                    f"{layer_type}: paint effect {', '.join(ignored)} is ignored.",
+                                    symbol_layer_index=index)
         except (AttributeError, RuntimeError):
             pass
         return result.strategy
@@ -2863,7 +2867,61 @@ class QgisMapLibreStyleExporter:
                                 f"{symbol_layer.layerType()} has no line conversion.")
             return
 
-        self.style["layers"].append(layer_def)
+        below, above = self._line_effect_layers(symbol_layer, layer_def)
+        self.style["layers"].extend(below + [layer_def] + above)
+
+    # Paint effects a line can carry in the browser (see _line_effect_layers).
+    LINE_EFFECTS = ("QgsOuterGlowEffect", "QgsDropShadowEffect")
+
+    @staticmethod
+    def _effect_list(symbol_layer) -> list:
+        effect = symbol_layer.paintEffect() if hasattr(symbol_layer, "paintEffect") else None
+        if effect is None or not effect.enabled() or type(effect).__name__ == "QgsDefaultPaintEffect":
+            return []
+        if type(effect).__name__ == "QgsEffectStack":
+            return [e for e in effect.effectList() if e.enabled()]
+        return [effect]
+
+    def _line_effect_layers(self, symbol_layer, layer_def: dict):
+        """A simple line's outer glow and drop shadow as extra line layers
+        under (or over) it, in the effect stack's order: the glow a wider,
+        blurred line of the glow colour; the shadow the same line offset and
+        blurred. QGIS draws effects as images; these are close equivalents."""
+        if not isinstance(symbol_layer, QgsSimpleLineSymbolLayer):
+            return [], []
+        below, above = [], []
+        target = below
+        for index, effect in enumerate(self._effect_list(symbol_layer)):
+            name = type(effect).__name__
+            if name == "QgsDrawSourceEffect":
+                target = above
+                continue
+            if name not in self.LINE_EFFECTS or _enum_int(effect.drawMode()) == 1:  # modifier only
+                continue
+            extra = copy.deepcopy(layer_def)
+            extra["id"] = f"{layer_def['id']}_fx{index}"
+            paint = extra["paint"]
+            paint.pop("line-dasharray", None)
+            blur = PropertyExtractor.static_pixels(effect.blurLevel(), effect.blurUnit())
+            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1), float(effect.opacity()))
+            if name == "QgsOuterGlowEffect":
+                spread = PropertyExtractor.static_pixels(effect.spread(), effect.spreadUnit())
+                color = effect.color() if _enum_int(effect.colorType()) == 0 or effect.ramp() is None \
+                    else effect.ramp().color(0.0)
+                paint["line-color"] = color.name()
+                paint["line-width"] = ex.add(paint["line-width"], 2 * spread)
+                paint["line-blur"] = spread + blur
+            else:
+                angle = math.radians(effect.offsetAngle())
+                distance = PropertyExtractor.static_pixels(effect.offsetDistance(), effect.offsetUnit())
+                # QgsShadowEffect::draw: offset (-d sin(a + 90°), -d cos(a + 90°)), y down.
+                paint["line-translate"] = [round(-distance * math.sin(angle + math.pi / 2), 3),
+                                           round(-distance * math.cos(angle + math.pi / 2), 3)]
+                paint["line-translate-anchor"] = "viewport"
+                paint["line-color"] = effect.color().name()
+                paint["line-blur"] = blur
+            target.append(extra)
+        return below, above
 
     def _convert_fill_symbol(
         self,
@@ -2894,6 +2952,12 @@ class QgisMapLibreStyleExporter:
                     "fill-translate": FillPropertyExtractor.get_fill_translate(),
                     "fill-translate-anchor": FillPropertyExtractor.get_fill_translate_anchor(),
                 })
+                color_prop = symbol_layer.dataDefinedProperties().property(
+                    QgsSymbolLayer.Property.PropertyFillColor)
+                if color_prop and color_prop.isActive():
+                    # Materialized colour bands (gradient / shapeburst fills) are
+                    # drawn in band order; other features have no band (key 0).
+                    layer_def["layout"]["fill-sort-key"] = ["to-number", ["get", mat.BAND_FIELD], 0]
 
             else:
                 layer_def["paint"].update({

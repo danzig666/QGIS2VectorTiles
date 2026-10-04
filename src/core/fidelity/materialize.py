@@ -26,6 +26,8 @@ ANGLE_FIELD = "q2vt_mat_angle"
 ORDINAL_FIELD = "q2vt_mat_ordinal"
 LENGTH_FIELD = "q2vt_mat_length"
 COUNT_FIELD = "q2vt_mat_npoints"
+BAND_FIELD = "q2vt_mat_band"        # colour band of a gradient / shapeburst fill
+COLOR_FIELD = "q2vt_mat_color"      # its colour ("r,g,b,a", QgsSymbolLayerUtils.encodeColor)
 
 VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVertex",
                                "CurvePoint"})
@@ -794,3 +796,66 @@ def coerce_to_symbol_type(expression: str, symbol_type: int) -> str:
         return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
                 f"'Point', @q2vt_coerce, nodes_to_points(@q2vt_coerce)))")
     return expression
+
+
+# --- gradient and shapeburst fills as colour bands ------------------------------------------
+#
+# The browser has no gradient fill. A QGIS gradient (linear, radial,
+# conical) or shapeburst fill is exported as ``bands`` solid fills: band i
+# covers the part of the polygon where the gradient parameter t lies in
+# [i/n, (i+1)/n] and is filled with the colour at its middle. Opaque fills
+# use overlapping bands (band i = every t >= i/n, drawn bottom to top) so
+# no hairline seams show between neighbours; translucent ones use exact,
+# non-overlapping bands.
+
+def gradient_band_recipe(gradient_type: int, ref1, ref2, centroid1: bool, centroid2: bool,
+                         angle: float, spread: int, band: int, bands: int, overlap: bool,
+                         construction_crs: str, extend: float = 0.0) -> Recipe:
+    """``ref1``/``ref2``: QGIS reference points as fractions of the feature's
+    bounding box (x right, y down); ``gradient_type`` 0 linear, 1 radial,
+    2 conical; ``spread`` 0 pad, 1 reflect, 2 repeat (QgsGradientFillSymbolLayer).
+    ``extend``: bands that do not overlap are grown by this fraction of a
+    band towards the band drawn after them (which covers it), so
+    anti-aliased edges leave no gaps (opaque colours only)."""
+    # QGIS rotates the reference points around the box centre by ``angle``
+    # (QTransform::rotate in y-down box fractions: clockwise on screen).
+    a = math.radians(angle or 0.0)
+
+    def rotated(point):
+        x, y = point[0] - 0.5, point[1] - 0.5
+        return (0.5 + x * math.cos(a) - y * math.sin(a), 0.5 + x * math.sin(a) + y * math.cos(a))
+
+    p1, p2 = rotated(ref1), rotated(ref2)
+    return Recipe("gradient_band", (), (
+        ("type", int(gradient_type)), ("p1", (float(p1[0]), float(p1[1]))),
+        ("p2", (float(p2[0]), float(p2[1]))), ("c1", bool(centroid1)), ("c2", bool(centroid2)),
+        ("spread", int(spread)), ("band", int(band)), ("bands", int(bands)),
+        ("overlap", bool(overlap)), ("crs", construction_crs), ("extend", float(extend))))
+
+
+def shapeburst_band_recipe(distance: float, whole_shape: bool, ignore_rings: bool, band: int,
+                           bands: int, construction_crs: str) -> Recipe:
+    """Band ``band`` of a shapeburst fill: t = distance to the boundary /
+    ``distance`` (map units of ``construction_crs``), or / the largest
+    distance inside the polygon (``whole_shape``). Bands overlap (inset
+    polygons drawn from the edge inwards)."""
+    return Recipe("shapeburst_band", (), (
+        ("distance", float(distance)), ("whole", bool(whole_shape)), ("ignore_rings", bool(ignore_rings)),
+        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs)))
+
+
+def _band_interval(band: int, bands: int, overlap: bool):
+    """(start, end) of a band's t interval, None = unbounded on that side."""
+    start = None if band == 0 else band / bands
+    end = None if overlap or band == bands - 1 else (band + 1) / bands
+    return start, end
+
+
+def color_bands_recipe(band_recipes, colors) -> Recipe:
+    """All bands of one gradient / shapeburst fill in one dataset: the
+    per-band recipes (gradient_band_recipe / shapeburst_band_recipe) and
+    their colours (encodeColor strings). The exporter writes one polygon per
+    feature and band (fidelity.bands) with BAND_FIELD and COLOR_FIELD; the
+    style draws them in band order."""
+    return Recipe("color_bands", (), (("bands", tuple(band_recipes)), ("colors", tuple(colors))))
+

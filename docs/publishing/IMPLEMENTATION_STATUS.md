@@ -830,3 +830,39 @@ not.
 | `pytest tests/integration/test_publishing_raster.py` | 5 passed (2 new, both fail without the fix) |
 | `pytest tests/integration/test_basemap_glyph_fonts.py` | 1 passed (fails without the fix with that font installed) |
 | related raster/basemap/export suites | 44 passed |
+
+## 4.10.0: gradient and shapeburst fills, line glow/shadow, arrow colour, new icon
+
+Found by comparing the QGIS built-in symbol library in QGIS and in the browser
+(`tools/gallery/build_gallery.py`).
+
+- **Gradient and shapeburst fills** (`materializer._gradient`, `_shapeburst`, `_band_rules`):
+  - One rule per symbol with a `color_bands` recipe: the per-band recipes and their colours
+    (`QgsSymbolLayerUtils.encodeColor`). Its solid fill reads the colour from `q2vt_mat_color`
+    (data-defined, so the DDP pipeline writes the MapLibre colour field). The style sorts by
+    `q2vt_mat_band` (`fill-sort-key`).
+  - `rules_exporter._color_bands` writes every band of every feature into one FlatGeobuf, band
+    by band and without a spatial index (an index reorders the features).
+  - `fidelity/bands.py` builds the band polygons with QgsGeometry. The earlier geometry
+    expressions were nested `with_variable` calls, which QGIS prepares in exponential time
+    (13 s to minutes per band). Exporting is now milliseconds per feature, and the test file
+    runs in 7 s instead of over 8 minutes.
+  - Gradients are built in the feature's unit bounding box and scaled back, as Qt draws them
+    (`QGradient::ObjectBoundingMode`: lines, circles and angles stretch with the box).
+  - Bands that do not overlap (repeat/reflect, conical, translucent colours excluded) grow by
+    half a band towards the band drawn after them, which covers the growth: no anti-aliasing
+    gaps at any zoom, and no visible error.
+  - Band count: about 4 colour levels per band, at most 64.
+  - A shapeburst distance in screen units uses the middle of the rule's zooms, clamped to the
+    export's maximum zoom.
+- **Line effects** (`maplibre_converter._line_effect_layers`): outer glow and drop shadow on
+  simple lines become blurred `line` layers. Marker effects (drawn into sprites) are no longer
+  reported.
+- **Arrow colour** (`materializer._arrow_fill_layer`): the top visible, non-offset fill layer.
+- **Icon:** new `icon.svg` / `icon.png` (and `docs/icons`).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_gradient_fills.py` (new) | 11 passed in 7 s |
+| unit tests, `test_materialize.py`, `test_plugin_package.py` | all passed |
+| gallery, 10 built-in gradient symbols, QGIS vs MapLibre | shape score 0.0; colour difference mean ~1, p99 2–3 levels |

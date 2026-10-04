@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img width="70" alt="icon" src="https://github.com/user-attachments/assets/e1f0e64b-6850-4ae5-b3c0-2ce2fca5580e" />
+<img width="96" alt="QWebMap icon" src="icon.svg" />
 
 # QWebMap
 
@@ -54,10 +54,12 @@ What carries over:
 - **Renderers:** single symbol, categorized, graduated and rule-based (nested rules, scale ranges,
   ELSE rules), symbol levels and the QGIS drawing order.
 - **Fills:** solid fills and outlines, line-pattern hatches, point-pattern, SVG and raster pattern
-  fills, centroid (point-on-surface) markers, random marker fills (approximated).
+  fills, gradient fills (linear, radial and conical, two colours or a colour ramp) and shapeburst
+  fills as fine colour bands, centroid (point-on-surface) markers, random marker fills
+  (approximated).
 - **Lines:** widths, offsets, caps, joins and dash patterns (including map-unit custom dashes);
   marker lines with markers at the QGIS positions (interval, vertices, centre point); hash lines,
-  arrows, filled lines and geometry generators.
+  arrows, filled lines and geometry generators; outer glow and drop shadow effects on lines.
 - **Markers:** simple markers (native circles when possible), SVG markers (also data-defined
   variants), font markers, ellipse, filled and raster markers, rendered by QGIS into sprites.
 - **Labels:** your installed fonts (glyphs are generated from them, bold and italic included),
@@ -65,8 +67,8 @@ What carries over:
   positions and callouts, and an option to label every feature.
 - **Units:** millimetres, points, pixels and map units, with sizes computed per zoom level.
 
-Not everything has a browser equivalent yet (for example gradient and shapeburst fills,
-interpolated lines). **Every export writes a fidelity report** that lists, layer by layer, what was
+Not everything has a browser equivalent yet (for example interpolated lines, inner shadow and
+blur effects). **Every export writes a fidelity report** that lists, layer by layer, what was
 exact, approximated or unsupported, with a suggested fix, and a *Strict* mode refuses to publish
 anything that would not match. The full, generated table is in
 [`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
