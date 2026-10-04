@@ -94,6 +94,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
     if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
+    // "Around point" (QGIS): beside the point at the label distance, not on it.
+    if (layer.metadata["q2vt:label-around"]) groups.get(polygons).around = layer.metadata["q2vt:label-around"];
     if (options.always && options.always.has(layer.id)) groups.get(polygons).always = true;
     const rank = layer.metadata["q2vt:label-rank"];
     if (Array.isArray(rank)) {
@@ -210,6 +212,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
         always: !!group.always,
+        around: aroundOption(group.around, zoom, perPx),
       });
       write(map.getSource(group.source), data, polygons);
       if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
@@ -413,7 +416,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       near = [];
       if (half && avoid.length) {
         const extent = bounds(rings);
-        const reachBox = grow(extent, 2 * half[0], 2 * half[1]);
+        const extra = options.around ? options.around.distance : 0;
+        const reachBox = grow(extent, 2 * half[0] + extra, 2 * half[1] + extra);
         near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
       }
     };
@@ -427,6 +431,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     // a label that cannot fit even there goes there at once, smaller and
     // along the polygon - no search (narrow strips, tiny parcels).
     let point;
+    let slot;
     const pre = options.always && label ? precomputedSpot(properties, label) : null;
     if (pre) {
       if (!within(reach, pre.point)) continue;
@@ -512,6 +517,23 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
         point = keep ? old.point : best.point;
       }
+    } else if (options.around && half) {
+      // "Around point" (QGIS): beside the point at the label distance, the
+      // first candidate position (QGIS order) that fits on the screen and
+      // keeps clear of better-ranked labels; else the first that fits.
+      const target = labelPoint(rings);
+      if (!target) continue;
+      const candidates = aroundCandidates(target, half, options.around);
+      const fits = (p) => fit(...p) >= 0;
+      const free = (p) => fits(p) && clear(...p) >= 0;
+      const kept = old && Number.isInteger(old.slot) && candidates[old.slot] && within(inner, old.point)
+        && Math.hypot(old.point[0] - candidates[old.slot][0], old.point[1] - candidates[old.slot][1])
+          <= (options.keepDistance ?? Infinity)
+        && (unchecked(old.point) || free(old.point));
+      slot = kept ? old.slot : candidates.findIndex(free);
+      if (slot < 0) slot = candidates.findIndex(fits);
+      if (slot < 0) continue;
+      point = kept ? old.point : candidates[slot];
     } else {
       const target = labelPoint(rings);
       if (!target || fit(...target) < 0) continue;
@@ -525,7 +547,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       boxes.push(box);
       avoid.push(box);
     }
-    points.set(key, { point, properties });
+    points.set(key, slot === undefined ? { point, properties } : { point, properties, slot });
   }
   for (const [key, old] of state.points) {
     if (!points.has(key) && !excluded.has(key) && (options.freeze || within(inner, old.point)) && unchecked(old.point)
@@ -540,6 +562,33 @@ export function labelPoints(features, view, maplibregl, options = {}) {
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out, boxes };
+}
+
+// "Around point" settings for labelPoints from the style metadata
+// (q2vt:label-around): the label distance in world units at this zoom.
+export function aroundOption(around, zoom, perPx) {
+  if (!around) return null;
+  let px = Number(around.px) || 0;
+  if (Number.isFinite(Number(around.zoom))) px *= 2 ** (zoom - Number(around.zoom));  // map units
+  const anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
+    : ["bottom", "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"];
+  return { anchors, distance: px * perPx };
+}
+
+// Label centres around a point (world units, y down), one per anchor: the
+// anchor names the side of the label that touches the point (MapLibre
+// text-variable-anchor), "bottom" = the label above the point. The label
+// keeps the QGIS distance from the point (diagonals: along the diagonal).
+const ANCHOR_SIDES = {
+  center: [0, 0], top: [0, 1], bottom: [0, -1], left: [1, 0], right: [-1, 0],
+  "top-left": [1, 1], "top-right": [-1, 1], "bottom-left": [1, -1], "bottom-right": [-1, -1],
+};
+export function aroundCandidates(point, [hx, hy], { anchors, distance }) {
+  return anchors.filter((a) => ANCHOR_SIDES[a]).map((a) => {
+    const [sx, sy] = ANCHOR_SIDES[a];
+    const d = sx && sy ? distance * Math.SQRT1_2 : distance;
+    return [point[0] + sx * (d + hx), point[1] + sy * (d + hy)];
+  });
 }
 
 // The export's pole of inaccessibility (EPSG:3857 metres, ``q2vt_pole_*``)

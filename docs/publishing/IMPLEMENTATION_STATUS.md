@@ -772,9 +772,34 @@ trademark found, and every checked domain was free; checked 4 Oct 2026).
   - The README leads with the symbology conversion.
 - **Known gap seen while making the demo:** polygon labels with *Around point* placement are
   centred on the polygon by the viewer's visible-polygon label placer. The QGIS label distance
-  is not applied, so the label can cover a centroid marker. Not changed in this release.
+  is not applied, so the label can cover a centroid marker. Fixed in 4.9.2.
 
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_label_font_style.py` | 6 passed (4 fail without the fix) |
 | `pytest tests/integration -k "label or glyph or font or text"` | 37 passed |
+
+## 4.9.2: around-point polygon labels, coordinates in the project CRS
+
+- **Around point:**
+  - `maplibre_converter._label_around` adds `metadata["q2vt:label-around"]` to visible-polygon
+    labels with *AroundPoint* / *OrderedPositionsAroundPoint*: `anchors` (QGIS order as MapLibre
+    anchor names) and `px` (the label distance). A map-unit distance also gets `zoom`, the zoom
+    at which `px` applies; it doubles per zoom level.
+  - `visible_labels.mjs`: `aroundOption` turns this into a world-unit distance per update, and
+    `aroundCandidates` gives the label centres around the visible-polygon centroid.
+  - `labelPoints` takes the first candidate that fits on the screen and keeps clear of
+    better-ranked labels, else the first that fits. A kept position stays while its candidate
+    has not moved.
+- **Coordinates:**
+  - `publishing/crs.py` records the project CRS (`authid`, `name`, PROJ string, geographic,
+    units) at PLAN; it goes to `ExportBundle.crs` and `manifest.crs` (schema updated).
+  - `tools.mjs` shows WGS 84 and then the project CRS. EOV keeps its own transformation.
+    Other CRSs load `assets/vendor/proj4.js` (proj4js 2.22.0, MIT, licence in `licenses/`)
+    only when needed. WGS 84 projects get no second row.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_visible_labels.py` | 29 passed |
+| `pytest tests/browser/test_coordinates_crs.py` | 3 passed |
+| `pytest tests/integration/test_end_to_end.py` (new: around-point metadata) and related viewer/publishing suites | 80 passed |

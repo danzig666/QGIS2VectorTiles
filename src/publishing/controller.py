@@ -115,6 +115,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         progress.info(f"[{name}]")
 
     stage("PLAN")
+    from .crs import project_crs_info  # pylint: disable=import-outside-toplevel
+    crs_info = project_crs_info(project)
     # Before the tile export (it drops layers that are not in the layer tree).
     street_area = _street_area(project, profile, extent_3857) \
         if profile.interaction.search and profile.interaction.street_search else None
@@ -164,6 +166,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "The vector tile export produced no tiles (see the export log).")
     bundle = exporter.export_bundle(profile.publication_id)
+    bundle.crs = crs_info
     if cache is not None:
         cache.prune()
     progress.check()
