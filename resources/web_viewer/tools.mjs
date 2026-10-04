@@ -1,4 +1,5 @@
-// Planning tools: coordinate readout (WGS 84; EOV approximate), distance and
+// Planning tools: coordinate readout (WGS 84 and the project's CRS: EOV with
+// its own transformation, any other projected CRS through proj4js), distance and
 // area measurement on user-drawn temporary geometry, print of the current
 // view. Measurement geometry is an in-memory GeoJSON source (allowed
 // runtime helper); it is never saved or published.
@@ -23,6 +24,25 @@ export function formatArea(m2) {
   return `${formatNumber(m2, 1)} m²`;
 }
 
+// Coordinates in the project CRS need proj4js unless it is WGS 84 (shown
+// anyway) or EOV (own transformation).
+export function needsProj4(crs) {
+  return !!(crs && crs.proj && !["EPSG:4326", "EPSG:23700", "OGC:CRS84"].includes(crs.authid));
+}
+
+let proj4Loading = null;
+function loadProj4() {
+  if (window.proj4) return Promise.resolve(window.proj4);
+  proj4Loading ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "assets/vendor/proj4.js";
+    script.onload = () => (window.proj4 ? resolve(window.proj4) : reject(new Error("proj4 missing")));
+    script.onerror = reject;
+    document.head.append(script);
+  });
+  return proj4Loading;
+}
+
 export class Tools {
   constructor({ map, manifest, container, viewer }) {
     Object.assign(this, { map, manifest, container, viewer });
@@ -42,14 +62,41 @@ export class Tools {
     const block = el("section", "q2vt-card");
     block.append(el("h3", "", t("tools.coordinates")));
     const wgs = el("div", "q2vt-tool-output");
-    const eov = el("div", "q2vt-tool-output");
-    block.append(el("div", "q2vt-field-label", t("tools.wgs84")), wgs, el("div", "q2vt-field-label", t("tools.eov")), eov);
+    block.append(el("div", "q2vt-field-label", t("tools.wgs84")), wgs);
     this.container.append(block);
+    // The project's CRS (manifest.crs) next to WGS 84: EOV with its own
+    // transformation, other projected CRSs through proj4js (loaded only then).
+    let projected = null;  // {output, convert(lng, lat) -> [x, y] | null, digits, outside}
+    const addProjected = (label, convert, digits, outside) => {
+      const output = el("div", "q2vt-tool-output");
+      block.append(el("div", "q2vt-field-label", label), output);
+      projected = { output, convert, digits, outside };
+    };
+    const crs = this.manifest.crs;
+    if (crs && crs.authid === "EPSG:23700") {
+      addProjected(t("tools.eov"), wgs84ToEov, 0, t("tools.eovOutside"));
+    } else if (needsProj4(crs)) {
+      loadProj4().then((proj4) => {
+        const transform = proj4("EPSG:4326", crs.proj);
+        const convert = (lng, lat) => {
+          const xy = transform.forward([lng, lat]);
+          return xy && xy.every(Number.isFinite) ? xy : null;
+        };
+        convert(this.map.getCenter().lng, this.map.getCenter().lat);  // a bad definition throws here
+        const approx = /\+(towgs84|nadgrids)=/.test(crs.proj) ? ` ${t("tools.approximate")}` : "";
+        addProjected(t("tools.projected", { name: crs.name, authid: crs.authid }) + approx, convert,
+                     crs.geographic ? 6 : 2, t("tools.projectedOutside"));
+        show(this.map.getCenter());
+      }).catch(() => { /* no readout in the project CRS */ });
+    }
     const show = (lngLat) => {
       wgs.textContent = `${lngLat.lng.toFixed(6)}, ${lngLat.lat.toFixed(6)}`;
-      const projected = wgs84ToEov(lngLat.lng, lngLat.lat);
-      eov.textContent = projected ? `${formatNumber(Math.round(projected[0]))}, ${formatNumber(Math.round(projected[1]))}`
-        : t("tools.eovOutside");
+      if (!projected) return;
+      const xy = projected.convert(lngLat.lng, lngLat.lat);
+      projected.output.textContent = xy
+        ? xy.map((v) => formatNumber(projected.digits ? Number(v.toFixed(projected.digits)) : Math.round(v),
+                                     projected.digits)).join(projected.digits ? "; " : ", ")  // decimal commas
+        : projected.outside;
     };
     this.onMove = (e) => show(e.lngLat);
     this.onMoveEnd = () => show(this.map.getCenter());

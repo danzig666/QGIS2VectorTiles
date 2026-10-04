@@ -507,6 +507,20 @@
     "generator": {
       "type": "object"
     },
+    "crs": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "authid": {"type": "string"},
+        "name": {"type": "string"},
+        "proj": {"type": "string"},
+        "geographic": {"type": "boolean"},
+        "units": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "basemap": {
       "type": [
         "object",

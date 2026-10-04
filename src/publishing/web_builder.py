@@ -56,7 +56,8 @@ LOCK_STALE_S = 6 * 3600
 ML_ASSETS = ["maplibre-gl.mjs", "maplibre-gl-shared.mjs", "maplibre-gl-worker.mjs",
              "maplibre-gl.css", "visible_labels.mjs"]
 LICENSES = {"MAPLIBRE-LICENSE.txt": os.path.join(ML_VIEWER, "MAPLIBRE-LICENSE.txt"),
-            "PMTILES-LICENSE.txt": os.path.join(WEB_VIEWER, "vendor", "PMTILES-LICENSE.txt")}
+            "PMTILES-LICENSE.txt": os.path.join(WEB_VIEWER, "vendor", "PMTILES-LICENSE.txt"),
+            "PROJ4JS-LICENSE.txt": os.path.join(WEB_VIEWER, "vendor", "PROJ4JS-LICENSE.txt")}
 VIEWER_EXCLUDE = {"index.html", "bootstrap.html", "bootstrap.mjs"}
 
 
@@ -289,6 +290,8 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
                   "print": profile.interaction.print},
         "diagnostics": "public-diagnostics.json",
         "generator": {"name": "QWebMap", "version": plugin_version()},
+        # The project CRS: the coordinate readout shows coordinates in it.
+        "crs": getattr(bundle, "crs", None),
     }
     manifest.update(extra or {})
     return manifest

@@ -422,6 +422,32 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert not labels[0].get("metadata", {}).get("q2vt:visible-polygons")
 
 
+def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_path):
+    """QGIS "Around point" on polygons: the label goes beside its point at
+    the label distance (the viewer places it, see visible_labels.mjs), not
+    on it; other placements carry no such hint."""
+    def labels_for(placement, name):
+        layer = zoning_layer(path=str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "zone"
+        settings.placement = placement
+        settings.dist = 3
+        settings.distUnits = Qgis.RenderUnit.Millimeters
+        settings.centroidWhole = False
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        _, result = export(layer)
+        style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+        return [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+
+    around = labels_for(Qgis.LabelPlacement.AroundPoint, "around")[0]["metadata"]["q2vt:label-around"]
+    assert around["px"] == pytest.approx(3 * 96 / 25.4, rel=0.01) and "zoom" not in around
+    assert around["anchors"][0] == "bottom"  # first try: above the point, as QGIS
+    over = labels_for(Qgis.LabelPlacement.OverPoint, "over")[0]["metadata"]
+    assert "q2vt:visible-polygons" in over and "q2vt:label-around" not in over
+
+
 def test_detail_below_a_metre_survives_at_the_max_zoom(export, tmp_path):
     """Geometry is simplified only within the tiles' own rounding at the max
     zoom. A fixed 1 m tolerance moved shared boundaries of two layers (a zone

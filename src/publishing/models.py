@@ -334,6 +334,7 @@ class ExportBundle:
     data_fingerprint: str = ""
     config_fingerprint: str = ""
     diagnostics_summary: Dict[str, int] = field(default_factory=dict)
+    crs: Optional[Dict[str, Any]] = None                     # project CRS (coordinate readout)
     warnings: List[str] = field(default_factory=list)
     raster_archives: List[dict] = field(default_factory=list)  # {layerId, path, ...} (private paths)
     basemap: Optional[dict] = None                            # extract + style templates (private)

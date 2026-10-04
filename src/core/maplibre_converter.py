@@ -3090,6 +3090,9 @@ class QgisMapLibreStyleExporter:
                 # "line": a line label put at the middle of the line's visible part.
                 "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
+            around = self._label_around(label_settings, placement)
+            if around:
+                layer_def["metadata"]["q2vt:label-around"] = around
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
     # MapLibre checks that a line label fits along its line with the
@@ -3097,6 +3100,29 @@ class QgisMapLibreStyleExporter:
     # the tile zoom; map-unit text doubles per zoom, so below z18 labels that
     # fit are dropped.
     LINE_LABEL_FIT_ZOOM = 18
+
+    @staticmethod
+    def _label_around(label_settings: QgsPalLayerSettings, placement: str) -> Optional[dict]:
+        """For an "around point" polygon label placed by the viewer: the
+        candidate positions (MapLibre anchor names, in QGIS's order) and the
+        QGIS label distance from the point, in pixels at ``zoom`` (map-unit
+        distances scale with the zoom; otherwise the size is fixed)."""
+        if placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
+            return None
+        anchors = TextPropertyExtractor.get_text_variable_anchor(label_settings)
+        try:
+            distance = float(label_settings.dist)
+        except (AttributeError, TypeError, ValueError):
+            distance = 0.0
+        pixels = PropertyExtractor.length(distance, label_settings.distUnits) if distance else 0.0
+        around = {"anchors": anchors}
+        if ex.is_number(pixels):
+            around["px"] = round(max(0.0, float(pixels)), 3)
+        else:
+            zoom = float(PropertyExtractor.context.reference_zoom)
+            around["px"] = round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3)
+            around["zoom"] = zoom  # map units: doubles with each zoom level
+        return around
 
     def _line_label_zoom_split(self, layer_def: dict) -> list:
         """A label with a zoom-curve ``text-size`` as one style layer per

@@ -444,3 +444,51 @@ def test_scaled_text_size_keeps_a_dense_zoom_curve():
     assert stops[0::2] == list(range(0, 25))  # a stop at every whole zoom
     assert stops[1::2][10][1] == pytest.approx(2 ** 10)
     assert stops[1][2][0] == "to-number"
+
+
+# "Around point" polygon labels (QGIS AroundPoint): beside the point at the
+# QGIS label distance, never on it (a centroid marker stays visible).
+AROUND = {"anchors": ["bottom", "bottom-left", "bottom-right", "left", "right", "top", "top-left",
+                      "top-right"], "distance": 0.03}
+
+
+def _overlaps(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def test_around_point_label_sits_beside_its_point_at_the_distance():
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072))]   # centroid (0.5, 0.5)
+    box = [0.08, 0.02]
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})[1]
+    assert x == pytest.approx(0.5)
+    assert y + box[1] == pytest.approx(0.5 - AROUND["distance"])   # above, label bottom at the distance
+    marker = [0.48, 0.48, 0.52, 0.52]  # a centroid marker 0.04 wide (< 2 x the distance)
+    assert not _overlaps([x - box[0], y - box[1], x + box[0], y + box[1]], marker)
+    # Without "around" (over point / horizontal) the label stays on the point.
+    assert _points(squares, [0, 0, 1, 1], {"box": box})[1] == pytest.approx([0.5, 0.5])
+
+
+def test_around_point_tries_the_next_position_when_one_does_not_fit_or_is_taken():
+    box = [0.08, 0.02]
+    # The top of the screen cuts the position above: the next one that fits.
+    squares = [(1, 0, 0, 0, (1024, 100, 3072, 300))]     # centroid y = 200/4096 ~ 0.049
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})[1]
+    # Above (and above-left/right) would leave the screen: right of the point.
+    assert [x, y] == pytest.approx([0.5 + AROUND["distance"] + box[0], 200 / 4096])
+    # Two polygons around the same point: the second label keeps clear of the first.
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072)), (2, 0, 0, 0, (1536, 1536, 2560, 2560))]
+    points = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})
+    boxes = [[x - box[0], y - box[1], x + box[0], y + box[1]] for x, y in points.values()]
+    assert len(boxes) == 2 and not _overlaps(*boxes)
+
+
+def test_around_point_distance_in_map_units_follows_the_zoom():
+    fixed = _js("m.aroundOption({px: 10, anchors: ['top']}, 16, 0.001)")
+    assert fixed == {"anchors": ["top"], "distance": pytest.approx(0.01)}
+    scaled = _js("m.aroundOption({px: 10, zoom: 14}, 16, 0.001)")
+    assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom"
+    assert _js("m.aroundOption(undefined, 16, 0.001)") is None
+    candidates = _js("m.aroundCandidates([0.5, 0.5], [0.1, 0.02], "
+                     "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
+    diagonal = 0.04 * math.sqrt(0.5)
+    assert sum(candidates, []) == pytest.approx([0.5, 0.44, 0.36, 0.5, 0.6 + diagonal, 0.52 + diagonal])

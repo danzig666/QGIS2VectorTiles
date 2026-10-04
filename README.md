@@ -99,7 +99,7 @@ window that turns the project into a public, self-contained web map:
   the browser reads with HTTP byte ranges, so you need no tile server, database or Docker.
 - The viewer has a layer tree (including hidden layers you chose to publish), opacity,
   legend with QGIS-rendered symbols, label switch, filters, popups, search, links to
-  features, permalinks, measuring (with EOV coordinates) and a phone layout. It is
+  features, permalinks, measuring, coordinates in the project's CRS and a phone layout. It is
   available in Hungarian and English.
 - Every setting is **saved in the project**, but credentials are not. Keys stay in the
   QGIS authentication database.
