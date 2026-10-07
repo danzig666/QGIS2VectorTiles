@@ -118,6 +118,7 @@ from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
 from .fidelity import html_labels
 from .fidelity import materialize as mat
+from .materializer import pattern_anchor_kind
 from .fidelity.materialize import Recipe
 
 def _enum_value(value) -> int:
@@ -264,6 +265,10 @@ class _RuleGroupSnapshot:
     # Lowest tile zoom of the data ("o"): colour band edges keep clear of
     # vertices at its coordinate grid.
     data_min_zoom: int = 0
+    # Feature-aligned pattern fill (materializer.pattern_anchor_kind) and the
+    # map CRS its anchor is measured in: each feature carries the anchor.
+    pattern_anchor: str = ""
+    anchor_crs: str = ""
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -363,6 +368,10 @@ class RulesExporter:
         # {layer id: approved source fields kept in the tiles (filters)}.
         self.feature_keys = dict(feature_keys or {})
         self.extra_tile_fields = {k: list(v) for k, v in (extra_tile_fields or {}).items()}
+        # QGIS draws in the project CRS: pattern anchors are measured there.
+        project_crs = QgsProject.instance().crs()
+        self._map_crs = project_crs.authid() if project_crs.isValid() and project_crs.authid() \
+            else f"EPSG:{_EPSG_CRS}"
         # Share of the Processing progress bar this export fills.
         self._progress_range = progress_range
         # Messages from worker threads, written by the main thread
@@ -575,6 +584,8 @@ class RulesExporter:
                 merge=primary.merge,
                 point_group=primary.point_group,
                 data_min_zoom=int(primary.get_attr("o") or 0),
+                pattern_anchor=self._pattern_anchor(primary, geom_target),
+                anchor_crs=self._map_crs if self._pattern_anchor(primary, geom_target) else "",
             ))
             if self._labels_visible_polygon(primary, geom_target):
                 rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
@@ -743,11 +754,14 @@ class RulesExporter:
 
         max_workers = self._compute_pool_size(len(todo))
         keep = self._vertex_sensitive_layers()
+        anchored = {rule.layer.id() for rule in self.flattened_rules or []
+                    if self._pattern_anchor(rule, 2) == "feature"}
 
         with self._executor(max_workers, "rules-base") as pool:
             futures: Dict[Future, str] = {
                 pool.submit(
-                    self._build_one_base_layer, src_path, target_paths[lid], lid in keep
+                    self._build_one_base_layer, src_path, target_paths[lid], lid in keep,
+                    lid in anchored
                 ): lid
                 for lid, src_path in todo.items()
             }
@@ -794,8 +808,33 @@ class RulesExporter:
                 keep.add(rule.layer.id())
         return keep
 
+    def _pattern_anchor(self, rule: FlattenedRule, geometry_target: int) -> str:
+        """materializer.pattern_anchor_kind of a polygon rule drawn as a pattern
+        texture on its own polygons ("" otherwise)."""
+        if rule.recipe is not None or rule.pre_generator or rule.get_attr("t") != 0 \
+                or rule.get_attr("g") != 2 or geometry_target != 2:
+            return ""
+        symbol = rule.rule.symbol()
+        if symbol is None or symbol.symbolLayerCount() != 1:
+            return ""
+        return pattern_anchor_kind(symbol.symbolLayer(0))
+
+    _BASE_ANCHOR_X = f"{_FIELD_PREFIX}_fanchor_x"
+    _BASE_ANCHOR_Y = f"{_FIELD_PREFIX}_fanchor_y"
+
+    def _anchor_expression(self, crs: str, axis: str, top: bool) -> str:
+        """x or y (EPSG:3857) of the bottom-left (``top``: top-left) corner of
+        the geometry's bounding box measured in ``crs``."""
+        export = f"EPSG:{_EPSG_CRS}"
+        y_edge = "y_max" if top else "y_min"
+        if not crs or crs == export:
+            return f"x_min(@geometry)" if axis == "x" else f"{y_edge}(@geometry)"
+        geom = f"transform(@geometry, '{export}', '{crs}')"
+        return (f"{axis}(transform(make_point(x_min({geom}), {y_edge}({geom})), "
+                f"'{crs}', '{export}'))")
+
     def _build_one_base_layer(self, src_path: str, dst_path: str,
-                              keep_vertices: bool = False) -> None:
+                              keep_vertices: bool = False, feature_anchor: bool = False) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
         self._check_cancel()
         crash_log.note(f"Base layer {dst_path}")
@@ -841,6 +880,14 @@ class RulesExporter:
             FIELD_TYPE=0,
             FORMULA='to_int(@id)'
             )
+        if feature_anchor:
+            # QGIS starts a point / line / SVG pattern at the bottom-left of
+            # the whole feature: measured before the parts are split.
+            for name, axis in ((self._BASE_ANCHOR_X, "x"), (self._BASE_ANCHOR_Y, "y")):
+                orig_id = self._run_alg_safe(
+                    "fieldcalculator", "native", INPUT=orig_id, FIELD_NAME=name, FIELD_TYPE=0,
+                    FIELD_LENGTH=24, FIELD_PRECISION=6,
+                    FORMULA=self._anchor_expression(self._map_crs, axis, False))
         self._check_cancel()
         singleparted = self._run_alg_safe(
             "multiparttosingleparts", "native", INPUT=orig_id
@@ -1980,6 +2027,13 @@ class RulesExporter:
                 mapping.append((6, f'"{anchor}"', anchor))
         if source_fields.indexFromName(mat.BAND_FIELD) >= 0:  # colour-band draw order
             mapping.append((2, f'"{mat.BAND_FIELD}"', mat.BAND_FIELD))
+        if grp.pattern_anchor:
+            whole = grp.pattern_anchor == "feature" and not grp.merge and \
+                source_fields.indexFromName(self._BASE_ANCHOR_X) >= 0
+            for name, base, axis in ((mat.PATTERN_ANCHOR_X_FIELD, self._BASE_ANCHOR_X, "x"),
+                                     (mat.PATTERN_ANCHOR_Y_FIELD, self._BASE_ANCHOR_Y, "y")):
+                mapping.append((6, f'"{base}"' if whole else self._anchor_expression(
+                    grp.anchor_crs, axis, grp.pattern_anchor == "feature-clip"), name))
         for name in (mat.DIRECTION_FIELD, mat.RUN_FIELD):  # inner effect strips
             if source_fields.indexFromName(name) >= 0:
                 mapping.append((2, f'"{name}"', name))

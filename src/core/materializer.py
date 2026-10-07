@@ -101,6 +101,18 @@ def _ring_filter(layer) -> int:
         return 0
 
 
+def pattern_anchor_kind(layer) -> str:
+    """Where QGIS starts a feature-aligned pattern fill (measured in QGIS
+    3.34, rounded to whole pixels): point, line and SVG patterns at the
+    bottom-left of the feature's bounding box ("feature"), raster image
+    fills at the top-left of each part, clipped to the view grown by 10 %
+    ("feature-clip"); "" for viewport-aligned and other fills."""
+    if layer.layerType() not in ("LinePatternFill", "PointPatternFill", "SVGFill", "RasterFill") \
+            or pattern_in_viewport(layer):
+        return ""
+    return "feature-clip" if layer.layerType() == "RasterFill" else "feature"
+
+
 def svg_fill_draws(layer) -> bool:
     """Whether QGIS paints an SVG fill: like ``QgsSVGFillSymbolLayer::
     storeViewBox`` the SVG data must parse (an empty path has no data; a

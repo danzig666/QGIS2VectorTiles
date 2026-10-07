@@ -231,8 +231,9 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [15, 16, 17, 18, 19]
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
-    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag).
-    assert "metadata" not in exporter.style["layers"][0]
+    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag);
+    # they start at each feature's anchor ("Align pattern to: Feature").
+    assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature"}
 
 
 def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
@@ -259,7 +260,8 @@ def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     exporter.context.reference_zoom = 14
     exporter._convert_symbol(QgsFillSymbol([pp]), "s", "src", "q2vt", 14, 24)
     layer_def = exporter.style["layers"][0]
-    assert layer_def["metadata"] == {exporter.SCREEN_PATTERN_FLAG: True}
+    assert layer_def["metadata"] == {exporter.SCREEN_PATTERN_FLAG: True,
+                                     exporter.PATTERN_ANCHOR_FLAG: "feature"}
     cell = exporter.pattern_images[layer_def["paint"]["fill-pattern"]].img_1x
     px = 4 * 96 / 25.4
     width, height, _, _ = point_pattern_cell(px, px, 0, 0)

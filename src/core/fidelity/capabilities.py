@@ -128,15 +128,20 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("LinePatternFill", "pattern", Strategy.SPRITE,
                "Screen units: periodic hatch texture with a verified repeat cell (angle and "
                "spacing within tolerance). Map units: hatch lines materialized as line "
-               "features clipped to each polygon, anchored like QGIS.",
-               ("Screen-unit textures are anchored to the world origin, not to each feature.",
-                "Only a solid simple-line sub-symbol is rendered exactly in textures."),
+               "features clipped to each polygon, anchored like QGIS. "
+               "Textures start where QGIS starts them: \"Align pattern to: "
+               "Feature\" at the bottom-left of each feature's bounding box, \"Viewport\" "
+               "at the view's corner (patched MapLibre), rounded to whole pixels.",
+               ("Only a solid simple-line sub-symbol is rendered exactly in textures.",),
                ("tests/unit/test_patterns_and_assets.py",
                 "tests/integration/test_materialize.py")),
     Capability("PointPatternFill", "pattern", Strategy.SPRITE,
                "Screen units: exact repeat cell (distance and displacement) rendered by QGIS. "
                "Map units: marker grid materialized as point features with QGIS anchoring "
-               "and clip modes.",
+               "and clip modes. "
+               "Textures start where QGIS starts them: \"Align pattern to: "
+               "Feature\" at the bottom-left of each feature's bounding box, \"Viewport\" "
+               "at the view's corner (patched MapLibre), rounded to whole pixels.",
                ("Random offsets follow QGIS's range, not its sequence; rotated grids are "
                 "approximated (reported).",
                 "\"Shape\" clipping: line, cross and closed simple markers are exported as "
@@ -145,11 +150,16 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("tests/integration/test_sprites.py", "tests/integration/test_materialize.py")),
     Capability("SVGFill", "pattern", Strategy.SPRITE,
                "Screen units: SVG repeat cell rendered by QGIS. Map units: grid of SVG "
-               "markers materialized as point features.",
+               "markers materialized as point features. "
+               "Textures start where QGIS starts them: \"Align pattern to: "
+               "Feature\" at the bottom-left of each feature's bounding box, \"Viewport\" "
+               "at the view's corner (patched MapLibre), rounded to whole pixels.",
                ("Tiles crossing the polygon edge are drawn whole (QGIS clips the texture).",)),
     Capability("RasterFill", "pattern", Strategy.SPRITE,
-               "Image tiled at its QGIS width (1x and 2x).",
-               ("Feature- and viewport-anchored image offsets are anchored to the map origin.",)),
+               "Image tiled at its QGIS width (1x and 2x), starting where QGIS starts it: "
+               "\"Coordinate mode: Object\" at the top-left of each part (clipped to the "
+               "view grown by 10 %, as QGIS clips it), \"Viewport\" at the view's corner.",
+               ("Rotated or tilted maps keep the anchor without QGIS's view clipping.",)),
     Capability("RandomMarkerFill", "pattern", Strategy.APPROXIMATE,
                "Marker count as in QGIS (absolute per feature, or per map-unit density area) "
                "as seeded random points; dense zooms and screen-unit densities use a "

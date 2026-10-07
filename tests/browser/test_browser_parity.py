@@ -367,3 +367,97 @@ def test_viewport_aligned_patterns_start_at_the_view_corner(tmp_path, kind):
     pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
     assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+def _feature_pattern(kind, tmp_path):
+    """A screen-unit pattern of the given kind, feature-aligned (QGIS default)."""
+    from qgis.core import (QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer,
+                           QgsRasterFillSymbolLayer, QgsSVGFillSymbolLayer)
+    if kind.startswith("hatch"):
+        pattern = QgsLinePatternFillSymbolLayer()
+        pattern.setLineAngle({"hatch_v": 90, "hatch_h": 0, "hatch_d": 45}[kind])
+        pattern.setDistance(10)
+        pattern.setDistanceUnit(Qgis.RenderUnit.Pixels)
+        pattern.setSubSymbol(QgsLineSymbol.createSimple(
+            {"color": "black", "width": "2", "width_unit": "Pixel"}))
+        return pattern
+    if kind == "points":
+        pattern = QgsPointPatternFillSymbolLayer()
+        for name in ("DistanceX", "DistanceY"):
+            getattr(pattern, f"set{name}")(12)
+            getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+        marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 4)
+        marker.setSizeUnit(Qgis.RenderUnit.Pixels)
+        marker.setColor(QColor("black"))
+        marker.setStrokeStyle(0)
+        pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+        return pattern
+    if kind == "svg":
+        svg = tmp_path / "corner.svg"
+        svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" '
+                       'viewBox="0 0 12 12"><rect width="4" height="4" fill="#000"/></svg>')
+        pattern = QgsSVGFillSymbolLayer(str(svg), 12, 0)
+        pattern.setPatternWidthUnit(Qgis.RenderUnit.Pixels)
+        pattern.setSvgStrokeWidth(0)
+        return pattern
+    from PIL import Image
+    image = Image.new("RGBA", (12, 12), (0, 0, 0, 0))
+    for x in range(4):
+        for y in range(4):
+            image.putpixel((x, y), (0, 0, 0, 255))
+    png = tmp_path / "corner.png"
+    image.save(png)
+    pattern = QgsRasterFillSymbolLayer(str(png))
+    pattern.setWidth(12)
+    pattern.setSizeUnit(Qgis.RenderUnit.Pixels) if hasattr(pattern, "setSizeUnit") \
+        else pattern.setWidthUnit(Qgis.RenderUnit.Pixels)
+    return pattern
+
+
+@pytest.mark.parametrize("kind", ["hatch_v", "hatch_h", "hatch_d", "points", "svg", "raster"])
+def test_feature_aligned_patterns_start_at_each_feature(tmp_path, kind):
+    """QGIS "Align pattern to: Feature" (the default) starts a point, line or
+    SVG pattern at the bottom-left of each feature's bounding box and a
+    raster fill at the top-left of each part, rounded to whole pixels. Three
+    features (one of two parts) at fractional pixel offsets: the browser
+    draws every pattern with QGIS's phase."""
+    px = gallery.EARTH / (512 * 2 ** ZOOM)
+    shapes = [
+        "MULTIPOLYGON((({a} {b}, {c} {b}, {c} {d}, {a} {d}, {a} {b})))".format(
+            a=-140 * px, b=-130 * px, c=-30.6 * px, d=-17.3 * px),
+        "MULTIPOLYGON((({a} {b}, {c} {b}, {c} {d}, {a} {d}, {a} {b})))".format(
+            a=-13.4 * px, b=-127.7 * px, c=140 * px, d=-35 * px),
+        "MULTIPOLYGON((({a} {b}, {c} {b}, {c} {d}, {a} {d}, {a} {b})), "
+        "(({e} {f}, {g} {f}, {g} {h}, {e} {h}, {e} {f})))".format(
+            a=-137.7 * px, b=5.6 * px, c=-20 * px, d=133.2 * px,
+            e=7.3 * px, f=21.4 * px, g=136 * px, h=128 * px),
+    ]
+    layer = QgsVectorLayer("MultiPolygon?crs=EPSG:3857", "anchors", "memory")
+    for wkt in shapes:
+        feature = QgsFeature()
+        geometry = QgsGeometry.fromWkt(wkt)
+        geometry.translate(*CENTER)
+        feature.setGeometry(geometry)
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "anchors.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_feature_pattern(kind, tmp_path)])))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+@pytest.mark.parametrize("kind", ["hatch_d", "points", "raster"])
+def test_feature_aligned_patterns_of_features_beyond_the_view(tmp_path, kind):
+    """A feature reaching far beyond the view: point / line / SVG patterns
+    still start at its own corner; a raster fill starts where QGIS clips the
+    part (the view grown by 10 %), so its phase follows the view."""
+    px = gallery.EARTH / (512 * 2 ** ZOOM)
+    layer = QgsVectorLayer("MultiPolygon?crs=EPSG:3857", "big", "memory")
+    feature = QgsFeature()
+    geometry = QgsGeometry.fromWkt(
+        "MULTIPOLYGON((({a} {b}, {c} {b}, {c} {d}, {a} {d}, {a} {b})))".format(
+            a=-2113.3 * px, b=-1907.7 * px, c=150 * px, d=2201.6 * px))
+    geometry.translate(*CENTER)
+    feature.setGeometry(geometry)
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "big.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_feature_pattern(kind, tmp_path)])))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
