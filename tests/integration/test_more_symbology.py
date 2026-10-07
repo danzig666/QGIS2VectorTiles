@@ -7,7 +7,7 @@ import os
 import sys
 
 import pytest
-from qgis.core import (QgsCoordinateReferenceSystem, QgsMapSettings, QgsMarkerSymbol,
+from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsMapSettings, QgsMarkerSymbol,
                        QgsProcessingFeedback, QgsPointClusterRenderer,
                        QgsPointDisplacementRenderer, QgsRectangle, QgsSingleSymbolRenderer)
 from qgis.PyQt.QtCore import QSize
@@ -50,8 +50,13 @@ def _export(layer, tmp_path, low, high):
     by_name = {l.name(): l for l in layers}
     rendered = []
     for rule in rules:
-        out = by_name[rule.output_dataset]
-        out.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+        out = by_name[rule.output_dataset].clone()  # rules may share a dataset
+        symbol = rule.rule.symbol().clone()
+        if out.geometryType() == Qgis.GeometryType.Line and symbol.type() != Qgis.SymbolType.Line:
+            # A polygon outline travels as a line layer inside a fill symbol.
+            from qgis.core import QgsLineSymbol
+            symbol = QgsLineSymbol([symbol.symbolLayer(i).clone() for i in range(symbol.symbolLayerCount())])
+        out.setRenderer(QgsSingleSymbolRenderer(symbol))
         rendered.append(out)
     return rendered, rules, diags
 
@@ -111,3 +116,176 @@ def test_grouping_follows_qgis_order_and_tolerance():
     # Grid: rows of 2 for 4 members, centred; QGIS joins row and column neighbours.
     positions, _, size = pg.displaced((0, 0), 4, pg.GRID, 2.0, 2.0, 0.0)
     assert size == 2 and len(pg.grid_lines(positions, size)) == 4
+
+
+# --- other renderers and symbol layer types -----------------------------------
+LINE = "LINESTRING(-100 -60, -30 40, 40 -40, 100 50)"
+SQUARES = ["POLYGON((-90 -90, -10 -90, -10 -10, -90 -10, -90 -90))",
+           "POLYGON((-30 -30, 50 -30, 50 50, -30 50, -30 -30))"]
+
+
+def _render_compare(layer, tmp_path, zooms=(14, 18)):
+    """QGIS drawing the layer vs QGIS drawing the exported datasets with
+    their converted symbols: ink difference and mean colour difference."""
+    import numpy as np
+    expected = render([layer], EXTENT)
+    rendered, rules, diags = _export(layer, tmp_path, *zooms)
+    zoom = _zoom(EXTENT)
+    shown = sorted(((rule.order, index, out) for index, (out, rule) in enumerate(zip(rendered, rules))
+                    if rule.visibility is None or rule.visibility.contains(zoom)),
+                   key=lambda item: (item[0], item[1]))  # QGIS draw order, bottom first
+    got = render([out for _, _, out in reversed(shown)], EXTENT)
+    if os.environ.get("Q2VT_DUMP"):
+        expected.save(os.path.join(os.environ["Q2VT_DUMP"], layer.name() + "_q.png"))
+        got.save(os.path.join(os.environ["Q2VT_DUMP"], layer.name() + "_b.png"))
+
+    def pixels(image):
+        image = image.convertToFormat(image.Format.Format_RGB32)
+        ptr = image.constBits()
+        ptr.setsize(image.sizeInBytes())
+        return np.frombuffer(ptr, np.uint8).reshape(image.height(), image.width(), 4)[..., :3].astype(int)
+    a, b = pixels(expected), pixels(got)
+    ink = (a < 250).any(axis=2) | (b < 250).any(axis=2)
+    return (mask_difference(ink_mask(expected), ink_mask(got)),
+            float(np.abs(a - b).max(axis=2)[ink].mean()), rules, diags)
+
+
+def test_interpolated_line_colour_and_width_follow_qgis(plugin, tmp_path):
+    from qgis.core import (QgsColorRampShader, QgsGradientColorRamp, QgsInterpolatedLineColor,
+                           QgsInterpolatedLineSymbolLayer, QgsInterpolatedLineWidth, QgsLineSymbol)
+    from qgis.PyQt.QtGui import QColor
+    layer = _layer("LineString", [LINE], str(tmp_path / "l.gpkg"))
+    interpolated = QgsInterpolatedLineSymbolLayer()
+    shader = QgsColorRampShader(0, 10, QgsGradientColorRamp(QColor("#2c7bb6"), QColor("#d7191c")))
+    shader.classifyColorRamp(5, -1)
+    interpolated.setInterpolatedColor(QgsInterpolatedLineColor(shader))
+    width = QgsInterpolatedLineWidth()
+    width.setIsVariableWidth(True)
+    width.setMinimumValue(0)
+    width.setMaximumValue(10)
+    width.setMinimumWidth(0.5)
+    width.setMaximumWidth(4)
+    interpolated.setInterpolatedWidth(width)
+    interpolated.setExpressionsStringForColor("0", "10")
+    interpolated.setExpressionsStringForWidth("0", "10")
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([interpolated])))
+    shape, colour, rules, _ = _render_compare(layer, tmp_path)
+    assert any(r.recipe is not None and r.recipe.kind == "interpolated_segments" for r in rules)
+    assert shape < 0.1 and colour < 30, (shape, colour)
+
+
+def test_vector_field_lines_match_qgis(plugin, tmp_path):
+    from qgis.core import (QgsField, QgsFeature, QgsGeometry, QgsLineSymbol, QgsVectorFieldSymbolLayer,
+                           QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import to_geopackage
+    memory = QgsVectorLayer("Point?crs=EPSG:3857", "vf", "memory")
+    memory.dataProvider().addAttributes([QgsField("dx", QVariant.Double), QgsField("dy", QVariant.Double)])
+    memory.updateFields()
+    features = []
+    for x, y, dx, dy in ((-60, -60, 40, 10), (0, 30, -20, 50), (60, -20, 30, -40)):
+        feature = QgsFeature(memory.fields())
+        feature.setAttributes([dx, dy])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({x} {y})"))
+        features.append(feature)
+    memory.dataProvider().addFeatures(features)
+    layer = to_geopackage(memory, str(tmp_path / "vf.gpkg"))
+    field = QgsVectorFieldSymbolLayer()
+    field.setXAttribute("dx")
+    field.setYAttribute("dy")
+    field.setScale(1.0)
+    field.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    field.setSubSymbol(QgsLineSymbol.createSimple({"color": "black", "width": "0.6"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([field])))
+    shape, _, _, _ = _render_compare(layer, tmp_path)
+    assert shape < 0.1, shape
+
+
+def test_merged_and_inverted_polygons_match_qgis(plugin, tmp_path):
+    from qgis.core import QgsFillSymbol, QgsInvertedPolygonRenderer, QgsMergedFeatureRenderer
+    for name, kind in (("merged", QgsMergedFeatureRenderer), ("inverted", QgsInvertedPolygonRenderer)):
+        layer = _layer("Polygon", SQUARES, str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(kind(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+            {"color": "#fdae61", "outline_color": "black", "outline_width": "0.6"}))))
+        folder = tmp_path / name
+        folder.mkdir()
+        shape, colour, rules, _ = _render_compare(layer, folder)
+        assert {r.merge for r in rules} == {"merge" if name == "merged" else "invert"}
+        assert shape < 0.05 and colour < 20, (name, shape, colour)
+
+
+def test_heatmap_becomes_a_maplibre_heatmap(plugin, tmp_path):
+    from qgis.core import QgsGradientColorRamp, QgsHeatmapRenderer, QgsProcessingFeedback
+    from qgis.PyQt.QtGui import QColor
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from fidelity.heatmap import heatmap_paint
+    from q2vt_fixtures import reset_project
+    layer = _layer("Point", POINTS, str(tmp_path / "hm.gpkg"))
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setColorRamp(QgsGradientColorRamp(QColor(0, 0, 255, 0), QColor("red")))
+    heatmap.setRadius(10)
+    heatmap.setRadiusUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(heatmap)
+    reset_project(layer)
+    rules = RulesFlattener(14, 18, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           extent=EXTENT).flatten_all_rules()
+    assert len(rules) == 1 and rules[0].heatmap
+    paint = heatmap_paint(rules[0].heatmap, 1.0)
+    assert {"heatmap-radius", "heatmap-color", "heatmap-intensity", "heatmap-weight"} <= set(paint)
+    # Screen radius: 10 mm at 96 dpi, fitted to MapLibre's kernel.
+    assert paint["heatmap-radius"] == pytest.approx(10 * 96 / 25.4 * 1.33, rel=0.01)
+
+
+def _converter():
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 17
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 14
+    return exporter
+
+
+def test_lineburst_is_a_line_pattern_with_colour_one_on_the_left(plugin):
+    from qgis.core import QgsLineburstSymbolLayer, QgsLineSymbol
+    from qgis.PyQt.QtGui import QColor
+    exporter = _converter()
+    burst = QgsLineburstSymbolLayer(QColor("#0000ff"), QColor("#ffff00"))
+    burst.setWidth(3)
+    exporter._convert_symbol(QgsLineSymbol([burst]), "s", "src", "q2vt", 14, 24)
+    layer_def = exporter.style["layers"][0]
+    assert layer_def["type"] == "line" and "line-pattern" in layer_def["paint"]
+    image = exporter.pattern_images[layer_def["paint"]["line-pattern"]].img_1x
+    # MapLibre puts the image's first row on the right of the line direction:
+    # colour 2 first, colour 1 (QGIS: the left edge) last.
+    top, bottom = image.getpixel((0, 0)), image.getpixel((0, image.height - 1))
+    assert top[2] < 30 and top[0] > 220 and bottom[2] > 220 and bottom[0] < 30
+
+
+def test_raster_line_repeats_like_qgis(plugin, tmp_path):
+    from PIL import Image
+    from qgis.core import QgsLineSymbol, QgsRasterLineSymbolLayer
+    path = str(tmp_path / "stripes.png")
+    stripes = Image.new("RGBA", (30, 10), (0, 0, 255, 255))
+    stripes.paste((255, 0, 0, 255), (0, 0, 30, 3))  # red band at the top
+    stripes.save(path)
+    exporter = _converter()
+    raster = QgsRasterLineSymbolLayer(path)
+    raster.setWidth(2)
+    raster.setWidthUnit(Qgis.RenderUnit.Millimeters)
+    exporter._convert_symbol(QgsLineSymbol([raster]), "s", "src", "q2vt", 14, 24)
+    layer_def = exporter.style["layers"][0]
+    images = exporter.pattern_images[layer_def["paint"]["line-pattern"]]
+    one, two = images.img_1x, images.img_2x
+    width_px = 2 * 96 / 25.4
+    # A power-of-two image width (seamless repeats) whose proportion gives
+    # QGIS's repeat: round(width x aspect) px for a line width_px wide.
+    assert one.width & (one.width - 1) == 0 and two.size == (2 * one.width, 2 * one.height)
+    period = one.width / one.height * width_px
+    assert period == pytest.approx(round(width_px * 3), rel=0.004)
+    # QGIS draws the image's top on the left of the line: flipped for MapLibre.
+    assert one.getpixel((one.width // 2, one.height - 1))[0] > 200
