@@ -124,8 +124,7 @@ def test_group_lock_raster_and_basemap_settings_round_trip(setup):
     dialog.i_layers.setCurrentRow(rows.index(ortho.id()))
     assert dialog.i_stack.currentIndex() == 1  # raster settings page
     dialog.r_format.setCurrentIndex(dialog.r_format.findData("webp"))
-    dialog.r_max.setValue(18)
-    dialog.r_hidpi.setChecked(True)
+    dialog.r_detail.setCurrentIndex(dialog.r_detail.findData(15))
     dialog.i_layers.setCurrentRow(rows.index(parcels.id()))
     assert dialog.i_stack.currentIndex() == 0
     dialog.b_kind.setCurrentIndex(dialog.b_kind.findData("protomaps"))
@@ -143,7 +142,7 @@ def test_group_lock_raster_and_basemap_settings_round_trip(setup):
     profile, _ = active_profile(project)
     assert profile.group(["Szabályozás"]).toggleable is False
     raster = profile.layer(ortho_id)
-    assert (raster.raster_format, raster.raster_max_zoom, raster.raster_hidpi) == ("webp", 18, True)
+    assert (raster.raster_format, raster.raster_max_zoom, raster.raster_hidpi) == ("webp", 15, False)
     assert profile.basemap.kind == "protomaps" and profile.basemap.initial == "dark"
     assert "dark" in profile.basemap.flavors and profile.basemap.source == "/data/hungary.pmtiles"
     assert QgsProject.instance().layerTreeRoot().findLayer(zones_id) is not None
@@ -183,26 +182,36 @@ def test_publish_the_visible_layers(setup):
     assert LayerConfig(ortho.id()).raster_format == "webp"
 
 
-def test_raster_resolution_and_matching_the_image(setup):
-    """The raster settings show the image's own resolution and what the
-    maximum zoom publishes; "Match the image's resolution" sets the zoom
-    (make_raster: 10 Web Mercator m = 6.8 ground m per pixel at 47.5° N,
-    so zoom 14) and is saved."""
+def test_raster_sharpest_detail_in_metres(setup):
+    """Raster detail is one choice in ground metres per pixel: like the image
+    (the default; make_raster: 10 Web Mercator m = 6.76 ground m per pixel at
+    47.5° N, zoom 14), like the map, or a pixel size. The estimate compares it
+    with the image. The removed "sharp on high-resolution screens" option
+    (512 px tiles) becomes the same detail one zoom further."""
     dialog, project, parcels, zones, ortho = setup
     _items(dialog)[ortho.id()].setCheckState(1, CHECKED)
+    dialog.e_max_zoom.setValue(12)
     dialog._fill_interaction_layers()  # pylint: disable=protected-access
     rows = [dialog.i_layers.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dialog.i_layers.count())]
     dialog.i_layers.setCurrentRow(rows.index(ortho.id()))
-    dialog.e_max_zoom.setValue(12)
-    dialog.r_max.setValue(-1)
-    dialog._raster_estimate()  # pylint: disable=protected-access
+    assert dialog.r_detail.currentData() == "image"
+    assert dialog.r_detail.currentText() == "Like the image: 6.76 m per pixel (recommended)"
     text = dialog.r_estimate.text()
-    assert "Image: 6.76 m per pixel" in text and "at zoom 12" in text and "4× coarser" in text, text
-    dialog.r_match.setChecked(True)
-    assert not dialog.r_max.isEnabled()
-    assert "at zoom 14" in dialog.r_estimate.text() and "as sharp as the image" in dialog.r_estimate.text()
-    dialog.r_hidpi.setChecked(True)  # 512 px tiles: one zoom less
-    assert "at zoom 13" in dialog.r_estimate.text() and "as sharp as the image" in dialog.r_estimate.text()
+    assert "Image: 6.76 m per pixel" in text and "as sharp as the image" in text and "zooms" in text, text
+    dialog.r_detail.setCurrentIndex(dialog.r_detail.findData("map"))
+    assert "4× coarser than the image" in dialog.r_estimate.text()
+    # Pixel sizes down from one step finer than the image (6.76 m: zoom 15).
+    assert [dialog.r_detail.itemData(i) for i in range(dialog.r_detail.count())][:4] == [
+        "image", "map", 15, 13]
+    dialog.r_detail.setCurrentIndex(dialog.r_detail.findData(15))
+    assert "finer than the image" in dialog.r_detail.currentText()
+    assert "finer than the image" in dialog.r_estimate.text()
     dialog.i_layers.setCurrentRow(rows.index(parcels.id()))
     assert dialog.save_settings()
-    assert dialog.profile.layer(ortho.id()).raster_match_native is True
+    saved = dialog.profile.layer(ortho.id())
+    assert (saved.raster_max_zoom, saved.raster_match_native, saved.raster_hidpi) == (15, False, False)
+    # An older setting with 512 px tiles: the same detail, one zoom further.
+    dialog.layer_configs[ortho.id()].raster_max_zoom = 16
+    dialog.layer_configs[ortho.id()].raster_hidpi = True
+    dialog.i_layers.setCurrentRow(rows.index(ortho.id()))
+    assert dialog.r_detail.currentData() == 17  # kept although finer than the list

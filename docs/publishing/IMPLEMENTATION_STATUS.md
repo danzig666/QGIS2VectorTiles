@@ -1244,3 +1244,21 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_publish_dialog_layers.py tests/integration/test_publishing_raster.py tests/unit/test_publishing_profile.py` | 45 passed (new: resolution text, matching with and without 512 px tiles, saved; native and tile resolutions, matched zoom) |
 | Owner orthophoto (0.40 m/pixel, EOV) | before: zoom 16 = 1.60 m, "4× coarser"; matched: zoom 18 = 0.40 m (882 tiles), with 512 px tiles zoom 17 (252 tiles) |
+
+## 4.21.0: raster detail as one choice in metres
+
+- Raster settings: *Maximum zoom*, *Match the image's resolution* and *Sharp on high-resolution
+  screens* are replaced by **Sharpest detail**, a choice of ground metres per pixel: *Like the
+  image* (recommended; `raster_max_zoom` None + `raster_match_native`, now the default for new
+  layers), *Like the map* (the publication's maximum tile zoom), or a pixel size per zoom from one
+  step finer than the image down to the layer's first zoom (finer ones flagged "no more detail";
+  a saved zoom outside that range stays listed). *Minimum zoom* is now *Shown from zoom*.
+- `raster_match_native` applies only without an explicit `raster_max_zoom`. `raster_hidpi`
+  stays in the model (exports of profiles that set it are unchanged) but the window no longer
+  sets it: a saved setting becomes the same sharpest detail one zoom further.
+- Estimate: "Image: 0.40 m per pixel. Sharpest detail on the web map: 1.60 m per pixel – 4×
+  coarser than the image (choose “Like the image” to show all of it)."
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publish_dialog_layers.py tests/integration/test_publishing_raster.py tests/unit/test_publishing_profile.py tests/integration/test_publish_dialog.py tests/integration/test_publishing_pipeline.py` | 58 passed (new: the choices in metres, the default, coarser / finer texts, saving, the old 512 px setting carried over) |

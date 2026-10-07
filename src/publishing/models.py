@@ -98,9 +98,10 @@ class LayerConfig:
     raster_min_zoom: Optional[int] = None   # None = the publication's tile zooms
     raster_max_zoom: Optional[int] = None
     raster_quality: int = 85           # jpeg / webp
-    raster_hidpi: bool = False         # 512 px images for sharp high-DPI screens
-    # The maximum zoom follows the image's own resolution (raster_max_zoom unused).
-    raster_match_native: bool = False
+    raster_hidpi: bool = False         # 512 px images (the Publish window no longer sets it)
+    # Without a maximum zoom: as sharp as the image (its own resolution sets
+    # the zoom); False: the publication's maximum tile zoom.
+    raster_match_native: bool = True
 
 
 @dataclass
