@@ -9,6 +9,7 @@ computed with QgsGeometry. The same construction as QGIS draws:
 * shapeburst bands as inset polygons, from the edge inwards.
 """
 
+import bisect
 import math
 from typing import Iterable, List, Optional, Tuple
 
@@ -35,11 +36,15 @@ class BandBuilder:
     # Web Mercator metres per CSS pixel at zoom 0 (512 px world).
     METRES_PER_PX_Z0 = 40075016.68557849 / 512
 
-    def __init__(self, recipe: Recipe, export_crs: str, detail_zoom: Optional[float] = None):
+    def __init__(self, recipe: Recipe, export_crs: str, detail_zoom: Optional[float] = None,
+                 coarse_zoom: Optional[float] = None):
         """``detail_zoom``: bands narrower than a pixel at this zoom are merged
-        per feature (export CRS in Web Mercator metres)."""
+        per feature (export CRS in Web Mercator metres); ``coarse_zoom``: the
+        lowest zoom whose tiles carry the bands, whose coordinate grid band
+        edges keep clear of the feature's vertices."""
         self.bands: Tuple[Recipe, ...] = tuple(recipe.param("bands"))
         self.detail_zoom = detail_zoom
+        self.coarse_zoom = coarse_zoom
         crs = (self.bands[0].param("crs") if self.bands else None) or export_crs
         self._to_crs = self._from_crs = None
         if crs != export_crs:
@@ -57,7 +62,14 @@ class BandBuilder:
         if self._to_crs is not None:
             local.transform(self._to_crs)
         shapes = []
-        context = _Context(local)
+        clearance = 0.0
+        if self.coarse_zoom is not None:
+            # Two tile units (1/4096 of a tile) at the coarsest zoom, in
+            # layer units.
+            clearance = 2 * self.METRES_PER_PX_Z0 * 512 / 4096 / 2 ** self.coarse_zoom
+            if self._to_crs is not None and self._to_crs.destinationCrs().isGeographic():
+                clearance /= 111320.0
+        context = _Context(local, clearance)
         for index, band in self._merged(geometry):
             if band.kind == "shapeburst_band":
                 shape = _shapeburst(local, band, context)
@@ -99,7 +111,10 @@ class BandBuilder:
 class _Context:
     """Per-feature values shared by its bands (unit box, shapeburst reach)."""
 
-    def __init__(self, geometry: QgsGeometry):
+    def __init__(self, geometry: QgsGeometry, clearance: float = 0.0):
+        # Distance (layer units) band edges keep from the feature's vertices.
+        self.clearance = clearance
+        self._edges = {}
         box = geometry.boundingBox()
         self.ox, self.oy = box.xMinimum(), box.yMaximum()
         self.ow, self.oh = max(box.width(), 1e-9), max(box.height(), 1e-9)
@@ -109,6 +124,43 @@ class _Context:
                                        -self.ox / self.ow, -self.oy / self.oh))
         self.back = QTransform(self.ow, 0, 0, self.oh, self.ox, self.oy)
         self.reach = {}
+
+    def free_edges(self, kind: int, origin, direction):
+        """``t -> t'``: a band edge moved off the feature's vertices.
+
+        A band edge along a polygon edge (e.g. a hole's side parallel to a
+        linear gradient's bands) touches it; once the tiles quantize the
+        coordinates such a ring falls apart and the hole is filled in the
+        browser. Edges within ``clearance`` of a vertex move to that
+        distance (a fraction of a colour level)."""
+        if not self.clearance:
+            return lambda t: t
+        key = (kind, origin, direction)
+        if key not in self._edges:
+            ox, oy = origin
+            dx, dy = direction
+            length2 = max(dx * dx + dy * dy, 1e-18)
+            if kind == 1:  # radial: t = |p - p1| / |d|
+                def t_of(x, y):
+                    return math.hypot(x - ox, y - oy) / math.sqrt(length2)
+                step = max(1 / self.ow, 1 / self.oh) / math.sqrt(length2)
+            else:  # linear: t = (p - p1) . d / |d|^2
+                def t_of(x, y):
+                    return ((x - ox) * dx + (y - oy) * dy) / length2
+                step = (abs(dx) / self.ow + abs(dy) / self.oh) / length2
+            ts = sorted({round(t_of(v.x(), v.y()), 12) for v in self.unit.vertices()})
+            self._edges[key] = (ts, self.clearance * step)
+        ts, eps = self._edges[key]
+        if not ts or eps <= 0:
+            return lambda t: t
+
+        def free(t):
+            index = bisect.bisect_left(ts, t)
+            for near in ts[max(0, index - 1):index + 1]:
+                if abs(t - near) < eps:
+                    return near + eps if t >= near else near - eps
+            return t
+        return free
 
 
 def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[QgsGeometry]:
@@ -126,8 +178,12 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
     p2x, p2y = point(recipe.param("p2"), recipe.param("c2"))
     dx, dy = p2x - p1x, p2y - p1y
     length = max(math.hypot(dx, dy), 1e-9)
+    # Band edges keep clear of the feature's vertices (see _Context.free_edges).
+    free = ctx.free_edges(kind, (p1x, p1y), (dx, dy)) if kind in (0, 1) else (lambda t: t)
     reach = math.sqrt(2) + 1  # beyond every corner of the unit box
     start, end = _band_interval(band, bands, overlap)
+    start = None if start is None else free(start)
+    end = None if end is None else free(end)
     # Grown towards the band drawn next (band 0 also backwards, under the
     # last band of the previous period / turn), which covers the growth.
     grow = (recipe.param("extend") or 0.0) / bands
@@ -142,9 +198,9 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
         top = 1.0 if overlap else b
         for k in range(count_from, count_to + 1):
             if spread == 1 and k % 2:  # reflect: odd periods run backwards
-                out.append((k + 1 - top, k + 1 - a))
+                out.append((free(k + 1 - top), free(k + 1 - a)))
             else:
-                out.append((k + a, k + top))
+                out.append((free(k + a), free(k + top)))
         return out
 
     if kind == 1:  # radial: t = distance from p1 / |p2 - p1|

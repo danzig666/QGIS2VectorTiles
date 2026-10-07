@@ -261,6 +261,9 @@ class _RuleGroupSnapshot:
     merge: str = ""
     # FlattenedRule.point_group (point cluster / displacement at one zoom).
     point_group: Optional[tuple] = None
+    # Lowest tile zoom of the data ("o"): colour band edges keep clear of
+    # vertices at its coordinate grid.
+    data_min_zoom: int = 0
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -571,6 +574,7 @@ class RulesExporter:
                 layer_name=primary.layer.name(),
                 merge=primary.merge,
                 point_group=primary.point_group,
+                data_min_zoom=int(primary.get_attr("o") or 0),
             ))
             if self._labels_visible_polygon(primary, geom_target):
                 rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
@@ -1113,7 +1117,7 @@ class RulesExporter:
             if not check.isValid() or check.featureCount() <= 0:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
-            current_input = self._color_bands(current_input, grp.recipe)
+            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom)
             if current_input is None:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
@@ -1283,7 +1287,7 @@ class RulesExporter:
                                  MAX_NODES=mat.PIECE_MAX_NODES)
         return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
 
-    def _color_bands(self, source: str, recipe: Recipe) -> Optional[str]:
+    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0) -> Optional[str]:
         """Worker: every colour band of a gradient / shapeburst fill as its
         own polygon (BAND_FIELD, COLOR_FIELD), all in one dataset, bands in
         order (see materialize.color_bands_recipe)."""
@@ -1294,7 +1298,7 @@ class RulesExporter:
         if not layer.isValid():
             return None
         # Bands under a pixel wide are merged, two zooms past the archive.
-        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0)
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0, float(min_zoom))
         colors = recipe.param("colors")
         fields = QgsFields()
         for field in layer.fields():
