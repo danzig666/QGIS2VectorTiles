@@ -1226,3 +1226,21 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_publishing_pipeline.py -k "only_in_the_project or temporary"` | 4 passed (new: join, expression field, unsaved edits; all three fail without the fix) |
 | `pytest tests/integration/test_publishing_pipeline.py tests/integration/test_export_cache.py tests/integration/test_end_to_end.py tests/integration/test_publishing_parcel_report.py tests/integration/test_publishing_label_always.py` | 39 passed, 1 failed: `test_reused_dataset_under_a_new_zoom_range_keeps_its_features`, failing the same since 4.16.0 |
+
+## 4.20.0: raster resolution shown, "Match the image's resolution"
+
+- `raster_tiles.native_resolution`: the layer's own ground resolution (one pixel measured on
+  the WGS 84 ellipsoid at the image's centre, so a Web Mercator or geographic raster is right
+  too; None for online services). `ground_resolution(zoom, latitude, hidpi)`: tile pixels at
+  the area's latitude; `native_zoom`: the lowest zoom as sharp as the image (3.5 % tolerance;
+  one less with 512 px tiles). `RasterPlan` carries `native_m`, `latitude`, `hidpi`.
+- `LayerConfig.raster_match_native` (profile `rasterMatchNative`): the maximum zoom is
+  `native_zoom` (the layer's web scale range still applies). Raster settings page: *Match the
+  image's resolution* (disables Maximum zoom) and the estimate's first line: the image's
+  resolution, what the maximum zoom publishes, and whether it is coarser (by how much, and the
+  zoom that would show all of it), finer (no added detail) or as sharp as the image.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publish_dialog_layers.py tests/integration/test_publishing_raster.py tests/unit/test_publishing_profile.py` | 45 passed (new: resolution text, matching with and without 512 px tiles, saved; native and tile resolutions, matched zoom) |
+| Owner orthophoto (0.40 m/pixel, EOV) | before: zoom 16 = 1.60 m, "4× coarser"; matched: zoom 18 = 0.40 m (882 tiles), with 512 px tiles zoom 17 (252 tiles) |
