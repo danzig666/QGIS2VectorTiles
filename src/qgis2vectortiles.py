@@ -408,7 +408,7 @@ class QGIS2VectorTiles:
     def _flatten_rules(self) -> List[FlattenedRule]:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
-            layer_ids=self.layer_ids, scale_limits=self.scale_limits,
+            layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).
@@ -535,6 +535,7 @@ class QGIS2VectorTiles:
             lengths=self.lengths,
             ordered_styles={rule.rule.description() for rule in rules or []
                             if RulesExporter._order_by(rule.layer)},
+            heatmaps={rule.rule.description(): rule.heatmap for rule in rules or [] if rule.heatmap},
         )
         exporter.export()
         return exporter

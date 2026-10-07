@@ -42,7 +42,7 @@ def test_classify_reports_unsupported_ddp_and_unknown_types():
     result = classify("SimpleLine", ["StrokeWidth", "CapStyle"])
     assert result.strategy == Strategy.NATIVE and result.unsupported_properties == ("CapStyle",)
     assert classify("MyPluginLayer").strategy == Strategy.UNSUPPORTED
-    assert classify("InterpolatedLine").strategy == Strategy.UNSUPPORTED
+    assert classify("InterpolatedLine").strategy == Strategy.MATERIALIZED  # supported since 4.14
 
 
 def test_capability_doc_mentions_every_type():

@@ -9,6 +9,7 @@ recursively flattens the rule hierarchy with full property inheritance
 Depends on: config, zoom_levels, flattened_rule
 """
 
+import math
 from typing import List, Optional, Union
 
 from qgis.core import (
@@ -60,8 +61,9 @@ class RulesFlattener:
 
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
                  diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
-                 scale_limits=None):
+                 scale_limits=None, extent=None):
         self.min_zoom = min_zoom
+        self.extent = extent  # export extent (EPSG:3857), for renderer statistics
         # {layer id: (min scale, max scale)}: extra scale range of a layer
         # (publishing, web only), on top of its own; 0 = no limit.
         self.scale_limits = dict(scale_limits or {})
@@ -169,7 +171,14 @@ class RulesFlattener:
                 # Reset per (layer, rule_type) pass; values must stay < 100
                 # because FlattenedRule.set_attr formats as 2 digits.
                 self._unique_counter = 0
+                before = len(self.flattened_rules)
                 self._flatten_rule(layer, layer_idx, root_rule, rule_type, 0, 0)
+                mode = self._merge_mode(layer.renderer()) if rule_type == 0 else ""
+                heatmap = self._heatmap_spec(layer) if rule_type == 0 and \
+                    layer.renderer() is not None and layer.renderer().type() == "heatmapRenderer" else None
+                for flat_rule in self.flattened_rules[before:]:
+                    flat_rule.merge = mode
+                    flat_rule.heatmap = heatmap
 
     @staticmethod
     @staticmethod
@@ -321,6 +330,88 @@ class RulesFlattener:
             return self._convert_renderer_to_rules(layer)
         return self._convert_labeling_to_rules(layer)
 
+    @staticmethod
+    def _heatmap_placeholder(heatmap):
+        """One rule exporting the points; its marker only carries the weight
+        expression (Size) into the tiles. The style draws a MapLibre heatmap
+        instead (FlattenedRule.heatmap)."""
+        from qgis.core import QgsMarkerSymbol  # pylint: disable=import-outside-toplevel
+        symbol = QgsMarkerSymbol.createSimple({"name": "circle", "size": "1"})
+        weight = heatmap.weightExpression()
+        if weight:
+            symbol.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertySize,
+                                                         QgsProperty.fromExpression(weight))
+        root = QgsRuleBasedRenderer.Rule(None)
+        root.appendChild(QgsRuleBasedRenderer.Rule(symbol, 0, 0, "", "Heatmap"))
+        return QgsRuleBasedRenderer(root)
+
+    def _heatmap_spec(self, layer):
+        """fidelity.heatmap spec of a heatmap renderer: ramp, radius and the
+        maximum density per zoom, from the points inside the export extent."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsExpressionContext, QgsExpressionContextUtils,
+                               QgsFeatureRequest, QgsPointXY)
+        from .fidelity import heatmap as hm  # pylint: disable=import-outside-toplevel
+        from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
+        from .materializer import _to_mm  # pylint: disable=import-outside-toplevel
+        renderer = layer.renderer()
+        project = QgsProject.instance()
+        crs = project.crs() if project.crs().isValid() else layer.crs()
+        to_project = QgsCoordinateTransform(layer.crs(), crs, project.transformContext())
+        request = QgsFeatureRequest()
+        latitude = 0.0
+        if self.extent is not None:
+            web = QgsCoordinateReferenceSystem("EPSG:3857")
+            request.setFilterRect(QgsCoordinateTransform(web, layer.crs(), project.transformContext())
+                                  .transformBoundingBox(self.extent))
+            center = QgsCoordinateTransform(web, QgsCoordinateReferenceSystem("EPSG:4326"),
+                                            project.transformContext()).transform(self.extent.center())
+            latitude = center.y()
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        weight = QgsExpression(renderer.weightExpression()) if renderer.weightExpression() else None
+        if weight is not None:
+            weight.prepare(context)
+        points = []
+        for feature in layer.getFeatures(request):
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            context.setFeature(feature)
+            value = 1.0
+            if weight is not None:
+                try:
+                    value = float(weight.evaluate(context))
+                except (TypeError, ValueError):
+                    continue
+            for part in geometry.constParts():
+                point = to_project.transform(QgsPointXY(part.x(), part.y()))
+                points.append((point.x(), point.y(), value))
+            if len(points) > 200000:
+                break
+        unit = renderer.radiusUnit()
+        screen = normalize_unit(unit) != "map" and _to_mm(1.0, unit) is not None
+        zooms = list(range(int(self.min_zoom), int(self.max_zoom) + 1))
+        if crs.isGeographic():
+            self.diagnostics.add("Q2VT_HEATMAP_APPROXIMATE",
+                                 "Heatmap in a geographic project CRS: map-unit radius and density "
+                                 "are approximated.", layer_id=layer.id())
+        if not renderer.maximumValue():
+            self.diagnostics.add("Q2VT_HEATMAP_APPROXIMATE",
+                                 "Heatmap with an automatic maximum: QGIS scales it to the densest "
+                                 "spot in view; the web map uses the densest spot of the exported "
+                                 "data at each zoom.", layer_id=layer.id())
+        return hm.build_spec(renderer.colorRamp(), renderer.radius(), "screen" if screen else "map",
+                             float(renderer.maximumValue() or 0.0), points, zooms,
+                             latitude=latitude, mercator=crs.authid() == "EPSG:3857",
+                             mm_per_unit=_to_mm(1.0, unit) if screen else None)
+
+    @staticmethod
+    def _merge_mode(renderer) -> str:
+        """"merge" / "invert" for renderers drawing a symbol's features
+        together (merged features, inverted polygons), else ""."""
+        kind = renderer.type() if renderer is not None else ""
+        return {"mergedFeatureRenderer": "merge", "invertedPolygonRenderer": "invert"}.get(kind, "")
+
     def _convert_renderer_to_rules(self, layer: QgsVectorLayer):
         """Convert any renderer to a QgsRuleBasedRenderer, preserving active items only."""
         system = layer.renderer()
@@ -330,6 +421,8 @@ class RulesFlattener:
         system = system.clone()
         if isinstance(system, QgsRuleBasedRenderer):
             return system
+        if system.type() == "heatmapRenderer":
+            return self._heatmap_placeholder(system)
 
         inactive_indices = self._get_inactive_item_indices(system)
         rule_renderer = QgsRuleBasedRenderer.convertFromRenderer(system)
@@ -829,6 +922,9 @@ class RulesFlattener:
                     int(getattr(sub_symbol.type(), "value", sub_symbol.type())) == 1:
                 split_rules.extend(self._generated_line_rules(flat_rule, symbol_layer, layer_idx))
                 continue
+            if layer_type == "VectorField" and sub_symbol is not None:
+                split_rules.extend(self._vector_field_rules(flat_rule, symbol_layer, layer_idx))
+                continue
             if layer_type == "GeometryGenerator":
                 symbol_type = sub_symbol.type()
                 geom_generator = True
@@ -882,6 +978,58 @@ class RulesFlattener:
                 split_rules.append(rule_clone)
 
         return split_rules
+
+    def _vector_field_rules(self, flat_rule: FlattenedRule, field_layer, layer_idx: int):
+        """A vector field marker: QGIS draws its line sub-symbol from each
+        point to the point moved by the vector (x, y attributes; or length and
+        angle; or a height) times the scale, in map units (project CRS) or on
+        screen. Exported as a line geometry generator; screen distances get one
+        rule per zoom, converted at the middle of the zoom."""
+        from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsVectorFieldSymbolLayer  # pylint: disable=import-outside-toplevel
+        from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
+        from .materializer import _to_mm  # pylint: disable=import-outside-toplevel
+        x_name, y_name = field_layer.xAttribute(), field_layer.yAttribute()
+        x = f"to_real({QgsExpression.quotedColumnRef(x_name)})" if x_name else "0"
+        y = f"to_real({QgsExpression.quotedColumnRef(y_name)})" if y_name else "0"
+        kind = field_layer.vectorFieldType()
+        if kind == QgsVectorFieldSymbolLayer.Polar:
+            angle = y if field_layer.angleUnits() == QgsVectorFieldSymbolLayer.Radians else f"radians({y})"
+            if field_layer.angleOrientation() == QgsVectorFieldSymbolLayer.ClockwiseFromNorth:
+                dx, dy = f"{x} * sin({angle})", f"{x} * cos({angle})"
+            else:
+                dx, dy = f"{x} * cos({angle})", f"{x} * sin({angle})"
+        elif kind == QgsVectorFieldSymbolLayer.Height:
+            dx, dy = "0", y
+        else:
+            dx, dy = x, y
+        if abs(field_layer.offset().x()) > 1e-9 or abs(field_layer.offset().y()) > 1e-9:
+            self.diagnostics.add("Q2VT_SYMBOL_APPROXIMATE", "Vector field offset is not applied.",
+                                 layer_id=flat_rule.layer.id(), rule_id=flat_rule.rule_id)
+        project_crs = QgsProject.instance().crs().authid() or flat_rule.layer.crs().authid()
+        layer_crs = flat_rule.layer.crs().authid()
+
+        def generator(factor):
+            point = "$geometry" if project_crs == layer_crs else \
+                f"transform($geometry, '{layer_crs}', '{project_crs}')"
+            line = (f"make_line({point}, translate({point}, ({dx}) * {factor!r}, "
+                    f"({dy}) * {factor!r}))")
+            if project_crs != layer_crs:
+                line = f"transform({line}, '{project_crs}', '{layer_crs}')"
+            gen = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": line, "SymbolType": "Line"})
+            gen.setSubSymbol(field_layer.subSymbol().clone())
+            gen.setRenderingPass(field_layer.renderingPass())
+            return gen
+
+        unit = field_layer.distanceUnit()
+        scale = float(field_layer.scale())
+        if normalize_unit(unit) == "map" or _to_mm(1.0, unit) is None:
+            return self._generated_line_rules(flat_rule, generator(scale), layer_idx)
+        rules = []
+        for rule in self.materializer._per_zoom(flat_rule):  # pylint: disable=protected-access
+            zoom = rule.get_attr("o")
+            factor = scale * _to_mm(1.0, unit) / 1000.0 * ZoomLevels.zoom_to_scale(zoom) / math.sqrt(2)
+            rules.extend(self._generated_line_rules(rule, generator(factor), layer_idx))
+        return rules
 
     def _generated_line_rules(self, flat_rule: FlattenedRule, generator, layer_idx: int):
         """A geometry generator drawn with a line symbol, as line rules on the

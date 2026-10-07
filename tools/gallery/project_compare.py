@@ -59,6 +59,9 @@ def view_center(layer, project):
     return wgs.x(), wgs.y()
 
 
+QGIS_MARGIN_PX = 100
+
+
 def qgis_render(layers, project, lon, lat, zoom, size, path):
     """QGIS render in the project CRS at the browser's ground resolution."""
     from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
@@ -67,19 +70,25 @@ def qgis_render(layers, project, lon, lat, zoom, size, path):
     from qgis.PyQt.QtCore import QSize  # pylint: disable=import-outside-toplevel
     from qgis.PyQt.QtGui import QColor  # pylint: disable=import-outside-toplevel
     crs = project.crs()
-    ground = bg.EARTH / (512 * 2 ** zoom) * math.cos(math.radians(lat))  # metres per pixel
+    ground = bg.EARTH / (512 * 2 ** zoom)  # Web Mercator units per pixel
+    if crs.authid() != "EPSG:3857":
+        ground *= math.cos(math.radians(lat))  # true metres per pixel
     center = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:4326"), crs,
                                     project).transform(QgsPointXY(lon, lat))
     if crs.isGeographic():
         ground /= 111319.49
-    half = size / 2 * ground
+    # QGIS skips features whose point (or bounding box) is outside the view
+    # even when their symbol reaches into it; the browser draws every tile's
+    # features. Render a margin around the view and crop it off.
+    margin = QGIS_MARGIN_PX
+    half = (size / 2 + margin) * ground
     settings = QgsMapSettings()
     settings.setLayers(layers)
     settings.setDestinationCrs(crs)
     settings.setTransformContext(project.transformContext())
     settings.setExtent(QgsRectangle(center.x() - half, center.y() - half,
                                     center.x() + half, center.y() + half))
-    settings.setOutputSize(QSize(size, size))
+    settings.setOutputSize(QSize(size + 2 * margin, size + 2 * margin))
     settings.setOutputDpi(96)
     settings.setBackgroundColor(QColor("white"))
     settings.setExpressionContext(QgsExpressionContext([
@@ -91,7 +100,7 @@ def qgis_render(layers, project, lon, lat, zoom, size, path):
     job = QgsMapRendererSequentialJob(settings)
     job.start()
     job.waitForFinished()
-    job.renderedImage().save(path)
+    job.renderedImage().copy(margin, margin, size, size).save(path)
 
 
 def main() -> int:
@@ -239,16 +248,20 @@ def main() -> int:
             view["score"] = bg.score(os.path.join(img_dir, f"{view['id']}_qgis.png"),
                                      os.path.join(img_dir, f"{view['id']}_browser.png"))
         shape = round(sum(v["score"]["shape"] for v in per_zoom) / len(per_zoom), 4)
+        color = round(max(v["score"]["color"] for v in per_zoom), 4)  # the worst zoom
         results.append({"id": per_zoom[0]["id"], "name": layer.name(), "kind": "layer",
                         "geometry": ["Point", "LineString", "Polygon"][int(getattr(
                             layer.geometryType(), "value", layer.geometryType()))],
-                        "score": {"shape": shape}, "diagnostics": [], "views": per_zoom})
+                        "score": {"shape": shape, "color": color}, "diagnostics": [],
+                        "views": per_zoom})
     with open(os.path.join(img_dir, "results.json"), "w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=1, ensure_ascii=False)
     page = os.path.join(out, "compare.html")
     compare_page.build(out, page, minimum=-1, title=f"{os.path.basename(args.project)}: QGIS vs browser")
     for card in results:
-        print(f"{card['name']}: {card['score']['shape']:.1%}")
+        per = " ".join(f"z{v['zoom']:g}={v['score']['color']:.1%}" for v in card["views"])
+        print(f"{card['name']}: shape {card['score']['shape']:.1%}, "
+              f"colour mismatch {card['score']['color']:.1%} worst ({per})")
     print(page)
     return 0
 

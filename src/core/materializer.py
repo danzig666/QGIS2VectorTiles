@@ -37,6 +37,7 @@ from qgis.core import (
     QgsSymbolLayerUtils,
 )
 from qgis.PyQt.QtCore import QPointF
+from qgis.PyQt.QtGui import QColor
 
 from ..utils.config import Qt
 from ..utils.flattened_rule import FlattenedRule
@@ -170,6 +171,8 @@ class SymbolMaterializer:
             return self._arrow(flat_rule, layer)
         if kind == "FilledLine":
             return self._filled_line(flat_rule, layer)
+        if kind == "InterpolatedLine":
+            return self._interpolated_line(flat_rule, layer)
         if kind == "LinePatternFill" and normalize_unit(layer.distanceUnit()) in ("map", "m"):
             return self._hatch(flat_rule, layer)
         if kind == "RandomMarkerFill":
@@ -1329,6 +1332,38 @@ class SymbolMaterializer:
         symbol = QgsLineSymbol([line])
         symbol.setOpacity(fill.opacity() if fill else 1.0)
         return [self._with_symbol(flat_rule, symbol, 1, 1)]
+
+    def _interpolated_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """An interpolated line (colour and width varying along each line
+        between per-feature start and end values) as short pieces with their
+        own colour and width (mat.interpolated_line_recipe), drawn by a
+        simple line reading both from the piece."""
+        from qgis.core import QgsReadWriteContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+
+        def xml(item):
+            doc = QDomDocument()
+            doc.appendChild(item.writeXml(doc, QgsReadWriteContext()))
+            return doc.toString()
+        recipe = mat.interpolated_line_recipe(
+            xml(layer.interpolatedColor()), xml(layer.interpolatedWidth()),
+            (layer.startValueExpressionForColor(), layer.endValueExpressionForColor()),
+            (layer.startValueExpressionForWidth(), layer.endValueExpressionForWidth()))
+        line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+        line.setWidthUnit(layer.widthUnit())
+        line.setWidthMapUnitScale(layer.widthMapUnitScale())
+        line.setOffset(layer.offset())
+        line.setOffsetUnit(layer.offsetUnit())
+        # Round ends join the pieces without gaps at bends (QGIS joins them too).
+        line.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeColor,
+                                    QgsProperty.fromField(mat.COLOR_FIELD))
+        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
+                                    QgsProperty.fromField(mat.WIDTH_FIELD))
+        symbol = QgsLineSymbol([line])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
 
     # -- map-unit hatches ------------------------------------------------------
     # -- gradient / shapeburst fills: colour bands (fidelity/materialize.py) --------------

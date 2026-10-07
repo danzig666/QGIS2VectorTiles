@@ -90,6 +90,15 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_PATTERN_APPROXIMATE": CodeInfo(
         Severity.WARNING, "Pattern reproduced only approximately",
         "Consider a simpler hatch (0/45/90 degrees, millimeter spacing)."),
+    "Q2VT_GRADIENT_APPROXIMATE": CodeInfo(
+        Severity.WARNING, "Gradient reproduced only approximately",
+        "Gradients are exported as colour steps relative to each feature."),
+    "Q2VT_SYMBOL_APPROXIMATE": CodeInfo(
+        Severity.WARNING, "Symbol setting reproduced only approximately",
+        "See the message for the setting that is not applied."),
+    "Q2VT_HEATMAP_APPROXIMATE": CodeInfo(
+        Severity.INFO, "Heatmap scaled differently from QGIS",
+        "Set a fixed maximum value in the heatmap renderer for the same colours at every place."),
     "Q2VT_PATTERN_NONPERIODIC": CodeInfo(
         Severity.WARNING,
         "A periodic texture cannot reproduce the requested pattern within tolerance",

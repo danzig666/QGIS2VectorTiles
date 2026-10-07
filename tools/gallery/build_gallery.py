@@ -378,8 +378,37 @@ def score(qgis_png, browser_png):
     diff = ImageChops.difference(a, b).convert("L")
     diff.save(qgis_png.replace("_qgis.png", "_diff.png"))
     return {"shape": round(unmatched / total, 4) if total else 0.0,
+            "color": color_score(a, b),
             "ink_qgis": sum(1 for v in ink_a.getdata() if v),
             "ink_browser": sum(1 for v in ink_b.getdata() if v)}
+
+
+COLOR_TOLERANCE = 40  # levels (0-255) in any channel
+
+
+def color_score(a, b) -> float:
+    """Share of drawn pixels (either image) whose colour is not a blend of
+    the colours within 1 px in the other image (per channel inside their
+    range, +-COLOR_TOLERANCE), both ways. Anti-aliased edges of any
+    intensity pass; a wrong colour, pattern period or phase, size or
+    position does not (the shape score only compares where ink is)."""
+    import numpy as np
+    x = np.asarray(a, dtype=np.int16)
+    y = np.asarray(b, dtype=np.int16)
+
+    def unmatched(p, q):
+        padded = np.pad(q, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        h, w = p.shape[:2]
+        shifted = [padded[dy:dy + h, dx:dx + w] for dy in (0, 1, 2) for dx in (0, 1, 2)]
+        low = np.min(shifted, axis=0) - COLOR_TOLERANCE
+        high = np.max(shifted, axis=0) + COLOR_TOLERANCE
+        return ((p < low) | (p > high)).any(axis=2)
+    ink = (x.min(axis=2) < 245) | (y.min(axis=2) < 245)
+    total = int(ink.sum())
+    if not total:
+        return 0.0
+    bad = (unmatched(x, y) | unmatched(y, x)) & ink
+    return round(float(bad.sum()) / total, 4)
 
 
 def write_html(out_dir, cards, summary):

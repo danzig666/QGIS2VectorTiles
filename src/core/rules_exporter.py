@@ -256,6 +256,11 @@ class _RuleGroupSnapshot:
     # The polygons of a "visible polygon" label (see _visible_polygon_group):
     # every part is kept; the viewer places the label in the visible part.
     visible_polygons: bool = False
+    # FlattenedRule.merge: the features drawn together ("merge": their union;
+    # "invert": the export area outside them).
+    merge: str = ""
+    # FlattenedRule.point_group (point cluster / displacement at one zoom).
+    point_group: Optional[tuple] = None
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -560,6 +565,8 @@ class RulesExporter:
                 pre_generator=pre_generator,
                 generated_fields=generated_fields,
                 layer_name=primary.layer.name(),
+                merge=primary.merge,
+                point_group=primary.point_group,
             ))
             if self._labels_visible_polygon(primary, geom_target):
                 rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
@@ -1068,6 +1075,13 @@ class RulesExporter:
             if current_input is None:
                 return None
 
+        # Merged features / inverted polygons: the symbol's features drawn
+        # together, before any recipe (a gradient fills the merged shape).
+        if grp.merge and grp.rule_type == 0:
+            current_input = self._merged_features(current_input, grp)
+            if current_input is None:
+                return None
+
         # Materialized marker positions: derive point features (with the
         # line azimuth) from the complete original lines before any field
         # expressions or tiling.
@@ -1089,6 +1103,10 @@ class RulesExporter:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
             current_input = self._color_bands(current_input, grp.recipe)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
+            current_input = self._interpolated_segments(current_input, grp.recipe)
             if current_input is None:
                 return None
 
@@ -1302,6 +1320,178 @@ class RulesExporter:
             for out_feature in features:
                 writer.addFeature(out_feature)
                 written += 1
+        del writer
+        return out if written else None
+
+    def _merged_features(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
+        """Worker: one feature for the whole rule group, as QGIS draws it.
+        "merge" (merged feature renderer): the union of the features (lines
+        merged into continuous lines). "invert" (inverted polygon renderer):
+        an area well beyond the export extent minus the union, so its outer
+        edge never reaches a tile and only the polygon edges are outlined."""
+        from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsProject,  # pylint: disable=import-outside-toplevel
+                               QgsVectorFileWriter, QgsWkbTypes)
+        layer = QgsVectorLayer(source, "merge_src", "ogr")
+        if not layer.isValid():
+            return None
+        geometries = [f.geometry() for f in layer.getFeatures() if not f.geometry().isEmpty()]
+        self._check_cancel()
+        union = QgsGeometry.unaryUnion(geometries) if geometries else QgsGeometry()
+        kind = QgsWkbTypes.geometryType(layer.wkbType())
+        if grp.merge == "invert" and grp.geometry_target == 1:
+            # The outline of the inverted area is the polygons' own edge.
+            if union.isEmpty():
+                return None
+            result = union
+        elif grp.merge == "invert":
+            if kind != QgsWkbTypes.PolygonGeometry:
+                return source
+            area = QgsRectangle(self.extent)
+            area.grow(max(area.width(), area.height()))
+            crs = layer.crs()
+            if crs.authid() != f"EPSG:{_EPSG_CRS}":
+                area = QgsCoordinateTransform(QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"), crs,
+                                              self._transform_context).transformBoundingBox(area)
+            if crs.isGeographic():
+                area = area.intersect(QgsRectangle(-180, -85.06, 180, 85.06))
+            outside = QgsGeometry.fromRect(area)
+            result = outside.difference(union) if not union.isEmpty() else outside
+        else:
+            if union.isEmpty():
+                return None
+            result = union.mergeLines() if kind == QgsWkbTypes.LineGeometry else union
+        if result.isEmpty():
+            return None
+        result.convertToMultiType()
+        out = self._temp_path("merged")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        writer = QgsVectorFileWriter.create(out, fields, result.wkbType(), layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        feature = QgsFeature(fields)
+        first = next(iter(layer.getFeatures()), None)
+        if first is not None:  # the symbol's own data-defined values (one per group)
+            for field in fields:
+                feature[field.name()] = first[field.name()]
+        feature.setGeometry(result)
+        writer.addFeature(feature)
+        del writer
+        return out
+
+    def _interpolated_segments(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: an interpolated line as pieces along each line (part), each
+        with the colour and width QGIS computes for the middle of the piece
+        (COLOR_FIELD, WIDTH_FIELD). The start / end values are evaluated per
+        feature, as QGIS does, and interpolated by length along the part."""
+        from qgis.core import (QgsExpression, QgsExpressionContext,  # pylint: disable=import-outside-toplevel
+                               QgsExpressionContextUtils, QgsFeature, QgsField, QgsFields,
+                               QgsGeometry, QgsInterpolatedLineColor, QgsInterpolatedLineWidth,
+                               QgsProject, QgsReadWriteContext, QgsSymbolLayerUtils,
+                               QgsVectorFileWriter, QgsWkbTypes)
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+        layer = QgsVectorLayer(source, "interpolated_src", "ogr")
+        if not layer.isValid():
+            return None
+
+        def restore(kind, xml):
+            item = kind()
+            doc = QDomDocument()
+            if xml and doc.setContent(xml)[0]:
+                item.readXml(doc.documentElement(), QgsReadWriteContext())
+            return item
+        color = restore(QgsInterpolatedLineColor, recipe.param("color"))
+        width = restore(QgsInterpolatedLineWidth, recipe.param("width"))
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+
+        def prepared(pair):
+            out = []
+            for text in pair:
+                expression = QgsExpression(text) if text else None
+                if expression is not None:
+                    expression.prepare(context)
+                out.append(expression)
+            return out
+        color_exprs, width_exprs = prepared(recipe.param("color_values")), prepared(recipe.param("width_values"))
+        varies_color = color.coloringMethod() == QgsInterpolatedLineColor.ColorRamp and all(color_exprs)
+        varies_width = width.isVariableWidth() and all(width_exprs)
+        shader = color.colorRampShader()
+        color_span = abs(shader.maximumValue() - shader.minimumValue()) or 1.0
+        width_span = abs(width.maximumValue() - width.minimumValue()) or 1.0
+        steps = recipe.param("steps", 64)
+
+        def number(expression):
+            value = expression.evaluate(context) if expression is not None else None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        fields.append(QgsField(mat.COLOR_FIELD, QVariant.String))
+        fields.append(QgsField(mat.WIDTH_FIELD, QVariant.Double))
+        out = self._temp_path("interpolated")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            context.setFeature(feature)
+            c1, c2 = (number(e) for e in color_exprs) if varies_color else (None, None)
+            w1, w2 = (number(e) for e in width_exprs) if varies_width else (None, None)
+            pieces = 1
+            if c1 is not None and c2 is not None:
+                pieces = max(pieces, math.ceil(steps * abs(c2 - c1) / color_span))
+            if w1 is not None and w2 is not None:
+                pieces = max(pieces, math.ceil(steps * abs(w2 - w1) / width_span))
+            pieces = min(pieces, 4 * steps)
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            for part in geometry.constParts():
+                length = part.length()
+                if length <= 0:
+                    continue
+                for piece in range(pieces):
+                    t0, t1 = piece / pieces, (piece + 1) / pieces
+                    middle = (t0 + t1) / 2
+                    line = QgsGeometry(part.curveSubstring(t0 * length, t1 * length))
+                    if line.isEmpty():
+                        continue
+                    if c1 is not None and c2 is not None:
+                        rgba = color.color(c1 + (c2 - c1) * middle)
+                    else:
+                        rgba = color.color(c1 if c1 is not None else 0.0)
+                    if w1 is not None and w2 is not None:
+                        stroke = width.strokeWidth(w1 + (w2 - w1) * middle)
+                    elif width.isVariableWidth():
+                        stroke = 0.0
+                    else:
+                        stroke = width.fixedStrokeWidth()
+                    if stroke <= 0 or not rgba.isValid() or rgba.alpha() == 0:
+                        continue  # out of range (ignored) or nothing to draw
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        if field.name() not in (mat.COLOR_FIELD, mat.WIDTH_FIELD):
+                            out_feature[field.name()] = feature[field.name()]
+                    out_feature[mat.COLOR_FIELD] = QgsSymbolLayerUtils.encodeColor(rgba)
+                    out_feature[mat.WIDTH_FIELD] = float(stroke)
+                    out_feature.setGeometry(line)
+                    writer.addFeature(out_feature)
+                    written += 1
         del writer
         return out if written else None
 
@@ -1800,6 +1990,8 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "color_bands":
             return [2, "@geometry"]  # bands already materialized (_color_bands)
+        if recipe is not None and recipe.kind == "interpolated_segments":
+            return [1, "@geometry"]  # pieces already materialized
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
             kind = 2 if recipe.param("fill") or recipe.param("stroke") else \

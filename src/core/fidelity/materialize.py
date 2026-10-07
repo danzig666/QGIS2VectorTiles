@@ -28,6 +28,7 @@ LENGTH_FIELD = "q2vt_mat_length"
 COUNT_FIELD = "q2vt_mat_npoints"
 BAND_FIELD = "q2vt_mat_band"        # colour band of a gradient / shapeburst fill
 COLOR_FIELD = "q2vt_mat_color"      # its colour ("r,g,b,a", QgsSymbolLayerUtils.encodeColor)
+WIDTH_FIELD = "q2vt_mat_width"      # its stroke width (symbol units): interpolated lines
 
 VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVertex",
                                "CurvePoint"})
@@ -859,3 +860,17 @@ def color_bands_recipe(band_recipes, colors) -> Recipe:
     style draws them in band order."""
     return Recipe("color_bands", (), (("bands", tuple(band_recipes)), ("colors", tuple(colors))))
 
+
+
+def interpolated_line_recipe(color_xml: str, width_xml: str, color_values, width_values,
+                             steps: int = 64) -> Recipe:
+    """An interpolated line (colour and/or width varying along the line) as
+    short pieces, each with the colour and width QGIS gives the middle of the
+    piece (COLOR_FIELD, WIDTH_FIELD). ``color_xml`` / ``width_xml``: the
+    symbol layer's QgsInterpolatedLineColor / QgsInterpolatedLineWidth;
+    ``*_values``: the (start, end) value expressions ("" = not set);
+    ``steps``: pieces over the whole value range."""
+    return Recipe("interpolated_segments", (), (
+        ("color", color_xml), ("width", width_xml),
+        ("color_values", tuple(color_values)), ("width_values", tuple(width_values)),
+        ("steps", int(steps))))
