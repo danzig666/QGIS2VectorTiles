@@ -306,6 +306,7 @@ class PublishDialog(QDialog):
         form.addRow(tr("Minimum tile zoom"), self.e_min_zoom)
         form.addRow(tr("Maximum tile zoom"), self.e_max_zoom)
         form.addRow(tr("Maximum browser zoom (overzoom)"), self.e_max_view)
+        self.e_limit_extent = QCheckBox(tr("Keep the web map on the extent (no panning or zooming away)"))
         # Extent: a layer's extent (follows the layer) or a fixed one taken
         # from the map canvas; summarized in words, not raw coordinates.
         extent_box = QVBoxLayout()
@@ -328,6 +329,7 @@ class PublishDialog(QDialog):
         self.extent_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         extent_box.addWidget(self.extent_label)
         form.addRow(tr("Extent"), extent_box)
+        form.addRow("", self.e_limit_extent)
         try:
             from qgis.gui import QgsColorButton  # pylint: disable=import-outside-toplevel
             self.e_accent = QgsColorButton()
@@ -1525,6 +1527,7 @@ class PublishDialog(QDialog):
         self.e_min_zoom.setValue(profile.view.min_zoom)
         self.e_max_zoom.setValue(profile.view.max_zoom)
         self.e_max_view.setValue(profile.view.max_view_zoom)
+        self.e_limit_extent.setChecked(profile.view.limit_to_extent)
         self.e_extent_layer.blockSignals(True)
         self.e_extent_layer.setLayer(self.project.mapLayer(profile.view.extent_layer)
                                      if profile.view.extent_layer else None)
@@ -1740,6 +1743,7 @@ class PublishDialog(QDialog):
         profile.view.min_zoom = self.e_min_zoom.value()
         profile.view.max_zoom = self.e_max_zoom.value()
         profile.view.max_view_zoom = max(self.e_max_view.value(), profile.view.max_zoom)
+        profile.view.limit_to_extent = self.e_limit_extent.isChecked()
         layers = []
         for item in self._tree_items():
             layer_id = item.data(0, LAYER_ROLE)

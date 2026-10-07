@@ -117,15 +117,16 @@ def test_stable_entry_routes_to_the_release_with_state(published):
     server = published["server"]
     root = os.path.dirname(os.path.dirname(published["pm"].release_dir))
     rel = os.path.relpath(root, server.root).replace(os.sep, "/")
-    url = server.url(f"{rel}/index.html") + "?layers=a#v=1&map=12.00/47.481352/19.053267"
+    # (zoom 14: the map does not zoom out far beyond its 4 km extent)
+    url = server.url(f"{rel}/index.html") + "?layers=a#v=1&map=14.00/47.481352/19.053267"
     state = _node("open_viewer.mjs", url, "", 800, 600)
     assert state["ready"] and not state["errors"], state
     # The entry loads the current release, which shows the stable address
     # again with the query and hash (4.7.2: reloads and shared links follow
     # the current release); the camera state is applied.
     assert urllib.parse.unquote(state["url"]).endswith(
-        f"{rel}/index.html?layers=a#v=1&map=12.00/47.481352/19.053267"), state["url"]
-    assert abs(state["zoom"] - 12) < 1e-6
+        f"{rel}/index.html?layers=a#v=1&map=14.00/47.481352/19.053267"), state["url"]
+    assert abs(state["zoom"] - 14) < 1e-6
     assert state["external"] == []  # A23: no third-party requests
     assert not [c for c in state["console"] if "Content Security Policy" in c]
 

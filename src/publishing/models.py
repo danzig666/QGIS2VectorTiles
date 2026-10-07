@@ -200,6 +200,9 @@ class ViewConfig:
     min_zoom: int = 0
     max_zoom: int = 16
     max_view_zoom: int = 22               # browser zoom limit (overzoom)
+    # The web map stays on the extent: its centre cannot leave it and it zooms
+    # out only a little beyond the whole extent.
+    limit_to_extent: bool = True
 
 
 @dataclass

@@ -131,6 +131,7 @@ async function start() {
     const style = bindStyle(await fetchChecked(styleUrl), manifest, manifestUrl, styleUrl);
     viewer.style = style;
     const view = manifest.view;
+    const stay = view.limitToExtent && extentLimit(view, maplibregl);
     const map = new maplibregl.Map({
       container: "q2vt-map",
       style,
@@ -146,10 +147,12 @@ async function start() {
       touchPitch: false,
       attributionControl: false,
       renderWorldCopies: false,
+      transformConstrain: stay ? stay.constrain : null,
       canvasContextAttributes: { preserveDrawingBuffer: new URLSearchParams(location.search).has("print") },
     });
     map.touchZoomRotate.disableRotation();
     viewer.map = map;
+    if (stay) stay.attach(map);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.FullscreenControl(), "top-right");
     if (window.isSecureContext && navigator.geolocation) {
@@ -191,3 +194,35 @@ async function start() {
 }
 
 start();
+
+
+// "Keep the web map on the extent": the map's centre cannot leave the
+// publication extent, and it zooms out at most one level beyond the zoom
+// that shows the whole extent (recomputed when the window is resized).
+export function extentLimit(view, maplibregl) {
+  const [west, south, east, north] = view.bounds || [];
+  if (![west, south, east, north].every(Number.isFinite) || west >= east || south >= north) return null;
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+  let map = null;
+  let floor = view.minZoom ?? 0;
+  return {
+    constrain(center, zoom) {
+      const low = Math.max(floor, map ? map.getMinZoom() : view.minZoom ?? 0);
+      const high = map ? map.getMaxZoom() : view.maxZoom ?? 22;
+      return {
+        center: new maplibregl.LngLat(clamp(center.lng, west, east), clamp(center.lat, south, north)),
+        zoom: clamp(zoom, low, high),
+      };
+    },
+    attach(target) {
+      map = target;
+      const update = () => {
+        const camera = map.cameraForBounds([[west, south], [east, north]], { padding: 0 });
+        if (camera && Number.isFinite(camera.zoom)) floor = Math.max(view.minZoom ?? 0, camera.zoom - 1);
+        map.jumpTo({ center: map.getCenter(), zoom: map.getZoom() });  // apply the new floor
+      };
+      update();
+      map.on("resize", update);
+    },
+  };
+}

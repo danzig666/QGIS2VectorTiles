@@ -197,6 +197,9 @@
           },
           "minItems": 4,
           "maxItems": 4
+        },
+        "limitToExtent": {
+          "type": "boolean"
         }
       }
     },
