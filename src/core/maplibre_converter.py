@@ -37,7 +37,7 @@ from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
-from .materializer import pattern_in_viewport
+from .materializer import pattern_anchor_kind, pattern_in_viewport
 from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
                                  solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
@@ -3381,6 +3381,11 @@ class QgisMapLibreStyleExporter:
                 # Starts at the corner of the view, as in QGIS (patched
                 # MapLibre); otherwise patterns are anchored to the map.
                 layer_def.setdefault("metadata", {})[self.PATTERN_ANCHOR_FLAG] = "viewport"
+            elif pattern_anchor_kind(symbol_layer):
+                # Starts at each feature's anchor (mat.PATTERN_ANCHOR_*_FIELD;
+                # features without one keep the map-anchored pattern).
+                layer_def.setdefault("metadata", {})[self.PATTERN_ANCHOR_FLAG] = \
+                    pattern_anchor_kind(symbol_layer)
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",

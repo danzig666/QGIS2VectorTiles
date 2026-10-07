@@ -1123,3 +1123,25 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/integration/test_line_shapes.py` | 6 passed (new) |
 | `pytest tests/integration/test_materialize.py tests/integration/test_gradient_fills.py tests/integration/test_more_symbology.py tests/integration/test_end_to_end.py tests/integration/test_units_and_properties.py tests/integration/test_flattener.py` | 163 passed |
 | `pytest tests/browser/test_browser_parity.py -k "offsets or dash or thin"` | 14 passed |
+
+## 4.16.0: feature-aligned pattern anchors
+
+- Measured in QGIS 3.34 (all anchors rounded to whole pixels): point, line and SVG patterns
+  start at the bottom-left of the whole feature's bounding box (also far outside the view;
+  rotation does not change the anchor); raster fills ("Coordinate mode: Object") at the
+  top-left of each part, clipped to the view grown by 10 %.
+- Exporter: rules drawn as such textures carry `q2vt_pat_x` / `q2vt_pat_y` (EPSG:3857, the
+  corner measured in the project CRS); the whole-feature corner is computed in the base
+  layer before the parts are split. Converter: `metadata: {"q2vt:pattern-anchor":
+  "feature" | "feature-clip"}`.
+- Patched MapLibre (`tools/patch_maplibre.py`, now also `maplibre-gl-shared.mjs`): fill
+  buckets of flagged layers carry the anchor per vertex (tile units, Float32), the fill and
+  fill-outline pattern shaders start the pattern there, snapped to device pixels, and clamp
+  it to the view for raster fills. Features without an anchor keep the map-anchored pattern.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_browser_parity.py -k "feature_aligned or beyond_the_view"` | 9 passed (new; all 6 feature-aligned cases fail without the anchors: mismatch 36–72 %, with them 0–0.9 %) |
+| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or viewport or feature or offsets or dash"` | 28 passed |
+| `pytest tests/integration/test_end_to_end.py tests/integration/test_sprites.py tests/integration/test_line_shapes.py tests/integration/test_more_symbology.py tests/unit/test_patterns_and_assets.py` | 67 passed |
+| `pytest tests/integration/test_materialize.py -k "pattern or hatch or texture or svg or raster"` | 36 passed |

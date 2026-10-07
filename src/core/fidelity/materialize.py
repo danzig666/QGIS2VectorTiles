@@ -32,6 +32,10 @@ BAND_FIELD = "q2vt_mat_band"        # colour band of a gradient / shapeburst fil
 COLOR_FIELD = "q2vt_mat_color"      # its colour ("r,g,b,a", QgsSymbolLayerUtils.encodeColor)
 WIDTH_FIELD = "q2vt_mat_width"      # its stroke width (symbol units): interpolated lines
 DIRECTION_FIELD = "q2vt_mat_dir"     # screen direction bucket of a line run (inner effects)
+# A pattern fill's anchor ("Align pattern to: Feature"), EPSG:3857: where
+# QGIS starts the pattern (see materializer.pattern_anchor_kind).
+PATTERN_ANCHOR_X_FIELD = "q2vt_pat_x"
+PATTERN_ANCHOR_Y_FIELD = "q2vt_pat_y"
 RUN_FIELD = "q2vt_mat_run"          # its ordinal along the lines (earlier runs' caps on top)
 
 VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVertex",

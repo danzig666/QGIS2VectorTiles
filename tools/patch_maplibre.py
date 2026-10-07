@@ -22,7 +22,14 @@ a double-size copy after every whole zoom. The patch:
    (crisp texels, no blur from sub-pixel sampling), and no double-size
    cross-fade copy. Layers flagged ``metadata: {"q2vt:pattern-anchor":
    "viewport"}`` (QGIS "Align pattern to: Viewport") start their pattern at
-   the corner of the map canvas instead of the map's origin.
+   the corner of the map canvas instead of the map's origin. Layers flagged
+   ``"feature"`` (point, line and SVG patterns: the bottom-left of the
+   feature's bounding box) or ``"feature-clip"`` (raster fills: the top-left
+   of the part, at most 10 % of the view outside it) start their pattern at
+   each feature's anchor, carried per vertex by the fill bucket
+   (``q2vt_pat_x`` / ``q2vt_pat_y`` properties, EPSG:3857) and snapped to
+   whole device pixels as QGIS rounds it. The outline pattern program
+   follows the same scaling and anchor.
    Other fill patterns (map-unit textures) keep MapLibre's scaling, which
    grows with the map like QGIS map units;
 5. samples a line pattern only inside its image: stock MapLibre maps the line
@@ -92,11 +99,21 @@ def _fill_patch(text: str) -> str:
            # QGIS's brush): shift the anchor by the sub-pixel part of the
            # map's screen offset (flat, unrotated maps).
            f"q2T={painter}.transform,q2r={painter}.pixelRatio||globalThis.devicePixelRatio||1,"
-           f"q2A=!!(q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-anchor\"]===\"viewport\");"
-           f"if((q2s||q2A)&&!q2T.pitch&&!(q2T.bearing%360)){{let q2c=q2T.center,q2w=q2T.worldSize,"
+           f"q2A=!!(q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-anchor\"]===\"viewport\"),"
+           # Feature-aligned (QGIS "Align pattern to: Feature"): the bucket
+           # carries each feature's anchor (a_q2anchor, tile units); mode 2
+           # clamps it to the view's top-left minus 10 % (raster fills).
+           f"q2F=q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-anchor\"],"
+           f"q2M=q2F===\"feature\"?1:q2F===\"feature-clip\"?2:0,q2Q=[q2M,-1e30,-1e30],q2B=[0,0,0],q2C=1;"
+           f"if((q2s||q2A||q2M)&&!q2T.pitch&&!(q2T.bearing%360)){{let q2c=q2T.center,q2w=q2T.worldSize,"
            f"q2u=(180+q2c.lng)/360*q2w-q2T.centerPoint.x,"
            f"q2v=(180-180/Math.PI*Math.log(Math.tan(Math.PI/4+q2c.lat*Math.PI/360)))/360*q2w"
            f"-q2T.centerPoint.y;"
+           # The view's corner in tile units, the tile origin on screen (CSS
+           # px) and screen px per pattern px: anchors snap to device pixels.
+           f"if(q2M){{let q2k=2**(q2z-q2T.zoom),q2t=8192/q2a;"
+           f"q2Q=[q2M,(q2u*q2k-q2x-.1*q2T.width*q2k)*q2t,(q2v*q2k-q2y-.1*q2T.height*q2k)*q2t];"
+           f"q2B=[q2x/q2k-q2u,q2y/q2k-q2v,q2r];q2C=1/q2k}}"
            # Viewport-aligned (QGIS "Align pattern to: Viewport"): the pattern
            # starts at the canvas corner (in the pattern's own zoom pixels).
            f"if(q2A){{let q2k=2**(q2z-q2T.zoom);q2x-=q2u*q2k;q2y-=q2v*q2k}}else{{"
@@ -105,7 +122,8 @@ def _fill_patch(text: str) -> str:
            f"let q2X=Math.floor(q2x/65536),q2Y=Math.floor(q2y/65536);"
            f"return{{u_image:0,u_texsize:{tile}.imageAtlasTexture.size,"
            f"u_scale:[{ratio},q2s?{cf}.toScale:{cf}.fromScale,{cf}.toScale],u_fade:{cf}.t,"
-           f"u_pixel_coord_upper:[q2X,q2Y],u_pixel_coord_lower:[q2x-q2X*65536,q2y-q2Y*65536]}}}}")
+           f"u_pixel_coord_upper:[q2X,q2Y],u_pixel_coord_lower:[q2x-q2X*65536,q2y-q2Y*65536],"
+           f"u_q2a:q2Q,u_q2b:q2B,u_q2c:q2C}}}}")
     text = text[:m.start()] + new + text[m.end():]
     # The fill program passes its style layer along (fill outlines keep stock behaviour).
     caller = re.compile(r"(\w+)=\(e,t,n,r,i\)=>R\(" + re.escape(fn) + r"\(t,e,n\),\{u_fill_translate:r,u_sdf_pattern:\+!!i\}\)")
@@ -117,12 +135,111 @@ def _fill_patch(text: str) -> str:
     call = f"h=d?{builder}(e,f,r,O,C):pu(O)"
     if text.count(call) != 1:
         raise SystemExit("fill draw call: expected exactly one match")
-    return text.replace(call, f"h=d?{builder}(e,f,r,O,C,n):pu(O)")
+    text = text.replace(call, f"h=d?{builder}(e,f,r,O,C,n):pu(O)")
+    outline = re.compile(r"(\w+)=\(e,t,n,r,i\)=>" + re.escape(builder) + r"\(e,t,n,r,i\)")
+    found = list(outline.finditer(text))
+    if len(found) != 1:
+        raise SystemExit(f"outline pattern uniform builder: {len(found)} matches (expected 1)")
+    ob = found[0].group(1)
+    text = outline.sub(lambda c: f"{ob}=(e,t,n,r,i,q2l)=>{builder}(e,t,n,r,i,q2l)", text)
+    call = f"{ob}(e,f,r,O,C):"
+    if text.count(call) != 1:
+        raise SystemExit("outline pattern call: expected exactly one match")
+    text = text.replace(call, f"{ob}(e,f,r,O,C,n):")
+    draw = "S.layoutVertexBuffer,g,_,n.paint,e.transform.zoom,w)"
+    if text.count(draw) != 1:
+        raise SystemExit("fill draw: expected exactly one match")
+    return text.replace(draw, "S.layoutVertexBuffer,g,_,n.paint,e.transform.zoom,w,d&&S.q2anchorBuffer||void 0)")
+
+
+ANCHOR_MARK = "/*q2vt-feature-anchor*/"
+ANCHOR_DECL_OLD = ("uniform vec2 u_pixel_coord_upper;uniform vec2 u_pixel_coord_lower;uniform vec3 u_scale;"
+                   "uniform vec2 u_fill_translate;layout(location=0) in vec2 a_pos;")
+ANCHOR_DECL_NEW = (ANCHOR_DECL_OLD + "uniform vec3 u_q2a;uniform vec3 u_q2b;uniform float u_q2c;"
+                   "layout(location=1) in vec2 a_q2anchor;")
+ANCHOR_POS = re.compile(
+    r"v_pos_a=get_pattern_pos\(u_pixel_coord_upper,u_pixel_coord_lower,fromScale\*display_size_a,(\w+),a_pos\);"
+    r"v_pos_b=get_pattern_pos\(u_pixel_coord_upper,u_pixel_coord_lower,toScale\*display_size_b,\1,a_pos\);")
+
+
+def _anchor_shader(match) -> str:
+    ratio = match.group(1)
+    # The pattern's top-left at the feature's anchor (QGIS brush origin),
+    # snapped to whole device pixels on screen like QGIS's rounding.
+    return (f"if(u_q2a.x>0.5&&a_q2anchor.x<1e29){{{ANCHOR_MARK}vec2 q2p=a_q2anchor;"
+            f"if(u_q2a.x>1.5){{q2p=max(q2p,u_q2a.yz);}}q2p*={ratio};"
+            f"if(u_q2b.z>0.0){{vec2 q2o=floor((q2p*u_q2c+u_q2b.xy)*u_q2b.z+0.5)/u_q2b.z;"
+            f"q2p=(q2o-u_q2b.xy)/u_q2c;}}vec2 q2v={ratio}*a_pos-q2p;"
+            f"v_pos_a=q2v/(fromScale*display_size_a);v_pos_b=q2v/(toScale*display_size_b);}}"
+            f"else{{{match.group(0)}}}")
+
+
+def _anchor_patch(text: str) -> str:
+    """Main bundle: the fill pattern shaders read a feature anchor."""
+    if text.count(ANCHOR_DECL_OLD) != 2:
+        raise SystemExit("fill pattern shader declarations: expected exactly two matches")
+    text = text.replace(ANCHOR_DECL_OLD, ANCHOR_DECL_NEW)
+    if len(ANCHOR_POS.findall(text)) != 2:
+        raise SystemExit("fill pattern positions: expected exactly two matches")
+    text = ANCHOR_POS.sub(_anchor_shader, text)
+    uniforms = re.compile(r"(u_sdf_pattern:new (\w+)\(e,t\.u_sdf_pattern\),"
+                          r"u_fill_translate:new (\w+)\(e,t\.u_fill_translate\))\}\)")
+    scale = re.search(r"u_scale:new (\w+)\(e,t\.u_scale\),u_fade:new (\w+)\(e,t\.u_fade\)", text)
+    found = uniforms.findall(text)
+    if len(found) != 2 or scale is None:
+        raise SystemExit(f"fill pattern uniform bindings: {len(found)} matches (expected 2)")
+    vec3, flt = scale.group(1), scale.group(2)
+    return uniforms.sub(lambda m: f"{m.group(1)},u_q2a:new {vec3}(e,t.u_q2a),u_q2b:new {vec3}(e,t.u_q2b),"
+                                  f"u_q2c:new {flt}(e,t.u_q2c)}})", text)
+
+
+SHARED = os.path.join(ROOT, "resources", "ml_viewer", "maplibre-gl-shared.mjs")
+BUCKET_MARK = "/*q2vt-fill-anchors*/"
+
+
+def _bucket_patch(text: str) -> str:
+    """Shared bundle: fill buckets of layers flagged ``q2vt:pattern-anchor``
+    "feature" / "feature-clip" carry each feature's pattern anchor (its
+    q2vt_pat_x / q2vt_pat_y, EPSG:3857 metres) per vertex, in tile units."""
+    layout = re.search(r"W\(`StructArrayLayout2f8`,(\w+)\)", text)
+    if layout is None:
+        raise SystemExit("StructArrayLayout2f8 not found")
+    floats = layout.group(1)
+    ctor = re.compile(r"(this\.segments2=new (\w+),)(this\.stateDependentLayerIds=this\.layers\.filter\(e=>e\.isStateDependent\(\)\)"
+                      r"\.map\(e=>e\.id\)\}populate\(e,t,n\)\{this\.hasDependencies=\w+\(`fill`)")
+    if len(ctor.findall(text)) != 1:
+        raise SystemExit("fill bucket constructor: expected exactly one match")
+    text = ctor.sub(lambda m: m.group(1) + BUCKET_MARK + "this.q2anchorArray=this.layers.some(e=>e.metadata&&"
+                    "/^feature/.test(e.metadata[\"q2vt:pattern-anchor\"]||\"\"))?new " + floats + ":null,"
+                    + m.group(3), text)
+    upload = re.compile(r"(upload\(e\)\{this\.uploaded\|\|\(this\.layoutVertexBuffer=e\.createVertexBuffer\(this\.layoutVertexArray,\w+\),"
+                        r"this\.indexBuffer=e\.createIndexBuffer\(this\.indexArray\),this\.indexBuffer2=e\.createIndexBuffer\(this\.indexArray2\))\)")
+    if len(upload.findall(text)) != 1:
+        raise SystemExit("fill bucket upload: expected exactly one match")
+    text = upload.sub(lambda m: m.group(1) + ",this.q2anchorArray&&this.q2anchorArray.length&&(this.q2anchorBuffer="
+                      "e.createVertexBuffer(this.q2anchorArray,[{name:\"a_q2anchor\",type:\"Float32\",components:2,offset:0}])))",
+                      text)
+    destroy = "this.indexBuffer2.destroy(),this.programConfigurations.destroy(),this.segments.destroy(),this.segments2.destroy())}"
+    if text.count(destroy) != 1:
+        raise SystemExit("fill bucket destroy: expected exactly one match")
+    text = text.replace(destroy, destroy[:-2] + ",this.q2anchorBuffer&&this.q2anchorBuffer.destroy())}")
+    add = re.compile(r"addFeature\(e,t,n,r,i,a\)\{for\(let e of (\w+)\(t,500\)\)\{let t=(\w+)\(e,r,a\.fill\.getGranularityForZoomLevel\(r\.z\)\),"
+                     r"n=this\.layoutVertexArray;(\w+)\(\(e,t\)=>\{n\.emplaceBack\(e,t\)\}")
+    if len(add.findall(text)) != 1:
+        raise SystemExit("fill bucket addFeature: expected exactly one match")
+    return add.sub(lambda m: (
+        "addFeature(e,t,n,r,i,a){let q2=this.q2anchorArray,q2x=1e30,q2y=1e30;if(q2){let q2p=e.properties||{},"
+        "q2X=q2p.q2vt_pat_x,q2Y=q2p.q2vt_pat_y;if(q2X!=null&&q2Y!=null&&isFinite(q2X)&&isFinite(q2Y)){"
+        "let q2s=2**r.z,q2w=40075016.68557849;q2x=((q2X/q2w+.5)*q2s-r.x)*8192;q2y=((.5-q2Y/q2w)*q2s-r.y)*8192}}"
+        f"for(let e of {m.group(1)}(t,500)){{let t={m.group(2)}(e,r,a.fill.getGranularityForZoomLevel(r.z)),"
+        f"n=this.layoutVertexArray;{m.group(3)}((e,t)=>{{n.emplaceBack(e,t);q2&&q2.emplaceBack(q2x,q2y)}}"), text)
 
 
 def patch(text: str) -> str:
     if FILL_MARK not in text:
         text = _fill_patch(text)
+    if ANCHOR_MARK not in text:
+        text = _anchor_patch(text)
     if WIDTH_MARK not in text:
         for old, new, count in WIDTH_EDITS:
             if text.count(old) != count:
@@ -159,17 +276,21 @@ def patch(text: str) -> str:
 def main() -> int:
     with open(BUNDLE, encoding="utf-8") as handle:
         text = handle.read()
+    with open(SHARED, encoding="utf-8") as handle:
+        shared = handle.read()
     if "--check" in sys.argv:
-        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK))
+        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK)) \
+            and BUCKET_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
-    patched = patch(text)
-    if patched != text:
-        with open(BUNDLE, "w", encoding="utf-8") as handle:
-            handle.write(patched)
-        print("patched", BUNDLE)
-    else:
-        print("already patched")
+    for path, old, new in ((BUNDLE, text, patch(text)),
+                           (SHARED, shared, shared if BUCKET_MARK in shared else _bucket_patch(shared))):
+        if new != old:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(new)
+            print("patched", path)
+        else:
+            print("already patched", path)
     return 0
 
 

@@ -63,12 +63,19 @@ light as in QGIS).
 *Not reproducible:* a line pattern or dash restarts where a vector tile cuts the line
 (MapLibre measures the distance along a line per tile); QGIS fits gradients to the visible
 part of a feature that runs out of view; QGIS clips lines to the view before pairing the
-vertices of curved repeated arrows; pattern fills aligned to the feature (QGIS's default
-"Align pattern to: Feature") are anchored to the map, while QGIS starts them at the
-top-left corner of each feature part as clipped to the view (same size and look, a
-different phase; the gallery's per-pixel score counts that phase as mismatch). Patterns
-aligned to the viewport ("Align pattern to: Viewport", raster fills "Coordinate mode:
-Viewport") start at the corner of the map canvas, exactly as in QGIS (4.14.1).
+vertices of curved repeated arrows.
+
+**Pattern anchors (4.16).** Pattern textures start where QGIS starts them (measured in
+QGIS 3.34, all rounded to whole pixels): "Align pattern to: Feature" (the default) at the
+bottom-left of the whole feature's bounding box for point, line and SVG patterns, and at
+the top-left of each part for raster fills ("Coordinate mode: Object"), which QGIS first
+clips to the view grown by 10 % (so a raster fill's phase follows the view when the part
+reaches beyond it); "Viewport" at the corner of the map canvas (4.14.1). Each feature
+carries its anchor (`q2vt_pat_x` / `q2vt_pat_y`, EPSG:3857, measured in the project CRS);
+the patched MapLibre fill bucket passes it per vertex to the pattern shaders. Tests
+compare the pattern phase pixel for pixel with QGIS (`tests/browser/test_browser_parity.py
+-k feature_aligned`, `-k beyond_the_view`). On rotated or tilted maps the anchors are kept
+but not snapped to pixels or clipped to the view.
 
 ## Behavior changes users may notice
 
