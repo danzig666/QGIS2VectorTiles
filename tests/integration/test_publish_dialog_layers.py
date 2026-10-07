@@ -161,3 +161,23 @@ def test_scales_column_shows_the_qgis_range(setup):
     assert text.startswith("(QGIS 1:2") and "000 –" in text and text.endswith(")"), text
     dialog._set_item_scales(item, 5000, 0)  # pylint: disable=protected-access
     assert "QGIS" not in item.text(5) and "QGIS layer: 1:2" in item.toolTip(5)
+
+
+def test_publish_the_visible_layers(setup):
+    """"Publish the visible layers": exactly the layers visible in the QGIS
+    Layers panel now are published (and visible at start); a layer in a
+    hidden group counts as hidden. New raster layers default to WebP."""
+    dialog, project, parcels, zones, ortho = setup
+    items = _items(dialog)
+    items[parcels.id()].setCheckState(1, UNCHECKED)
+    items[zones.id()].setCheckState(1, CHECKED)
+    project.layerTreeRoot().findGroup("Háttér").setItemVisibilityChecked(False)
+    dialog.publish_visible_layers()
+    assert items[parcels.id()].checkState(1) == CHECKED and items[parcels.id()].checkState(2) == CHECKED
+    assert items[zones.id()].checkState(1) == UNCHECKED  # hidden in QGIS
+    assert items[ortho.id()].checkState(1) == UNCHECKED  # in a hidden group
+    project.layerTreeRoot().findGroup("Háttér").setItemVisibilityChecked(True)
+    dialog.publish_visible_layers()
+    assert items[ortho.id()].checkState(1) == CHECKED
+    from q2vt_plugin.src.publishing.models import LayerConfig  # pylint: disable=import-error
+    assert LayerConfig(ortho.id()).raster_format == "webp"

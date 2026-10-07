@@ -268,3 +268,25 @@ def test_raster_tiles_are_the_same_with_any_number_of_threads(tmp_path):
         with open(out, "rb") as handle:
             archives.append(handle.read())
     assert archives[0] == archives[1] and len(archives[0]) > 1000
+
+
+def test_webp_falls_back_to_png_where_qgis_cannot_write_it(tmp_path, monkeypatch):
+    """WebP is the default image format; a QGIS without a WebP writer makes
+    PNG tiles (also transparent) with a warning instead of failing."""
+    from q2vt_plugin.src.publishing import raster_tiles  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.vendor.pmtiles.tile import TileType  # pylint: disable=import-error
+    assert LayerConfig("x").raster_format == "webp"
+    project, profile, parcels, ortho = _project(tmp_path)
+    config = profile.layer(ortho.id())
+
+    class NoWebp:  # pylint: disable=too-few-public-methods
+        @staticmethod
+        def supportedImageFormats():
+            return [b"png", b"jpeg"]
+    monkeypatch.setattr(raster_tiles, "QImageWriter", NoWebp)
+    plan = raster_tiles.plan_layer(project, ortho, config, profile, EXTENT)
+    out = str(tmp_path / "fallback.pmtiles")
+    raster_tiles.render_layer(project, ortho, config, plan, out)
+    with open_pmtiles(out) as archive:
+        assert archive.header["tile_type"] == TileType.PNG and archive.metadata()["format"] == "png"
+    assert any("cannot write WebP" in warning for warning in plan.warnings)

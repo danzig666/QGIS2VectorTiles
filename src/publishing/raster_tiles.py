@@ -113,11 +113,17 @@ def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
 
 
 def _encoder(fmt: str) -> str:
-    supported = {bytes(f).decode().lower() for f in QImageWriter.supportedImageFormats()}
-    if fmt == "webp" and "webp" not in supported:
-        raise PublishingError("Q2VT_PUB_DEPENDENCY",
-                              "This QGIS cannot write WebP images; choose PNG or JPEG.")
     return {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}[fmt]
+
+
+def tile_format(fmt: str) -> str:
+    """The image format the tiles are written in: WebP (the default) falls
+    back to PNG, also transparent, where this QGIS cannot write WebP."""
+    if fmt == "webp":
+        supported = {bytes(f).decode().lower() for f in QImageWriter.supportedImageFormats()}
+        if "webp" not in supported:
+            return "png"
+    return fmt
 
 
 def _encode(image: QImage, writer_format: str, quality: int) -> bytes:
@@ -166,7 +172,11 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
         return None
     from collections import deque  # pylint: disable=import-outside-toplevel
     from concurrent.futures import ThreadPoolExecutor  # pylint: disable=import-outside-toplevel
-    writer_format = _encoder(config.raster_format)
+    fmt = tile_format(config.raster_format)
+    if fmt != config.raster_format:
+        plan.warnings.append(f'Raster layer "{layer.name()}": this QGIS cannot write WebP images, '
+                             "so its tiles are PNG (larger).")
+    writer_format = _encoder(fmt)
     tile_px = 512 if config.raster_hidpi else 256
     settings = QgsMapSettings()
     settings.setLayers([layer])
@@ -177,7 +187,7 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
     settings.setFlag(QgsMapSettings.Flag.Antialiasing, True)
     settings.setFlag(QgsMapSettings.Flag.RenderMapTile, True)
     settings.setFlag(QgsMapSettings.Flag.DrawLabeling, False)
-    jpeg = config.raster_format == "jpeg"
+    jpeg = fmt == "jpeg"
     if blend in ("multiply", "screen") and jpeg:
         plan.warnings.append(f'Raster layer "{layer.name()}": its {blend} blend mode needs transparency; '
                              "JPEG has none, so it is drawn as normal. Choose PNG or WebP.")
@@ -262,9 +272,9 @@ def render_layer(project, layer, config: LayerConfig, plan: RasterPlan, output: 
                                  "hillshade are exact.")
         if not sink.count:
             return None
-        metadata = {"name": title or layer.name(), "format": config.raster_format,
+        metadata = {"name": title or layer.name(), "format": fmt,
                     "type": "overlay", "description": "QGIS raster layer rendered by QWebMap"}
-        return sink.write(IMAGE_TILE_TYPES[config.raster_format], Compression.NONE, metadata,
+        return sink.write(IMAGE_TILE_TYPES[fmt], Compression.NONE, metadata,
                           progress=progress.sub(0.9, 1.0))
 
 
@@ -367,7 +377,7 @@ def raster_cache_key(project, layer, config: LayerConfig, plan: RasterPlan, blen
     return export_cache.make_key(
         "raster", code, sources, style.xmlData(), layer.crs().toWkt(), operations,
         [plan.min_zoom, plan.max_zoom, list(plan.extent_3857)],
-        [config.raster_format, int(config.raster_quality), bool(config.raster_hidpi)],
+        [tile_format(config.raster_format), int(config.raster_quality), bool(config.raster_hidpi)],
         config.title or layer.name(), blend)
 
 
