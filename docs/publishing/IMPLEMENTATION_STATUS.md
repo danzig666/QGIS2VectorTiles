@@ -1212,3 +1212,17 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/browser/test_web_viewer_streetview.py` (4 runs) | 6 passed each time |
 | `pytest tests/browser/test_pmtiles_transport.py tests/browser/test_browser_smoke.py tests/browser/test_static_package.py` | all passed (the deep link opens at zoom 14: zoom 12 is beyond the 4 km test extent) |
 | `pytest tests/unit/test_publishing_profile.py tests/unit/test_publishing_web_builder.py tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py tests/integration/test_publishing_raster.py tests/integration/test_end_to_end.py` | 93 passed |
+
+## 4.19.1: joined fields, virtual fields and unsaved edits are published
+
+- The 4.19.0 memory-layer copy now covers every layer whose source lacks what QGIS shows
+  (`RulesExporter._snapshot_reason`): unsaved edits (`isModified`), joined fields (also
+  auxiliary storage, e.g. moved labels) and virtual (expression) fields. Labels or rules built
+  on them came out empty (the export then failed with "No glyphs for font"), an unsaved
+  feature was missing. The copy leaves out a GeoPackage source's own `fid` column (an unsaved
+  feature's provisional value collided).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_pipeline.py -k "only_in_the_project or temporary"` | 4 passed (new: join, expression field, unsaved edits; all three fail without the fix) |
+| `pytest tests/integration/test_publishing_pipeline.py tests/integration/test_export_cache.py tests/integration/test_end_to_end.py tests/integration/test_publishing_parcel_report.py tests/integration/test_publishing_label_always.py` | 39 passed, 1 failed: `test_reused_dataset_under_a_new_zoom_range_keeps_its_features`, failing the same since 4.16.0 |
