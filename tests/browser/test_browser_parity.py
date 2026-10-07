@@ -337,3 +337,33 @@ def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypa
     _compare(tmp_path, layer, metric="shape")
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.03), (qgis, browser)
+
+
+@pytest.mark.parametrize("kind", ["hatch", "points"])
+def test_viewport_aligned_patterns_start_at_the_view_corner(tmp_path, kind):
+    """QGIS "Align pattern to: Viewport" starts the pattern at the corner of
+    the map view (lines at x = 0, 10, 20 ... px on screen whatever the pan):
+    the browser anchors such layers at the canvas corner, so even the
+    pattern's phase matches."""
+    from qgis.core import QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer
+    layer = _polygon_layer(str(tmp_path / "vp.gpkg"), False)
+    if kind == "hatch":
+        pattern = QgsLinePatternFillSymbolLayer()
+        pattern.setLineAngle(90)
+        pattern.setDistance(10)
+        pattern.setDistanceUnit(Qgis.RenderUnit.Pixels)
+        pattern.setSubSymbol(QgsLineSymbol.createSimple(
+            {"color": "black", "width": "2", "width_unit": "Pixel"}))
+    else:
+        pattern = QgsPointPatternFillSymbolLayer()
+        for name in ("DistanceX", "DistanceY"):
+            getattr(pattern, f"set{name}")(12)
+            getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+        marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 4)
+        marker.setSizeUnit(Qgis.RenderUnit.Pixels)
+        marker.setColor(QColor("black"))
+        marker.setStrokeStyle(0)
+        pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05

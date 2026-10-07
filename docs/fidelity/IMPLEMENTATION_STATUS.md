@@ -45,9 +45,12 @@ blend tolerance):
 *Not reproducible:* a line pattern or dash restarts where a vector tile cuts the line
 (MapLibre measures the distance along a line per tile); QGIS fits gradients to the visible
 part of a feature that runs out of view; QGIS clips lines to the view before pairing the
-vertices of curved repeated arrows; pattern fills are anchored to the map, while QGIS
-starts them at the top-left corner of each feature part as clipped to the view (same size
-and look, a different phase; the gallery's per-pixel score counts that phase as mismatch).
+vertices of curved repeated arrows; pattern fills aligned to the feature (QGIS's default
+"Align pattern to: Feature") are anchored to the map, while QGIS starts them at the
+top-left corner of each feature part as clipped to the view (same size and look, a
+different phase; the gallery's per-pixel score counts that phase as mismatch). Patterns
+aligned to the viewport ("Align pattern to: Viewport", raster fills "Coordinate mode:
+Viewport") start at the corner of the map canvas, exactly as in QGIS (4.14.1).
 
 ## Behavior changes users may notice
 
