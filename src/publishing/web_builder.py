@@ -314,6 +314,7 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
             "minZoom": float(max(0, profile.view.min_zoom if profile.view else 0)),
             "maxZoom": float(profile.view.max_view_zoom),
             "bounds": [round(float(v), 7) for v in bundle.bounds_wgs84],
+            "limitToExtent": bool(profile.view.limit_to_extent),
         },
         "groups": bundle.groups, "layers": bundle.layers, "rules": bundle.rules,
         "components": bundle.components,

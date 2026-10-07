@@ -1187,3 +1187,28 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_publish_dialog_layers.py tests/integration/test_publishing_raster.py tests/unit/test_publishing_profile.py` | 43 passed (new: publish the visible layers, WebP default; PNG fallback without a WebP writer) |
 | `pytest tests/integration/test_publishing_pipeline.py tests/integration/test_publishing_basemap_themes.py tests/integration/test_export_cache.py` | 9 passed, 1 failed: `test_reused_dataset_under_a_new_zoom_range_keeps_its_features` (18 of 24 datasets reused, expects all); fails the same at 4.16.0 and 4.17.0, not caused by this release |
+
+## 4.19.0: temporary layers published, the map stays on the extent
+
+- Temporary (memory) layers, e.g. restored by the Memory Layer Saver plugin, were published
+  empty: the exporter reopens each source by its URI in a worker, and a memory URI opens a
+  new, empty layer (the viewer then said "not visible at this zoom"). Now
+  `RulesExporter._memory_snapshot` copies their features (ids kept) into a GeoPackage on the
+  caller thread; the export cache keys them by the layer URI (`_SourceSnapshot.key_uri`) and
+  a content digest, so an unchanged temporary layer is reused.
+- *Keep the web map on the extent* (`ViewConfig.limit_to_extent`, default on; manifest
+  `view.limitToExtent`; Publish window, General tab under Extent): the viewer's
+  `transformConstrain` keeps the map's centre inside the extent and zooms out at most one
+  level beyond the zoom that shows the whole extent (recomputed on resize). Deep links are
+  constrained the same way.
+- Tests: the browser harness (`tests/browser/interact.mjs`) answers Google's Street View
+  coverage tiles with a transparent image; the street-view tap test failed whenever the
+  blocked download gave up before the check (3 of 4 runs).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_publishing_pipeline.py -k temporary` | 1 passed (new: a memory layer is published and reused from the cache; fails without the fix: no components) |
+| `pytest tests/browser/test_web_viewer_features.py tests/browser/test_web_viewer_parcel.py tests/browser/test_web_viewer_basemap_raster.py tests/browser/test_snap.py tests/browser/test_coordinates_crs.py` | 27 passed (new: the map stays on the extent) |
+| `pytest tests/browser/test_web_viewer_streetview.py` (4 runs) | 6 passed each time |
+| `pytest tests/browser/test_pmtiles_transport.py tests/browser/test_browser_smoke.py tests/browser/test_static_package.py` | all passed (the deep link opens at zoom 14: zoom 12 is beyond the 4 km test extent) |
+| `pytest tests/unit/test_publishing_profile.py tests/unit/test_publishing_web_builder.py tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py tests/integration/test_publishing_raster.py tests/integration/test_end_to_end.py` | 93 passed |

@@ -15,6 +15,12 @@ const browser = await chromium.launch({ executablePath, args: ["--use-gl=swiftsh
 const context = await browser.newContext({ viewport: { width: +width, height: +height }, deviceScaleFactor: 1,
   reducedMotion: process.env.Q2VT_MOTION === "1" ? "no-preference" : "reduce" });
 await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
+// Google's Street View coverage tiles (streetview tests stub the session
+// only): answered with a transparent image, so the overlay does not fail
+// whenever the blocked network gives up first.
+const EMPTY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+await context.route("https://tile.googleapis.com/v1/2dtiles/**",
+  (route) => route.fulfill({ status: 200, contentType: "image/png", body: EMPTY_PNG }));
 const page = await context.newPage();
 const pageErrors = [];
 const consoleMessages = [];

@@ -208,3 +208,33 @@ def test_unapproved_field_in_tiles_is_refused(project, tmp_path):
     finally:
         qgis_model.tile_fields = original
     assert error.value.code == "Q2VT_PUB_FIELD_DISCLOSURE"
+
+
+def test_temporary_memory_layers_are_published(project, tmp_path):
+    """A temporary (memory) layer, e.g. restored by the Memory Layer Saver
+    plugin: its URI opens a new, empty layer, so the export used to publish
+    nothing for it ("not visible at this zoom" in the viewer). Its features
+    are copied from the project; unchanged, it is reused from the cache."""
+    from qgis.core import QgsFeatureRequest, QgsProcessingFeedback  # pylint: disable=import-outside-toplevel
+    project, parcels = project
+    scratch = parcels.materialize(QgsFeatureRequest())
+    assert scratch.providerType() == "memory" and scratch.featureCount() == 4
+    scratch.setName("Ideiglenes réteg")
+    scratch.setRenderer(parcels.renderer().clone())
+    project.addMapLayer(scratch)
+    profile = _profile(parcels, tmp_path)
+    profile.layers.append(LayerConfig(scratch.id()))
+    result = export_local(project, profile, EXTENT)
+    manifest = json.load(open(os.path.join(result.release.release_dir, "manifest.json"),
+                              encoding="utf-8"))
+    layer = next(l for l in manifest["layers"] if l["title"] == "Ideiglenes réteg")
+    assert layer["componentIds"], layer
+    log = []
+
+    class Feedback(QgsProcessingFeedback):
+        def pushInfo(self, info):  # noqa: N802
+            log.append(info)
+    export_local(project, profile, EXTENT, Feedback())
+    line = next(line for line in log if "Export cache:" in line)
+    hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
+    assert hits == total, line

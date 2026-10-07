@@ -216,6 +216,9 @@ class _SourceSnapshot:
     # Size/mtime digest of the source files (export cache); None: not
     # file based, never reused.
     data_fingerprint: Optional[str] = None
+    # The layer's own URI for cache keys when source_uri is a per-export copy
+    # (a memory layer's features); "" = source_uri.
+    key_uri: str = ""
 
     @property
     def needs_serial_read(self) -> bool:
@@ -506,16 +509,27 @@ class RulesExporter:
             lid = r.layer.id()
             if lid in sources:
                 continue
+            source_uri, provider = r.layer.source(), r.layer.providerType()
+            fingerprint = export_cache.source_fingerprint(provider, source_uri) \
+                if self.cache else None
+            key_uri = ""
+            if provider == "memory":
+                # A temporary (scratch) layer, e.g. restored by the Memory
+                # Layer Saver plugin: its URI opens a new, empty layer, so its
+                # features are copied here, on the caller thread.
+                key_uri = f"memory:{source_uri}"
+                source_uri, fingerprint = self._memory_snapshot(r.layer)
+                provider = "ogr"
             sources[lid] = _SourceSnapshot(
                 layer_id=lid,
                 name=r.layer.name(),
-                source_uri=r.layer.source(),
-                provider=r.layer.providerType(),
+                source_uri=source_uri,
+                provider=provider,
                 order_by=self._order_by(r.layer),
                 crs_wkt=r.layer.crs().toWkt(),
                 feature_key=self.feature_keys.get(lid, ""),
-                data_fingerprint=(export_cache.source_fingerprint(
-                    r.layer.providerType(), r.layer.source()) if self.cache else None),
+                data_fingerprint=fingerprint if self.cache else None,
+                key_uri=key_uri,
             )
 
         # Snapshot rule groups.
@@ -631,6 +645,27 @@ class RulesExporter:
                           bool(clause.nullsFirst())) for clause in renderer.orderBy().list())
         except (AttributeError, RuntimeError):
             return ()
+
+    def _memory_snapshot(self, layer) -> Tuple[str, Optional[str]]:
+        """Caller thread: a memory layer's features (feature ids kept) in a
+        GeoPackage, and a fingerprint of its content for the export cache."""
+        import hashlib  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsVectorFileWriter  # pylint: disable=import-outside-toplevel
+        path = join(self.utils_dir, f"memory_{layer.id()}.gpkg")
+        if exists(path):
+            os.remove(path)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName, options.layerName = "GPKG", "memory"
+        error = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path, QgsProject.instance().transformContext(), options)
+        if error[0] != QgsVectorFileWriter.NoError:
+            self.feedback.reportError(f"Cannot copy temporary layer '{layer.name()}': {error[1]}")
+        digest = hashlib.sha256(layer.source().encode("utf-8"))
+        for feature in layer.getFeatures():
+            digest.update(str(feature.id()).encode())
+            digest.update(bytes(feature.geometry().asWkb()))
+            digest.update(repr(feature.attributes()).encode("utf-8"))
+        return f"{path}|layername=memory", digest.hexdigest()
 
     @staticmethod
     def _add_order_field(path: str, order_by) -> None:
@@ -1019,7 +1054,9 @@ class RulesExporter:
         group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
                  if f.name not in ("flat_rules", "output_dataset", "layer_name")}
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
-                  if f.name not in ("layer_id", "name", "feature_key")}
+                  if f.name not in ("layer_id", "name", "feature_key", "key_uri")}
+        if src.key_uri:  # a per-export copy: the layer's own URI
+            source["source_uri"] = src.key_uri
         return source, src.feature_key, self.extra_tile_fields.get(grp.layer_id, []), group
 
     def _dataset_key(self, context: dict, src: _SourceSnapshot, grp: _RuleGroupSnapshot) -> str:

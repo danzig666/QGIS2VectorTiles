@@ -237,3 +237,22 @@ def test_phone_layout(site, tmp_path):
     assert results[0]["panelHidden"] and results[0]["scrollWidth"] <= results[0]["width"]
     assert not results[1]["hidden"] and results[1]["expanded"] == "true" and results[1]["bottom"] == 640
     assert results[2] is True
+
+
+def test_map_stays_on_the_extent(site, tmp_path):
+    """"Keep the web map on the extent" (default): the centre cannot leave
+    the publication extent and the map zooms out at most one level beyond
+    the zoom that shows the whole extent."""
+    results = _run(site["url"], [{"eval": PRELUDE + """
+        const [w, s0, e, n] = man.view.bounds;
+        const fit = m.cameraForBounds([[w, s0], [e, n]], { padding: 0 }).zoom;
+        m.jumpTo({ center: [10, 60], zoom: 0 });
+        const c0 = m.getCenter();
+        m.panBy([5000, -5000], { animate: false });
+        const c1 = m.getCenter();
+        return { limit: man.view.limitToExtent, fit, zoom: m.getZoom(),
+                 inside: [c0, c1].every((c) => c.lng >= w && c.lng <= e && c.lat >= s0 && c.lat <= n) };"""}],
+        tmp_path)
+    out = results[0]
+    assert out["limit"] is True and out["inside"]
+    assert out["zoom"] >= out["fit"] - 1 - 1e-6 and out["zoom"] > 5

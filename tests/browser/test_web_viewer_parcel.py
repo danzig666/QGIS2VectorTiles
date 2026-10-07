@@ -77,7 +77,8 @@ def test_legend_lists_only_what_is_visible(site, tmp_path):
         {"eval": "document.getElementById('q2vt-tab-legend').click(); q2vtViewer.map.jumpTo({ center: %s, zoom: 17 }); return 1;" % json.dumps(anchor)},
         {"idle": True}, {"wait": 300},
         {"eval": "return document.querySelectorAll('#q2vt-pane-legend .q2vt-legend-item').length;"},
-        {"eval": "q2vtViewer.map.jumpTo({ center: [0, 0], zoom: 15 }); return 1;"},
+        # Far from every feature (with the extent limit lifted).
+        {"eval": "q2vtViewer.map.setTransformConstrain(null); q2vtViewer.map.jumpTo({ center: [0, 0], zoom: 15 }); return 1;"},
         {"idle": True}, {"wait": 300},
         {"eval": "return [...document.querySelectorAll('#q2vt-pane-legend .q2vt-legend-item')].map((i) => i.textContent).concat([q2vtViewer.map.getZoom(), JSON.stringify(q2vtViewer.map.getCenter())]);"},
         {"eval": "const box = document.querySelector('#q2vt-pane-legend input[role=switch]'); box.click(); return box.checked;"},

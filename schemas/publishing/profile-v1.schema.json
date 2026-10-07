@@ -92,6 +92,9 @@
         },
         "extentLayer": {
           "type": "string"
+        },
+        "limitToExtent": {
+          "type": "boolean"
         }
       }
     },
