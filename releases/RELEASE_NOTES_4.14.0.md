@@ -20,6 +20,9 @@ These were missing or approximate before and now look like QGIS:
 - **Pattern fills keep their size and stay sharp.** Point, SVG, raster and line-hatch fills in screen units were drawn up to 1.4× too large or too small between zoom levels, and slightly blurred. They now have exactly the QGIS size at every zoom and are pixel-sharp. Line hatches use the same whole-pixel spacing as QGIS.
 - **Gradient fills are smooth.** Rainbow and other colourful gradients showed visible stripes; the colour now changes in steps of about one colour level, as in QGIS.
 - **Arrows** (e.g. the "pointing arrow" style): the body tapers from the start width to the end width as in QGIS, the heads have the QGIS size, and every fill layer of the arrow is drawn, including the black drop shadow.
+- **Marker lines** with an interval in screen units (e.g. "cat trail"): the spacing was up to 19 % off between zoom levels; it now stays within 4 % of QGIS.
+
+Layers using screen-size marker intervals, point clusters or point displacement now export a dataset per eighth of a zoom level, so their export takes longer.
 
 ### Known differences
 - A line image or dash pattern starts again where a vector tile cuts the line (a limit of browser vector tiles).
@@ -30,6 +33,6 @@ These were missing or approximate before and now look like QGIS:
 |---|---|
 | `pytest tests/integration/test_more_symbology.py` | 10 passed (new: cluster, displacement ring and grid, interpolated line, vector field, merged and inverted polygons compared with QGIS; heatmap; lineburst and raster line images) |
 | `pytest tests/integration/test_gradient_fills.py` | 11 passed (now requires about one colour level of accuracy, was six) |
-| Pattern, arrow and sprite tests (`test_materialize.py -k "pattern or arrow"`, `test_sprites.py`, `test_patterns_and_assets.py`) | passed |
-| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or dash"` | passed (screen-unit pattern spacing now within 3 % between zooms, was 30 %) |
+| Pattern, arrow, marker-line and sprite tests (`test_materialize.py -k "pattern or arrow or interval or marker_line or screen"`, `test_sprites.py`, `test_patterns_and_assets.py`) | passed |
+| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or dash or marker or interval"` | passed (screen-unit pattern spacing now within 3 % between zooms, was 30 %) |
 | `pytest tests/integration/test_end_to_end.py` | 21 passed |

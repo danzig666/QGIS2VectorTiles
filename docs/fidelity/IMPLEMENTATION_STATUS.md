@@ -84,3 +84,11 @@ and look, a different phase; the gallery's per-pixel score counts that phase as 
 * Offsets of polygon outlines move inwards for positive values whatever the ring
   orientation (QGIS buffers each ring).
 * Tile archives no longer repeat per-zoom datasets at every zoom (smaller archives).
+* 4.14: pattern fills sized in screen units keep the QGIS size at every zoom and are
+  pixel-sharp (they were 0.7×–1.4× between zooms and resampled); screen hatches use QGIS's
+  whole-pixel spacing.
+* 4.14: gradient and shapeburst fills step about one colour level (more band polygons per
+  feature, merged where narrower than a pixel two zooms past the archive).
+* 4.14: screen-size marker intervals, point clusters and point displacement are exported in
+  eighths of a zoom: more datasets and a longer export for such layers.
+* 4.14: arrows draw their tapered body, QGIS-size heads and every fill layer (drop shadows).

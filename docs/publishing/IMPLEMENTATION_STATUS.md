@@ -1050,3 +1050,31 @@ italic Liberation Sans) that was horizontal on the web.
 | Run | Result |
 |---|---|
 | `pytest tests/browser/test_web_viewer_streetview.py` | 6 passed (new: a 403 from the Map Tiles API shows why the lines are missing; a tap still opens the panorama) |
+
+## 4.14.0: every built-in QGIS symbol type, exact pattern sizes, smooth gradients
+
+- **New:** lineburst, interpolated line, raster line, vector field marker, merged features,
+  inverted polygons, heatmap, point cluster and point displacement (see
+  `docs/fidelity/IMPLEMENTATION_STATUS.md`, "Symbology added beyond the plan"). Every
+  built-in QGIS 3.34 symbol layer type is converted; only plugin symbol layers are reported
+  as unsupported.
+- **Patched MapLibre** (`tools/patch_maplibre.py`, re-run after updating MapLibre): style
+  layers flagged `metadata: {"q2vt:screen-pattern": true}` draw their fill pattern at the
+  real zoom (no 2× growth between zooms, no cross-fade copy) on whole device pixels.
+- **Fill patterns** in screen units are rendered at their true size (were 1/√2) and flagged;
+  screen hatches use QGIS's truncated brush image (2 mm = 7.56 px drawn 7 px apart).
+- **Gradients:** about one colour level per band (up to 1024), merged per feature below a
+  pixel; band edges keep two tile units from the feature's vertices (a band edge on a hole's
+  side filled the hole in the browser).
+- **Arrows:** tapered body ending at the head (screen sizes per zoom band), heads of end
+  width + head thickness, every fill layer drawn (offset layers with a viewport translate).
+- **Marker lines:** screen-size intervals in eighths of a zoom (within 4 % of QGIS).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_more_symbology.py` | 10 passed (new file) |
+| `pytest tests/integration/test_gradient_fills.py` | 11 passed (accuracy now ~1 colour level, was 6) |
+| `pytest tests/integration/test_materialize.py -k "pattern or arrow or interval or marker_line or screen"` | passed |
+| `pytest tests/integration/test_sprites.py tests/unit/test_patterns_and_assets.py` | passed |
+| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or dash or marker or interval"` | passed (screen-unit pattern spacing within 3 % between zooms, was 30 %) |
+| `pytest tests/integration/test_end_to_end.py` | 21 passed (unsupported-layer tests use a plugin-style custom symbol layer) |
