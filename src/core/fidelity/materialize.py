@@ -239,13 +239,15 @@ def grid_recipe(dx: float, dy: float, disp_x: float, disp_y: float, off_x: float
                 off_y: float, construction_crs: str, anchor: str, inset: float = 0.0,
                 rows_from_top: bool = False, segments=(), clip_shape: bool = False,
                 clip_mode: str = "", deviation=(0.0, 0.0), seed: int = 0, paths=(),
-                fill: bool = False, stroke=None) -> Recipe:
+                fill: bool = False, stroke=None, ordered: bool = False) -> Recipe:
     """Point-pattern grid in map units (see :func:`grid_expression`)."""
     params = [
         ("dx", float(dx)), ("dy", float(dy)), ("disp_x", float(disp_x)),
         ("disp_y", float(disp_y)), ("off_x", float(off_x)), ("off_y", float(off_y)),
         ("crs", construction_crs), ("anchor", anchor), ("inset", float(inset)),
         ("top", bool(rows_from_top))]
+    if ordered:  # points carry their drawing rank (see grid_expression)
+        params.append(("ordered", True))
     if deviation[0] or deviation[1]:
         params += [("dev_x", float(deviation[0])), ("dev_y", float(deviation[1])),
                    ("seed", int(seed))]
@@ -380,6 +382,12 @@ def marker_segments(shape: str, size: float, angle: float = 0.0,
         bx, by = screen(x2 * half, y2 * half)
         segments.append((ax + ox, ay + oy, bx + ox, by + oy))
     return tuple(segments)
+
+
+# Drawing rank of an ordered grid point (z): (column + shift) * rows + row +
+# shift, column and row counted from the feature's grid anchor.
+GRID_RANK_SHIFT = 64
+GRID_RANK_ROWS = 16384
 
 
 # Grid anchor of the whole feature, kept when a polygon is cut into pieces.
@@ -576,6 +584,12 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
             keep = f"intersects(@q2vt_g, {rect})"
         else:  # centre of the bounds intersecting the polygon
             keep = f"intersects(@q2vt_g, {centre})"
+    elif p("ordered"):
+        # QGIS's drawing rank as z: column by column, rows from the top
+        # (GEOS returns the clipped points sorted by coordinate).
+        element = (f"make_point({point_x}, {point_y}, "
+                   f"({i} + {GRID_RANK_SHIFT}) * {GRID_RANK_ROWS} + {j} + {GRID_RANK_SHIFT})")
+        keep, final = "true", f"intersection({clip}, @q2vt_all)"
     else:
         element = f"make_point({point_x}, {point_y})"
         keep, final = "true", f"intersection({clip}, @q2vt_all)"
@@ -587,9 +601,10 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         f"if({count} > {MAX_GRID_POINTS}, NULL, "
         f"with_variable('q2vt_all', collect_geometries(array_filter(array_foreach("
         f"generate_series(0, {count} * {per_point} - 1), "
+        # Column by column, as QGIS draws the markers (later ones on top).
         f"with_variable('q2vt_ij', array("
-        f"@q2vt_r[0] + floor(@element / {per_point}) % (@q2vt_r[1] - @q2vt_r[0] + 1), "
-        f"@q2vt_r[2] + floor(floor(@element / {per_point}) / (@q2vt_r[1] - @q2vt_r[0] + 1)), "
+        f"@q2vt_r[0] + floor(floor(@element / {per_point}) / (@q2vt_r[3] - @q2vt_r[2] + 1)), "
+        f"@q2vt_r[2] + floor(@element / {per_point}) % (@q2vt_r[3] - @q2vt_r[2] + 1), "
         f"@element % {per_point}), "
         f"if({keep}, {element}, NULL))), @element IS NOT NULL)), {final})))))"
     )

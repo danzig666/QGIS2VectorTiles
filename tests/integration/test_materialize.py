@@ -242,7 +242,6 @@ def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     at the 1/sqrt(2) compromise for stock tile-zoom scaling."""
     from qgis.core import QgsPointPatternFillSymbolLayer
     from q2vt_plugin.src.core import maplibre_converter as mc
-    from fidelity.patterns import point_pattern_cell
     from fidelity.diagnostics import DiagnosticCollector
     pp = QgsPointPatternFillSymbolLayer()
     marker = _marker(Qgis.MarkerShape.Square, 1)
@@ -264,8 +263,8 @@ def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
                                      exporter.PATTERN_ANCHOR_FLAG: "feature"}
     cell = exporter.pattern_images[layer_def["paint"]["fill-pattern"]].img_1x
     px = 4 * 96 / 25.4
-    width, height, _, _ = point_pattern_cell(px, px, 0, 0)
-    assert cell.size == (width, height)
+    # QGIS's texture brush: two spacings, truncated to whole pixels.
+    assert cell.size == (int(2 * px), int(2 * px))
     assert exporter._screen_scale() == exporter.TEXTURE_SCREEN_SCALE  # reset afterwards
 
 
@@ -826,6 +825,49 @@ def test_pattern_pieces_give_the_whole_feature_pattern(plugin, tmp_path, monkeyp
         # feature: compare the drawn line work.
         assert QgsGeometry.unaryUnion([ours]).length() == pytest.approx(
             QgsGeometry.unaryUnion([whole]).length(), rel=1e-6)
+
+
+def test_screen_point_pattern_markers_are_whole_and_in_qgis_order(plugin, tmp_path, monkeypatch):
+    """A screen-unit point pattern drawn marker by marker ("centroid
+    within"): whole markers on a grid from the feature's top-left corner,
+    the row on the top edge included, written column by column from the
+    left, each column from the top (QGIS's drawing order, later markers on
+    top), also when the polygon is cut into pieces."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity import materialize as mat
+    from fidelity.diagnostics import DiagnosticCollector
+    monkeypatch.setattr(mat, "PIECE_CELLS", 4)  # several pieces
+    layer = _layer("Polygon", ["POLYGON((-100 -90, 95 -90, 95 80, -100 80, -100 -90))"],
+                   str(tmp_path / "p.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 14)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(10)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+    pp.setClipMode(Qgis.MarkerClipMode.CentroidWithin)
+    pp.setCoordinateReference(Qgis.SymbolCoordinateReference.Feature)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(16, 16, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    assert len(rules) == 8 and all(r.recipe.param("ordered") for r in rules)  # eighths of z16
+    assert {r.z_order for r in rules} == {"source"}
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    layers, rules = RulesExporter(rules, EXTENT, 16, 16, str(utils), 0, QgsProcessingFeedback(),
+                                  diagnostics=diags).export()
+    assert len(layers) == 8
+    for output in layers:
+        points = [f.geometry().asPoint() for f in output.getFeatures()]
+        xs = sorted({round(p.x(), 6) for p in points})
+        ys = sorted({round(p.y(), 6) for p in points}, reverse=True)
+        assert len(xs) > 8 and len(ys) > 8 and len(points) == len(xs) * len(ys)
+        assert xs[0] == -100 and ys[0] == 80  # the left and top edges' markers
+        assert [(round(p.x(), 6), round(p.y(), 6)) for p in points] == \
+            [(x, y) for x in xs for y in ys]
 
 
 def test_patterns_over_the_budget_become_textures(plugin, tmp_path, monkeypatch):

@@ -81,6 +81,8 @@ def _compare(tmp_path, layer, metric="near", center=CENTER):
     browser_png = str(tmp_path / "v_browser.png")
     if metric == "shape":  # pixel-level mismatch (the gallery score)
         return gallery.score(qgis_png, browser_png)["shape"]
+    if metric == "color":  # colour mismatch (the gallery's colour score)
+        return gallery.score(qgis_png, browser_png)["color"]
     if metric == "darkness":  # total ink, 1 = one fully black pixel (qgis, browser)
         from PIL import Image
         return tuple(sum(255 - v for v in Image.open(path).convert("L").getdata()) / 255.0
@@ -461,3 +463,49 @@ def test_feature_aligned_patterns_of_features_beyond_the_view(tmp_path, kind):
     layer = to_geopackage(layer, str(tmp_path / "big.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_feature_pattern(kind, tmp_path)])))
     assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+def _overlapping_squares(clip_mode):
+    """Point pattern of outlined squares larger than their spacing, so their
+    stacking order shows: QGIS draws them column by column from the left,
+    each column from the top (later markers on top)."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pattern = QgsPointPatternFillSymbolLayer()
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(15.3)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 19)
+    marker.setSizeUnit(Qgis.RenderUnit.Pixels)
+    marker.setColor(QColor("#e0b040"))
+    marker.setStrokeColor(QColor("#202060"))
+    marker.setStrokeWidth(2)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.Pixels)
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    pattern.setClipMode(clip_mode)
+    pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Feature)
+    return pattern
+
+
+@pytest.mark.parametrize("clip,metric,limit", [("centroid", "shape", 0.03),
+                                                ("shape", "color", 0.03)])
+def test_overlapping_pattern_markers_stack_like_qgis(tmp_path, clip, metric, limit):
+    """Point patterns whose markers overlap. "Centroid within": whole
+    markers, also the row centred on the top edge (4.16: cut at the edge,
+    4.8 % of the pixels off); the rest is the spacing kept per eighth of a
+    zoom (±4.5 %). "Shape": QGIS's own texture, two spacings truncated to
+    whole pixels, markers stacked in its drawing order (4.16: 19 % of the
+    colours off)."""
+    px = gallery.EARTH / (512 * 2 ** ZOOM)
+    layer = QgsVectorLayer("MultiPolygon?crs=EPSG:3857", "squares", "memory")
+    feature = QgsFeature()
+    geometry = QgsGeometry.fromWkt(
+        "MULTIPOLYGON((({a} {b}, {c} {b}, {c} {d}, {a} {d}, {a} {b})))".format(
+            a=-120.4 * px, b=-110 * px, c=104.3 * px, d=95.6 * px))
+    geometry.translate(*CENTER)
+    feature.setGeometry(geometry)
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "squares.gpkg"))
+    mode = {"centroid": Qgis.MarkerClipMode.CentroidWithin,
+            "shape": Qgis.MarkerClipMode.Shape}[clip]
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_overlapping_squares(mode)])))
+    assert _compare(tmp_path, layer, metric=metric) < limit

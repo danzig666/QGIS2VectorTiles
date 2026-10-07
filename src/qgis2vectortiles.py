@@ -542,6 +542,8 @@ class QGIS2VectorTiles:
                           for rule in rules or [] if getattr(rule, "effect_role", None)},
             inner_effects={rule.rule.description(): rule.inner_effect
                            for rule in rules or [] if getattr(rule, "inner_effect", None)},
+            z_orders={rule.rule.description(): rule.z_order
+                      for rule in rules or [] if getattr(rule, "z_order", None)},
         )
         exporter.export()
         return exporter

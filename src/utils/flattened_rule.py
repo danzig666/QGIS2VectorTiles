@@ -59,6 +59,9 @@ class FlattenedRule:
     # Inner effects (inner shadow / glow) as strips across the line, coloured
     # by the run's screen direction (SymbolMaterializer._inner_effect_spec).
     inner_effect: Optional[dict] = None
+    # "source": symbols drawn in data order (overlapping pattern markers
+    # stacked as QGIS draws them), not sorted by screen position.
+    z_order: Optional[str] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -67,6 +70,7 @@ class FlattenedRule:
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
+            self.z_order,
         )
 
     @property

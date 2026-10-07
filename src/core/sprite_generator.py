@@ -98,6 +98,35 @@ class PatternImages:
     metadata: Optional[Dict[str, object]] = None
 
 
+def _pixels_to_millimeters(symbol: QgsSymbol) -> None:
+    """Sizes in pixels as the same millimetres (96 DPI): QGIS draws pixel
+    sizes 1:1 whatever the render context's scale, so an oversampled sprite
+    (e.g. the @2x sheet) of a pixel-sized marker came out at its 1x size."""
+    pixels = Qgis.RenderUnit.Pixels
+    for layer in symbol.symbolLayers():
+        for unit_getter in [name for name in dir(layer)
+                            if name.endswith("Unit") and not name.startswith("set")]:
+            base = unit_getter[:-len("Unit")]
+            setter = f"set{base[:1].upper()}{base[1:]}"
+            unit_setter = f"set{unit_getter[:1].upper()}{unit_getter[1:]}"
+            if not all(hasattr(layer, name) for name in (base, setter, unit_setter)):
+                continue
+            try:
+                if getattr(layer, unit_getter)() != pixels:
+                    continue
+                value = getattr(layer, base)()
+                if isinstance(value, QPointF):
+                    value = QPointF(value.x() / _PX_PER_MM, value.y() / _PX_PER_MM)
+                elif isinstance(value, (int, float)):
+                    value = value / _PX_PER_MM
+                else:
+                    continue
+                getattr(layer, setter)(value)
+                getattr(layer, unit_setter)(Qgis.RenderUnit.Millimeters)
+            except (TypeError, AttributeError, RuntimeError):
+                continue
+
+
 @dataclass
 class SymbolImage:
     """Render a QGIS symbol as a centre-preserving cropped PIL image."""
@@ -229,6 +258,8 @@ class SymbolImage:
         symbol = self._independent_copy(self.symbol)
         if not self.bake_rotation and isinstance(symbol, QgsMarkerSymbol):
             symbol.setAngle(0)
+        if self.scale_factor != 1 and isinstance(symbol, QgsMarkerSymbol):
+            _pixels_to_millimeters(symbol)
         canvas = int(_BASE_CANVAS_PX * max(1.0, self.scale_factor / 3.0))
         if isinstance(symbol, QgsMarkerSymbol):
             qt_img = self._render_marker(symbol)

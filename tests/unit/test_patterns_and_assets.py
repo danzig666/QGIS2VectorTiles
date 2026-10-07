@@ -146,3 +146,25 @@ def test_screen_hatch_spacing_is_truncated_like_qgis():
     assert spacing == pytest.approx(8 * math.cos(math.atan2(8, 15)))
     assert qgis_image_hatch(150, 7.559)[0] % 180 == pytest.approx(180 - qgis_image_hatch(30, 7.559)[0])
     assert qgis_image_hatch(0, 0.6) == (0, 0.6)  # under a pixel: unchanged
+
+
+def test_apply_pattern_positions_follow_qgis():
+    """QgsPointPatternFillSymbolLayer::applyPattern: a QImage of two
+    spacings truncated to whole pixels, markers at the real spacing in QGIS's
+    drawing order (x outer, y inner; then the displaced passes), not
+    wrapped."""
+    from fidelity.patterns import apply_pattern_positions, tile_markers
+    width, height, positions = apply_pattern_positions(18.9, 18.9)
+    assert (width, height) == (37, 37)
+    # First pass: the corners of the 2x2 cell, column by column.
+    assert positions[:5] == [(-37.8, -37.8), (-37.8, 0.0), (-37.8, 37.8), (-37.8, 75.6),
+                             (0.0, -37.8)]
+    assert (18.9, 18.9) in positions and (37.8, 37.8) in positions  # one spacing apart
+    # Displacement X moves the odd rows; Y moves the odd columns up.
+    _, _, shifted = apply_pattern_positions(10, 10, 5, 2)
+    assert (5.0, 10.0) in shifted and (10.0, -2.0) in shifted
+    marker = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
+    cell = tile_markers(marker, width, height, positions, wrap=False)
+    assert cell.size == (37, 37)
+    # The marker at x = 37.8 is cut at the right edge, not wrapped to x = 0.8.
+    assert cell.getpixel((36, 18))[3] > 0 and cell.getpixel((2, 18))[3] == 0

@@ -175,6 +175,9 @@ class ConversionContext:
         # Oversampling of map-unit sprites drawn for one zoom band (None:
         # one sprite for the component's whole zoom range).
         self.sprite_oversampling = None
+        # Screen-size icons drawn from an image this many times larger (None:
+        # 1:1), see QgisMapLibreStyleExporter.PATTERN_MARKER_OVERSAMPLING.
+        self.icon_oversampling = None
 
     def report(self, code: str, message: str = "", **extra):
         extra.setdefault("component", self.component)
@@ -787,7 +790,8 @@ class IconPropertyExtractor:
                 # Drawn 1:1 like QGIS draws it: an oversampled image shrunk
                 # by the GPU (no mipmaps) breaks thin outlines into dots.
                 static = ex.is_number(icon_size) and not IconPropertyExtractor._rotated(symbol)
-                return icon_size, 1.0, (1.0 if static else None)
+                return icon_size, 1.0, \
+                    (getattr(context, "icon_oversampling", None) or 1.0) if static else None
             mupp = 1.0 / max(PropertyExtractor.static_pixels(1.0, "map", context.reference_zoom),
                              1e-12)
             return icon_size, mupp, context.sprite_oversampling or float(_SPRITE_QUALITY)
@@ -1603,6 +1607,7 @@ class QgisMapLibreStyleExporter:
         translates: Optional[Dict[str, tuple]] = None,
         effect_roles: Optional[Dict[str, str]] = None,
         inner_effects: Optional[Dict[str, dict]] = None,
+        z_orders: Optional[Dict[str, str]] = None,
     ):
         """Initialise the exporter.
 
@@ -1637,6 +1642,8 @@ class QgisMapLibreStyleExporter:
         self.effect_roles = effect_roles or {}
         # Style name -> inner effect strips (SymbolMaterializer._inner_effects).
         self.inner_effects = inner_effects or {}
+        # Style name -> symbol-z-order ("source": data order).
+        self.z_orders = z_orders or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1799,14 +1806,29 @@ class QgisMapLibreStyleExporter:
             self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
         first = len(self.style["layers"])
-        self._convert_symbol(
-            style.symbol(), style.styleName(), style.layerName(),
-            self.source_name, bounds[0], bounds[1],
-        )
+        z_order = getattr(self, "z_orders", {}).get(style.styleName())
+        # Pattern markers sit at fractional pixels, which QGIS draws
+        # anti-aliased. MapLibre draws a 1:1 icon at the nearest pixel, which
+        # rounds the overlaps between markers into visible bands; an image
+        # twice as large, shrunk by the GPU, is anti-aliased like QGIS's.
+        self.context.icon_oversampling = self.PATTERN_MARKER_OVERSAMPLING if z_order else None
+        try:
+            self._convert_symbol(
+                style.symbol(), style.styleName(), style.layerName(),
+                self.source_name, bounds[0], bounds[1],
+            )
+        finally:
+            self.context.icon_oversampling = None
         if style.styleName() in self.ordered_styles:
             self._apply_draw_order(self.style["layers"][first:])
         if style.styleName() in self.translates:
             self._apply_translate(self.style["layers"][first:], self.translates[style.styleName()])
+        if z_order:  # markers drawn in data order (QGIS's drawing order)
+            for layer_def in self.style["layers"][first:]:
+                if layer_def.get("type") == "symbol":
+                    layer_def.setdefault("layout", {})["symbol-z-order"] = z_order
+
+    PATTERN_MARKER_OVERSAMPLING = 2.0
 
     _TRANSLATE = {"fill": "fill", "line": "line", "circle": "circle", "symbol": "icon"}
 
@@ -2378,7 +2400,8 @@ class QgisMapLibreStyleExporter:
 
     def _register_point_pattern(self, layer) -> Optional[str]:
         """Seamless texture for a point pattern spaced in screen units."""
-        from .fidelity.patterns import point_pattern_cell, tile_markers  # pylint: disable=import-outside-toplevel
+        from .fidelity.patterns import (apply_pattern_positions, point_pattern_cell,  # pylint: disable=import-outside-toplevel
+                                        tile_markers)
         marker = layer.subSymbol()
         if marker is None:
             return None
@@ -2408,6 +2431,25 @@ class QgisMapLibreStyleExporter:
             return self._textures(cells[0], cells[1], error, "Point pattern")
         one, two = self._marker_images(marker)
         cells = []
+        if not self._whole_markers(layer) and not layer.angle() and \
+                not layer.maximumRandomDeviationX() and not layer.maximumRandomDeviationY() \
+                and self._exact_screen_texture and not self._pattern_uses_map_units(layer) \
+                and 1 <= 2 * dx and 1 <= 2 * dy \
+                and 2 * dx <= 1000 and 2 * dy <= 1000:
+            # QGIS's own texture brush (applyPattern): its truncated size and
+            # drawing order, so overlapping markers stack as in QGIS. (QGIS
+            # draws the markers one by one when that image would be empty or
+            # over 2000 px.)
+            disp_x, disp_y = (self._pattern_offset_px(layer.displacementX(),
+                                                      layer.displacementXUnit(), 2 * dx),
+                              self._pattern_offset_px(layer.displacementY(),
+                                                      layer.displacementYUnit(), 2 * dy))
+            for ratio, image in ((1, one), (2, two)):
+                width, height, positions = apply_pattern_positions(
+                    dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio,
+                    off_x * ratio, off_y * ratio)
+                cells.append(tile_markers(image, width, height, positions, wrap=False))
+            return self._textures(cells[0], cells[1], 0.0, "Point pattern")
         for ratio, image in ((1, one), (2, two)):
             width, height, positions, _ = point_pattern_cell(
                 dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio)
@@ -2415,6 +2457,13 @@ class QgisMapLibreStyleExporter:
                          for x, y in positions]
             cells.append(tile_markers(image, width, height, positions))
         return self._textures(cells[0], cells[1], error, "Point pattern")
+
+    @staticmethod
+    def _whole_markers(layer) -> bool:
+        """Point pattern drawn marker by marker in QGIS (a clip mode other
+        than "Shape"), not with a texture brush."""
+        return hasattr(layer, "clipMode") and \
+            _enum_int(layer.clipMode()) != _enum_int(Qgis.MarkerClipMode.Shape)
 
     # A texture of markers with random data-defined values repeats after
     # about this many pixels (several markers per direction).
