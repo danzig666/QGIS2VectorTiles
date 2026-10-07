@@ -20,7 +20,7 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 | PR-11 | Label typography, glyph calibration, offsets | **Done** | Glyph metrics calibrated (24 px em, bearings), size factor removed, font stacks shared with glyph generation, `ő`/`ű`. |
 | PR-12 | Render ordering, geometry hardening | **Done** | QGIS draw order (later rules on top, rendering passes, layer tree), renderer order-by as sort keys, symbol-reach extent buffer with tile pruning, generators in the layer CRS, same-type generators drawn with their sub-symbol. *Not reproducible:* per-feature interleaving of different style layers. |
 | PR-13 | Pinned labels and callouts | **Partial** | Data-defined X/Y labels exported at the point with the data-defined alignment, always shown; simple callouts as leader lines ending at the label anchor. *Missing:* QGIS PAL-computed placements; leaders ending on the label box. |
-| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows as in `QgsArrowSymbolLayer` (straight first→last, circular arcs, per-segment; body tapered from the start to the end width and ending at the head; heads of end width + head thickness; every fill layer drawn, shifted ones as screen-offset copies such as drop shadows); hash lines as marker lines; filled lines as strokes. *Approximate:* half arrows (drawn full); curved arrows have straight-sided heads. |
+| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows are the polygons `QgsArrowSymbolLayer` fills (a port of its straight and curved arrow construction with Qt's own arcs, every head and arrow type, its vertex pairing; pixel-identical to QGIS in tests), built in painter pixels per eighth of a zoom for screen sizes and filled with the arrow's fill symbol; opaque multi-layer fills (drop shadows) keep QGIS's per-arrow drawing order; arrow lines keep all their vertices (no base-layer simplification). Hash lines as marker lines; filled lines as strokes. |
 | PR-15 | Raster fallback / compositing groups | Not started | *Hybrid* mode is selectable but reports `Q2VT_HYBRID_NOT_AVAILABLE`. |
 | PR-16 | Atomic publication, HTTP packaging, UI report | **Mostly done** | Cancellable `ogr2ogr`, XML-safe VRT, JSON/HTML report, strict failures remove only the new output; optional static web package (`web/`: XYZ tiles, relative-URL style, viewer; written atomically, works from any sub-directory of a plain web server); popups escape attribute text. *Missing:* PMTiles output, fidelity panel inside the viewer. |
 
@@ -41,6 +41,24 @@ blend tolerance):
 | Heatmap | MapLibre heatmap: radius and colours fitted to QGIS's quartic kernel, intensity per zoom from the densest point | 4.7 % |
 | Point cluster | QGIS grouping per eighth of a zoom; cluster symbol with `@cluster_size` | 1.9 % |
 | Point displacement | Ring / concentric rings / grid around the centre symbol, circle or grid lines | 0.7 % |
+
+### Line effects and offsets (4.15)
+
+| Item | How | Gallery (worst zoom) |
+|---|---|---|
+| Pointing arrow (curved repeated arrows, drop-shadow fill) | QGIS's arrow polygons; per-arrow layer order | 3.0 / 1.3 % at 14.6 / 16.25 (was 38 / 35 %); 17.8: see below |
+| Effect emboss (inner shadow) | Runs by screen direction (36 buckets, direction over one line width per zoom); strips about 1 px wide across the line, each coloured by QGIS's rendering of a straight line of that direction; line ends and turns by QGIS's cap colour | 24 / 11 / 5 % (was 59 / 68 / 76 %); the rest where the zigzag's legs nearly touch |
+| Effect neon (outer glow + inner shadow) | Glow as a blurred line from a copy simplified at an eighth of the glow's width per zoom (no spikes on dense vertices); inner shadow as above | 1.6 / 0.1 / 1.0 % (was 4.1 / 1.1 / 0.9 %, with spikes) |
+| Topo steps (±1.4 mm offsets) | GEOS offset curves (QGIS's `offsetLine`) per eighth of a zoom up to the zoom where the layer's corners no longer make MapLibre's `line-offset` loop (99.5 % of the corners), native above | 15 / 16 / 15 % (was 24 / 20 / 16 %): the offset lines match; the rest is the phase of the tick markers (a screen interval is exact at the middle of each eighth of a zoom, so the phase drifts along long lines) |
+
+At 17.8 the pointing-arrow line runs out of the view: QGIS clips it to the view (plus 10 %)
+first and pairs the clipped vertices into different arrows, so its own arrows change while
+panning (the gallery scores 70 %; with the symbol's "clip features to extent" off, QGIS
+and the web map differ by 2.2 % of the pixels, the rest a three-vertex semicircle whose head side QGIS
+decides by floating-point rounding).
+Inner effects are computed for straight lines: where lines overlap or nearly touch, QGIS
+shades their union, the web map each line (lighter strips are drawn last, so overlaps are
+light as in QGIS).
 
 *Not reproducible:* a line pattern or dash restarts where a vector tile cuts the line
 (MapLibre measures the distance along a line per tile); QGIS fits gradients to the visible

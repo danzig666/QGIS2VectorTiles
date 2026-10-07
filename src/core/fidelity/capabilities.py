@@ -55,8 +55,15 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("SimpleLine", "line", Strategy.NATIVE,
                "Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit "
                "custom dashes are exported as their dashes (Qt pattern restarted on every "
-               "line and ring) from the zoom where the pattern is 6 px long.",
+               "line and ring) from the zoom where the pattern is 6 px long. Offsets are "
+               "QGIS's offset curves where MapLibre's line-offset would loop at corners "
+               "(screen units: per eighth of a zoom up to the zoom where the corners allow "
+               "it). Outer glow and drop shadow are blurred lines drawn from a copy "
+               "simplified at the effect's size; inner shadow and inner glow are strips "
+               "across the line coloured by QGIS's own rendering for the line's direction.",
                ("Map-unit widths become exponential zoom curves.",
+                "Inner effects are computed for a straight line: where lines overlap or "
+                "nearly touch, QGIS shades their union, the web map each line.",
                 "Other dashes are MapLibre dash arrays: they restart where tiles clip a line.",
                 "Aligned or corner-tweaked dash patterns and trimmed lines use MapLibre "
                 "dash arrays."),
@@ -102,15 +109,18 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Hash angle relative to a data-defined value is frozen.",),
                ("tests/integration/test_materialize.py",)),
     Capability("ArrowLine", "line", Strategy.MATERIALIZED,
-               "Straight, per-segment and curved (circular arc) arrows: the body as a line "
-               "tapered from the start to the end width and ending at the head, heads as "
-               "rotated triangles (end width + head thickness); every fill layer drawn as its "
-               "own copy, shifted by its screen offset (drop shadows).",
-               ("Curved arrows have straight-sided heads; half arrows are drawn as full ones.",
-                "Fill outlines and non-solid arrow fills are drawn as solid colours.",
-                "QGIS re-pairs the vertices of curved repeated arrows after clipping the "
-                "line to the view; the web map keeps the line's own vertices."),
-               ("tests/integration/test_materialize.py", "tests/integration/test_gradient_fills.py")),
+               "The polygons QGIS fills (its straight and curved arrow construction, every "
+               "head and arrow type, the vertex pairing of repeated and curved arrows), filled "
+               "with the arrow's fill symbol; screen sizes per eighth of a zoom. Opaque "
+               "multi-layer fills (a drop shadow) keep QGIS's per-arrow drawing order; the "
+               "line keeps all its vertices.",
+               ("Sizes are within +-4.5 % between eighths of a zoom; beyond the archive's "
+                "last zoom the arrows scale with the map.",
+                "QGIS rebuilds arrows from the line clipped to the view, so near the view's "
+                "edge its own arrows change while panning; the web map keeps the whole line.",
+                "Data-defined arrow sizes use their static values."),
+               ("tests/integration/test_line_shapes.py", "tests/integration/test_materialize.py",
+                "tests/integration/test_gradient_fills.py")),
     Capability("FilledLine", "line", Strategy.MATERIALIZED,
                "Exported as a stroke of the fill width with the fill sub-symbol colour.",
                ("Pattern/gradient fills inside the line are drawn with their base colour.",),

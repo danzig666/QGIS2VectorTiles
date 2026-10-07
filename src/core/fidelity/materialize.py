@@ -31,6 +31,8 @@ CLUSTER_COLOR_FIELD = "q2vt_cluster_color"  # @cluster_color (the members' commo
 BAND_FIELD = "q2vt_mat_band"        # colour band of a gradient / shapeburst fill
 COLOR_FIELD = "q2vt_mat_color"      # its colour ("r,g,b,a", QgsSymbolLayerUtils.encodeColor)
 WIDTH_FIELD = "q2vt_mat_width"      # its stroke width (symbol units): interpolated lines
+DIRECTION_FIELD = "q2vt_mat_dir"     # screen direction bucket of a line run (inner effects)
+RUN_FIELD = "q2vt_mat_run"          # its ordinal along the lines (earlier runs' caps on top)
 
 VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVertex",
                                "CurvePoint"})
@@ -590,64 +592,6 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     if crs == export_crs:
         return body
     return f"transform({body}, '{crs}', '{export_crs}')"
-
-
-def _arc_through(a: str, b: str, c: str) -> str:
-    """Segmentized circular arc through three point expressions."""
-    def xy(point):
-        return f"x({point}) || ' ' || y({point})"
-    return (f"densify_by_count(geom_from_wkt('CircularString (' || {xy(a)} || ', ' || "
-            f"{xy(b)} || ', ' || {xy(c)} || ')'), 0)")
-
-
-def arrow_body_expression(curved: bool, repeated: bool, cut_start: float = 0.0,
-                          cut_end: float = 0.0, geom: str = "@geometry") -> str:
-    """Geometry of QGIS arrow bodies (``QgsArrowSymbolLayer``).
-
-    * straight: from the first to the last vertex; *repeated*: one arrow per
-      segment;
-    * curved: a circular arc through the first, middle (index n/2) and last
-      vertex; *curved repeated*: arcs through each vertex triple, a straight
-      arrow for a remaining single segment.
-
-    ``cut_start``/``cut_end`` (layer units) shorten a single arrow's body
-    under its heads so a wide body does not stick out of the head's tip.
-    """
-    n = f"num_points({geom})"
-
-    def point(index):
-        return f"point_n({geom}, {index})"
-    if repeated and curved:
-        body = (f"collect_geometries(array_foreach(generate_series(0, {n} - 2, 2), "
-                f"if(@element + 2 < {n}, "
-                f"{_arc_through(point('@element + 1'), point('@element + 2'), point('@element + 3'))}, "
-                f"make_line({point('@element + 1')}, {point('@element + 2')}))))")
-    elif repeated:
-        body = f"segments_to_lines({geom})"
-    elif curved:
-        body = (f"if({n} >= 3, {_arc_through(point(1), point(f'floor({n} / 2) + 1'), point(n))}, "
-                f"{geom})")
-    else:
-        body = f"make_line({point(1)}, {point(n)})"  # QGIS joins first and last vertex
-    if not repeated and (cut_start or cut_end):
-        body = (f"with_variable('q2vt_body', {body}, line_substring(@q2vt_body, {float(cut_start)}, "
-                f"max({float(cut_start)}, length(@q2vt_body) - {float(cut_end)})))")
-    return body
-
-
-def arrow_body_for(recipe: Recipe, export_crs: str = "EPSG:3857", cuts: bool = True) -> str:
-    """``arrow_body_expression`` for a recipe, evaluated in the recipe's CRS
-    (the project CRS, like QGIS) and returned in ``export_crs``."""
-    def body(geom):
-        return arrow_body_expression(
-            bool(recipe.param("arrow_curved")), bool(recipe.param("arrow_repeated")),
-            recipe.param("cut_start", 0.0) if cuts else 0.0,
-            recipe.param("cut_end", 0.0) if cuts else 0.0, geom)
-    crs = recipe.param("crs") or export_crs
-    if crs == export_crs:
-        return body("@geometry")
-    return (f"transform(with_variable('q2vt_src', transform(@geometry, '{export_crs}', '{crs}'), "
-            f"{body('@q2vt_src')}), '{crs}', '{export_crs}')")
 
 
 def glyph_recipe(wkt: str, angle: str, construction_crs: str) -> Recipe:
