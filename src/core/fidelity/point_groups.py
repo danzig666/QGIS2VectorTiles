@@ -62,7 +62,7 @@ def centroid(points: Sequence[Point], members: Sequence[int]) -> Point:
 
 def displaced(center: Point, count: int, placement: int, symbol_diagonal: float,
               center_diagonal: float, addition: float):
-    """(member positions, circle radius or None, grid step or None), map
+    """(member positions, circle radius or None, grid size or None), map
     units, as QGIS places ``count`` members around ``center``."""
     cx, cy = center
     positions: List[Point] = []
@@ -101,25 +101,19 @@ def displaced(center: Point, count: int, placement: int, symbol_diagonal: float,
                 break
             positions.append((cx + step * column - shift, cy - (step * row - shift)))
         row += 1
-    return positions, None, step
+    return positions, None, size
 
 
-def grid_lines(positions: Sequence[Point], step: float) -> List[List[Point]]:
-    """The grid QGIS draws between displaced members (rows and columns)."""
-    if len(positions) < 2:
+def grid_lines(positions: Sequence[Point], size: int) -> List[Tuple[Point, Point]]:
+    """The segments QGIS draws between displaced grid members
+    (QgsPointDisplacementRenderer::drawGrid): each member to the next one in
+    its row and to the one below it."""
+    if len(positions) < 2 or size < 1:
         return []
-    def key(value):
-        return round(value / step) if step else 0
-    rows: Dict[int, List[Point]] = {}
-    columns: Dict[int, List[Point]] = {}
-    for x, y in positions:
-        rows.setdefault(key(y), []).append((x, y))
-        columns.setdefault(key(x), []).append((x, y))
     lines = []
-    for members in rows.values():
-        if len(members) > 1:
-            lines.append(sorted(members))
-    for members in columns.values():
-        if len(members) > 1:
-            lines.append(sorted(members, key=lambda p: p[1]))
+    for i, point in enumerate(positions):
+        if i + 1 < len(positions) and (i + 1) % size != 0:
+            lines.append((point, positions[i + 1]))
+        if i + size < len(positions):
+            lines.append((point, positions[i + size]))
     return lines

@@ -370,6 +370,10 @@ class RulesExporter:
         self.extent = extent
         self.include_required_fields_only = include_required_fields_only
         self.max_zoom = max_zoom
+        # Point cluster / displacement groups per (source, zoom): every
+        # role and rule of the layer at a zoom shares one grouping.
+        self._point_group_cache: dict = {}
+        self._point_group_lock = threading.Lock()
         self.cent_source = cent_source
         self.utils_dir = utils_dir
         self.feedback = feedback
@@ -1051,6 +1055,13 @@ class RulesExporter:
 
         current_input: str = source_path
 
+        # Point cluster / displacement: the whole layer grouped at this zoom
+        # (before any rule filter: QGIS groups every drawn point).
+        if grp.point_group:
+            current_input = self._point_groups(current_input, grp.point_group)
+            if current_input is None:
+                return None
+
         # Optional filter step.
         if grp.filter_expression:
             self._check_cancel()
@@ -1325,6 +1336,125 @@ class RulesExporter:
             for out_feature in features:
                 writer.addFeature(out_feature)
                 written += 1
+        del writer
+        return out if written else None
+
+    def _point_grouping(self, source: str, zoom: int, params: dict):
+        """(layer, features in drawing order, their points and groups in the
+        grouping CRS, transforms) of a point cluster / displacement layer at
+        one zoom; computed once per source and zoom."""
+        from qgis.core import QgsFeatureRequest  # pylint: disable=import-outside-toplevel
+        from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
+        key = (source, zoom, params.get("tolerance"), params.get("crs"))
+        with self._point_group_lock:
+            cached = self._point_group_cache.get(key)
+            if cached is not None:
+                return cached
+            layer = QgsVectorLayer(source, "point_groups", "ogr")
+            if not layer.isValid():
+                return None
+            target = QgsCoordinateReferenceSystem(params.get("crs") or layer.crs().authid())
+            to_crs = QgsCoordinateTransform(layer.crs(), target, self._transform_context)
+            from_crs = QgsCoordinateTransform(target, layer.crs(), self._transform_context)
+            order_field = f"{_FIELD_PREFIX}_orig_id"
+            request = QgsFeatureRequest()
+            if layer.fields().indexOf(order_field) >= 0:  # QGIS draws in feature order
+                request.setOrderBy(QgsFeatureRequest.OrderBy([
+                    QgsFeatureRequest.OrderByClause(order_field, True)]))
+            features, points = [], []
+            for feature in layer.getFeatures(request):
+                geometry = feature.geometry()
+                if geometry.isEmpty():
+                    continue
+                point = geometry.centroid().asPoint() if geometry.isMultipart() else geometry.asPoint()
+                point = to_crs.transform(point)
+                features.append(feature)
+                points.append((point.x(), point.y()))
+            groups = pg.group_points(points, float(params.get("tolerance") or 0.0))
+            cached = (layer, features, points, groups, from_crs)
+            self._point_group_cache[key] = cached
+            return cached
+
+    def _point_groups(self, source: str, point_group: tuple) -> Optional[str]:
+        """Worker: one role of a point cluster / displacement renderer at one
+        zoom (FlattenedRule.point_group = (mode, role, zoom, params)):
+
+        * members: cluster - the points left alone; displacement - every
+          point, the grouped ones moved around their group's centre;
+        * cluster / center: one point per group of two or more at its
+          centroid, with CLUSTER_SIZE_FIELD (the first member's attributes);
+        * circle / grid: the displacement circle or grid lines."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
+        mode, role, zoom, params = point_group
+        params = dict(params)
+        grouping = self._point_grouping(source, zoom, params)
+        if grouping is None:
+            return None
+        layer, features, points, groups, from_crs = grouping
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        if role in ("cluster", "center"):
+            fields.append(QgsField(mat.CLUSTER_SIZE_FIELD, QVariant.Int))
+            fields.append(QgsField(mat.CLUSTER_COLOR_FIELD, QVariant.String))
+        kind = QgsWkbTypes.LineString if role in ("circle", "grid") else QgsWkbTypes.Point
+        out = self._temp_path("groups")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, kind, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+
+        def back(x, y):
+            return from_crs.transform(QgsPointXY(x, y))
+
+        def write(source_feature, geometry, size=None):
+            feature = QgsFeature(fields)
+            for field in fields:
+                if field.name() not in (mat.CLUSTER_SIZE_FIELD, mat.CLUSTER_COLOR_FIELD):
+                    feature[field.name()] = source_feature[field.name()]
+            if size is not None:
+                feature[mat.CLUSTER_SIZE_FIELD] = size
+            feature.setGeometry(geometry)
+            writer.addFeature(feature)
+
+        written = 0
+        placement = params.get("placement", pg.RING)
+        for members in groups:
+            self._check_cancel()
+            if len(members) < 2:
+                if role == "members":
+                    write(features[members[0]], features[members[0]].geometry())
+                    written += 1
+                continue
+            center = pg.centroid(points, members)
+            if role in ("cluster", "center"):
+                write(features[members[0]], QgsGeometry.fromPointXY(back(*center)), len(members))
+                written += 1
+                continue
+            if mode != "displacement":
+                continue  # clustered points are drawn by the cluster symbol only
+            positions, radius, size = pg.displaced(
+                center, len(members), placement, params.get("symbol_diagonal", 0.0),
+                params.get("center_diagonal", 0.0), params.get("addition", 0.0))
+            if role == "members":
+                for index, (x, y) in zip(members, positions):
+                    write(features[index], QgsGeometry.fromPointXY(back(x, y)))
+                    written += 1
+            elif role == "circle" and radius:
+                ring = [back(center[0] + radius * math.sin(2 * math.pi * k / 72),
+                             center[1] + radius * math.cos(2 * math.pi * k / 72)) for k in range(73)]
+                write(features[members[0]], QgsGeometry.fromPolylineXY(ring))
+                written += 1
+            elif role == "grid" and size:
+                for a, b in pg.grid_lines(positions, size):
+                    write(features[members[0]], QgsGeometry.fromPolylineXY([back(*a), back(*b)]))
+                    written += 1
         del writer
         return out if written else None
 

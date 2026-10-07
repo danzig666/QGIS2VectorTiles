@@ -102,11 +102,15 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Hash angle relative to a data-defined value is frozen.",),
                ("tests/integration/test_materialize.py",)),
     Capability("ArrowLine", "line", Strategy.MATERIALIZED,
-               "Straight arrows: body as a line of the arrow width, heads as rotated "
-               "markers at the line ends.",
-               ("Curved, per-segment, half or tapered arrows are approximated.",
-                "Heads sized in map units are omitted (reported)."),
-               ("tests/integration/test_materialize.py",)),
+               "Straight, per-segment and curved (circular arc) arrows: the body as a line "
+               "tapered from the start to the end width and ending at the head, heads as "
+               "rotated triangles (end width + head thickness); every fill layer drawn as its "
+               "own copy, shifted by its screen offset (drop shadows).",
+               ("Curved arrows have straight-sided heads; half arrows are drawn as full ones.",
+                "Fill outlines and non-solid arrow fills are drawn as solid colours.",
+                "QGIS re-pairs the vertices of curved repeated arrows after clipping the "
+                "line to the view; the web map keeps the line's own vertices."),
+               ("tests/integration/test_materialize.py", "tests/integration/test_gradient_fills.py")),
     Capability("FilledLine", "line", Strategy.MATERIALIZED,
                "Exported as a stroke of the fill width with the fill sub-symbol colour.",
                ("Pattern/gradient fills inside the line are drawn with their base colour.",),
@@ -155,7 +159,8 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
                "reflect / repeat) as solid colour bands per feature, from the QGIS reference "
                "points of its bounding box.",
-               ("Smooth colour change becomes steps of about 4 levels (up to 64 bands).",
+               ("Smooth colour change becomes steps of about one level (up to 1024 bands, "
+                "merged where narrower than a pixel two zooms past the archive).",
                 "Viewport-relative gradients are drawn relative to each feature (reported).")),
     Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
                "Shading by distance to the boundary as inset colour bands (whole shape or a "
