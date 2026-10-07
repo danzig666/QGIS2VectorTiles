@@ -231,6 +231,40 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [15, 16, 17, 18, 19]
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
+    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag).
+    assert "metadata" not in exporter.style["layers"][0]
+
+
+def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
+    """Patterns sized only in screen units are flagged for the patched
+    MapLibre (drawn at the real zoom) and rendered at their true size, not
+    at the 1/sqrt(2) compromise for stock tile-zoom scaling."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.patterns import point_pattern_cell
+    from fidelity.diagnostics import DiagnosticCollector
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 1)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.Millimeters)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(4)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 17
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 14
+    exporter._convert_symbol(QgsFillSymbol([pp]), "s", "src", "q2vt", 14, 24)
+    layer_def = exporter.style["layers"][0]
+    assert layer_def["metadata"] == {exporter.SCREEN_PATTERN_FLAG: True}
+    cell = exporter.pattern_images[layer_def["paint"]["fill-pattern"]].img_1x
+    px = 4 * 96 / 25.4
+    width, height, _, _ = point_pattern_cell(px, px, 0, 0)
+    assert cell.size == (width, height)
+    assert exporter._screen_scale() == exporter.TEXTURE_SCREEN_SCALE  # reset afterwards
 
 
 @pytest.mark.parametrize("curved,repeated,head_type", [
@@ -451,15 +485,21 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     stroke.setSubSymbol(_marker())
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
     _, rules, _ = _export(plugin, layer, tmp_path)
-    intervals = {r.get_attr("o"): r.recipe.param("interval") for r in rules
-                 if r.recipe is not None and r.recipe.kind == "marker_points"}
-    assert len(intervals) > 3
-    for zoom in sorted(intervals)[1:]:
-        assert intervals[zoom] == pytest.approx(intervals[zoom - 1] / 2)
-    top = max(intervals)
-    # z+0.5: 4 mm at 96 dpi on the Web Mercator grid.
+    placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    zooms = {r.get_attr("o") for r in placed}
+    assert len(zooms) > 3
+    # Eighths of a zoom, each with 4 mm (96 dpi, Web Mercator grid) at its
+    # middle: within +-4 % of QGIS's spacing anywhere in the band.
     from fidelity.zoom import zoom_to_scale
-    assert intervals[top] == pytest.approx(0.004 * zoom_to_scale(top + 0.5), rel=1e-6)
+    top = max(zooms)
+    assert len([r for r in placed if r.get_attr("o") == top]) == 8
+    for rule in placed:
+        band = rule.visibility
+        if band.max_zoom is None:
+            continue
+        middle = (band.min_zoom + band.max_zoom) / 2
+        assert band.max_zoom - band.min_zoom == pytest.approx(1 / 8)
+        assert rule.recipe.param("interval") == pytest.approx(0.004 * zoom_to_scale(middle), rel=1e-6)
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
     assert any(r.recipe is None and r.visibility is not None
                and r.visibility.min_zoom == top + 1 for r in rules)

@@ -106,22 +106,36 @@ window.addEventListener('load',()=>document.querySelectorAll('.card').forEach(c=
 """
 
 
+def mismatch(score: dict) -> float:
+    """The colour mismatch (build_gallery.color_score) when measured, else the
+    shape mismatch of older runs."""
+    return score.get("color", score.get("shape", 0.0))
+
+
+def card_mismatch(card: dict) -> float:
+    """A style's mismatch: its worst zoom."""
+    views = card.get("views") or []
+    if views and all("color" in v.get("score", {}) for v in views):
+        return max(v["score"]["color"] for v in views)
+    return mismatch(card["score"])
+
+
 def build(gallery: str, out: str, minimum: float = 0.0, names=(), baseline: str = "",
           title: str = "QGIS vs browser comparison") -> int:
     images, cards = _cards(gallery)
     before = {}
     if baseline:
         _, old = _cards(baseline)
-        before = {c["name"]: c["score"]["shape"] for c in old}
+        before = {c["name"]: card_mismatch(c) for c in old}
     wanted = [n.lower() for n in names if n]
-    chosen = [c for c in cards if c["score"]["shape"] > minimum or (minimum == 0 and wanted)]
+    chosen = [c for c in cards if card_mismatch(c) > minimum or (minimum == 0 and wanted)]
     if wanted:
         chosen = [c for c in chosen if any(w in c["name"].lower() for w in wanted)]
-    chosen.sort(key=lambda c: -c["score"]["shape"])
+    chosen.sort(key=lambda c: -card_mismatch(c))
     esc = html.escape
     parts = []
     for card in chosen:
-        score = card["score"]["shape"]
+        score = card_mismatch(card)
         trend = ""
         if card["name"] in before:
             old = before[card["name"]]
@@ -137,7 +151,7 @@ def build(gallery: str, out: str, minimum: float = 0.0, names=(), baseline: str 
             browser = os.path.join(images, f"{view['id']}_browser.png")
             q, b, o = _data_uri(_load(qgis)), _data_uri(_load(browser)), \
                 _data_uri(overlay(qgis, browser))
-            label = (f"zoom {view['zoom']:g} · {view['score']['shape']:.1%}"
+            label = (f"zoom {view['zoom']:g} · {mismatch(view['score']):.1%} colour mismatch"
                      if view.get("zoom") is not None and len(card["views"]) > 1 else "")
             alt = esc(card["name"])
             views.append(f"""
@@ -170,7 +184,7 @@ def build(gallery: str, out: str, minimum: float = 0.0, names=(), baseline: str 
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Render comparison</title>
 <style>{_STYLE}</style></head><body>
 <h1>{esc(title)}</h1>
-<p class="lead">{len(chosen)} of {len(cards)} styles, worst first. Swipe: QGIS on the left of the handle, browser on the right. Blink alternates them in place.</p>
+<p class="lead">{len(chosen)} of {len(cards)} styles, worst first by colour mismatch (share of drawn pixels whose colour is not a blend of the other render's colours within 1 px, tolerance 40 levels; the worst zoom counts). Swipe: QGIS on the left of the handle, browser on the right. Blink alternates them in place.</p>
 <div class="legend"><span><span class="sw" style="background:#ff0000"></span>only QGIS</span>
 <span><span class="sw" style="background:#00ffff"></span>only browser</span>
 <span><span class="sw" style="background:#808080"></span>both</span></div>

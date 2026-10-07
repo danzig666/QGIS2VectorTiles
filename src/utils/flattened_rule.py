@@ -38,13 +38,28 @@ class FlattenedRule:
     # (publishing.provenance.RuleProvenance); captured before cloning and
     # conversion, copied by derive() and every other construction.
     provenance: Optional[object] = None
+    # Renderer that draws the features of a symbol together: "merge" (merged
+    # feature renderer: their union) or "invert" (inverted polygon renderer:
+    # everything outside them); "" draws each feature.
+    merge: str = ""
+    # Heatmap renderer: the MapLibre heatmap spec (fidelity.heatmap.build_spec)
+    # drawn instead of the rule's (placeholder) marker.
+    heatmap: Optional[dict] = None
+    # Point cluster / displacement renderer at one zoom: (mode, role,
+    # params...) applied to the whole layer before anything else (see
+    # RulesExporter._point_groups).
+    point_group: Optional[tuple] = None
+    # Shift on screen (x, y, QGIS unit name), y down: drawn with a viewport
+    # translate (an arrow fill layer's offset, e.g. a drop shadow).
+    translate: Optional[tuple] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
         return FlattenedRule(
             rule if rule is not None else self.rule.clone(),
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
-            self.pre_generator, self.provenance,
+            self.pre_generator, self.provenance, self.merge, self.heatmap,
+            self.point_group, self.translate,
         )
 
     @property

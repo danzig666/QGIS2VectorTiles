@@ -8,12 +8,14 @@ import sys
 
 import numpy as np
 import pytest
-from qgis.core import (Qgis, QgsFillSymbol, QgsGradientColorRamp, QgsGradientFillSymbolLayer, QgsGradientStop,
+from qgis.core import (Qgis, QgsFeatureRequest, QgsFillSymbol, QgsGradientColorRamp, QgsGradientFillSymbolLayer, QgsGradientStop,
                        QgsLineSymbol, QgsShapeburstFillSymbolLayer, QgsSimpleLineSymbolLayer,
                        QgsSingleSymbolRenderer)
 from qgis.PyQt.QtGui import QColor
 
 from q2vt_render import render
+
+BAND_FIELD = "q2vt_mat_band"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_materialize import EXTENT, _layer  # noqa: E402  pylint: disable=wrong-import-position
@@ -46,7 +48,14 @@ def _export(layer, tmp_path):
     rendered = []
     for rule in rules:
         out = by_name[rule.output_dataset]
-        out.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+        renderer = QgsSingleSymbolRenderer(rule.rule.symbol().clone())
+        if out.fields().indexOf(BAND_FIELD) >= 0:
+            # Bands in order, as the style's fill-sort-key draws them (QGIS
+            # would iterate the dataset in spatial index order).
+            renderer.setOrderBy(QgsFeatureRequest.OrderBy([
+                QgsFeatureRequest.OrderByClause(BAND_FIELD, True)]))
+            renderer.setOrderByEnabled(True)
+        out.setRenderer(renderer)
         rendered.append(out)
     return rendered, rules, diags
 
@@ -83,10 +92,10 @@ def test_gradient_fill_bands_match_qgis(plugin, tmp_path, kind, spread):
     assert len(rules) == 1 and rules[0].recipe.kind == "color_bands"
     assert len(dict(rules[0].recipe.params)["bands"]) >= 8
     assert not [d for d in diags.items if d.code == "Q2VT_UNSUPPORTED_SYMBOL_LAYER"]
-    # Colour steps of ~6 levels; repeat and conical gradients also have sharp
+    # Colour steps of ~1 level; repeat and conical gradients also have sharp
     # colour jumps, anti-aliased a pixel differently.
-    assert mean < 6 and p99 < (40 if spread == Qgis.GradientSpread.Repeat or kind == Qgis.GradientType.Conical
-                               else 30), (mean, p99)
+    assert mean < 3.5 and p99 < (40 if spread == Qgis.GradientSpread.Repeat or kind == Qgis.GradientType.Conical
+                                 else 6), (mean, p99)
 
 
 def test_colour_ramp_gradient_matches_qgis(plugin, tmp_path):
@@ -99,7 +108,7 @@ def test_colour_ramp_gradient_matches_qgis(plugin, tmp_path):
     fill.setReferencePoint1(fill.referencePoint1().__class__(0, 0))
     fill.setReferencePoint2(fill.referencePoint2().__class__(1, 1))
     _, _, mean, p99 = _compare(plugin, tmp_path, fill)
-    assert mean < 6 and p99 < 30, (mean, p99)
+    assert mean < 3.5 and p99 < 30, (mean, p99)
 
 
 @pytest.mark.parametrize("whole", [True, False])
@@ -150,7 +159,9 @@ def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     assert not [d for d in report["diagnostics"] if d["code"] == "Q2VT_UNSUPPORTED_EFFECT"]
 
 
-def test_arrow_takes_the_colour_of_its_top_unshifted_fill(plugin, tmp_path):
+def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
+    """"pointing arrow": a black copy shifted on screen (drop shadow) under
+    the orange arrow, as QGIS draws the two fill layers."""
     from qgis.core import QgsArrowSymbolLayer, QgsSimpleFillSymbolLayer
     from qgis.PyQt.QtCore import QPointF
     layer = _layer("LineString", ["LINESTRING(-80 -60, 0 60, 80 -40)"], str(tmp_path / "a.gpkg"))
@@ -161,5 +172,9 @@ def test_arrow_takes_the_colour_of_its_top_unshifted_fill(plugin, tmp_path):
     arrow.setSubSymbol(QgsFillSymbol([shadow, top]))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     _, rules, _ = _export(layer, tmp_path)
-    body = rules[0].rule.symbol().symbolLayer(0)
-    assert body.color().name() == "#ff7f00"
+    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in rules]
+    shadow_rules = [r for r in rules if r.translate]
+    assert colors[0] == "#000000" and colors[-1] == "#ff7f00"
+    assert shadow_rules and all(r.translate == (-1.2, 1.4, "MM") for r in shadow_rules)
+    assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
+    assert all(r.translate is None for r in rules if r not in shadow_rules)

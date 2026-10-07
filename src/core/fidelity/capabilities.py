@@ -102,11 +102,15 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Hash angle relative to a data-defined value is frozen.",),
                ("tests/integration/test_materialize.py",)),
     Capability("ArrowLine", "line", Strategy.MATERIALIZED,
-               "Straight arrows: body as a line of the arrow width, heads as rotated "
-               "markers at the line ends.",
-               ("Curved, per-segment, half or tapered arrows are approximated.",
-                "Heads sized in map units are omitted (reported)."),
-               ("tests/integration/test_materialize.py",)),
+               "Straight, per-segment and curved (circular arc) arrows: the body as a line "
+               "tapered from the start to the end width and ending at the head, heads as "
+               "rotated triangles (end width + head thickness); every fill layer drawn as its "
+               "own copy, shifted by its screen offset (drop shadows).",
+               ("Curved arrows have straight-sided heads; half arrows are drawn as full ones.",
+                "Fill outlines and non-solid arrow fills are drawn as solid colours.",
+                "QGIS re-pairs the vertices of curved repeated arrows after clipping the "
+                "line to the view; the web map keeps the line's own vertices."),
+               ("tests/integration/test_materialize.py", "tests/integration/test_gradient_fills.py")),
     Capability("FilledLine", "line", Strategy.MATERIALIZED,
                "Exported as a stroke of the fill width with the fill sub-symbol colour.",
                ("Pattern/gradient fills inside the line are drawn with their base colour.",),
@@ -155,17 +159,38 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
                "reflect / repeat) as solid colour bands per feature, from the QGIS reference "
                "points of its bounding box.",
-               ("Smooth colour change becomes steps of about 4 levels (up to 64 bands).",
+               ("Smooth colour change becomes steps of about one level (up to 1024 bands, "
+                "merged where narrower than a pixel two zooms past the archive).",
                 "Viewport-relative gradients are drawn relative to each feature (reported).")),
     Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
                "Shading by distance to the boundary as inset colour bands (whole shape or a "
                "set distance, rings ignored when set).",
-               ("Smooth colour change becomes steps (up to 64 bands); blur is not applied.",
+               ("Smooth colour change becomes steps of about one level (up to 1024 bands); blur is "
+                "not applied.",
                 "A distance in screen units is fixed at the middle of the visible zooms.")),
-    Capability("InterpolatedLine", "line", Strategy.UNSUPPORTED, "Not supported."),
-    Capability("RasterLine", "line", Strategy.APPROXIMATE,
-               "Emitted as a line pattern from the image preview."),
-    Capability("Lineburst", "line", Strategy.UNSUPPORTED, "Not supported."),
+    Capability("InterpolatedLine", "line", Strategy.MATERIALIZED,
+               "Colour and width interpolated along each line between the per-feature start "
+               "and end values: exported as short pieces (about 64 over the value range) with "
+               "the colour and width QGIS gives their middle.",
+               ("Colour and width change in small steps instead of continuously.",),
+               ("tests/integration/test_more_symbology.py",)),
+    Capability("RasterLine", "line", Strategy.NATIVE,
+               "The image along the line, its height the line width (MapLibre line-pattern), "
+               "repeating every whole pixel as QGIS does, starting where the cap starts.",
+               ("The repeat restarts where a tile cuts a line (as dash patterns do).",),
+               ("tests/integration/test_more_symbology.py",)),
+    Capability("Lineburst", "line", Strategy.NATIVE,
+               "The gradient across the line (colour 1 on the left edge, colour 2 on the "
+               "right) as a line-pattern image stretched to the line width, caps and joins "
+               "included.",
+               ("Blur is not applied.",),
+               ("tests/integration/test_more_symbology.py",)),
+    Capability("VectorField", "marker", Strategy.MATERIALIZED,
+               "A line from each point by the vector (x/y, length/angle or height) times the "
+               "scale, drawn with the line sub-symbol; screen-unit lengths per zoom.",
+               ("Screen-unit lengths are exact in the middle of each zoom.",
+                "The marker offset is not applied."),
+               ("tests/integration/test_more_symbology.py",)),
 ]}
 
 

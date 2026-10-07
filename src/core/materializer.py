@@ -35,8 +35,10 @@ from qgis.core import (
     QgsSimpleMarkerSymbolLayerBase,
     QgsSymbolLayer,
     QgsSymbolLayerUtils,
+    QgsUnitTypes,
 )
 from qgis.PyQt.QtCore import QPointF
+from qgis.PyQt.QtGui import QColor
 
 from ..utils.config import Qt
 from ..utils.flattened_rule import FlattenedRule
@@ -170,6 +172,8 @@ class SymbolMaterializer:
             return self._arrow(flat_rule, layer)
         if kind == "FilledLine":
             return self._filled_line(flat_rule, layer)
+        if kind == "InterpolatedLine":
+            return self._interpolated_line(flat_rule, layer)
         if kind == "LinePatternFill" and normalize_unit(layer.distanceUnit()) in ("map", "m"):
             return self._hatch(flat_rule, layer)
         if kind == "RandomMarkerFill":
@@ -1016,21 +1020,25 @@ class SymbolMaterializer:
         except AttributeError:
             along, along_unit = 0.0, None
 
-        def to_map(value, unit, zoom):
+        def to_map(value, unit, zoom: float):
+            """Map distance of a screen distance at (fractional) ``zoom``."""
             if abs(value or 0.0) <= 1e-9:
                 return 0.0
             if normalize_unit(unit) == "map":
                 return float(value)
-            return _to_mm(value, unit) / 1000.0 * ZoomLevels.zoom_to_scale(zoom) / math.sqrt(2)
+            return _to_mm(value, unit) / 1000.0 * (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom
 
         interval_mm = _to_mm(layer.interval(), layer.intervalUnit())
         if interval_mm is not None and \
                 interval_mm * 96.0 / 25.4 < self.INTERVAL_MIN_SPACING_PX:
             return None
         length = self._layer_totals(native.layer)[1]
-        elements = sum(length / max(to_map(layer.interval(), layer.intervalUnit(), zoom), 1e-9)
-                       for zoom in range(low, high + 1))
-        if self._over_budget(native, elements, "Marker line"):
+        per_zoom_elements = sum(length / max(to_map(layer.interval(), layer.intervalUnit(), zoom + 0.5),
+                                             1e-9) for zoom in range(low, high + 1))
+        # Positions in eighths of a zoom (spacing within +-4 % of QGIS's;
+        # fewer bands when the markers would exceed the output budget).
+        steps = next((n for n in (8, 4, 2) if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        if self._over_budget(native, per_zoom_elements * steps, "Marker line"):
             return None
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, 0.0,
                                             layer.offsetUnit(), native)
@@ -1048,20 +1056,42 @@ class SymbolMaterializer:
                 ZoomInterval(float(high), float(high + 1)))
             if not over.visibility.is_empty:
                 rules.append(over)
-        for rule in zoom_rules:
-            zoom = rule.get_attr("o")
-            recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
-                                         to_map(along, along_unit, zoom),
-                                         to_map(layer.offset(), layer.offsetUnit(), zoom), crs)
-            extra = []
-            if _ring_filter(layer):
-                extra.append(("ring_filter", _ring_filter(layer)))
-            average = self._average_angle_length(layer, rule)
-            if average:
-                extra.append(("average", average))
-            recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + tuple(extra))
-            rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
+        for index, zoom_rule in enumerate(zoom_rules):
+            for rule, zoom in self._sub_zoom_bands(zoom_rule, steps, index == len(zoom_rules) - 1):
+                recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
+                                             to_map(along, along_unit, zoom),
+                                             to_map(layer.offset(), layer.offsetUnit(), zoom), crs)
+                extra = []
+                if _ring_filter(layer):
+                    extra.append(("ring_filter", _ring_filter(layer)))
+                average = self._average_angle_length(layer, rule)
+                if average:
+                    extra.append(("average", average))
+                recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + tuple(extra))
+                rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
         return rules
+
+    @staticmethod
+    def _sub_zoom_bands(rule: FlattenedRule, steps: int, last: bool):
+        """[(rule, middle zoom)]: ``rule`` (one zoom) split into ``steps``
+        equal zoom bands (attribute "b"); the last band of an open-ended last
+        zoom stays visible when overzooming."""
+        low = float(rule.get_attr("o"))
+        visible = rule.visibility or ZoomInterval(low, None if last else low + 1.0)
+        if steps <= 1:
+            return [(rule, low + 0.5)]
+        bands = []
+        for step in range(steps):
+            start, end = low + step / steps, low + (step + 1) / steps
+            open_end = step == steps - 1 and visible.max_zoom is None
+            interval = visible.intersect(ZoomInterval(start, None if open_end else end))
+            if interval.is_empty:
+                continue
+            band = rule.derive()
+            band.visibility = interval
+            band.set_attr("b", step)
+            bands.append((band, (start + end) / 2))
+        return bands
 
     def _marker_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
         placements = _flag_names(layer.placements())
@@ -1214,15 +1244,15 @@ class SymbolMaterializer:
 
     # -- arrows --------------------------------------------------------------
     def _arrow_head_units(self, layer, flat_rule):
-        """(unit, body width, head width, head length) in one common unit, or
-        None when map units and screen units are mixed."""
+        """(unit, start width, end width, head thickness, head length) in one
+        common unit, or None when map units and screen units are mixed."""
         values = [(layer.arrowWidth(), layer.arrowWidthUnit()),
                   (layer.arrowStartWidth(), layer.arrowStartWidthUnit()),
                   (layer.headThickness(), layer.headThicknessUnit()),
                   (layer.headLength(), layer.headLengthUnit())]
         if all(normalize_unit(unit) == "map" for _, unit in values):
             width, start, thick, length = (v for v, _ in values)
-            return Qgis.RenderUnit.MapUnits, (width + start) / 2.0, max(width, start) + 2 * thick, length
+            return Qgis.RenderUnit.MapUnits, start, width, thick, length
         mm = [_to_mm(v, unit) for v, unit in values]
         if any(v is None for v in mm):
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
@@ -1230,86 +1260,161 @@ class SymbolMaterializer:
                          flat_rule)
             return None
         width, start, thick, length = mm
-        return Qgis.RenderUnit.Millimeters, (width + start) / 2.0, max(width, start) + 2 * thick, length
+        return Qgis.RenderUnit.Millimeters, start, width, thick, length
 
     @staticmethod
-    def _arrow_fill_layer(fill):
-        """The fill layer that gives the arrow its look: the top visible solid
-        fill without an offset (an offset one is usually a shadow), else the
-        top visible one, else the first."""
+    def _arrow_fill_layers(fill):
+        """The visible layers of the arrow's fill symbol, bottom first (a
+        shifted copy under the main one is usually a drop shadow)."""
         if fill is None or not fill.symbolLayerCount():
-            return None
+            return []
         layers = [fill.symbolLayer(i) for i in range(fill.symbolLayerCount())]
-        visible = [l for l in layers if l.enabled() and l.color().alpha() > 0 and (
+        return [l for l in layers if l.enabled() and l.color().alpha() > 0 and (
             l.layerType() != "SimpleFill" or l.brushStyle() != Qt.BrushStyle.NoBrush)]
-        unshifted = [l for l in visible if l.layerType() != "SimpleFill" or l.offset().isNull()
-                     or (abs(l.offset().x()) < 1e-9 and abs(l.offset().y()) < 1e-9)]
-        return (unshifted or visible or layers)[-1]
+
+    def _map_units_per_mm(self, flat_rule: FlattenedRule, zoom: float) -> float:
+        """Project CRS map units per screen millimetre at ``zoom``."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes  # pylint: disable=import-outside-toplevel
+        crs = QgsCoordinateReferenceSystem(self.project_crs or flat_rule.layer.crs().authid())
+        metres = (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom / 1000.0
+        if crs.isGeographic():
+            return metres / 111320.0
+        return metres * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
+
+    def _arrow_cut_bands(self, flat_rule: FlattenedRule, head_mm: float, overlap: float):
+        """Zoom bands for a screen-size arrow head: (rule, cut in map units).
+
+        The body must end under the head (QGIS ends it at the head's base), but
+        a geometry cut is in map units while the head keeps its screen size.
+        Each band cuts by the head length at its top zoom: across the band the
+        body reaches up to ``1 - 2^-width`` of the head length into the head,
+        where the head is still wider than the body for ``overlap`` (the
+        fraction of the head wider than the body)."""
+        count = 1
+        while count < 8 and 1.0 - 2.0 ** (-1.0 / count) > overlap:
+            count *= 2
+        bands = []
+        per_zoom = self._per_zoom(flat_rule)
+        for index, rule in enumerate(per_zoom):
+            low = float(rule.get_attr("o"))
+            visible = rule.visibility or ZoomInterval(
+                low, None if index == len(per_zoom) - 1 else low + 1.0)
+            for step in range(count):
+                top = low + (step + 1) / count
+                # The last band of an open-ended rule stays visible when overzooming.
+                last = step + 1 == count and visible.max_zoom is None
+                interval = visible.intersect(ZoomInterval(low + step / count, None if last else top))
+                if interval.is_empty:
+                    continue
+                band = rule.derive()
+                band.visibility = interval
+                bands.append((band, step, head_mm * self._map_units_per_mm(flat_rule, top)))
+        return bands, count
 
     def _arrow(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
-        """Arrow body (straight, per segment or circular arcs, like QGIS) as a
-        line, heads as triangles of the QGIS head length and width at the
-        ends of every arrow."""
+        """A QGIS arrow (straight, per segment or circular arcs) as its body
+        line, tapered from the start to the end width in short pieces and
+        ending at the head's base, plus heads as triangles of the QGIS head
+        length and width at the ends of every arrow. Every visible layer of
+        the arrow's fill is drawn as its own copy, shifted by its offset on
+        screen (a drop shadow under the arrow, as in QGIS)."""
         from qgis.core import QgsEllipseSymbolLayer  # pylint: disable=import-outside-toplevel
         fill = layer.subSymbol()
-        fill_layer = self._arrow_fill_layer(fill)
-        color = fill_layer.color() if fill_layer is not None else None
-        if fill_layer is None or fill_layer.layerType() != "SimpleFill" or fill.symbolLayerCount() > 1:
+        fill_layers = self._arrow_fill_layers(fill)
+        if not fill_layers:
+            return []
+        if any(l.layerType() != "SimpleFill" or l.strokeStyle() != Qt.PenStyle.NoPen
+               for l in fill_layers):
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                         "Arrow fill is drawn with one colour (its top visible, not offset layer); "
-                         "other fill layers (e.g. an offset shadow) are left out.", flat_rule)
-        if int(layer.arrowType()) != 0 or layer.arrowStartWidth() != layer.arrowWidth():
+                         "Arrow fill layers are drawn as solid colours, without outlines.",
+                         flat_rule)
+        if int(layer.arrowType()) != 0:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                         "Half or tapered arrows are drawn with a constant-width body and "
-                         "full heads.", flat_rule)
+                         "Half arrows are drawn as full arrows.", flat_rule)
         curved, repeated = bool(layer.isCurved()), bool(layer.isRepeated())
         crs = self.project_crs or flat_rule.layer.crs().authid()
         head_type = int(layer.headType())  # 0 single, 1 reversed, 2 double
         sizes = self._arrow_head_units(layer, flat_rule)
-        cut_start = cut_end = 0.0
-        if sizes is not None and sizes[0] == Qgis.RenderUnit.MapUnits:
-            cut_end = sizes[3] if head_type in (0, 2) else 0.0
-            cut_start = sizes[3] if head_type in (1, 2) else 0.0
+        if sizes is not None:
+            unit, start_width, end_width, thickness, head_length = sizes
+        else:
+            unit, start_width = layer.arrowWidthUnit(), layer.arrowStartWidth()
+            end_width, thickness, head_length = layer.arrowWidth(), 0.0, 0.0
+        # QGIS: a head is as wide as the body at its end plus the head
+        # thickness (measured: 4 mm body, 4.5 mm thickness -> 8.5 mm head).
+        head_widths = {"end": end_width + thickness, "start": start_width + thickness}
+        heads = head_length > 0 and thickness >= 0 and max(head_widths.values()) > 0
+        map_units = normalize_unit(unit) == "map"
 
-        width = sizes[1] if sizes is not None else layer.arrowWidth()
-        body = QgsSimpleLineSymbolLayer(color, width)
-        body.setWidthUnit(sizes[0] if sizes is not None else layer.arrowWidthUnit())
-        body.setPenCapStyle(0x00)  # flat
-        if width == 0 and fill_layer is not None and fill_layer.strokeStyle() == 0:
-            body.setPenStyle(0)  # no body at all (QGIS: empty polygon, no outline)
-        body_symbol = QgsLineSymbol([body])
-        body_symbol.setOpacity(fill.opacity() if fill else 1.0)
-        body_recipe = mat.Recipe("arrow_body", params=(
-            ("arrow_curved", curved), ("arrow_repeated", repeated), ("crs", crs),
-            ("cut_start", cut_start), ("cut_end", cut_end)))
-        rules = [self._with_symbol(flat_rule, body_symbol, 1, 1, body_recipe)]
-        if sizes is None:
-            return rules
+        # Body bands: one set of cut lengths for map units, per zoom band for
+        # screen sizes (the head keeps its screen length).
+        def cuts(length):
+            return (length if head_type in (0, 2) else 0.0, length if head_type in (1, 2) else 0.0)
+        if heads and not map_units:
+            overlap = min(thickness / head_widths[k] if head_widths[k] > 0 else 0.0
+                          for k in (("end",) if head_type == 0 else ("start",) if head_type == 1
+                                    else ("end", "start")))
+            bands, band_count = self._arrow_cut_bands(flat_rule, head_length, overlap)
+        else:
+            bands, band_count = [(flat_rule, 0, head_length if heads else 0.0)], 1
+        taper = abs(start_width - end_width) > 1e-9
 
-        unit, _, head_width, head_length = sizes
-        if head_width <= 0 or head_length <= 0:
-            return rules
-        head = QgsEllipseSymbolLayer()
-        head.setShape(QgsEllipseSymbolLayer.Shape.Triangle
-                      if hasattr(QgsEllipseSymbolLayer, "Shape") else Qgis.MarkerShape.Triangle)
-        head.setSymbolWidth(head_width)
-        head.setSymbolHeight(head_length)
-        head.setSymbolWidthUnit(unit)
-        head.setSymbolHeightUnit(unit)
-        head.setOffset(QPointF(0, head_length / 2.0))  # tip on the line end
-        head.setOffsetUnit(unit)
-        head.setColor(color)
-        head.setStrokeStyle(0)
-        head_symbol = QgsMarkerSymbol([head])
-        head_symbol.setOpacity(fill.opacity() if fill else 1.0)
-        # The triangle points up; +90 turns it along the line direction.
-        ends = {0: [("LastVertex", 90.0)], 1: [("FirstVertex", 270.0)],
-                2: [("LastVertex", 90.0), ("FirstVertex", 270.0)]}.get(head_type, [])
-        for index, (placement, extra) in enumerate(ends, start=2):
-            symbol = self._marker_points_symbol(head_symbol, True, extra, 0.0, None, flat_rule)
-            recipe = mat.Recipe("marker_points", (placement,), (
-                ("arrow_curved", curved), ("arrow_repeated", repeated), ("crs", crs)))
-            rules.append(self._with_symbol(flat_rule, symbol, 0, index, recipe))
+        rules = []
+        for copy, fill_layer in enumerate(fill_layers):
+            color = fill_layer.color()
+            offset = fill_layer.offset() if fill_layer.layerType() == "SimpleFill" else QPointF()
+            translate = None
+            if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
+                translate = (offset.x(), offset.y(), QgsUnitTypes.encodeUnit(fill_layer.offsetUnit()))
+            base = 20 * copy
+            for band_rule, step, length in bands:
+                body = QgsSimpleLineSymbolLayer(color, (start_width + end_width) / 2.0)
+                body.setWidthUnit(unit)
+                body.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                body.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                if taper:
+                    body.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
+                                                QgsProperty.fromField(mat.WIDTH_FIELD))
+                if max(start_width, end_width) == 0 and fill_layer.layerType() == "SimpleFill" \
+                        and fill_layer.strokeStyle() == Qt.PenStyle.NoPen:
+                    body.setPenStyle(Qt.PenStyle.NoPen)  # no body at all (QGIS: empty polygon)
+                body_symbol = QgsLineSymbol([body])
+                body_symbol.setOpacity(fill.opacity())
+                cut_start, cut_end = cuts(length)
+                params = [("arrow_curved", curved), ("arrow_repeated", repeated), ("crs", crs),
+                          ("cut_start", cut_start), ("cut_end", cut_end)]
+                if taper:
+                    params.append(("taper", (float(start_width), float(end_width))))
+                    params.append(("taper_nested", color.alpha() == 255 and fill.opacity() >= 1.0))
+                derived = self._with_symbol(band_rule, body_symbol, 1, base + 1 + step,
+                                            mat.Recipe("arrow_body", params=tuple(params)))
+                derived.translate = translate
+                rules.append(derived)
+            if not heads:
+                continue
+            # The triangle points up; +90 turns it along the line direction.
+            ends = {0: [("LastVertex", 90.0, "end")], 1: [("FirstVertex", 270.0, "start")],
+                    2: [("LastVertex", 90.0, "end"), ("FirstVertex", 270.0, "start")]}.get(head_type, [])
+            for index, (placement, extra, end) in enumerate(ends, start=base + 1 + band_count):
+                head = QgsEllipseSymbolLayer()
+                head.setShape(QgsEllipseSymbolLayer.Shape.Triangle
+                              if hasattr(QgsEllipseSymbolLayer, "Shape") else Qgis.MarkerShape.Triangle)
+                head.setSymbolWidth(head_widths[end])
+                head.setSymbolHeight(head_length)
+                head.setSymbolWidthUnit(unit)
+                head.setSymbolHeightUnit(unit)
+                head.setOffset(QPointF(0, head_length / 2.0))  # tip on the line end
+                head.setOffsetUnit(unit)
+                head.setColor(color)
+                head.setStrokeStyle(Qt.PenStyle.NoPen)
+                head_symbol = QgsMarkerSymbol([head])
+                head_symbol.setOpacity(fill.opacity())
+                symbol = self._marker_points_symbol(head_symbol, True, extra, 0.0, None, flat_rule)
+                recipe = mat.Recipe("marker_points", (placement,), (
+                    ("arrow_curved", curved), ("arrow_repeated", repeated), ("crs", crs)))
+                derived = self._with_symbol(flat_rule, symbol, 0, index, recipe)
+                derived.translate = translate
+                rules.append(derived)
         return rules
 
     # -- filled lines ----------------------------------------------------------
@@ -1330,18 +1435,54 @@ class SymbolMaterializer:
         symbol.setOpacity(fill.opacity() if fill else 1.0)
         return [self._with_symbol(flat_rule, symbol, 1, 1)]
 
+    def _interpolated_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
+        """An interpolated line (colour and width varying along each line
+        between per-feature start and end values) as short pieces with their
+        own colour and width (mat.interpolated_line_recipe), drawn by a
+        simple line reading both from the piece."""
+        from qgis.core import QgsReadWriteContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+
+        def xml(item):
+            doc = QDomDocument()
+            doc.appendChild(item.writeXml(doc, QgsReadWriteContext()))
+            return doc.toString()
+        recipe = mat.interpolated_line_recipe(
+            xml(layer.interpolatedColor()), xml(layer.interpolatedWidth()),
+            (layer.startValueExpressionForColor(), layer.endValueExpressionForColor()),
+            (layer.startValueExpressionForWidth(), layer.endValueExpressionForWidth()))
+        line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+        line.setWidthUnit(layer.widthUnit())
+        line.setWidthMapUnitScale(layer.widthMapUnitScale())
+        line.setOffset(layer.offset())
+        line.setOffsetUnit(layer.offsetUnit())
+        # Round ends join the pieces without gaps at bends (QGIS joins them too).
+        line.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeColor,
+                                    QgsProperty.fromField(mat.COLOR_FIELD))
+        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
+                                    QgsProperty.fromField(mat.WIDTH_FIELD))
+        symbol = QgsLineSymbol([line])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
+
     # -- map-unit hatches ------------------------------------------------------
     # -- gradient / shapeburst fills: colour bands (fidelity/materialize.py) --------------
-    MAX_BANDS = 64
+    # Smooth as QGIS's 8-bit gradient: neighbouring bands differ by about one
+    # colour level (64 bands of ~4 levels showed as stripes on a rainbow).
+    # The exporter merges bands narrower than a pixel per feature.
+    MAX_BANDS = 1024
+    BAND_LEVELS = 1.0
 
     @classmethod
     def _band_count(cls, colors) -> int:
-        """Bands so neighbours differ by ~4 levels (at most MAX_BANDS)."""
+        """Bands so neighbours differ by ~BAND_LEVELS levels (at most MAX_BANDS)."""
         spread = 0
         for a, b in zip(colors, colors[1:]):
             spread += max(abs(a.red() - b.red()), abs(a.green() - b.green()),
                           abs(a.blue() - b.blue()), abs(a.alpha() - b.alpha()))
-        return max(2, min(cls.MAX_BANDS, math.ceil(spread / 4)))
+        return max(2, min(cls.MAX_BANDS, math.ceil(spread / cls.BAND_LEVELS)))
 
     @staticmethod
     def _ramp_of(layer):
@@ -1357,7 +1498,7 @@ class SymbolMaterializer:
         """One rule drawing every colour band of the fill: a solid fill whose
         colour is the band's (COLOR_FIELD), from one materialized dataset."""
         from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
-        probe = [ramp.color(i / 16) for i in range(17)]
+        probe = [ramp.color(i / 64) for i in range(65)]
         bands = self._band_count(probe)
         colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
         overlap = overlap_ok and all(c.alpha() == 255 for c in colors)
@@ -1388,7 +1529,10 @@ class SymbolMaterializer:
         p1, p2 = layer.referencePoint1(), layer.referencePoint2()
 
         def recipe(band, bands, opaque):
-            overlap = opaque and spread == 0 and gradient_type != 2
+            # Opaque bands nest (each reaches to the end of its period, under
+            # the bands drawn after it): thin anti-aliased bands that only
+            # touch let the background through (lighter colours).
+            overlap = opaque and gradient_type != 2
             return mat.gradient_band_recipe(
                 gradient_type, (p1.x(), p1.y()), (p2.x(), p2.y()),
                 layer.referencePoint1IsCentroid(), layer.referencePoint2IsCentroid(),

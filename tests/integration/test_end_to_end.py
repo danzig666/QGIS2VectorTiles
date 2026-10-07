@@ -7,7 +7,7 @@ import pytest
 from qgis.core import (QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
                        QgsFeature, QgsFillSymbol, QgsGeometry, QgsLinePatternFillSymbolLayer,
                        QgsPalLayerSettings, QgsProcessingException, QgsProcessingFeedback,
-                       QgsLineburstSymbolLayer, QgsProperty, QgsRectangle,
+                       QgsLineSymbolLayer, QgsProperty, QgsRectangle,
                        QgsSingleSymbolRenderer, QgsSymbolLayer, QgsTextFormat,
                        QgsVectorLayerSimpleLabeling, Qgis)
 from qgis.PyQt.QtGui import QColor
@@ -16,6 +16,32 @@ from fidelity.validation import inspect_mbtiles
 from q2vt_fixtures import reset_project, zoning_layer
 
 EXTENT = QgsRectangle(2119000, 6019000, 2123000, 6023000)
+
+
+class UnknownLine(QgsLineSymbolLayer):
+    """A symbol layer type the exporter does not know (as from a plugin):
+    every built-in QGIS type is converted now."""
+
+    def __init__(self):
+        super().__init__()
+
+    def layerType(self):  # noqa: N802
+        return "Q2vtTestUnknownLine"
+
+    def startRender(self, context):  # noqa: N802
+        pass
+
+    def stopRender(self, context):  # noqa: N802
+        pass
+
+    def renderPolyline(self, points, context):  # noqa: N802
+        pass
+
+    def properties(self):
+        return {}
+
+    def clone(self):
+        return UnknownLine()
 
 
 class Feedback(QgsProcessingFeedback):
@@ -156,7 +182,7 @@ def test_other_processing_temp_outputs_are_kept(plugin):
 def test_strict_mode_fails_before_publication(export, tmp_path):
     layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
     symbol = QgsFillSymbol()
-    symbol.changeSymbolLayer(0, QgsLineburstSymbolLayer())  # an unsupported outline
+    symbol.changeSymbolLayer(0, UnknownLine())  # an unsupported outline
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     with pytest.raises(QgsProcessingException, match="Strict export failed"):
         export(layer, fidelity_mode=1)
@@ -172,7 +198,7 @@ def test_strict_mode_fails_before_publication(export, tmp_path):
 def test_unsupported_fill_is_reported_not_drawn_black(export, tmp_path):
     layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
     symbol = QgsFillSymbol()
-    symbol.changeSymbolLayer(0, QgsLineburstSymbolLayer())  # an unsupported outline
+    symbol.changeSymbolLayer(0, UnknownLine())  # an unsupported outline
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     exporter, result = export(layer)
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))

@@ -56,6 +56,30 @@ def _angle_diff(a: float, b: float) -> float:
     return min(diff, 180.0 - diff)
 
 
+def qgis_image_hatch(angle_deg: float, spacing_px: float) -> Tuple[float, float]:
+    """Angle and spacing QGIS really draws a screen hatch with.
+
+    With the default clip mode QGIS paints the lines into a brush image
+    whose sides are truncated to whole pixels
+    (``QgsLinePatternFillSymbolLayer::applyPattern``): a 7.56 px spacing is
+    drawn 7 px apart, and an oblique hatch gets the angle and spacing of the
+    truncated ``(spacing / sin, spacing / cos)`` image.
+    """
+    def near(a: float, b: float) -> bool:
+        return abs(a - b) < 1e-8
+
+    angle = angle_deg % 360.0
+    if any(near(angle, a) for a in (0.0, 90.0, 180.0, 270.0, 360.0)):
+        whole = int(spacing_px)
+        return angle_deg, float(whole) if whole >= 1 else spacing_px
+    height = int(spacing_px / math.cos(math.radians(angle)))
+    width = int(spacing_px / math.sin(math.radians(angle)))
+    if height == 0 or width == 0:
+        return angle_deg, spacing_px
+    real = math.degrees(math.atan2(height, width)) % 360.0
+    return real, abs(abs(height) * math.cos(math.radians(real)))
+
+
 def solve_periodic_cell(spec: LinePatternSpec, profile: ExportProfile,
                         max_component: int = 64) -> Optional[PeriodicCell]:
     """Find the smallest seamless square cell for ``spec`` (best effort)."""

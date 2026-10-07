@@ -14,15 +14,40 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 | PR-05 | Visibility intervals, overzoom, explicit GDAL metadata | **Done** | Exact intervals, overzoom policy, per-layer tile zooms through the MVT `CONF` option (the VRT options were ignored by GDAL), truncated-metadata-aware archive inspection. |
 | PR-06 | Marker/pattern renderer separation, deterministic atlas | **Done** | Whole-symbol renderer, oversampled sprites with `pixelRatio`, deterministic packer, true 2×, straight-alpha test. |
 | PR-07 | LinePatternFill texture and materialized-hatch routes | **Done** | Screen units: verified seamless texture. Map units: hatch lines materialized per feature. |
-| PR-08 | PointPatternFill and image/SVG patterns | **Done** | Exact repeat cells (fractional/dense periods repeated in the cell); map-unit grids materialized from the zoom where spacing ≥ 8 px, per-zoom textures below (rendered at the integer zoom: MapLibre grows `fill-pattern` with the map until the next zoom, so map-unit textures stay exact and screen-unit parts, drawn at 1/√2, stay within ±41 %); SVG fills follow QGIS (only with parsable SVG data, stroke sub-symbol exported); raster fills tiled. |
+| PR-08 | PointPatternFill and image/SVG patterns | **Done** | Exact repeat cells (fractional/dense periods repeated in the cell); map-unit grids materialized from the zoom where spacing ≥ 8 px, per-zoom textures below (rendered at the integer zoom: MapLibre grows `fill-pattern` with the map until the next zoom, so map-unit textures stay exact and screen-unit parts of such a mixed pattern, drawn at 1/√2, stay within ±41 %); patterns sized only in screen units are drawn at their true size at every zoom, on whole device pixels (patched MapLibre, `q2vt:screen-pattern`), screen hatches with QGIS's whole-pixel spacing; SVG fills follow QGIS (only with parsable SVG data, stroke sub-symbol exported); raster fills tiled. |
 | PR-09 | Feature-context properties, native circles, sprite variants | **Done** | Native circle layers for plain circles; per-value sprite variants with a budget; static-vs-feature detection. |
 | PR-10 | Exact marker-line positions | **Done** | Vertex/first/last/inner/central/segment-centre and map-unit interval markers (offset along the line, averaged angles) materialized at the QGIS positions; polygon outlines offset like QGIS (ring buffers); ring filters. Screen-unit intervals materialized per zoom (native placement beyond the last tile zoom). *Approximate:* screen-unit intervals and corner-angle averaging over a screen length are exact at the middle of each zoom (spacing within ±19 % inside the zoom). |
 | PR-11 | Label typography, glyph calibration, offsets | **Done** | Glyph metrics calibrated (24 px em, bearings), size factor removed, font stacks shared with glyph generation, `ő`/`ű`. |
 | PR-12 | Render ordering, geometry hardening | **Done** | QGIS draw order (later rules on top, rendering passes, layer tree), renderer order-by as sort keys, symbol-reach extent buffer with tile pruning, generators in the layer CRS, same-type generators drawn with their sub-symbol. *Not reproducible:* per-feature interleaving of different style layers. |
 | PR-13 | Pinned labels and callouts | **Partial** | Data-defined X/Y labels exported at the point with the data-defined alignment, always shown; simple callouts as leader lines ending at the label anchor. *Missing:* QGIS PAL-computed placements; leaders ending on the label box. |
-| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows as in `QgsArrowSymbolLayer` (straight first→last, circular arcs, per-segment, triangular heads); hash lines as marker lines; filled lines as strokes. *Approximate:* half and tapered arrows. |
+| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows as in `QgsArrowSymbolLayer` (straight first→last, circular arcs, per-segment; body tapered from the start to the end width and ending at the head; heads of end width + head thickness; every fill layer drawn, shifted ones as screen-offset copies such as drop shadows); hash lines as marker lines; filled lines as strokes. *Approximate:* half arrows (drawn full); curved arrows have straight-sided heads. |
 | PR-15 | Raster fallback / compositing groups | Not started | *Hybrid* mode is selectable but reports `Q2VT_HYBRID_NOT_AVAILABLE`. |
 | PR-16 | Atomic publication, HTTP packaging, UI report | **Mostly done** | Cancellable `ogr2ogr`, XML-safe VRT, JSON/HTML report, strict failures remove only the new output; optional static web package (`web/`: XYZ tiles, relative-URL style, viewer; written atomically, works from any sub-directory of a plain web server); popups escape attribute text. *Missing:* PMTiles output, fidelity panel inside the viewer. |
+
+## Symbology added beyond the plan (4.14)
+
+Every built-in QGIS 3.34 symbol layer type is now converted; only plugin-provided symbol
+layer types are reported as unsupported. Measured with the gallery (`tools/gallery`,
+zooms 14.6 / 16.25 / 17.8, colour mismatch = pixels whose colour is outside the browser's
+blend tolerance):
+
+| Item | How | Gallery (worst zoom) |
+|---|---|---|
+| Lineburst | `line-pattern` image of the gradient across the line (colour 1 on the left), caps and joins included | 0.0 % |
+| Interpolated line | Pieces with QGIS's colour and width for the middle of each piece | 0.0 % |
+| Raster line | `line-pattern` image with QGIS's repeat (whole-pixel width), start and orientation; patched MapLibre keeps screen size at every zoom | 7.4 % (restarts at tile edges) |
+| Vector field marker | Line from each point by the vector, per zoom for screen units | 4.3 % |
+| Merged features / inverted polygons | The symbol's features united (inverted: the area beyond them) before any recipe | 0.0 % |
+| Heatmap | MapLibre heatmap: radius and colours fitted to QGIS's quartic kernel, intensity per zoom from the densest point | 4.7 % |
+| Point cluster | QGIS grouping per eighth of a zoom; cluster symbol with `@cluster_size` | 1.9 % |
+| Point displacement | Ring / concentric rings / grid around the centre symbol, circle or grid lines | 0.7 % |
+
+*Not reproducible:* a line pattern or dash restarts where a vector tile cuts the line
+(MapLibre measures the distance along a line per tile); QGIS fits gradients to the visible
+part of a feature that runs out of view; QGIS clips lines to the view before pairing the
+vertices of curved repeated arrows; pattern fills are anchored to the map, while QGIS
+starts them at the top-left corner of each feature part as clipped to the view (same size
+and look, a different phase; the gallery's per-pixel score counts that phase as mismatch).
 
 ## Behavior changes users may notice
 
@@ -59,3 +84,11 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 * Offsets of polygon outlines move inwards for positive values whatever the ring
   orientation (QGIS buffers each ring).
 * Tile archives no longer repeat per-zoom datasets at every zoom (smaller archives).
+* 4.14: pattern fills sized in screen units keep the QGIS size at every zoom and are
+  pixel-sharp (they were 0.7×–1.4× between zooms and resampled); screen hatches use QGIS's
+  whole-pixel spacing.
+* 4.14: gradient and shapeburst fills step about one colour level (more band polygons per
+  feature, merged where narrower than a pixel two zooms past the archive).
+* 4.14: screen-size marker intervals, point clusters and point displacement are exported in
+  eighths of a zoom: more datasets and a longer export for such layers.
+* 4.14: arrows draw their tapered body, QGIS-size heads and every fill layer (drop shadows).

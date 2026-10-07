@@ -1,6 +1,7 @@
 """Convert QGIS Vector Tile Layer styles to MapLibre GL JSON style format."""
 
 import copy
+import dataclasses
 import json
 import math
 import re
@@ -26,7 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol
+from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
@@ -36,7 +37,8 @@ from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
-from .fidelity.patterns import LinePatternSpec, render_line_pattern, solve_periodic_cell
+from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
+                                 solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
 from ..utils.config import _SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX
 
@@ -1596,6 +1598,8 @@ class QgisMapLibreStyleExporter:
         lengths: Optional[LengthConverter] = None,
         ordered_styles: Optional[set] = None,
         visible_polygons: Optional[Dict[str, Tuple[str, bool]]] = None,
+        heatmaps: Optional[Dict[str, dict]] = None,
+        translates: Optional[Dict[str, tuple]] = None,
     ):
         """Initialise the exporter.
 
@@ -1622,6 +1626,10 @@ class QgisMapLibreStyleExporter:
                              their polygon by the viewer.
         """
         self.visible_polygons = visible_polygons or {}
+        # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
+        self.heatmaps = heatmaps or {}
+        # Style name -> (x, y, unit): shifted on screen (viewport translate).
+        self.translates = translates or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1777,6 +1785,9 @@ class QgisMapLibreStyleExporter:
             return
         self.context.component = style.styleName()
         self.context.source_layer = style.layerName()
+        if style.styleName() in self.heatmaps:
+            self._heatmap_layer(style, self.heatmaps[style.styleName()], bounds)
+            return
         first = len(self.style["layers"])
         self._convert_symbol(
             style.symbol(), style.styleName(), style.layerName(),
@@ -1784,6 +1795,44 @@ class QgisMapLibreStyleExporter:
         )
         if style.styleName() in self.ordered_styles:
             self._apply_draw_order(self.style["layers"][first:])
+        if style.styleName() in self.translates:
+            self._apply_translate(self.style["layers"][first:], self.translates[style.styleName()])
+
+    _TRANSLATE = {"fill": "fill", "line": "line", "circle": "circle", "symbol": "icon"}
+
+    def _apply_translate(self, layer_defs, translate) -> None:
+        """Shift the style's layers on screen like a QGIS fill offset (painter
+        coordinates: x right, y down, not turned with the map)."""
+        x, y, unit_name = translate
+        unit, ok = QgsUnitTypes.decodeRenderUnit(unit_name)
+        if not ok:
+            return
+        shift = [PropertyExtractor.static_pixels(x, unit), PropertyExtractor.static_pixels(y, unit)]
+        for layer_def in layer_defs:
+            prefix = self._TRANSLATE.get(layer_def.get("type"))
+            if prefix is None:
+                continue
+            paint = layer_def.setdefault("paint", {})
+            current = paint.get(f"{prefix}-translate")
+            if isinstance(current, list) and len(current) == 2 and \
+                    all(isinstance(v, (int, float)) for v in current):
+                shift = [shift[0] + current[0], shift[1] + current[1]]
+            paint[f"{prefix}-translate"] = shift
+            paint[f"{prefix}-translate-anchor"] = "viewport"
+
+    def _heatmap_layer(self, style, spec: dict, bounds) -> None:
+        """A QGIS heatmap renderer as a MapLibre heatmap layer; the weight is
+        the placeholder marker's Size (the renderer's weight expression)."""
+        from .fidelity.heatmap import heatmap_paint  # pylint: disable=import-outside-toplevel
+        symbol = style.symbol()
+        prop = symbol.symbolLayer(0).dataDefinedProperties().property(
+            QgsSymbolLayer.Property.PropertySize) if symbol.symbolLayerCount() else None
+        weight = PropertyExtractor.get_value_or_expression(1.0, prop, "number")
+        layer_def = self._base_layer_def("heatmap", style.styleName(), style.layerName(),
+                                         self.source_name, bounds[0], bounds[1])
+        layer_def["layout"]["visibility"] = "visible"
+        layer_def["paint"] = heatmap_paint(spec, weight)
+        self.style["layers"].append(layer_def)
 
     _SORT_KEYS = {"fill": "fill-sort-key", "line": "line-sort-key",
                   "circle": "circle-sort-key", "symbol": "symbol-sort-key"}
@@ -2007,6 +2056,10 @@ class QgisMapLibreStyleExporter:
             color_rgba=(color.red(), color.green(), color.blue(), color.alpha()),
             offset_px=screen_px(symbol_layer.offset(), symbol_layer.offsetUnit(), "offset"),
         )
+        if self._exact_screen_texture and \
+                _enum_int(symbol_layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly):
+            angle, spacing = qgis_image_hatch(spec.angle_deg, spec.spacing_px)
+            spec = dataclasses.replace(spec, angle_deg=angle, spacing_px=spacing)
         cell = solve_periodic_cell(spec, self.profile)
         if cell is None:
             return None
@@ -2211,7 +2264,7 @@ class QgisMapLibreStyleExporter:
         from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
         # Screen-unit parts are drawn at TEXTURE_SCREEN_SCALE, map-unit parts
         # at the reference zoom (scaling both factors keeps map pixels).
-        scale = self.TEXTURE_SCREEN_SCALE
+        scale = self._screen_scale()
         reference = self._reference_map_units_per_px() * scale
         one = SymbolImage(marker, "pattern-marker", scale, True, reference).img
         two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference).img
@@ -2280,11 +2333,19 @@ class QgisMapLibreStyleExporter:
     # texture grows 2x with the map until the next zoom, while QGIS keeps
     # screen-unit sizes. Drawn at 1/sqrt(2), they stay within 0.71x-1.41x of
     # QGIS (instead of 1x-2x), exact in the middle of every zoom.
+    # Textures of patterns sized only in screen units are drawn at their true
+    # size instead: their style layer carries SCREEN_PATTERN_FLAG, which the
+    # patched MapLibre (tools/patch_maplibre.py) draws at the real zoom.
     TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
+    SCREEN_PATTERN_FLAG = "q2vt:screen-pattern"
+    _exact_screen_texture = False
+
+    def _screen_scale(self) -> float:
+        return 1.0 if self._exact_screen_texture else self.TEXTURE_SCREEN_SCALE
 
     def _texture_px(self, value, unit) -> float:
         px = PropertyExtractor.static_pixels(value, unit)
-        return px if normalize_unit(unit) in ("map", "m") else px * self.TEXTURE_SCREEN_SCALE
+        return px if normalize_unit(unit) in ("map", "m") else px * self._screen_scale()
 
     def _pattern_px(self, value, unit, what: str) -> float:
         if normalize_unit(unit) in ("map", "m") and value and not self._pattern_zoom_bands:
@@ -2555,6 +2616,94 @@ class QgisMapLibreStyleExporter:
                 return None
             cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
         return self._textures(cells[0], cells[1], 0.0, "Raster fill")
+
+    def _register_raster_line(self, layer) -> Optional[str]:
+        """``line-pattern`` image of a raster line. MapLibre stretches the
+        image height to the line width and repeats it along the line, as QGIS
+        does; only its proportions matter. Its width is a power of two (at
+        least 64 px), which MapLibre needs for a seamless repeat."""
+        from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QSize  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QImageReader  # pylint: disable=import-outside-toplevel
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        path = layer.path()
+        source = QImageReader(path).size() if path else None
+        if not path or source is None or source.isEmpty():
+            return None
+        line_px = max(1.0, PropertyExtractor.static_pixels(layer.width(), layer.widthUnit()))
+        natural = line_px * source.width() / source.height()  # one repeat on screen
+        # QGIS scales the image to whole pixels before tiling it along the
+        # line: a screen-size line repeats every round(natural) px.
+        ratio = source.width() / source.height()
+        if normalize_unit(layer.widthUnit()) not in ("map", "m") and natural >= 1:
+            ratio = round(natural) / line_px
+        width = 64
+        while width < 512 and (width < natural or
+                               abs(width / max(1, round(width / ratio)) - ratio) / ratio > 0.003):
+            width *= 2  # whole-pixel proportions within 0.3 %
+        height = max(1, round(width / ratio))
+        error = abs(width / height - ratio) / ratio
+        if error > 0.01:
+            self.context.report("Q2VT_PATTERN_NONPERIODIC",
+                                f"Raster line repeat differs by {error:.1%} (image proportions "
+                                "rounded to whole pixels).", strategy=Strategy.APPROXIMATE.value)
+        cells = []
+        for scale in (1, 2):  # sprite pixel ratio
+            image, _ = QgsApplication.imageCache().pathAsImage(
+                path, QSize(width * scale, height * scale), False, 1.0, True)
+            if image.isNull():
+                self.context.report("Q2VT_SPRITE_RENDER_FAILED",
+                                    "Raster line image could not be loaded.", detail=path)
+                return None
+            # QGIS draws the image's top on the left of the line's direction;
+            # MapLibre puts the first row on the right (see LINEBURST_*).
+            cell = SymbolImage._qt_to_pil(image).transpose(Image.Transpose.FLIP_TOP_BOTTOM)  # pylint: disable=protected-access
+            if _enum_int(layer.penCapStyle()) != _enum_int(Qt.PenCapStyle.FlatCap):
+                # QGIS starts the image where the round / square cap starts,
+                # half the line width before the line; MapLibre at the line
+                # start. One repeat is the image width, so half the line
+                # width is half the image height: start the image there.
+                from PIL import ImageChops  # pylint: disable=import-outside-toplevel
+                cell = ImageChops.offset(cell, -round(height * scale / 2), 0)
+            cells.append(cell)
+        name = self._next_name("pattern")
+        self.pattern_images[name] = PatternImages(cells[0], cells[1])
+        return name
+
+    # Rows of the lineburst image (its gradient across the line).
+    LINEBURST_ROWS = 64
+    # MapLibre's line-pattern puts the image's first row on the right of the
+    # line's direction (measured against QGIS, see the tests).
+    LINEBURST_FIRST_ROW_LEFT = False
+
+    def _register_lineburst(self, layer) -> Optional[str]:
+        """``line-pattern`` image of a lineburst: QGIS fills the stroke with
+        a gradient across it, colour 1 on the left edge (in the line's
+        direction) to colour 2 on the right edge, caps and joins included.
+        The image's rows are that gradient; MapLibre stretches its height to
+        the line width and draws caps and joins with it as QGIS does."""
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsGradientColorRamp  # pylint: disable=import-outside-toplevel
+        two_colors = _enum_int(layer.gradientColorType(), 0) == 0
+        ramp = layer.colorRamp() if not two_colors and layer.colorRamp() is not None \
+            else QgsGradientColorRamp(layer.color(), layer.color2())
+        if getattr(layer, "blurRadius", lambda: 0)():
+            self.context.report("Q2VT_GRADIENT_APPROXIMATE",
+                                "Lineburst blur is not applied.", strategy=Strategy.APPROXIMATE.value)
+        cells = []
+        for scale in (1, 2):
+            rows = self.LINEBURST_ROWS * scale
+            image = Image.new("RGBA", (64 * scale, rows))
+            for row in range(rows):
+                t = (row + 0.5) / rows
+                color = ramp.color(t if self.LINEBURST_FIRST_ROW_LEFT else 1.0 - t)
+                image.paste((color.red(), color.green(), color.blue(), color.alpha()),
+                            (0, row, 64 * scale, row + 1))
+            cells.append(image)
+        name = self._next_name("pattern")
+        self.pattern_images[name] = PatternImages(cells[0], cells[1])
+        return name
 
     _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "layerenabled"})
 
@@ -2985,6 +3134,26 @@ class QgisMapLibreStyleExporter:
                 "line-round-limit": LinePropertyExtractor.get_line_round_limit(),
                 "visibility": "visible",
             })
+        elif symbol_layer.layerType() in ("RasterLine", "Lineburst") and \
+                (raster_pattern := (self._register_raster_line(symbol_layer)
+                                    if symbol_layer.layerType() == "RasterLine"
+                                    else self._register_lineburst(symbol_layer))):
+            # QGIS draws the image along the line, its height the line width:
+            # MapLibre's line-pattern fits the image height to line-width too.
+            layer_def["paint"].update({
+                "line-pattern": raster_pattern,
+                "line-width": LinePropertyExtractor.get_line_width(symbol_layer),
+                "line-opacity": ex.mul(PropertyExtractor.opacity(symbol, symbol_layer),
+                                       float(getattr(symbol_layer, "opacity", lambda: 1.0)())),
+            })
+            offset = LinePropertyExtractor.get_line_offset(symbol_layer)
+            if isinstance(offset, list) or (ex.is_number(offset) and offset != 0):
+                layer_def["paint"]["line-offset"] = offset
+            layer_def["layout"].update({
+                "line-cap": LinePropertyExtractor.get_line_cap(symbol_layer),
+                "line-join": LinePropertyExtractor.get_line_join(symbol_layer),
+                "visibility": "visible",
+            })
         elif LinePropertyExtractor.is_pattern_line(symbol_layer):
             self.context.report("Q2VT_PATTERN_APPROXIMATE",
                                 f"{symbol_layer.layerType()} exported from a symbol preview.",
@@ -3127,10 +3296,19 @@ class QgisMapLibreStyleExporter:
                 if kind == "RandomMarkerFill":
                     return self._register_random_pattern(symbol_layer)
                 return None
-            if kind != "LinePatternFill" and self._pattern_uses_map_units(symbol_layer):
+            map_units = self._pattern_uses_map_units(symbol_layer)
+            if kind != "LinePatternFill" and map_units:
                 pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
-            else:
+            elif map_units:
                 pattern_name = register()
+            else:
+                self._exact_screen_texture = True
+                try:
+                    pattern_name = register()
+                finally:
+                    self._exact_screen_texture = False
+                if pattern_name is not None:
+                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",

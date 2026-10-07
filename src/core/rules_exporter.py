@@ -256,6 +256,14 @@ class _RuleGroupSnapshot:
     # The polygons of a "visible polygon" label (see _visible_polygon_group):
     # every part is kept; the viewer places the label in the visible part.
     visible_polygons: bool = False
+    # FlattenedRule.merge: the features drawn together ("merge": their union;
+    # "invert": the export area outside them).
+    merge: str = ""
+    # FlattenedRule.point_group (point cluster / displacement at one zoom).
+    point_group: Optional[tuple] = None
+    # Lowest tile zoom of the data ("o"): colour band edges keep clear of
+    # vertices at its coordinate grid.
+    data_min_zoom: int = 0
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -365,6 +373,10 @@ class RulesExporter:
         self.extent = extent
         self.include_required_fields_only = include_required_fields_only
         self.max_zoom = max_zoom
+        # Point cluster / displacement groups per (source, zoom): every
+        # role and rule of the layer at a zoom shares one grouping.
+        self._point_group_cache: dict = {}
+        self._point_group_lock = threading.Lock()
         self.cent_source = cent_source
         self.utils_dir = utils_dir
         self.feedback = feedback
@@ -560,6 +572,9 @@ class RulesExporter:
                 pre_generator=pre_generator,
                 generated_fields=generated_fields,
                 layer_name=primary.layer.name(),
+                merge=primary.merge,
+                point_group=primary.point_group,
+                data_min_zoom=int(primary.get_attr("o") or 0),
             ))
             if self._labels_visible_polygon(primary, geom_target):
                 rule_groups.append(self._visible_polygon_group(rule_groups[-1], primary))
@@ -1044,6 +1059,13 @@ class RulesExporter:
 
         current_input: str = source_path
 
+        # Point cluster / displacement: the whole layer grouped at this zoom
+        # (before any rule filter: QGIS groups every drawn point).
+        if grp.point_group:
+            current_input = self._point_groups(current_input, grp.point_group)
+            if current_input is None:
+                return None
+
         # Optional filter step.
         if grp.filter_expression:
             self._check_cancel()
@@ -1068,6 +1090,13 @@ class RulesExporter:
             if current_input is None:
                 return None
 
+        # Merged features / inverted polygons: the symbol's features drawn
+        # together, before any recipe (a gradient fills the merged shape).
+        if grp.merge and grp.rule_type == 0:
+            current_input = self._merged_features(current_input, grp)
+            if current_input is None:
+                return None
+
         # Materialized marker positions: derive point features (with the
         # line azimuth) from the complete original lines before any field
         # expressions or tiling.
@@ -1088,7 +1117,15 @@ class RulesExporter:
             if not check.isValid() or check.featureCount() <= 0:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
-            current_input = self._color_bands(current_input, grp.recipe)
+            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
+            current_input = self._interpolated_segments(current_input, grp.recipe)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "arrow_body" and grp.recipe.param("taper"):
+            current_input = self._tapered_arrows(current_input, grp.recipe)
             if current_input is None:
                 return None
 
@@ -1250,7 +1287,7 @@ class RulesExporter:
                                  MAX_NODES=mat.PIECE_MAX_NODES)
         return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
 
-    def _color_bands(self, source: str, recipe: Recipe) -> Optional[str]:
+    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0) -> Optional[str]:
         """Worker: every colour band of a gradient / shapeburst fill as its
         own polygon (BAND_FIELD, COLOR_FIELD), all in one dataset, bands in
         order (see materialize.color_bands_recipe)."""
@@ -1260,7 +1297,8 @@ class RulesExporter:
         layer = QgsVectorLayer(source, "bands_src", "ogr")
         if not layer.isValid():
             return None
-        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}")
+        # Bands under a pixel wide are merged, two zooms past the archive.
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0, float(min_zoom))
         colors = recipe.param("colors")
         fields = QgsFields()
         for field in layer.fields():
@@ -1302,6 +1340,361 @@ class RulesExporter:
             for out_feature in features:
                 writer.addFeature(out_feature)
                 written += 1
+        del writer
+        return out if written else None
+
+    def _point_grouping(self, source: str, zoom: int, params: dict):
+        """(layer, features in drawing order, their points and groups in the
+        grouping CRS, transforms) of a point cluster / displacement layer at
+        one zoom; computed once per source and zoom."""
+        from qgis.core import QgsFeatureRequest  # pylint: disable=import-outside-toplevel
+        from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
+        key = (source, zoom, params.get("tolerance"), params.get("crs"))
+        with self._point_group_lock:
+            cached = self._point_group_cache.get(key)
+            if cached is not None:
+                return cached
+            layer = QgsVectorLayer(source, "point_groups", "ogr")
+            if not layer.isValid():
+                return None
+            target = QgsCoordinateReferenceSystem(params.get("crs") or layer.crs().authid())
+            to_crs = QgsCoordinateTransform(layer.crs(), target, self._transform_context)
+            from_crs = QgsCoordinateTransform(target, layer.crs(), self._transform_context)
+            order_field = f"{_FIELD_PREFIX}_orig_id"
+            request = QgsFeatureRequest()
+            if layer.fields().indexOf(order_field) >= 0:  # QGIS draws in feature order
+                request.setOrderBy(QgsFeatureRequest.OrderBy([
+                    QgsFeatureRequest.OrderByClause(order_field, True)]))
+            features, points = [], []
+            for feature in layer.getFeatures(request):
+                geometry = feature.geometry()
+                if geometry.isEmpty():
+                    continue
+                point = geometry.centroid().asPoint() if geometry.isMultipart() else geometry.asPoint()
+                point = to_crs.transform(point)
+                features.append(feature)
+                points.append((point.x(), point.y()))
+            groups = pg.group_points(points, float(params.get("tolerance") or 0.0))
+            cached = (layer, features, points, groups, from_crs)
+            self._point_group_cache[key] = cached
+            return cached
+
+    def _point_groups(self, source: str, point_group: tuple) -> Optional[str]:
+        """Worker: one role of a point cluster / displacement renderer at one
+        zoom (FlattenedRule.point_group = (mode, role, zoom, params)):
+
+        * members: cluster - the points left alone; displacement - every
+          point, the grouped ones moved around their group's centre;
+        * cluster / center: one point per group of two or more at its
+          centroid, with CLUSTER_SIZE_FIELD (the first member's attributes);
+        * circle / grid: the displacement circle or grid lines."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
+        mode, role, zoom, params = point_group
+        params = dict(params)
+        grouping = self._point_grouping(source, zoom, params)
+        if grouping is None:
+            return None
+        layer, features, points, groups, from_crs = grouping
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        if role in ("cluster", "center"):
+            fields.append(QgsField(mat.CLUSTER_SIZE_FIELD, QVariant.Int))
+            fields.append(QgsField(mat.CLUSTER_COLOR_FIELD, QVariant.String))
+        kind = QgsWkbTypes.LineString if role in ("circle", "grid") else QgsWkbTypes.Point
+        out = self._temp_path("groups")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, kind, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+
+        def back(x, y):
+            return from_crs.transform(QgsPointXY(x, y))
+
+        def write(source_feature, geometry, size=None):
+            feature = QgsFeature(fields)
+            for field in fields:
+                if field.name() not in (mat.CLUSTER_SIZE_FIELD, mat.CLUSTER_COLOR_FIELD):
+                    feature[field.name()] = source_feature[field.name()]
+            if size is not None:
+                feature[mat.CLUSTER_SIZE_FIELD] = size
+            feature.setGeometry(geometry)
+            writer.addFeature(feature)
+
+        written = 0
+        placement = params.get("placement", pg.RING)
+        for members in groups:
+            self._check_cancel()
+            if len(members) < 2:
+                if role == "members":
+                    write(features[members[0]], features[members[0]].geometry())
+                    written += 1
+                continue
+            center = pg.centroid(points, members)
+            if role in ("cluster", "center"):
+                write(features[members[0]], QgsGeometry.fromPointXY(back(*center)), len(members))
+                written += 1
+                continue
+            if mode != "displacement":
+                continue  # clustered points are drawn by the cluster symbol only
+            positions, radius, size = pg.displaced(
+                center, len(members), placement, params.get("symbol_diagonal", 0.0),
+                params.get("center_diagonal", 0.0), params.get("addition", 0.0))
+            if role == "members":
+                for index, (x, y) in zip(members, positions):
+                    write(features[index], QgsGeometry.fromPointXY(back(x, y)))
+                    written += 1
+            elif role == "circle" and radius:
+                ring = [back(center[0] + radius * math.sin(2 * math.pi * k / 72),
+                             center[1] + radius * math.cos(2 * math.pi * k / 72)) for k in range(73)]
+                write(features[members[0]], QgsGeometry.fromPolylineXY(ring))
+                written += 1
+            elif role == "grid" and size:
+                for a, b in pg.grid_lines(positions, size):
+                    write(features[members[0]], QgsGeometry.fromPolylineXY([back(*a), back(*b)]))
+                    written += 1
+        del writer
+        return out if written else None
+
+    def _merged_features(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
+        """Worker: one feature for the whole rule group, as QGIS draws it.
+        "merge" (merged feature renderer): the union of the features (lines
+        merged into continuous lines). "invert" (inverted polygon renderer):
+        an area well beyond the export extent minus the union, so its outer
+        edge never reaches a tile and only the polygon edges are outlined."""
+        from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsProject,  # pylint: disable=import-outside-toplevel
+                               QgsVectorFileWriter, QgsWkbTypes)
+        layer = QgsVectorLayer(source, "merge_src", "ogr")
+        if not layer.isValid():
+            return None
+        geometries = [f.geometry() for f in layer.getFeatures() if not f.geometry().isEmpty()]
+        self._check_cancel()
+        union = QgsGeometry.unaryUnion(geometries) if geometries else QgsGeometry()
+        kind = QgsWkbTypes.geometryType(layer.wkbType())
+        if grp.merge == "invert" and grp.geometry_target == 1:
+            # The outline of the inverted area is the polygons' own edge.
+            if union.isEmpty():
+                return None
+            result = union
+        elif grp.merge == "invert":
+            if kind != QgsWkbTypes.PolygonGeometry:
+                return source
+            area = QgsRectangle(self.extent)
+            area.grow(max(area.width(), area.height()))
+            crs = layer.crs()
+            if crs.authid() != f"EPSG:{_EPSG_CRS}":
+                area = QgsCoordinateTransform(QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"), crs,
+                                              self._transform_context).transformBoundingBox(area)
+            if crs.isGeographic():
+                area = area.intersect(QgsRectangle(-180, -85.06, 180, 85.06))
+            outside = QgsGeometry.fromRect(area)
+            result = outside.difference(union) if not union.isEmpty() else outside
+        else:
+            if union.isEmpty():
+                return None
+            result = union.mergeLines() if kind == QgsWkbTypes.LineGeometry else union
+        if result.isEmpty():
+            return None
+        result.convertToMultiType()
+        out = self._temp_path("merged")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        writer = QgsVectorFileWriter.create(out, fields, result.wkbType(), layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        feature = QgsFeature(fields)
+        first = next(iter(layer.getFeatures()), None)
+        if first is not None:  # the symbol's own data-defined values (one per group)
+            for field in fields:
+                feature[field.name()] = first[field.name()]
+        feature.setGeometry(result)
+        writer.addFeature(feature)
+        del writer
+        return out
+
+    def _interpolated_segments(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: an interpolated line as pieces along each line (part), each
+        with the colour and width QGIS computes for the middle of the piece
+        (COLOR_FIELD, WIDTH_FIELD). The start / end values are evaluated per
+        feature, as QGIS does, and interpolated by length along the part."""
+        from qgis.core import (QgsExpression, QgsExpressionContext,  # pylint: disable=import-outside-toplevel
+                               QgsExpressionContextUtils, QgsFeature, QgsField, QgsFields,
+                               QgsGeometry, QgsInterpolatedLineColor, QgsInterpolatedLineWidth,
+                               QgsProject, QgsReadWriteContext, QgsSymbolLayerUtils,
+                               QgsVectorFileWriter, QgsWkbTypes)
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+        layer = QgsVectorLayer(source, "interpolated_src", "ogr")
+        if not layer.isValid():
+            return None
+
+        def restore(kind, xml):
+            item = kind()
+            doc = QDomDocument()
+            if xml and doc.setContent(xml)[0]:
+                item.readXml(doc.documentElement(), QgsReadWriteContext())
+            return item
+        color = restore(QgsInterpolatedLineColor, recipe.param("color"))
+        width = restore(QgsInterpolatedLineWidth, recipe.param("width"))
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+
+        def prepared(pair):
+            out = []
+            for text in pair:
+                expression = QgsExpression(text) if text else None
+                if expression is not None:
+                    expression.prepare(context)
+                out.append(expression)
+            return out
+        color_exprs, width_exprs = prepared(recipe.param("color_values")), prepared(recipe.param("width_values"))
+        varies_color = color.coloringMethod() == QgsInterpolatedLineColor.ColorRamp and all(color_exprs)
+        varies_width = width.isVariableWidth() and all(width_exprs)
+        shader = color.colorRampShader()
+        color_span = abs(shader.maximumValue() - shader.minimumValue()) or 1.0
+        width_span = abs(width.maximumValue() - width.minimumValue()) or 1.0
+        steps = recipe.param("steps", 64)
+
+        def number(expression):
+            value = expression.evaluate(context) if expression is not None else None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        fields.append(QgsField(mat.COLOR_FIELD, QVariant.String))
+        fields.append(QgsField(mat.WIDTH_FIELD, QVariant.Double))
+        out = self._temp_path("interpolated")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            context.setFeature(feature)
+            c1, c2 = (number(e) for e in color_exprs) if varies_color else (None, None)
+            w1, w2 = (number(e) for e in width_exprs) if varies_width else (None, None)
+            pieces = 1
+            if c1 is not None and c2 is not None:
+                pieces = max(pieces, math.ceil(steps * abs(c2 - c1) / color_span))
+            if w1 is not None and w2 is not None:
+                pieces = max(pieces, math.ceil(steps * abs(w2 - w1) / width_span))
+            pieces = min(pieces, 4 * steps)
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            for part in geometry.constParts():
+                length = part.length()
+                if length <= 0:
+                    continue
+                for piece in range(pieces):
+                    t0, t1 = piece / pieces, (piece + 1) / pieces
+                    middle = (t0 + t1) / 2
+                    line = QgsGeometry(part.curveSubstring(t0 * length, t1 * length))
+                    if line.isEmpty():
+                        continue
+                    if c1 is not None and c2 is not None:
+                        rgba = color.color(c1 + (c2 - c1) * middle)
+                    else:
+                        rgba = color.color(c1 if c1 is not None else 0.0)
+                    if w1 is not None and w2 is not None:
+                        stroke = width.strokeWidth(w1 + (w2 - w1) * middle)
+                    elif width.isVariableWidth():
+                        stroke = 0.0
+                    else:
+                        stroke = width.fixedStrokeWidth()
+                    if stroke <= 0 or not rgba.isValid() or rgba.alpha() == 0:
+                        continue  # out of range (ignored) or nothing to draw
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        if field.name() not in (mat.COLOR_FIELD, mat.WIDTH_FIELD):
+                            out_feature[field.name()] = feature[field.name()]
+                    out_feature[mat.COLOR_FIELD] = QgsSymbolLayerUtils.encodeColor(rgba)
+                    out_feature[mat.WIDTH_FIELD] = float(stroke)
+                    out_feature.setGeometry(line)
+                    writer.addFeature(out_feature)
+                    written += 1
+        del writer
+        return out if written else None
+
+    # Pieces of a tapered arrow body (width steps of 1/24 of the change).
+    ARROW_TAPER_PIECES = 24
+
+    def _tapered_arrows(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: arrow bodies (``mat.arrow_body_for``, cut at the heads)
+        whose width runs from the start to the end width, as QGIS's arrow
+        polygon does: short pieces, each with the width of its middle
+        (WIDTH_FIELD)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        bodies = self._run_alg_safe("geometrybyexpression", "native", INPUT=source, OUTPUT_GEOMETRY=1,
+                                    EXPRESSION=mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}"))
+        bodies = self._run_alg_safe("removenullgeometries", "native", INPUT=bodies, REMOVE_EMPTY=True)
+        bodies = self._run_alg_safe("multiparttosingleparts", "native", INPUT=bodies)
+        layer = QgsVectorLayer(bodies, "arrow_bodies", "ogr") if isinstance(bodies, str) else bodies
+        if layer is None or not layer.isValid():
+            return None
+        start, end = recipe.param("taper")
+        nested = bool(recipe.param("taper_nested", False))
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.WIDTH_FIELD:
+                fields.append(field)
+        fields.append(QgsField(mat.WIDTH_FIELD, QVariant.Double))
+        out = self._temp_path("arrows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written, pieces = 0, self.ARROW_TAPER_PIECES
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            for part in geometry.constParts():
+                length = part.length()
+                if length <= 0:
+                    continue
+                for piece in range(pieces):
+                    t0, t1 = piece / pieces, (piece + 1) / pieces
+                    if nested:
+                        # Opaque: each piece reaches to the wide end of the body,
+                        # so a width step lies on a continuous line (pieces
+                        # meeting end to end show hairline cracks).
+                        t0, t1 = (t0, 1.0) if end >= start else (0.0, t1)
+                    line = QgsGeometry(part.curveSubstring(t0 * length, t1 * length))
+                    if line.isEmpty():
+                        continue
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        if field.name() != mat.WIDTH_FIELD:
+                            out_feature[field.name()] = feature[field.name()]
+                    middle = (piece + 0.5) / pieces
+                    out_feature[mat.WIDTH_FIELD] = float(start + (end - start) * middle)
+                    out_feature.setGeometry(line)
+                    writer.addFeature(out_feature)
+                    written += 1
         del writer
         return out if written else None
 
@@ -1800,6 +2193,8 @@ class RulesExporter:
             return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "color_bands":
             return [2, "@geometry"]  # bands already materialized (_color_bands)
+        if recipe is not None and recipe.kind == "interpolated_segments":
+            return [1, "@geometry"]  # pieces already materialized
         if recipe is not None and recipe.kind == "grid_points":
             # Stroke-only markers are exported as their (clipped) line work.
             kind = 2 if recipe.param("fill") or recipe.param("stroke") else \
@@ -1827,6 +2222,8 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":
+            if recipe.param("taper"):
+                return [1, "@geometry"]  # bodies built by _tapered_arrows
             return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "callout":
             label = self._layer_point_expression(
