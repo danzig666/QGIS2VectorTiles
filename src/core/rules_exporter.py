@@ -1282,7 +1282,8 @@ class RulesExporter:
         layer = QgsVectorLayer(source, "bands_src", "ogr")
         if not layer.isValid():
             return None
-        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}")
+        # Bands under a pixel wide are merged, two zooms past the archive.
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0)
         colors = recipe.param("colors")
         fields = QgsFields()
         for field in layer.fields():

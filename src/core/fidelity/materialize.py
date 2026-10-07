@@ -848,7 +848,7 @@ def shapeburst_band_recipe(distance: float, whole_shape: bool, ignore_rings: boo
 def _band_interval(band: int, bands: int, overlap: bool):
     """(start, end) of a band's t interval, None = unbounded on that side."""
     start = None if band == 0 else band / bands
-    end = None if overlap or band == bands - 1 else (band + 1) / bands
+    end = None if overlap or band + 1 >= bands - 1e-9 else (band + 1) / bands
     return start, end
 
 

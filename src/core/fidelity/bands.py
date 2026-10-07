@@ -32,8 +32,14 @@ class BandBuilder:
     """Band polygons of one color_bands recipe, per feature geometry in the
     export CRS."""
 
-    def __init__(self, recipe: Recipe, export_crs: str):
+    # Web Mercator metres per CSS pixel at zoom 0 (512 px world).
+    METRES_PER_PX_Z0 = 40075016.68557849 / 512
+
+    def __init__(self, recipe: Recipe, export_crs: str, detail_zoom: Optional[float] = None):
+        """``detail_zoom``: bands narrower than a pixel at this zoom are merged
+        per feature (export CRS in Web Mercator metres)."""
         self.bands: Tuple[Recipe, ...] = tuple(recipe.param("bands"))
+        self.detail_zoom = detail_zoom
         crs = (self.bands[0].param("crs") if self.bands else None) or export_crs
         self._to_crs = self._from_crs = None
         if crs != export_crs:
@@ -52,7 +58,7 @@ class BandBuilder:
             local.transform(self._to_crs)
         shapes = []
         context = _Context(local)
-        for index, band in enumerate(self.bands):
+        for index, band in self._merged(geometry):
             if band.kind == "shapeburst_band":
                 shape = _shapeburst(local, band, context)
             else:
@@ -64,6 +70,30 @@ class BandBuilder:
             if not shape.isEmpty():
                 shapes.append((index, shape))
         return shapes
+
+
+    def _merged(self, geometry: QgsGeometry):
+        """[(colour index, band recipe)]: neighbouring bands merged so none is
+        narrower than about a pixel at ``detail_zoom`` (the feature's
+        bounding box diagonal bounds every band's extent); a merged band takes
+        the colour of its middle."""
+        count = len(self.bands)
+        if self.detail_zoom is None or count < 2:
+            return list(enumerate(self.bands))
+        box = geometry.boundingBox()
+        pixels = math.hypot(box.width(), box.height()) / (
+            self.METRES_PER_PX_Z0 / 2 ** self.detail_zoom)
+        step = max(1, math.ceil(count / max(pixels, 1.0)))
+        if step == 1:
+            return list(enumerate(self.bands))
+        merged = []
+        for group in range(math.ceil(count / step)):
+            recipe = self.bands[group * step]
+            params = dict(recipe.params)
+            params["band"], params["bands"] = group, count / step
+            colour = min(count - 1, group * step + step // 2)
+            merged.append((colour, Recipe(recipe.kind, recipe.placements, tuple(params.items()))))
+        return merged
 
 
 class _Context:
@@ -107,17 +137,22 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
     def periods(count_from, count_to):
         """[(ta, tb)] of this band in each spread period."""
         out = []
+        # Nested (overlap): a band reaches to the end of its period, under
+        # the bands drawn after it.
+        top = 1.0 if overlap else b
         for k in range(count_from, count_to + 1):
             if spread == 1 and k % 2:  # reflect: odd periods run backwards
-                out.append((k + 1 - b, k + 1 - a))
+                out.append((k + 1 - top, k + 1 - a))
             else:
-                out.append((k + a, k + b))
+                out.append((k + a, k + top))
         return out
 
     if kind == 1:  # radial: t = distance from p1 / |p2 - p1|
         def disc(t):
             return QgsGeometry.fromPointXY(QgsPointXY(p1x, p1y)).buffer(t * length, _CIRCLE_SEGMENTS)
         if spread == 0:
+            if end is not None:
+                end += grow
             shape = g if end is None else g.intersection(disc(end))
             if start is not None:
                 shape = shape.difference(disc(start))
@@ -144,7 +179,8 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
             return QgsGeometry.fromPolygonXY([[QgsPointXY(p1x + dx * t + nx * side, p1y + dy * t + ny * side)
                                                for t, side in corners]])
         if spread == 0:
-            shape = g.intersection(strip(-big if start is None else start, big if end is None else end))
+            shape = g.intersection(strip(-big if start is None else start,
+                                         big if end is None else end + grow))
         else:
             strips = [strip(ta, tb) for ta, tb in periods(math.floor(-big), math.ceil(big))]
             shape = g.intersection(_union(strips))

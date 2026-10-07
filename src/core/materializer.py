@@ -1443,16 +1443,20 @@ class SymbolMaterializer:
 
     # -- map-unit hatches ------------------------------------------------------
     # -- gradient / shapeburst fills: colour bands (fidelity/materialize.py) --------------
-    MAX_BANDS = 64
+    # Smooth as QGIS's 8-bit gradient: neighbouring bands differ by about one
+    # colour level (64 bands of ~4 levels showed as stripes on a rainbow).
+    # The exporter merges bands narrower than a pixel per feature.
+    MAX_BANDS = 1024
+    BAND_LEVELS = 1.0
 
     @classmethod
     def _band_count(cls, colors) -> int:
-        """Bands so neighbours differ by ~4 levels (at most MAX_BANDS)."""
+        """Bands so neighbours differ by ~BAND_LEVELS levels (at most MAX_BANDS)."""
         spread = 0
         for a, b in zip(colors, colors[1:]):
             spread += max(abs(a.red() - b.red()), abs(a.green() - b.green()),
                           abs(a.blue() - b.blue()), abs(a.alpha() - b.alpha()))
-        return max(2, min(cls.MAX_BANDS, math.ceil(spread / 4)))
+        return max(2, min(cls.MAX_BANDS, math.ceil(spread / cls.BAND_LEVELS)))
 
     @staticmethod
     def _ramp_of(layer):
@@ -1468,7 +1472,7 @@ class SymbolMaterializer:
         """One rule drawing every colour band of the fill: a solid fill whose
         colour is the band's (COLOR_FIELD), from one materialized dataset."""
         from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
-        probe = [ramp.color(i / 16) for i in range(17)]
+        probe = [ramp.color(i / 64) for i in range(65)]
         bands = self._band_count(probe)
         colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
         overlap = overlap_ok and all(c.alpha() == 255 for c in colors)
@@ -1499,7 +1503,10 @@ class SymbolMaterializer:
         p1, p2 = layer.referencePoint1(), layer.referencePoint2()
 
         def recipe(band, bands, opaque):
-            overlap = opaque and spread == 0 and gradient_type != 2
+            # Opaque bands nest (each reaches to the end of its period, under
+            # the bands drawn after it): thin anti-aliased bands that only
+            # touch let the background through (lighter colours).
+            overlap = opaque and gradient_type != 2
             return mat.gradient_band_recipe(
                 gradient_type, (p1.x(), p1.y()), (p2.x(), p2.y()),
                 layer.referencePoint1IsCentroid(), layer.referencePoint2IsCentroid(),
