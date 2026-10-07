@@ -94,7 +94,7 @@ class LayerConfig:
     min_scale: float = 0.0
     max_scale: float = 0.0
     # Raster layers only (rendered by QGIS into their own raster PMTiles archive):
-    raster_format: str = "png"         # RASTER_FORMATS; png keeps transparency
+    raster_format: str = "webp"        # RASTER_FORMATS; webp and png keep transparency
     raster_min_zoom: Optional[int] = None   # None = the publication's tile zooms
     raster_max_zoom: Optional[int] = None
     raster_quality: int = 85           # jpeg / webp

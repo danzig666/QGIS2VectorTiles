@@ -317,7 +317,8 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
     from the export cache while the layer, its style and its settings are
     unchanged)."""
     from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
-    from .raster_tiles import blend_name, raster_source_id, raster_style_layer_id  # pylint: disable=import-outside-toplevel
+    from .raster_tiles import (blend_name, raster_source_id, raster_style_layer_id,  # pylint: disable=import-outside-toplevel
+                               tile_format)
     out = []
     folder = os.path.join(work_dir, "rasters")
     if os.path.isdir(folder):
@@ -343,7 +344,7 @@ def _render_rasters(project, profile, configs, plans, work_dir, progress, warnin
                             "it is not published.")
             continue
         progress.info(f'Raster layer "{layer.name()}": {descriptor.addressed_tiles} tiles, '
-                      f"{descriptor.size_bytes / 1e6:.1f} MB ({config.raster_format})")
+                      f"{descriptor.size_bytes / 1e6:.1f} MB ({tile_format(config.raster_format)})")
         out.append({"layerId": lid, "sourceId": raster_source_id(lid),
                     "styleLayerId": raster_style_layer_id(lid), "path": descriptor.path,
                     "descriptor": descriptor, "tileSize": 256})

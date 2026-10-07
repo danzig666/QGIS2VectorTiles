@@ -360,6 +360,11 @@ class PublishDialog(QDialog):
         self.bulk.setMenu(self._bulk_menu())
         bulk_row.addWidget(QLabel(tr("Select several rows (Ctrl/Shift + click) to change them together:")), 1)
         bulk_row.addWidget(self.bulk)
+        publish_visible = QPushButton(tr("Publish the visible layers"))
+        publish_visible.setToolTip(tr("Publish exactly the layers visible in the QGIS Layers panel now "
+                                      "(also visible at start); the hidden ones are no longer published"))
+        publish_visible.clicked.connect(self.publish_visible_layers)
+        bulk_row.addWidget(publish_visible)
         layers_layout.addLayout(bulk_row)
         self.tree = QTreeWidget()
         # Short headers (the layer names need the room); the meaning in tooltips.
@@ -507,6 +512,20 @@ class PublishDialog(QDialog):
             self.status.setText(tr('Layers of map theme "{}" added to the published layers.').format(name))
         else:
             self.status.setText(tr('Map theme "{}" applied to the layer list.').format(name))
+
+    def publish_visible_layers(self):
+        """Published layers := the layers visible in the QGIS layer tree now
+        (a layer in a hidden group is hidden); they are visible at start."""
+        root = self.project.layerTreeRoot()
+        count = 0
+        for item in self._tree_items():
+            node = root.findLayer(item.data(0, LAYER_ROLE))
+            shown = node is not None and node.isVisible()
+            item.setCheckState(COL_PUBLISH, _check(shown))
+            if shown:
+                item.setCheckState(COL_VISIBLE, CHECKED)
+                count += 1
+        self.status.setText(tr("Published layers: the {} layers visible in QGIS.").format(count))
 
     def _refresh_initial_theme(self):
         current = self.theme_initial.currentData()
@@ -813,8 +832,8 @@ class PublishDialog(QDialog):
         form = QFormLayout(page)
         self.r_title = QLineEdit()
         self.r_format = QComboBox()
+        self.r_format.addItem(tr("WebP (small, transparent; the default)"), "webp")
         self.r_format.addItem(tr("PNG (sharp, transparent; larger)"), "png")
-        self.r_format.addItem(tr("WebP (photos and plans; small, transparent)"), "webp")
         self.r_format.addItem(tr("JPEG (photos; no transparency)"), "jpeg")
         self.r_min = QSpinBox()
         self.r_max = QSpinBox()
