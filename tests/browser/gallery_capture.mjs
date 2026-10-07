@@ -19,7 +19,10 @@ window.maplibregl = maplibregl;
 window.q2vt = { errors: [], missing: [] };
 window.map = new maplibregl.Map({ container: "map", style: "http://localhost:${port}/style/style.json",
   center: [0, 0], zoom: 1, fadeDuration: 0, attributionControl: false, pixelRatio: 1,
-  canvasContextAttributes: { preserveDrawingBuffer: true } });
+  canvasContextAttributes: { preserveDrawingBuffer: true },
+  // The export's style points at the plugin's preview port (9000): serve
+  // everything from this run's port, so runs can go side by side.
+  transformRequest: (url) => ({ url: url.replace("://localhost:9000/", "://localhost:${port}/") }) });
 map.on("error", (e) => window.q2vt.errors.push(String(e.error && e.error.message || e)));
 map.on("styleimagemissing", (e) => window.q2vt.missing.push(e.id));
 map.once("load", () => { window.q2vtVisibleLabels = enableVisibleLabels(map, maplibregl); });
