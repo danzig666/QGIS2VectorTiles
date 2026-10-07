@@ -1020,21 +1020,25 @@ class SymbolMaterializer:
         except AttributeError:
             along, along_unit = 0.0, None
 
-        def to_map(value, unit, zoom):
+        def to_map(value, unit, zoom: float):
+            """Map distance of a screen distance at (fractional) ``zoom``."""
             if abs(value or 0.0) <= 1e-9:
                 return 0.0
             if normalize_unit(unit) == "map":
                 return float(value)
-            return _to_mm(value, unit) / 1000.0 * ZoomLevels.zoom_to_scale(zoom) / math.sqrt(2)
+            return _to_mm(value, unit) / 1000.0 * (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom
 
         interval_mm = _to_mm(layer.interval(), layer.intervalUnit())
         if interval_mm is not None and \
                 interval_mm * 96.0 / 25.4 < self.INTERVAL_MIN_SPACING_PX:
             return None
         length = self._layer_totals(native.layer)[1]
-        elements = sum(length / max(to_map(layer.interval(), layer.intervalUnit(), zoom), 1e-9)
-                       for zoom in range(low, high + 1))
-        if self._over_budget(native, elements, "Marker line"):
+        per_zoom_elements = sum(length / max(to_map(layer.interval(), layer.intervalUnit(), zoom + 0.5),
+                                             1e-9) for zoom in range(low, high + 1))
+        # Positions in eighths of a zoom (spacing within +-4 % of QGIS's;
+        # fewer bands when the markers would exceed the output budget).
+        steps = next((n for n in (8, 4, 2) if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        if self._over_budget(native, per_zoom_elements * steps, "Marker line"):
             return None
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, 0.0,
                                             layer.offsetUnit(), native)
@@ -1052,20 +1056,42 @@ class SymbolMaterializer:
                 ZoomInterval(float(high), float(high + 1)))
             if not over.visibility.is_empty:
                 rules.append(over)
-        for rule in zoom_rules:
-            zoom = rule.get_attr("o")
-            recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
-                                         to_map(along, along_unit, zoom),
-                                         to_map(layer.offset(), layer.offsetUnit(), zoom), crs)
-            extra = []
-            if _ring_filter(layer):
-                extra.append(("ring_filter", _ring_filter(layer)))
-            average = self._average_angle_length(layer, rule)
-            if average:
-                extra.append(("average", average))
-            recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + tuple(extra))
-            rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
+        for index, zoom_rule in enumerate(zoom_rules):
+            for rule, zoom in self._sub_zoom_bands(zoom_rule, steps, index == len(zoom_rules) - 1):
+                recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
+                                             to_map(along, along_unit, zoom),
+                                             to_map(layer.offset(), layer.offsetUnit(), zoom), crs)
+                extra = []
+                if _ring_filter(layer):
+                    extra.append(("ring_filter", _ring_filter(layer)))
+                average = self._average_angle_length(layer, rule)
+                if average:
+                    extra.append(("average", average))
+                recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + tuple(extra))
+                rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
         return rules
+
+    @staticmethod
+    def _sub_zoom_bands(rule: FlattenedRule, steps: int, last: bool):
+        """[(rule, middle zoom)]: ``rule`` (one zoom) split into ``steps``
+        equal zoom bands (attribute "b"); the last band of an open-ended last
+        zoom stays visible when overzooming."""
+        low = float(rule.get_attr("o"))
+        visible = rule.visibility or ZoomInterval(low, None if last else low + 1.0)
+        if steps <= 1:
+            return [(rule, low + 0.5)]
+        bands = []
+        for step in range(steps):
+            start, end = low + step / steps, low + (step + 1) / steps
+            open_end = step == steps - 1 and visible.max_zoom is None
+            interval = visible.intersect(ZoomInterval(start, None if open_end else end))
+            if interval.is_empty:
+                continue
+            band = rule.derive()
+            band.visibility = interval
+            band.set_attr("b", step)
+            bands.append((band, (start + end) / 2))
+        return bands
 
     def _marker_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
         placements = _flag_names(layer.placements())
