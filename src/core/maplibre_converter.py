@@ -1,6 +1,7 @@
 """Convert QGIS Vector Tile Layer styles to MapLibre GL JSON style format."""
 
 import copy
+import dataclasses
 import json
 import math
 import re
@@ -36,7 +37,8 @@ from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
-from .fidelity.patterns import LinePatternSpec, render_line_pattern, solve_periodic_cell
+from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
+                                 solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
 from ..utils.config import _SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX
 
@@ -2027,6 +2029,10 @@ class QgisMapLibreStyleExporter:
             color_rgba=(color.red(), color.green(), color.blue(), color.alpha()),
             offset_px=screen_px(symbol_layer.offset(), symbol_layer.offsetUnit(), "offset"),
         )
+        if self._exact_screen_texture and \
+                _enum_int(symbol_layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly):
+            angle, spacing = qgis_image_hatch(spec.angle_deg, spec.spacing_px)
+            spec = dataclasses.replace(spec, angle_deg=angle, spacing_px=spacing)
         cell = solve_periodic_cell(spec, self.profile)
         if cell is None:
             return None
@@ -2231,7 +2237,7 @@ class QgisMapLibreStyleExporter:
         from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
         # Screen-unit parts are drawn at TEXTURE_SCREEN_SCALE, map-unit parts
         # at the reference zoom (scaling both factors keeps map pixels).
-        scale = self.TEXTURE_SCREEN_SCALE
+        scale = self._screen_scale()
         reference = self._reference_map_units_per_px() * scale
         one = SymbolImage(marker, "pattern-marker", scale, True, reference).img
         two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference).img
@@ -2300,11 +2306,19 @@ class QgisMapLibreStyleExporter:
     # texture grows 2x with the map until the next zoom, while QGIS keeps
     # screen-unit sizes. Drawn at 1/sqrt(2), they stay within 0.71x-1.41x of
     # QGIS (instead of 1x-2x), exact in the middle of every zoom.
+    # Textures of patterns sized only in screen units are drawn at their true
+    # size instead: their style layer carries SCREEN_PATTERN_FLAG, which the
+    # patched MapLibre (tools/patch_maplibre.py) draws at the real zoom.
     TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
+    SCREEN_PATTERN_FLAG = "q2vt:screen-pattern"
+    _exact_screen_texture = False
+
+    def _screen_scale(self) -> float:
+        return 1.0 if self._exact_screen_texture else self.TEXTURE_SCREEN_SCALE
 
     def _texture_px(self, value, unit) -> float:
         px = PropertyExtractor.static_pixels(value, unit)
-        return px if normalize_unit(unit) in ("map", "m") else px * self.TEXTURE_SCREEN_SCALE
+        return px if normalize_unit(unit) in ("map", "m") else px * self._screen_scale()
 
     def _pattern_px(self, value, unit, what: str) -> float:
         if normalize_unit(unit) in ("map", "m") and value and not self._pattern_zoom_bands:
@@ -3255,10 +3269,19 @@ class QgisMapLibreStyleExporter:
                 if kind == "RandomMarkerFill":
                     return self._register_random_pattern(symbol_layer)
                 return None
-            if kind != "LinePatternFill" and self._pattern_uses_map_units(symbol_layer):
+            map_units = self._pattern_uses_map_units(symbol_layer)
+            if kind != "LinePatternFill" and map_units:
                 pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
-            else:
+            elif map_units:
                 pattern_name = register()
+            else:
+                self._exact_screen_texture = True
+                try:
+                    pattern_name = register()
+                finally:
+                    self._exact_screen_texture = False
+                if pattern_name is not None:
+                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",

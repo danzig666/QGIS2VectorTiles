@@ -317,7 +317,8 @@ def _period(png, axis=0):
 def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypatch, unit, zoom):
     """MapLibre draws fill-pattern in the pixels of the tile's integer zoom,
     so a texture grows with the map until the next zoom (Kis szaggatott: a
-    texture laid out for the middle of the zoom was 1.4x too sparse)."""
+    texture laid out for the middle of the zoom was 1.4x too sparse). Screen
+    sizes are flagged for the patched MapLibre and keep their exact size."""
     from qgis.core import QgsPointPatternFillSymbolLayer
     monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
     layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
@@ -335,4 +336,4 @@ def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypa
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
     _compare(tmp_path, layer, metric="shape")
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
-    assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.3), (qgis, browser)
+    assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.03), (qgis, browser)

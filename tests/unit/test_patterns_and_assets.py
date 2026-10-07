@@ -130,3 +130,19 @@ def test_dense_off_grid_markers_have_no_seams():
     alpha = cell.getchannel("A")
     columns = [sum(alpha.getpixel((x, y)) for y in range(height)) for x in range(width)]
     assert min(columns) > 0.6 * max(columns)
+
+
+def test_screen_hatch_spacing_is_truncated_like_qgis():
+    """QGIS 3.34 paints a screen hatch into a brush image with whole-pixel
+    sides (measured: 2 mm = 7.56 px is drawn 7 px apart, 45° lines 7.07 px)."""
+    from fidelity.patterns import qgis_image_hatch
+    assert qgis_image_hatch(0, 7.559) == (0, 7.0)
+    assert qgis_image_hatch(90, 12.47) == (90, 12.0)
+    angle, spacing = qgis_image_hatch(45, 7.559)
+    assert angle == pytest.approx(45) and spacing == pytest.approx(7.071, abs=1e-3)
+    assert qgis_image_hatch(45, 7.937)[1] == pytest.approx(7.778, abs=1e-3)
+    angle, spacing = qgis_image_hatch(30, 7.559)  # 8 x 15 px image
+    assert angle == pytest.approx(math.degrees(math.atan2(8, 15)))
+    assert spacing == pytest.approx(8 * math.cos(math.atan2(8, 15)))
+    assert qgis_image_hatch(150, 7.559)[0] % 180 == pytest.approx(180 - qgis_image_hatch(30, 7.559)[0])
+    assert qgis_image_hatch(0, 0.6) == (0, 0.6)  # under a pixel: unchanged
