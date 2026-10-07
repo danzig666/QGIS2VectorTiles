@@ -513,11 +513,12 @@ class RulesExporter:
             fingerprint = export_cache.source_fingerprint(provider, source_uri) \
                 if self.cache else None
             key_uri = ""
-            if provider == "memory":
-                # A temporary (scratch) layer, e.g. restored by the Memory
-                # Layer Saver plugin: its URI opens a new, empty layer, so its
-                # features are copied here, on the caller thread.
-                key_uri = f"memory:{source_uri}"
+            reason = self._snapshot_reason(r.layer)
+            if reason:
+                # Reopening the URI would lose data the project shows (see
+                # _snapshot_reason): its features are copied here, on the
+                # caller thread, as QGIS has them.
+                key_uri = f"{reason}:{source_uri}"
                 source_uri, fingerprint = self._memory_snapshot(r.layer)
                 provider = "ogr"
             sources[lid] = _SourceSnapshot(
@@ -646,8 +647,29 @@ class RulesExporter:
         except (AttributeError, RuntimeError):
             return ()
 
+    @staticmethod
+    def _snapshot_reason(layer) -> str:
+        """Why the layer must be copied from the project rather than reopened
+        from its URI by a worker ("" = reopen): a temporary (memory) layer
+        reopens empty (e.g. one restored by the Memory Layer Saver plugin);
+        unsaved edits, joined fields (also auxiliary storage, e.g. moved
+        labels) and virtual (expression) fields are not in the source."""
+        if layer.providerType() == "memory":
+            return "memory"
+        if layer.isModified():
+            return "edits"
+        from qgis.core import QgsFields  # pylint: disable=import-outside-toplevel
+        lost = {Qgis.FieldOrigin.Join, Qgis.FieldOrigin.Expression, Qgis.FieldOrigin.Edit} \
+            if hasattr(Qgis, "FieldOrigin") else {QgsFields.OriginJoin, QgsFields.OriginExpression,
+                                                  QgsFields.OriginEdit}
+        fields = layer.fields()
+        if any(fields.fieldOrigin(i) in lost for i in range(fields.count())):
+            return "fields"
+        return ""
+
     def _memory_snapshot(self, layer) -> Tuple[str, Optional[str]]:
-        """Caller thread: a memory layer's features (feature ids kept) in a
+        """Caller thread: the layer's features as the project has them
+        (feature ids kept; joined and virtual fields, unsaved edits) in a
         GeoPackage, and a fingerprint of its content for the export cache."""
         import hashlib  # pylint: disable=import-outside-toplevel
         from qgis.core import QgsVectorFileWriter  # pylint: disable=import-outside-toplevel
@@ -656,11 +678,16 @@ class RulesExporter:
             os.remove(path)
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName, options.layerName = "GPKG", "memory"
+        # A GeoPackage source's own "fid" column would be written as the
+        # copy's key: an unsaved feature's provisional value collides.
+        options.attributes = [i for i, field in enumerate(layer.fields())
+                              if field.name().lower() not in ("fid", "ogc_fid")]
         error = QgsVectorFileWriter.writeAsVectorFormatV3(
             layer, path, QgsProject.instance().transformContext(), options)
         if error[0] != QgsVectorFileWriter.NoError:
             self.feedback.reportError(f"Cannot copy temporary layer '{layer.name()}': {error[1]}")
         digest = hashlib.sha256(layer.source().encode("utf-8"))
+        digest.update(repr(layer.fields().names()).encode("utf-8"))
         for feature in layer.getFeatures():
             digest.update(str(feature.id()).encode())
             digest.update(bytes(feature.geometry().asWkb()))

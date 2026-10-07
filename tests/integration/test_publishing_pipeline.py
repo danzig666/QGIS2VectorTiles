@@ -238,3 +238,67 @@ def test_temporary_memory_layers_are_published(project, tmp_path):
     line = next(line for line in log if "Export cache:" in line)
     hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
     assert hits == total, line
+
+
+def _label_texts(result):
+    """Label texts in the export's tiles (zoom 13)."""
+    import glob  # pylint: disable=import-outside-toplevel
+    from osgeo import gdal  # pylint: disable=import-outside-toplevel
+    work = sorted(glob.glob(os.path.join(os.path.dirname(result.publication_dir), ".q2vt-work",
+                                         "*", "*", "tiles.mbtiles")))[-1]
+    ds = gdal.OpenEx(work, gdal.OF_VECTOR, open_options=["ZOOM_LEVEL=13", "CLIP=NO"])
+    texts = set()
+    for i in range(ds.GetLayerCount()):
+        layer = ds.GetLayer(i)
+        if "t01" in layer.GetName():
+            texts |= {f.GetField("q2vt_label") for f in layer if "q2vt_label" in f.keys()}
+    return texts
+
+
+@pytest.mark.parametrize("kind", ["join", "expression", "edits"])
+def test_layer_data_only_in_the_project_is_published(project, tmp_path, kind):
+    """What QGIS shows but a reopened source lacks: joined fields, virtual
+    (expression) fields and unsaved edits. Labels made of them came out
+    empty (the export then failed: no glyphs), an unsaved feature was
+    missing. The layer is copied from the project instead."""
+    from qgis.core import QgsFeature, QgsVectorLayerJoinInfo  # pylint: disable=import-outside-toplevel
+    project, parcels = project
+    project.layerTreeRoot().findLayer(parcels.id()).setItemVisibilityChecked(True)
+    settings = parcels.labeling().settings()
+    expected = set(PUBLISHED)
+    if kind == "join":
+        owners = to_geopackage(QgsVectorLayer("None?field=hrsz:string&field=owner:string", "owners",
+                                              "memory"), str(tmp_path / "owners.gpkg"))
+        owners.startEditing()
+        for hrsz in PUBLISHED:
+            feature = QgsFeature(owners.fields())
+            feature["hrsz"], feature["owner"] = hrsz, f"Tulajdonos {hrsz}"
+            owners.addFeature(feature)
+        assert owners.commitChanges()
+        project.addMapLayer(owners)
+        join = QgsVectorLayerJoinInfo()
+        join.setJoinLayer(owners)
+        join.setJoinFieldName("hrsz")
+        join.setTargetFieldName("hrsz")
+        join.setPrefix("j_")
+        assert parcels.addJoin(join)
+        settings.fieldName = "j_owner"
+        expected = {f"Tulajdonos {hrsz}" for hrsz in PUBLISHED}
+    elif kind == "expression":
+        parcels.addExpressionField("\"hrsz\" || ' m²'", QgsField("felirat", QVariant.String))
+        settings.fieldName = "felirat"
+        expected = {f"{hrsz} m²" for hrsz in PUBLISHED}
+    else:
+        parcels.startEditing()
+        feature = QgsFeature(parcels.fields())
+        feature["hrsz"], feature["zone"] = "777/7", "K1"
+        feature.setGeometry(QgsGeometry.fromWkt(
+            "POLYGON((2120000 6020000, 2120300 6020000, 2120300 6020300, 2120000 6020300, "
+            "2120000 6020000))"))
+        assert parcels.addFeature(feature)
+        expected.add("777/7")
+    parcels.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    result = export_local(project, _profile(parcels, tmp_path), EXTENT)
+    assert _label_texts(result) == expected
+    if kind == "edits":
+        parcels.rollBack()
