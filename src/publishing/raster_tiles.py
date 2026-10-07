@@ -51,10 +51,62 @@ class RasterPlan:
     extent_3857: Tuple[float, float, float, float]
     online: bool = False
     warnings: List[str] = field(default_factory=list)
+    # Ground metres per pixel of the layer's own image (None: unknown, e.g.
+    # an online service) and the latitude the tile resolutions refer to.
+    native_m: Optional[float] = None
+    latitude: float = 0.0
+    hidpi: bool = False
+
+    def resolution(self, zoom: int) -> float:
+        """Ground metres per tile pixel at ``zoom`` (512 px tiles: half)."""
+        return ground_resolution(zoom, self.latitude, self.hidpi)
 
 
 def is_raster(layer) -> bool:
     return isinstance(layer, QgsRasterLayer)
+
+
+def ground_resolution(zoom: float, latitude: float, hidpi: bool = False) -> float:
+    """Ground metres per pixel of a Web Mercator tile at ``zoom`` and ``latitude``
+    (256 px tiles; 512 px "HiDPI" tiles have twice the pixels)."""
+    return 2 * ORIGIN / 256 / 2 ** zoom * math.cos(math.radians(latitude)) / (2 if hidpi else 1)
+
+
+def native_zoom(native_m: float, latitude: float, hidpi: bool = False) -> int:
+    """The lowest zoom whose tiles are as sharp as an image of ``native_m``
+    ground metres per pixel (3.5 % tolerance: 0.4 m at 48° N is zoom 18)."""
+    exact = math.log2(2 * ORIGIN / 256 * math.cos(math.radians(latitude))
+                      / (native_m * (2 if hidpi else 1)))
+    return max(0, min(22, int(math.ceil(exact - 0.05))))
+
+
+def native_resolution(layer, transform_context=None) -> Optional[float]:
+    """Ground metres per pixel of the layer's own image (the mean of x and y,
+    one pixel measured on the WGS 84 ellipsoid at the image's centre, so any
+    CRS works: Web Mercator metres are not ground metres), or None when
+    unknown: online services serve any resolution."""
+    if (layer.providerType() or "").lower() in ONLINE_PROVIDERS:
+        return None
+    try:
+        px, py = abs(float(layer.rasterUnitsPerPixelX())), abs(float(layer.rasterUnitsPerPixelY()))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+    if not px > 0 or not py > 0 or not layer.crs().isValid():
+        return None
+    from qgis.core import (QgsCoordinateTransformContext, QgsDistanceArea,  # pylint: disable=import-outside-toplevel
+                           QgsPointXY)
+    area = QgsDistanceArea()
+    area.setSourceCrs(layer.crs(), transform_context or QgsCoordinateTransformContext())
+    area.setEllipsoid("WGS84")
+    centre = layer.extent().center()
+    try:
+        dx = area.measureLine(QgsPointXY(centre.x(), centre.y()), QgsPointXY(centre.x() + px, centre.y()))
+        dy = area.measureLine(QgsPointXY(centre.x(), centre.y()), QgsPointXY(centre.x(), centre.y() + py))
+    except Exception:  # noqa: BLE001 - a point outside the CRS's area
+        return None
+    if not dx > 0 or not dy > 0:
+        return None
+    return math.sqrt(dx * dy)
 
 
 def zoom_range(config: LayerConfig, profile: PublicationProfile) -> Tuple[int, int]:
@@ -84,15 +136,9 @@ def count_tiles(extent, min_zoom: int, max_zoom: int) -> int:
 
 def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
                extent_3857: QgsRectangle) -> RasterPlan:
-    """Zooms, area (export extent ∩ layer extent) and an upper bound of tiles."""
-    low, high = zoom_range(config, profile)
-    # Not rendered where the layer is hidden on the web (its scale range).
-    from .qgis_model import _zoom_of_scale, layer_scale_range  # pylint: disable=import-outside-toplevel
-    out_scale, in_scale = layer_scale_range(layer, config)
-    if out_scale and _zoom_of_scale(out_scale) is not None:
-        low = min(high, max(low, int(math.floor(_zoom_of_scale(out_scale)))))
-    if in_scale and _zoom_of_scale(in_scale) is not None:
-        high = max(low, min(high, int(math.ceil(_zoom_of_scale(in_scale)))))
+    """Zooms, area (export extent ∩ layer extent) and an upper bound of tiles.
+    "Match the image's resolution" (``raster_match_native``): the maximum
+    zoom is the lowest one as sharp as the image (native_zoom)."""
     web = QgsCoordinateReferenceSystem(WEB_MERCATOR)
     area = QgsRectangle(extent_3857)
     warnings = []
@@ -103,13 +149,27 @@ def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
             area = area.intersect(layer_extent)
     except Exception:  # noqa: BLE001 - provider without a usable extent (e.g. XYZ): the export extent
         pass
+    centre_y = (area if not area.isEmpty() else QgsRectangle(extent_3857)).center().y()
+    latitude = math.degrees(math.atan(math.sinh(centre_y / 6378137.0)))
+    native_m = native_resolution(layer, project.transformContext())
+    hidpi = bool(getattr(config, "raster_hidpi", False))
+    low, high = zoom_range(config, profile)
+    if getattr(config, "raster_match_native", False) and native_m:
+        high = max(low, native_zoom(native_m, latitude, hidpi))
+    # Not rendered where the layer is hidden on the web (its scale range).
+    from .qgis_model import _zoom_of_scale, layer_scale_range  # pylint: disable=import-outside-toplevel
+    out_scale, in_scale = layer_scale_range(layer, config)
+    if out_scale and _zoom_of_scale(out_scale) is not None:
+        low = min(high, max(low, int(math.floor(_zoom_of_scale(out_scale)))))
+    if in_scale and _zoom_of_scale(in_scale) is not None:
+        high = max(low, min(high, int(math.ceil(_zoom_of_scale(in_scale)))))
     online = (layer.providerType() or "").lower() in ONLINE_PROVIDERS
     if online:
         warnings.append(f'"{layer.name()}" is an online map service: check that its licence allows '
                         "republishing its images.")
     box = (area.xMinimum(), area.yMinimum(), area.xMaximum(), area.yMaximum())
     tiles = 0 if area.isEmpty() else count_tiles(box, low, high)
-    return RasterPlan(layer.id(), low, high, tiles, box, online, warnings)
+    return RasterPlan(layer.id(), low, high, tiles, box, online, warnings, native_m, latitude, hidpi)
 
 
 def _encoder(fmt: str) -> str:

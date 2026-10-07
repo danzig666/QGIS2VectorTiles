@@ -181,3 +181,28 @@ def test_publish_the_visible_layers(setup):
     assert items[ortho.id()].checkState(1) == CHECKED
     from q2vt_plugin.src.publishing.models import LayerConfig  # pylint: disable=import-error
     assert LayerConfig(ortho.id()).raster_format == "webp"
+
+
+def test_raster_resolution_and_matching_the_image(setup):
+    """The raster settings show the image's own resolution and what the
+    maximum zoom publishes; "Match the image's resolution" sets the zoom
+    (make_raster: 10 Web Mercator m = 6.8 ground m per pixel at 47.5° N,
+    so zoom 14) and is saved."""
+    dialog, project, parcels, zones, ortho = setup
+    _items(dialog)[ortho.id()].setCheckState(1, CHECKED)
+    dialog._fill_interaction_layers()  # pylint: disable=protected-access
+    rows = [dialog.i_layers.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dialog.i_layers.count())]
+    dialog.i_layers.setCurrentRow(rows.index(ortho.id()))
+    dialog.e_max_zoom.setValue(12)
+    dialog.r_max.setValue(-1)
+    dialog._raster_estimate()  # pylint: disable=protected-access
+    text = dialog.r_estimate.text()
+    assert "Image: 6.76 m per pixel" in text and "at zoom 12" in text and "4× coarser" in text, text
+    dialog.r_match.setChecked(True)
+    assert not dialog.r_max.isEnabled()
+    assert "at zoom 14" in dialog.r_estimate.text() and "as sharp as the image" in dialog.r_estimate.text()
+    dialog.r_hidpi.setChecked(True)  # 512 px tiles: one zoom less
+    assert "at zoom 13" in dialog.r_estimate.text() and "as sharp as the image" in dialog.r_estimate.text()
+    dialog.i_layers.setCurrentRow(rows.index(parcels.id()))
+    assert dialog.save_settings()
+    assert dialog.profile.layer(ortho.id()).raster_match_native is True

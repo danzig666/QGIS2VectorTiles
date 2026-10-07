@@ -56,6 +56,29 @@ def publishable(layer) -> bool:
     return (isinstance(layer, QgsVectorLayer) and layer.isSpatial()) or isinstance(layer, QgsRasterLayer)
 
 
+def _metres(value: float) -> str:
+    return f"{value:.2f} m" if value < 10 else f"{value:.0f} m"
+
+
+def raster_resolution_text(plan) -> str:
+    """The image's own resolution and what the chosen maximum zoom publishes."""
+    from ..publishing.raster_tiles import native_zoom  # pylint: disable=import-outside-toplevel
+    published = plan.resolution(plan.max_zoom)
+    if not plan.native_m:
+        return tr("Published: {} per pixel at zoom {} (the image's own resolution is unknown, "
+                  "e.g. an online service).").format(_metres(published), plan.max_zoom)
+    text = tr("Image: {} per pixel. Published: {} per pixel at zoom {}").format(
+        _metres(plan.native_m), _metres(published), plan.max_zoom)
+    best = native_zoom(plan.native_m, plan.latitude, plan.hidpi)
+    if plan.max_zoom < best:
+        return text + tr(" – {}× coarser than the image; zoom {} would show all of it.").format(
+            round(2 ** (best - plan.max_zoom)), best)
+    if plan.max_zoom > best:
+        return text + tr(" – finer than the image (zoom {} is enough): a larger export, no more "
+                         "detail.").format(best)
+    return text + tr(" – as sharp as the image.")
+
+
 def tr(text: str) -> str:
     return QCoreApplication.translate("PublishDialog", text)
 
@@ -846,6 +869,11 @@ class PublishDialog(QDialog):
         self.r_quality = QSpinBox()
         self.r_quality.setRange(1, 100)
         self.r_hidpi = QCheckBox(tr("Sharp on high-resolution screens (512 px tiles, about 4× larger)"))
+        self.r_hidpi.toggled.connect(self._raster_estimate)
+        self.r_match = QCheckBox(tr("Match the image's resolution (sets the maximum zoom)"))
+        self.r_match.setToolTip(tr("The maximum zoom becomes the lowest one whose tiles are as sharp as "
+                                   "the image itself: finer zooms would add size, not detail"))
+        self.r_match.toggled.connect(lambda on: (self.r_max.setEnabled(not on), self._raster_estimate()))
         self.r_opacity = QDoubleSpinBox()
         self.r_opacity.setRange(0, 1)
         self.r_opacity.setSingleStep(0.1)
@@ -857,6 +885,7 @@ class PublishDialog(QDialog):
         form.addRow(tr("Image format"), self.r_format)
         form.addRow(tr("Minimum zoom"), self.r_min)
         form.addRow(tr("Maximum zoom"), self.r_max)
+        form.addRow("", self.r_match)
         form.addRow(tr("Quality (JPEG/WebP)"), self.r_quality)
         form.addRow("", self.r_hidpi)
         form.addRow(tr("Initial opacity"), self.r_opacity)
@@ -874,7 +903,9 @@ class PublishDialog(QDialog):
         layer = self.project.mapLayer(self.current_layer_id)
         config = LayerConfig(self.current_layer_id,
                              raster_min_zoom=self.r_min.value() if self.r_min.value() >= 0 else None,
-                             raster_max_zoom=self.r_max.value() if self.r_max.value() >= 0 else None)
+                             raster_max_zoom=self.r_max.value() if self.r_max.value() >= 0 else None,
+                             raster_hidpi=self.r_hidpi.isChecked(),
+                             raster_match_native=self.r_match.isChecked())
         profile = PublicationProfile()
         profile.view.min_zoom, profile.view.max_zoom = self.e_min_zoom.value(), self.e_max_zoom.value()
         try:
@@ -882,7 +913,8 @@ class PublishDialog(QDialog):
         except Exception:  # noqa: BLE001 - no extent yet
             self.r_estimate.setText("")
             return
-        self.r_estimate.setText(tr("At most {} tiles at zooms {}–{} in the export extent.").format(
+        self.r_estimate.setText(raster_resolution_text(plan) + "\n" + tr(
+            "At most {} tiles at zooms {}–{} in the export extent.").format(
             plan.tiles, plan.min_zoom, plan.max_zoom) + ("\n⚠ " + "; ".join(plan.warnings) if plan.warnings else ""))
 
     def _basemap_tab(self):
@@ -1642,6 +1674,8 @@ class PublishDialog(QDialog):
             self.r_max.setValue(-1 if config.raster_max_zoom is None else config.raster_max_zoom)
             self.r_quality.setValue(config.raster_quality)
             self.r_hidpi.setChecked(config.raster_hidpi)
+            self.r_match.setChecked(config.raster_match_native)
+            self.r_max.setEnabled(not config.raster_match_native)
             self.r_opacity.setValue(config.opacity)
             self.r_legend.setChecked(config.legend)
             self._raster_estimate()
@@ -1705,6 +1739,7 @@ class PublishDialog(QDialog):
             config.raster_max_zoom = self.r_max.value() if self.r_max.value() >= 0 else None
             config.raster_quality = self.r_quality.value()
             config.raster_hidpi = self.r_hidpi.isChecked()
+            config.raster_match_native = self.r_match.isChecked()
             config.opacity = float(self.r_opacity.value())
             config.legend = self.r_legend.isChecked()
             return

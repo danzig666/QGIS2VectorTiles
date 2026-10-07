@@ -99,6 +99,8 @@ class LayerConfig:
     raster_max_zoom: Optional[int] = None
     raster_quality: int = 85           # jpeg / webp
     raster_hidpi: bool = False         # 512 px images for sharp high-DPI screens
+    # The maximum zoom follows the image's own resolution (raster_max_zoom unused).
+    raster_match_native: bool = False
 
 
 @dataclass

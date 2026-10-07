@@ -680,6 +680,9 @@
         "rasterHidpi": {
           "type": "boolean"
         },
+        "rasterMatchNative": {
+          "type": "boolean"
+        },
         "minScale": {
           "type": "number",
           "minimum": 0
