@@ -216,6 +216,10 @@ class SymbolMaterializer:
             return self._gradient(flat_rule, layer)
         if kind == "ShapeburstFill":
             return self._shapeburst(flat_rule, layer)
+        if kind == "PointPatternFill" and self._whole_marker_pattern(layer):
+            grid = self._screen_point_grid(flat_rule, layer)
+            if grid is not None:
+                return grid
         if kind == "PointPatternFill" and normalize_unit(layer.distanceXUnit()) == "map" \
                 and normalize_unit(layer.distanceYUnit()) == "map" \
                 and not self._tiling_pattern(layer):
@@ -877,6 +881,91 @@ class SymbolMaterializer:
             inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape),
             deviation=self._deviation(layer, flat_rule), seed=layer.seed())
         return [self._with_symbol(flat_rule, marker.clone(), 0, 1, recipe)]
+
+    @staticmethod
+    def _whole_marker_pattern(layer) -> bool:
+        """A point pattern spaced in screen units that QGIS draws marker by
+        marker (clip mode other than "Shape": only whole markers, chosen by
+        their centre or bounds), not as a clipped texture."""
+        try:
+            clip = int(layer.clipMode())
+        except AttributeError:
+            return False
+        return clip != int(Qgis.MarkerClipMode.Shape) and layer.subSymbol() is not None \
+            and not layer.angle() \
+            and _to_mm(layer.distanceX(), layer.distanceXUnit()) is not None \
+            and _to_mm(layer.distanceY(), layer.distanceYUnit()) is not None
+
+    # Screen-unit point grids: positions per eighth of a zoom (spacing within
+    # +-4.5 % of QGIS's); fewer bands when over the output budget.
+    SCREEN_GRID_STEPS = (8, 4, 2, 1)
+
+    def _screen_point_grid(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """QgsPointPatternFillSymbolLayer::renderPolygon for clip modes other
+        than "Shape": whole markers on a grid starting at the top-left of the
+        feature's bounding box (or the view's corner), kept when their centre
+        is inside ("centroid within"), their bounds inside ("completely
+        within") or touching it ("no clipping"). Screen spacing becomes map
+        units per eighth of a zoom; the markers keep their screen size."""
+        marker = layer.subSymbol()
+        dx_mm = _to_mm(layer.distanceX(), layer.distanceXUnit())
+        dy_mm = _to_mm(layer.distanceY(), layer.distanceYUnit())
+        if not dx_mm or not dy_mm or dx_mm <= 0 or dy_mm <= 0 \
+                or dx_mm * 96.0 / 25.4 < self.GRID_MIN_SPACING_PX:
+            return None
+        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        if low > high:
+            return None
+
+        def mm(value, unit, cell_mm):
+            if not value:
+                return 0.0
+            if normalize_unit(unit) in ("percent", "percentage", "%"):
+                return value * cell_mm / 100.0
+            converted = _to_mm(value, unit)
+            if converted is None:
+                self._report("Q2VT_PATTERN_APPROXIMATE",
+                             "Map-unit offsets of a screen-unit point pattern are ignored.",
+                             flat_rule)
+            return converted or 0.0
+        disp_x = mm(layer.displacementX(), layer.displacementXUnit(), dx_mm)
+        disp_y = mm(layer.displacementY(), layer.displacementYUnit(), dy_mm)
+        # QGIS: the offset wraps within one cell (std::fmod).
+        off_x = math.fmod(mm(layer.offsetX(), layer.offsetXUnit(), dx_mm), dx_mm)
+        off_y = math.fmod(mm(layer.offsetY(), layer.offsetYUnit(), dy_mm), dy_mm)
+        size_mm = _to_mm(marker.size(), marker.sizeUnit()) or 0.0
+        clip = int(layer.clipMode())
+        # Marker centre in the polygon shrunk (completely within) or grown
+        # (no clipping) by the marker's half size.
+        reach = {int(Qgis.MarkerClipMode.CompletelyWithin): size_mm / 2.0,
+                 int(Qgis.MarkerClipMode.NoClipping): -size_mm / 2.0}.get(clip, 0.0)
+        if layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY():
+            self._report("Q2VT_PATTERN_APPROXIMATE", "Random deviation of pattern markers "
+                         "in screen units is not reproduced.", flat_rule)
+        anchor = self._anchor(layer, flat_rule)
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        zoom_rules = self._per_zoom(flat_rule)
+        area = self._layer_totals(flat_rule.layer)[0]
+        elements = sum(area / (dx_mm * dy_mm * self._map_units_per_mm(flat_rule, z + 0.5) ** 2)
+                       for z in range(low, high + 1))
+        steps = next((n for n in self.SCREEN_GRID_STEPS
+                      if elements * n <= self.MAX_PATTERN_ELEMENTS), 0)
+        if not steps:
+            self._over_budget(flat_rule, elements, "Point pattern")
+            return None
+        symbol = marker.clone()
+        rules = []
+        for index, rule in enumerate(zoom_rules):
+            for band, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
+                per_mm = self._map_units_per_mm(flat_rule, zoom)
+                recipe = mat.grid_recipe(
+                    dx_mm * per_mm, dy_mm * per_mm, disp_x * per_mm, disp_y * per_mm,
+                    off_x * per_mm, off_y * per_mm, crs, anchor, reach * per_mm,
+                    rows_from_top=True, ordered=True)
+                derived = self._with_symbol(band, symbol.clone(), 0, 1, recipe)
+                derived.z_order = "source"  # QGIS draws column by column
+                rules.append(derived)
+        return rules
 
     def _deviation(self, layer, flat_rule):
         """Maximum random deviation (map units) of point-pattern markers."""

@@ -1253,16 +1253,27 @@ class RulesExporter:
         if not self.validate_expression(grp, grp.geometry_expression):
                 return None
         geom_target = abs(grp.geometry_target - 2)
+        # Pattern markers in QGIS's drawing order: their rank rides as z.
+        ranked = grp.recipe is not None and grp.recipe.kind == "grid_points" and \
+            bool(grp.recipe.param("ordered")) and geom_target == 2
         transformed = self._run_alg_safe(
             "geometrybyexpression", "native",
             INPUT=transbase,
             OUTPUT_GEOMETRY=geom_target,
             EXPRESSION=grp.geometry_expression,
+            **({"WITH_Z": True} if ranked else {}),
         )
         check = QgsVectorLayer(transformed, "check", "ogr")
         if not check.isValid() or check.featureCount() <= 0:
             self._report_empty_output(grp, transbase)
             return None
+        if ranked:
+            del check
+            transformed = self._ranked_points(transformed)
+            if transformed is None:
+                self._report_empty_output(grp, transbase)
+                return None
+            check = QgsVectorLayer(transformed, "check", "ogr")
         anchors = [name for name in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD)
                    if check.fields().indexFromName(name) >= 0]
         if anchors:  # only needed to build the pieces' grids
@@ -1336,6 +1347,63 @@ class RulesExporter:
                 layer_id=grp.layer_id, component=grp.output_dataset,
                 detail=grp.geometry_expression)
 
+    def _ranked_points(self, source: str) -> Optional[str]:
+        """Worker: pattern markers as single points in QGIS's drawing order,
+        so the viewer stacks overlapping markers as QGIS does (symbol-z-order
+        "source"): feature by feature, part by part, then by the rank each
+        point carries as z (column by column, rows from the top, see
+        mat.grid_expression). Written without an index or feature ids, which
+        would restore the old order."""
+        from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        layer = QgsVectorLayer(source, "ranked_src", "ogr")
+        if not layer.isValid():
+            return None
+        names = layer.fields().names()
+        anchors = [name for name in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD) if name in names]
+        rank_field = ORDER_FIELD if ORDER_FIELD in names else f"{_FIELD_PREFIX}_orig_id"
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() not in anchors:
+                fields.append(field)
+
+        def number(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+        first_of_part, attributes, points = {}, {}, []
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            rank = number(feature[rank_field]) if rank_field in names else 0.0
+            # The pieces of one polygon part share its grid anchor.
+            part = (rank,) + tuple(number(feature[name]) for name in anchors) if anchors \
+                else (rank, feature.id())
+            first = first_of_part.setdefault(part, feature.id())
+            attributes[feature.id()] = [feature[field.name()] for field in fields]
+            for vertex in feature.geometry().vertices():
+                z = vertex.z()
+                points.append((rank, first, 0.0 if z != z else z, vertex.x(), vertex.y(),
+                               feature.id()))
+        if not points:
+            return None
+        points.sort(key=lambda item: item[:3])
+        out = self._temp_path("ranked")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # an index reorders the points
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.Point, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        for _, _, _, x, y, source_id in points:
+            out_feature = QgsFeature(fields)
+            out_feature.setAttributes(attributes[source_id])
+            out_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+            writer.addFeature(out_feature)
+        del writer
+        return out
+
     def _pattern_pieces(self, source: str, recipe: Recipe) -> str:
         """Worker: polygons cut into pieces for a pattern grid. Each keeps its
         feature's grid anchor, so the grid is continuous across pieces; a
@@ -1347,8 +1415,8 @@ class RulesExporter:
         out = source
         for name, formula in ((mat.ANCHOR_X_FIELD, anchor_x), (mat.ANCHOR_Y_FIELD, anchor_y)):
             out = self._run_alg_safe("fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
-                                     FIELD_TYPE=0, FIELD_LENGTH=24, FIELD_PRECISION=9,
-                                     FORMULA=formula)
+                                     FIELD_TYPE=0, FIELD_LENGTH=0, FIELD_PRECISION=0,
+                                     FORMULA=formula)  # exact: markers on the edge stay
         out = self._run_alg_safe("geometrybyexpression", "native", INPUT=out,
                                  OUTPUT_GEOMETRY=0,
                                  EXPRESSION=mat.piece_cut_expression(recipe, export_crs))

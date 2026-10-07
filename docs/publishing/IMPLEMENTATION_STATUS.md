@@ -1145,3 +1145,29 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or viewport or feature or offsets or dash"` | 28 passed |
 | `pytest tests/integration/test_end_to_end.py tests/integration/test_sprites.py tests/integration/test_line_shapes.py tests/integration/test_more_symbology.py tests/unit/test_patterns_and_assets.py` | 67 passed |
 | `pytest tests/integration/test_materialize.py -k "pattern or hatch or texture or svg or raster"` | 36 passed |
+
+## 4.17.0: whole pattern markers, QGIS's pattern texture
+
+- Screen-unit point patterns with a clip mode other than "Shape" (QGIS draws them marker by
+  marker, `renderPolygon`): point features per eighth of a zoom (`SymbolMaterializer.
+  _screen_point_grid`, recipe `grid_points` with `top` and `ordered`), kept by QGIS's test
+  (centre or bounds, boundary included). Each point's drawing rank (column, row from the
+  top) rides as z while the grid is built; `RulesExporter._ranked_points` writes the points
+  in QGIS's order (feature, part, rank) to a FlatGeobuf without index, so no feature id
+  restores the GEOS order; the style draws them with `symbol-z-order: source`
+  (`FlattenedRule.z_order`). Piece anchors are stored at full precision (the row centred on
+  the top edge fell 1 ulp outside).
+- Their icons are oversampled 2x (`ConversionContext.icon_oversampling`): MapLibre shrinks
+  them with linear filtering, anti-aliased at fractional pixels like QGIS (1:1 icons are
+  sampled at the nearest pixel, which banded the overlaps).
+- Screen-unit "Shape" point patterns: the texture is QGIS's `applyPattern` image
+  (`fidelity.patterns.apply_pattern_positions`): two spacings truncated to whole pixels,
+  markers at the real spacing in QGIS's order, cut at the image edge.
+- Sprites: pixel-sized marker values are converted to millimetres before oversampled
+  rendering (QGIS draws pixels 1:1 at any scale; the @2x sheet held them at half size).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or viewport or feature or offsets or dash or overlapping"` | 30 passed (new: overlapping markers, "centroid within" pixel mismatch 2.0 %, was 4.8 %; "Shape" colour mismatch 1.4 %, was 19 %) |
+| `pytest tests/integration/test_materialize.py -k "pattern or grid or point or hatch or texture or svg or raster"` | 39 passed (new: whole markers in QGIS's order across pieces) |
+| `pytest tests/integration/test_end_to_end.py tests/integration/test_sprites.py tests/integration/test_more_symbology.py tests/unit/test_patterns_and_assets.py` | 62 passed |

@@ -136,7 +136,11 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("tests/unit/test_patterns_and_assets.py",
                 "tests/integration/test_materialize.py")),
     Capability("PointPatternFill", "pattern", Strategy.SPRITE,
-               "Screen units: exact repeat cell (distance and displacement) rendered by QGIS. "
+               "Screen units, \"Shape\" clipping: QGIS's own texture brush (two spacings "
+               "truncated to whole pixels, overlapping markers stacked in its drawing order). "
+               "Screen units, other clip modes: whole markers as point features per eighth "
+               "of a zoom, kept by QGIS's test (centre, bounds) and stacked in its drawing "
+               "order (column by column, each from the top). "
                "Map units: marker grid materialized as point features with QGIS anchoring "
                "and clip modes. "
                "Textures start where QGIS starts them: \"Align pattern to: "
@@ -144,6 +148,9 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "at the view's corner (patched MapLibre), rounded to whole pixels.",
                ("Random offsets follow QGIS's range, not its sequence; rotated grids are "
                 "approximated (reported).",
+                "Screen-unit marker grids keep their spacing within ±4.5 % (per eighth of a "
+                "zoom); set to \"Viewport\" they start at the map origin, so the markers "
+                "along the edges differ from QGIS's, which change as the view moves.",
                 "\"Shape\" clipping: line, cross and closed simple markers are exported as "
                 "clipped geometry (cut at the edge like QGIS); other markers are drawn whole "
                 "when their centre is inside."),

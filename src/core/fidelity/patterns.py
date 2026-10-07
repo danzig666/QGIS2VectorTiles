@@ -149,10 +149,41 @@ def render_line_pattern(spec: LinePatternSpec, cell: PeriodicCell,
 SUPERSAMPLE = 4
 
 
-def tile_markers(marker, cell_w: int, cell_h: int, positions):
+def apply_pattern_positions(dx: float, dy: float, disp_x: float = 0.0, disp_y: float = 0.0,
+                            off_x: float = 0.0, off_y: float = 0.0):
+    """QgsPointPatternFillSymbolLayer::applyPattern (QGIS 3.34), the texture
+    brush of a point pattern clipped to the shape: ``(width, height,
+    positions)`` with the image size truncated to whole pixels, as QImage
+    does (two spacings, e.g. 37 px for 18.9 px), and the marker centres in
+    QGIS's drawing order (later ones on top; image y down). Markers are
+    drawn at the real spacing, also beyond the image, not wrapped: the
+    texture repeats every ``width`` pixels."""
+    width, height = 2.0 * dx, 2.0 * dy
+    wo, ho = math.fmod(off_x, width), math.fmod(off_y, height)
+    positions = []
+
+    def steps(start, stop, step):  # QGIS's accumulating float loops
+        value = start
+        while value <= stop:
+            yield value
+            value += step
+    for x in steps(-width, width * 2.0, width):
+        for y in steps(-height, height * 2.0, height):
+            positions.append((x + wo, y + ho))
+    for x in steps(-width, width * 2.0, width):
+        for y in steps(-height / 2.0, height * 2.0, height):
+            positions.append((x + wo + disp_x, y + ho))
+    for x in steps(-width / 2.0, width * 2.0, width):
+        for y in steps(-height, height * 2.0, height / 2.0):
+            positions.append((x + wo + (disp_x if math.fmod(y, height) != 0 else 0.0),
+                              y + ho - disp_y))
+    return int(width), int(height), positions
+
+
+def tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
     """Paint ``marker`` (RGBA, centred on its origin) at ``positions`` in a
     ``cell_w × cell_h`` repeat cell, wrapping across edges so the cell tiles
-    seamlessly.
+    seamlessly (``wrap``; otherwise markers are clipped at the cell edge).
 
     Positions off the pixel grid (a dense pattern spaced 2.1 px) are painted
     on a ``SUPERSAMPLE``-times larger cell and averaged down: rounding each
@@ -166,22 +197,23 @@ def tile_markers(marker, cell_w: int, cell_h: int, positions):
     off_grid = any(abs((x - half_w) - round(x - half_w)) > 0.05
                    or abs((y - half_h) - round(y - half_h)) > 0.05 for x, y in positions)
     if not off_grid:
-        return _paste_markers(marker, cell_w, cell_h, positions)
+        return _paste_markers(marker, cell_w, cell_h, positions, wrap)
     big = marker.resize((marker.width * SUPERSAMPLE, marker.height * SUPERSAMPLE), Image.BICUBIC)
     cell = _paste_markers(big, cell_w * SUPERSAMPLE, cell_h * SUPERSAMPLE,
-                          [(x * SUPERSAMPLE, y * SUPERSAMPLE) for x, y in positions])
+                          [(x * SUPERSAMPLE, y * SUPERSAMPLE) for x, y in positions], wrap)
     return cell.resize((max(1, cell_w), max(1, cell_h)), Image.BOX)
 
 
-def _paste_markers(marker, cell_w: int, cell_h: int, positions):
+def _paste_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
     """``tile_markers`` with every marker rounded to whole pixels."""
     from PIL import Image  # pylint: disable=import-outside-toplevel
 
     cell = Image.new("RGBA", (max(1, cell_w), max(1, cell_h)), (0, 0, 0, 0))
     half_w, half_h = marker.width / 2.0, marker.height / 2.0
+    shifts_x, shifts_y = ((-cell_w, 0, cell_w), (-cell_h, 0, cell_h)) if wrap else ((0,), (0,))
     for x, y in positions:
-        for wx in (-cell_w, 0, cell_w):
-            for wy in (-cell_h, 0, cell_h):
+        for wx in shifts_x:
+            for wy in shifts_y:
                 left = int(round(x + wx - half_w))
                 top = int(round(y + wy - half_h))
                 if left >= cell_w or top >= cell_h or left + marker.width <= 0 \

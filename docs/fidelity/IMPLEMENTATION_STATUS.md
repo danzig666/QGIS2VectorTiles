@@ -77,6 +77,30 @@ compare the pattern phase pixel for pixel with QGIS (`tests/browser/test_browser
 -k feature_aligned`, `-k beyond_the_view`). On rotated or tilted maps the anchors are kept
 but not snapped to pixels or clipped to the view.
 
+**Whole pattern markers (4.17).** A point pattern spaced in screen units with a clip mode
+other than "Shape" ("centroid within", "completely within", "no clipping") is drawn by QGIS
+marker by marker (`QgsPointPatternFillSymbolLayer::renderPolygon`): whole markers on a grid
+from the top-left of the feature's bounding box, column by column from the left, each column
+from the top, later markers on top. It is exported as point features per eighth of a zoom
+(spacing within ±4.5 %), kept by QGIS's test (centre or bounds against the polygon, the
+boundary included), each carrying its drawing rank (column, row) as z while the grid is
+built; the exporter writes the points in QGIS's order (feature, part, rank) without an index
+or feature ids that would restore another order, and the style draws them in data order
+(`symbol-z-order: source`). The grid anchor of polygon pieces keeps full precision (a row
+centred on the top edge was lost to rounding). Their icons come from a sprite drawn twice as
+large and shrunk by the GPU, which anti-aliases markers at fractional pixels like QGIS (a 1:1
+icon is sampled at the nearest pixel, which rounded the overlaps into bands). "Viewport"
+alignment starts this grid at the map origin: QGIS starts it at the view's corner, so the
+markers along the edges differ (QGIS's change as the view moves). With "Shape" clipping QGIS
+fills the polygon with a texture brush (`applyPattern`): an image of two spacings truncated
+to whole pixels (37 px for 18.9 px), markers drawn at the real spacing in its order and cut
+at the image edge; the texture is now that image (`fidelity.patterns.apply_pattern_positions`),
+so overlapping markers stack as in QGIS and the repeat is QGIS's. Sprites of pixel-sized
+markers are oversampled in millimetres: QGIS draws pixel sizes 1:1 whatever the scale, so the
+@2x sheet held them at half size. Tests: `tests/browser/test_browser_parity.py -k
+overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`,
+`tests/unit/test_patterns_and_assets.py -k apply_pattern`.
+
 ## Behavior changes users may notice
 
 * Scale breakpoints between integer zooms are now kept (fractional `minzoom`/`maxzoom`),
