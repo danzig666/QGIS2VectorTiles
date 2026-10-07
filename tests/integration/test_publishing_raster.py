@@ -302,11 +302,13 @@ def test_matching_the_image_resolution_sets_the_maximum_zoom(tmp_path):
     assert raster_tiles.ground_resolution(18, 47.97) == pytest.approx(0.4, rel=0.01)
     project, profile, parcels, ortho = _project(tmp_path)
     config = profile.layer(ortho.id())
-    config.raster_max_zoom = None
+    assert config.raster_max_zoom == 15  # an explicit zoom wins
+    assert raster_tiles.plan_layer(project, ortho, config, profile, EXTENT).max_zoom == 15
+    config.raster_max_zoom, config.raster_match_native = None, False  # like the map
     plan = raster_tiles.plan_layer(project, ortho, config, profile, EXTENT)
     assert plan.native_m == pytest.approx(10 * math.cos(math.radians(plan.latitude)), rel=0.01)
     assert plan.max_zoom == profile.view.max_zoom == 13
-    config.raster_match_native = True
+    config.raster_match_native = True  # like the image (the default)
     plan = raster_tiles.plan_layer(project, ortho, config, profile, EXTENT)
     assert plan.max_zoom == 14 and plan.resolution(14) <= plan.native_m * 1.04 < plan.resolution(13)
     config.raster_hidpi = True

@@ -61,21 +61,20 @@ def _metres(value: float) -> str:
 
 
 def raster_resolution_text(plan) -> str:
-    """The image's own resolution and what the chosen maximum zoom publishes."""
+    """The image's own pixel size and the sharpest detail the web map shows."""
     from ..publishing.raster_tiles import native_zoom  # pylint: disable=import-outside-toplevel
     published = plan.resolution(plan.max_zoom)
     if not plan.native_m:
-        return tr("Published: {} per pixel at zoom {} (the image's own resolution is unknown, "
-                  "e.g. an online service).").format(_metres(published), plan.max_zoom)
-    text = tr("Image: {} per pixel. Published: {} per pixel at zoom {}").format(
-        _metres(plan.native_m), _metres(published), plan.max_zoom)
+        return tr("Sharpest detail on the web map: {} per pixel (the image's own resolution is "
+                  "unknown, e.g. an online service).").format(_metres(published))
+    text = tr("Image: {} per pixel. Sharpest detail on the web map: {} per pixel").format(
+        _metres(plan.native_m), _metres(published))
     best = native_zoom(plan.native_m, plan.latitude, plan.hidpi)
     if plan.max_zoom < best:
-        return text + tr(" – {}× coarser than the image; zoom {} would show all of it.").format(
-            round(2 ** (best - plan.max_zoom)), best)
+        return text + tr(" – {}× coarser than the image (choose “Like the image” to show all "
+                         "of it).").format(round(2 ** (best - plan.max_zoom)))
     if plan.max_zoom > best:
-        return text + tr(" – finer than the image (zoom {} is enough): a larger export, no more "
-                         "detail.").format(best)
+        return text + tr(" – finer than the image: a larger export, no more detail.")
     return text + tr(" – as sharp as the image.")
 
 
@@ -861,19 +860,20 @@ class PublishDialog(QDialog):
         self.r_format.addItem(tr("PNG (sharp, transparent; larger)"), "png")
         self.r_format.addItem(tr("JPEG (photos; no transparency)"), "jpeg")
         self.r_min = QSpinBox()
-        self.r_max = QSpinBox()
-        for box in (self.r_min, self.r_max):
-            box.setRange(-1, 22)
-            box.setSpecialValueText(tr("as the map"))
-            box.valueChanged.connect(self._raster_estimate)
+        self.r_min.setRange(-1, 22)
+        self.r_min.setSpecialValueText(tr("as the map"))
+        self.r_min.valueChanged.connect(self._raster_estimate)
+        # Sharpest detail, as the size of a pixel on the ground: "image" (as
+        # sharp as the image), "map" (the publication's maximum tile zoom) or
+        # a zoom level. Zooming in further only enlarges these images.
+        self.r_detail = QComboBox()
+        self.r_detail.setToolTip(tr("How much detail the web map can show: the size of one image pixel "
+                                    "on the ground when zoomed in fully. Each finer step means about 4× "
+                                    "more images and a larger export."))
+        self.r_detail.currentIndexChanged.connect(lambda *_: self._raster_estimate())
+        self._raster_choice = "map"
         self.r_quality = QSpinBox()
         self.r_quality.setRange(1, 100)
-        self.r_hidpi = QCheckBox(tr("Sharp on high-resolution screens (512 px tiles, about 4× larger)"))
-        self.r_hidpi.toggled.connect(self._raster_estimate)
-        self.r_match = QCheckBox(tr("Match the image's resolution (sets the maximum zoom)"))
-        self.r_match.setToolTip(tr("The maximum zoom becomes the lowest one whose tiles are as sharp as "
-                                   "the image itself: finer zooms would add size, not detail"))
-        self.r_match.toggled.connect(lambda on: (self.r_max.setEnabled(not on), self._raster_estimate()))
         self.r_opacity = QDoubleSpinBox()
         self.r_opacity.setRange(0, 1)
         self.r_opacity.setSingleStep(0.1)
@@ -883,29 +883,69 @@ class PublishDialog(QDialog):
         self.r_estimate.setWordWrap(True)
         form.addRow(tr("Title in the viewer"), self.r_title)
         form.addRow(tr("Image format"), self.r_format)
-        form.addRow(tr("Minimum zoom"), self.r_min)
-        form.addRow(tr("Maximum zoom"), self.r_max)
-        form.addRow("", self.r_match)
+        form.addRow(tr("Sharpest detail"), self.r_detail)
+        form.addRow(tr("Shown from zoom"), self.r_min)
         form.addRow(tr("Quality (JPEG/WebP)"), self.r_quality)
-        form.addRow("", self.r_hidpi)
         form.addRow(tr("Initial opacity"), self.r_opacity)
         form.addRow("", self.r_legend)
         form.addRow("", self.r_estimate)
         form.addRow("", _note(tr("Raster layers are drawn by QGIS exactly as on the canvas into their own "
                                   "image tile archive (data/raster-….pmtiles). Vector layers always stay "
-                                  "vector tiles. Above the maximum zoom the last images are enlarged.")))
+                                  "vector tiles. Zoomed in beyond the sharpest detail, the images are "
+                                  "enlarged.")))
         return page
+
+    def _raster_detail(self):
+        """(raster_max_zoom, raster_match_native) of the "Sharpest detail" choice."""
+        choice = self.r_detail.currentData() if self.r_detail.count() else self._raster_choice
+        if choice == "image":
+            return None, True
+        if choice == "map" or choice is None:
+            return None, False
+        return int(choice), False
+
+    def _fill_raster_detail(self, plan):
+        """The "Sharpest detail" choices for this layer: like the image (when
+        its resolution is known), like the map, or a pixel size per zoom."""
+        from ..publishing.raster_tiles import ground_resolution, native_zoom  # pylint: disable=import-outside-toplevel
+        lat = plan.latitude
+        best = native_zoom(plan.native_m, lat) if plan.native_m else None
+        choice = self.r_detail.currentData() if self.r_detail.count() else self._raster_choice
+        self.r_detail.blockSignals(True)
+        self.r_detail.clear()
+        if best is not None:
+            self.r_detail.addItem(tr("Like the image: {} per pixel (recommended)").format(
+                _metres(plan.native_m)), "image")
+        finer = tr(" – finer than the image, no more detail")
+        map_zoom = self.e_max_zoom.value()
+        self.r_detail.addItem(tr("Like the map: {} per pixel").format(
+            _metres(ground_resolution(map_zoom, lat))) + (finer if best is not None and map_zoom > best
+                                                          else ""), "map")
+        # Pixel sizes from one step finer than the image (beyond it only the
+        # export grows) down to the zoom the layer is shown from.
+        top = 21 if best is None else min(22, best + 1)
+        low = self.r_min.value() if self.r_min.value() >= 0 else self.e_min_zoom.value()
+        zooms = set(range(max(low, 8), top + 1))
+        if isinstance(choice, int):
+            zooms.add(choice)  # a saved choice outside the range stays
+        for zoom in sorted(zooms, reverse=True):
+            if zoom in (best, map_zoom):
+                continue  # the two entries above
+            label = tr("{} per pixel").format(_metres(ground_resolution(zoom, lat)))
+            self.r_detail.addItem(label + (finer if best is not None and zoom > best else ""), zoom)
+        index = self.r_detail.findData(choice)
+        self.r_detail.setCurrentIndex(index if index >= 0 else self.r_detail.findData("map"))
+        self.r_detail.blockSignals(False)
 
     def _raster_estimate(self):
         if not self.current_layer_id or self.i_stack.currentIndex() != 1:
             return
         from ..publishing.raster_tiles import plan_layer  # pylint: disable=import-outside-toplevel
         layer = self.project.mapLayer(self.current_layer_id)
+        high, match = self._raster_detail()
         config = LayerConfig(self.current_layer_id,
                              raster_min_zoom=self.r_min.value() if self.r_min.value() >= 0 else None,
-                             raster_max_zoom=self.r_max.value() if self.r_max.value() >= 0 else None,
-                             raster_hidpi=self.r_hidpi.isChecked(),
-                             raster_match_native=self.r_match.isChecked())
+                             raster_max_zoom=high, raster_match_native=match)
         profile = PublicationProfile()
         profile.view.min_zoom, profile.view.max_zoom = self.e_min_zoom.value(), self.e_max_zoom.value()
         try:
@@ -913,6 +953,7 @@ class PublishDialog(QDialog):
         except Exception:  # noqa: BLE001 - no extent yet
             self.r_estimate.setText("")
             return
+        self._fill_raster_detail(plan)
         self.r_estimate.setText(raster_resolution_text(plan) + "\n" + tr(
             "At most {} tiles at zooms {}–{} in the export extent.").format(
             plan.tiles, plan.min_zoom, plan.max_zoom) + ("\n⚠ " + "; ".join(plan.warnings) if plan.warnings else ""))
@@ -1670,12 +1711,23 @@ class PublishDialog(QDialog):
             self.i_stack.setCurrentIndex(1)
             self.r_title.setText(config.title)
             self.r_format.setCurrentIndex(max(0, self.r_format.findData(config.raster_format)))
+            if config.raster_hidpi:
+                # "Sharp on high-resolution screens" (512 px tiles) is gone:
+                # the same sharpest detail is one zoom further.
+                config.raster_hidpi = False
+                if config.raster_max_zoom is not None:
+                    config.raster_max_zoom = min(22, config.raster_max_zoom + 1)
+                elif not config.raster_match_native:
+                    config.raster_max_zoom = min(22, self.e_max_zoom.value() + 1)
+            self.r_min.blockSignals(True)
             self.r_min.setValue(-1 if config.raster_min_zoom is None else config.raster_min_zoom)
-            self.r_max.setValue(-1 if config.raster_max_zoom is None else config.raster_max_zoom)
+            self.r_min.blockSignals(False)
+            self._raster_choice = "image" if config.raster_max_zoom is None and config.raster_match_native \
+                else "map" if config.raster_max_zoom is None else config.raster_max_zoom
+            self.r_detail.blockSignals(True)
+            self.r_detail.clear()
+            self.r_detail.blockSignals(False)
             self.r_quality.setValue(config.raster_quality)
-            self.r_hidpi.setChecked(config.raster_hidpi)
-            self.r_match.setChecked(config.raster_match_native)
-            self.r_max.setEnabled(not config.raster_match_native)
             self.r_opacity.setValue(config.opacity)
             self.r_legend.setChecked(config.legend)
             self._raster_estimate()
@@ -1736,10 +1788,9 @@ class PublishDialog(QDialog):
             config.title = self.r_title.text().strip()
             config.raster_format = self.r_format.currentData()
             config.raster_min_zoom = self.r_min.value() if self.r_min.value() >= 0 else None
-            config.raster_max_zoom = self.r_max.value() if self.r_max.value() >= 0 else None
+            config.raster_max_zoom, config.raster_match_native = self._raster_detail()
             config.raster_quality = self.r_quality.value()
-            config.raster_hidpi = self.r_hidpi.isChecked()
-            config.raster_match_native = self.r_match.isChecked()
+            config.raster_hidpi = False
             config.opacity = float(self.r_opacity.value())
             config.legend = self.r_legend.isChecked()
             return

@@ -137,8 +137,8 @@ def count_tiles(extent, min_zoom: int, max_zoom: int) -> int:
 def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
                extent_3857: QgsRectangle) -> RasterPlan:
     """Zooms, area (export extent ∩ layer extent) and an upper bound of tiles.
-    "Match the image's resolution" (``raster_match_native``): the maximum
-    zoom is the lowest one as sharp as the image (native_zoom)."""
+    Without a maximum zoom, "like the image" (``raster_match_native``): the
+    lowest zoom as sharp as the image (native_zoom); else the map's."""
     web = QgsCoordinateReferenceSystem(WEB_MERCATOR)
     area = QgsRectangle(extent_3857)
     warnings = []
@@ -154,7 +154,7 @@ def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
     native_m = native_resolution(layer, project.transformContext())
     hidpi = bool(getattr(config, "raster_hidpi", False))
     low, high = zoom_range(config, profile)
-    if getattr(config, "raster_match_native", False) and native_m:
+    if config.raster_max_zoom is None and getattr(config, "raster_match_native", False) and native_m:
         high = max(low, native_zoom(native_m, latitude, hidpi))
     # Not rendered where the layer is hidden on the web (its scale range).
     from .qgis_model import _zoom_of_scale, layer_scale_range  # pylint: disable=import-outside-toplevel
