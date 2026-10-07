@@ -20,7 +20,9 @@ a double-size copy after every whole zoom. The patch:
    scale and world anchoring use the real zoom, with the anchor's sub-pixel
    part kept (seamless across tiles) and snapped to whole device pixels
    (crisp texels, no blur from sub-pixel sampling), and no double-size
-   cross-fade copy.
+   cross-fade copy. Layers flagged ``metadata: {"q2vt:pattern-anchor":
+   "viewport"}`` (QGIS "Align pattern to: Viewport") start their pattern at
+   the corner of the map canvas instead of the map's origin.
    Other fill patterns (map-unit textures) keep MapLibre's scaling, which
    grows with the map like QGIS map units;
 5. samples a line pattern only inside its image: stock MapLibre maps the line
@@ -89,12 +91,17 @@ def _fill_patch(text: str) -> str:
            # Snap the texture grid to whole device pixels (crisp texels, as
            # QGIS's brush): shift the anchor by the sub-pixel part of the
            # map's screen offset (flat, unrotated maps).
-           f"q2T={painter}.transform,q2r={painter}.pixelRatio||globalThis.devicePixelRatio||1;"
-           f"if(q2s&&!q2T.pitch&&!(q2T.bearing%360)){{let q2c=q2T.center,q2w=q2T.worldSize,"
+           f"q2T={painter}.transform,q2r={painter}.pixelRatio||globalThis.devicePixelRatio||1,"
+           f"q2A=!!(q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-anchor\"]===\"viewport\");"
+           f"if((q2s||q2A)&&!q2T.pitch&&!(q2T.bearing%360)){{let q2c=q2T.center,q2w=q2T.worldSize,"
            f"q2u=(180+q2c.lng)/360*q2w-q2T.centerPoint.x,"
            f"q2v=(180-180/Math.PI*Math.log(Math.tan(Math.PI/4+q2c.lat*Math.PI/360)))/360*q2w"
-           f"-q2T.centerPoint.y;q2x+=(Math.round(q2u*q2r)-q2u*q2r)/q2r;"
-           f"q2y+=(Math.round(q2v*q2r)-q2v*q2r)/q2r}}"
+           f"-q2T.centerPoint.y;"
+           # Viewport-aligned (QGIS "Align pattern to: Viewport"): the pattern
+           # starts at the canvas corner (in the pattern's own zoom pixels).
+           f"if(q2A){{let q2k=2**(q2z-q2T.zoom);q2x-=q2u*q2k;q2y-=q2v*q2k}}else{{"
+           f"q2x+=(Math.round(q2u*q2r)-q2u*q2r)/q2r;"
+           f"q2y+=(Math.round(q2v*q2r)-q2v*q2r)/q2r}}}}"
            f"let q2X=Math.floor(q2x/65536),q2Y=Math.floor(q2y/65536);"
            f"return{{u_image:0,u_texsize:{tile}.imageAtlasTexture.size,"
            f"u_scale:[{ratio},q2s?{cf}.toScale:{cf}.fromScale,{cf}.toScale],u_fade:{cf}.t,"

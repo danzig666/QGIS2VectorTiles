@@ -70,6 +70,17 @@ def _flag_names(flags) -> set:
     return {m.name for m in Qgis.MarkerLinePlacement if value & int(m)}
 
 
+def pattern_in_viewport(layer) -> bool:
+    """Whether a pattern fill starts at the corner of the view ("Align
+    pattern to: Viewport"; raster fills: "Coordinate mode: Viewport") rather
+    than at each feature's corner (the default)."""
+    getter = "coordinateMode" if layer.layerType() == "RasterFill" else "coordinateReference"
+    try:
+        return getattr(layer, getter)() == Qgis.SymbolCoordinateReference.Viewport
+    except AttributeError:
+        return False
+
+
 def _to_mm(value: float, unit) -> Optional[float]:
     """Physical length in mm, or None for map units / unknown units."""
     factor = physical_factor(normalize_unit(unit))
@@ -174,7 +185,10 @@ class SymbolMaterializer:
             return self._filled_line(flat_rule, layer)
         if kind == "InterpolatedLine":
             return self._interpolated_line(flat_rule, layer)
-        if kind == "LinePatternFill" and normalize_unit(layer.distanceUnit()) in ("map", "m"):
+        if kind == "LinePatternFill" and normalize_unit(layer.distanceUnit()) in ("map", "m") \
+                and not pattern_in_viewport(layer):
+            # Hatch lines start at the feature; a viewport-aligned hatch stays
+            # a texture, anchored at the view's corner in the browser.
             return self._hatch(flat_rule, layer)
         if kind == "RandomMarkerFill":
             return self._random_fill(flat_rule, layer)
@@ -1584,15 +1598,6 @@ class SymbolMaterializer:
         if mus.minScale or mus.maxScale or mus.minSizeMMEnabled or mus.maxSizeMMEnabled:
             self._report("Q2VT_PATTERN_APPROXIMATE",
                          "Hatch spacing scale limits are ignored.", flat_rule)
-        anchor = "feature"
-        try:
-            if layer.coordinateReference() != Qgis.SymbolCoordinateReference.Feature:
-                anchor = "world"
-                self._report("Q2VT_PATTERN_APPROXIMATE",
-                             "Viewport-anchored hatch is anchored to the map origin.",
-                             flat_rule)
-        except AttributeError:
-            pass
         crs = self.project_crs or flat_rule.layer.crs().authid()
-        recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, anchor)
+        recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, "feature")
         return [self._with_symbol(flat_rule, sub.clone(), 1, 1, recipe)]

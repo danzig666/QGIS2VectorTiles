@@ -37,6 +37,7 @@ from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
+from .materializer import pattern_in_viewport
 from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
                                  solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
@@ -2338,6 +2339,7 @@ class QgisMapLibreStyleExporter:
     # patched MapLibre (tools/patch_maplibre.py) draws at the real zoom.
     TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
     SCREEN_PATTERN_FLAG = "q2vt:screen-pattern"
+    PATTERN_ANCHOR_FLAG = "q2vt:pattern-anchor"
     _exact_screen_texture = False
 
     def _screen_scale(self) -> float:
@@ -3297,7 +3299,8 @@ class QgisMapLibreStyleExporter:
                     return self._register_random_pattern(symbol_layer)
                 return None
             map_units = self._pattern_uses_map_units(symbol_layer)
-            if kind != "LinePatternFill" and map_units:
+            viewport = pattern_in_viewport(symbol_layer)
+            if map_units and (kind != "LinePatternFill" or viewport):
                 pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
             elif map_units:
                 pattern_name = register()
@@ -3309,6 +3312,10 @@ class QgisMapLibreStyleExporter:
                     self._exact_screen_texture = False
                 if pattern_name is not None:
                     layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+            if viewport:
+                # Starts at the corner of the view, as in QGIS (patched
+                # MapLibre); otherwise patterns are anchored to the map.
+                layer_def.setdefault("metadata", {})[self.PATTERN_ANCHOR_FLAG] = "viewport"
             if pattern_name is None:
                 self.context.report(
                     "Q2VT_PATTERN_APPROXIMATE",

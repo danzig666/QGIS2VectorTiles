@@ -1078,3 +1078,22 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/integration/test_sprites.py tests/unit/test_patterns_and_assets.py` | passed |
 | `pytest tests/browser/test_browser_parity.py -k "pattern or hatch or dash or marker or interval"` | passed (screen-unit pattern spacing within 3 % between zooms, was 30 %) |
 | `pytest tests/integration/test_end_to_end.py` | 21 passed (unsupported-layer tests use a plugin-style custom symbol layer) |
+
+## 4.14.1: viewport-aligned pattern fills
+
+- QGIS line pattern, point pattern and SVG fills have *Align pattern to: Feature / Viewport*
+  (raster image fills: *Coordinate mode: Object / Viewport*). Viewport-aligned patterns start
+  at the top-left corner of the map view and stay there while panning (checked in QGIS 3.34:
+  lines at x = 0, 10, 20 … px whatever the pan).
+- The converter flags such style layers `metadata: {"q2vt:pattern-anchor": "viewport"}`; the
+  patched MapLibre (`tools/patch_maplibre.py`) starts their pattern at the canvas corner.
+  Viewport-aligned hatches in map units stay textures (per-zoom) instead of hatch lines,
+  which start at each feature.
+- Feature alignment (the default) is unchanged: anchored to the map, see the fidelity status.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_browser_parity.py -k viewport` | 2 passed (new: a viewport-aligned hatch and point pattern match QGIS pixel for pixel, phase included; both fail when the pattern is feature-aligned) |
+| `pytest tests/browser/test_browser_parity.py -k "pattern or hatch"` | 15 passed |
+| `pytest tests/integration/test_materialize.py tests/integration/test_sprites.py tests/unit/test_patterns_and_assets.py -k "pattern or hatch or texture"` | 56 passed |
+
