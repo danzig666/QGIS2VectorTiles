@@ -742,11 +742,12 @@ class RulesExporter:
             return target_paths
 
         max_workers = self._compute_pool_size(len(todo))
+        keep = self._vertex_sensitive_layers()
 
         with self._executor(max_workers, "rules-base") as pool:
             futures: Dict[Future, str] = {
                 pool.submit(
-                    self._build_one_base_layer, src_path, target_paths[lid]
+                    self._build_one_base_layer, src_path, target_paths[lid], lid in keep
                 ): lid
                 for lid, src_path in todo.items()
             }
@@ -779,7 +780,22 @@ class RulesExporter:
         transformed_extent = transformer.transformBoundingBox(self.extent)
         return transformed_extent
     
-    def _build_one_base_layer(self, src_path: str, dst_path: str) -> None:
+    def _vertex_sensitive_layers(self) -> set:
+        """Layers drawn by symbols built from their vertices (arrows, markers
+        on vertices or segment centres): their lines keep every vertex, as
+        QGIS draws them (simplification drops nearly collinear vertices)."""
+        keep = set()
+        for rule in self.flattened_rules or []:
+            recipe = getattr(rule, "recipe", None)
+            if recipe is None:
+                continue
+            if recipe.kind == "arrow_polygons" or (recipe.kind == "marker_points" and any(
+                    p in mat.VERTEX_PLACEMENTS or p == "SegmentCenter" for p in recipe.placements)):
+                keep.add(rule.layer.id())
+        return keep
+
+    def _build_one_base_layer(self, src_path: str, dst_path: str,
+                              keep_vertices: bool = False) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
         self._check_cancel()
         crash_log.note(f"Base layer {dst_path}")
@@ -830,6 +846,9 @@ class RulesExporter:
             "multiparttosingleparts", "native", INPUT=orig_id
         )
         self._check_cancel()
+        if keep_vertices:
+            self._run_alg_safe("savefeatures", "native", INPUT=singleparted, OUTPUT=dst_path)
+            return
         self._run_alg_safe(
             "simplifygeometries", "native",
             INPUT=singleparted,
@@ -1124,8 +1143,12 @@ class RulesExporter:
             current_input = self._interpolated_segments(current_input, grp.recipe)
             if current_input is None:
                 return None
-        elif grp.recipe is not None and grp.recipe.kind == "arrow_body" and grp.recipe.param("taper"):
-            current_input = self._tapered_arrows(current_input, grp.recipe)
+        elif grp.recipe is not None and grp.recipe.kind == "arrow_polygons":
+            current_input = self._arrow_polygons(current_input, grp.recipe)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "direction_runs":
+            current_input = self._direction_runs(current_input, grp.recipe, grp.source_geometry)
             if current_input is None:
                 return None
 
@@ -1634,31 +1657,105 @@ class RulesExporter:
         del writer
         return out if written else None
 
-    # Pieces of a tapered arrow body (width steps of 1/24 of the change).
-    ARROW_TAPER_PIECES = 24
-
-    def _tapered_arrows(self, source: str, recipe: Recipe) -> Optional[str]:
-        """Worker: arrow bodies (``mat.arrow_body_for``, cut at the heads)
-        whose width runs from the start to the end width, as QGIS's arrow
-        polygon does: short pieces, each with the width of its middle
-        (WIDTH_FIELD)."""
-        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
-                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
-        bodies = self._run_alg_safe("geometrybyexpression", "native", INPUT=source, OUTPUT_GEOMETRY=1,
-                                    EXPRESSION=mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}"))
-        bodies = self._run_alg_safe("removenullgeometries", "native", INPUT=bodies, REMOVE_EMPTY=True)
-        bodies = self._run_alg_safe("multiparttosingleparts", "native", INPUT=bodies)
-        layer = QgsVectorLayer(bodies, "arrow_bodies", "ogr") if isinstance(bodies, str) else bodies
+    def _arrow_polygons(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: the polygons QGIS fills for an arrow symbol layer
+        (``fidelity/arrows.py``), built in painter pixels (y down) of the
+        recipe's zoom in the recipe CRS (the project CRS, like QGIS)."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProject,
+                               QgsVectorFileWriter, QgsWkbTypes)
+        from .fidelity.arrows import arrow_polygons  # pylint: disable=import-outside-toplevel
+        layer = QgsVectorLayer(source, "arrows", "ogr") if isinstance(source, str) else source
         if layer is None or not layer.isValid():
             return None
-        start, end = recipe.param("taper")
-        nested = bool(recipe.param("taper_nested", False))
+        pixel = float(recipe.param("pixel"))
+        start, width, head_length, thickness, offset = (v / pixel for v in recipe.param("sizes"))
+        curved, repeated = bool(recipe.param("curved")), bool(recipe.param("repeated"))
+        head_type, arrow_type = int(recipe.param("head_type")), int(recipe.param("arrow_type"))
+        crs = QgsCoordinateReferenceSystem(recipe.param("crs") or f"EPSG:{_EPSG_CRS}")
+        to_crs = from_crs = None
+        if crs.isValid() and crs != layer.crs():
+            context = QgsProject.instance().transformContext()
+            to_crs = QgsCoordinateTransform(layer.crs(), crs, context)
+            from_crs = QgsCoordinateTransform(crs, layer.crs(), context)
         fields = QgsFields()
         for field in layer.fields():
-            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.WIDTH_FIELD:
+            if field.name().lower() not in ("fid", "ogc_fid"):
                 fields.append(field)
-        fields.append(QgsField(mat.WIDTH_FIELD, QVariant.Double))
         out = self._temp_path("arrows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        # Opaque multi-layer fills: QGIS fills every arrow with all layers
+        # before the next arrow, so a later arrow's shadow covers an earlier
+        # arrow. Each layer then keeps only its visible part (painter order).
+        shifts = recipe.param("painter")
+        target = int(recipe.param("layer", 0))
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            geometry = QgsGeometry(feature.geometry())
+            if geometry.isEmpty():
+                continue
+            if to_crs is not None:
+                geometry.transform(to_crs)
+            shapes = []
+            for part in geometry.constParts():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                points = [(line.xAt(i), line.yAt(i)) for i in range(line.numPoints())]
+                # QGIS draws nothing for repeated vertices (zero-length segments).
+                points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
+                if not points:
+                    continue
+                x0, y0 = points[0]
+                pixels = [((x - x0) / pixel, (y0 - y) / pixel) for x, y in points]
+                for polygon in arrow_polygons(pixels, curved, repeated, start, width, head_length,
+                                              thickness, head_type, arrow_type, offset):
+                    shape = QgsGeometry.fromPolygonXY([[
+                        QgsPointXY(x0 + x * pixel, y0 - y * pixel) for x, y in polygon]])
+                    shape = shape.makeValid()  # Qt fills self-crossings odd-even
+                    shape.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
+                    if not shape.isEmpty():
+                        shapes.append(shape)
+            if shifts:
+                shapes = self._painter_visible(shapes, shifts, target)
+            for shape in shapes:
+                if from_crs is not None:
+                    shape.transform(from_crs)
+                shape.convertToMultiType()
+                out_feature = QgsFeature(fields)
+                for field in fields:
+                    out_feature[field.name()] = feature[field.name()]
+                out_feature.setGeometry(shape)
+                writer.addFeature(out_feature)
+                written += 1
+        del writer
+        return out if written else None
+
+    def _direction_runs(self, source: str, recipe: Recipe, source_geometry: int) -> Optional[str]:
+        """Worker: lines cut into runs of segments whose screen direction
+        falls in the same bucket (mat.DIRECTION_FIELD, 0 = east, clockwise
+        on screen), for inner effect strips (fidelity/line_effects.py)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                               QgsLineString, QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        layer = QgsVectorLayer(source, "runs", "ogr") if isinstance(source, str) else source
+        if layer is None or not layer.isValid():
+            return None
+        buckets = int(recipe.param("buckets"))
+        window = float(recipe.param("window", 0.0) or 0.0)
+        step = 2 * math.pi / buckets
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and \
+                    field.name() not in (mat.DIRECTION_FIELD, mat.RUN_FIELD):
+                fields.append(field)
+        fields.append(QgsField(mat.DIRECTION_FIELD, QVariant.Int))
+        fields.append(QgsField(mat.RUN_FIELD, QVariant.Int))
+        out = self._temp_path("runs")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
         with self._temp_files_lock:
             self._temp_files.add(out)
         options = QgsVectorFileWriter.SaveVectorOptions()
@@ -1666,37 +1763,86 @@ class RulesExporter:
         options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
         writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
                                             QgsProject.instance().transformContext(), options)
-        written, pieces = 0, self.ARROW_TAPER_PIECES
+        written = 0
+
+        def write(feature, points, bucket):
+            out_feature = QgsFeature(fields)
+            for field in fields:
+                if field.name() not in (mat.DIRECTION_FIELD, mat.RUN_FIELD):
+                    out_feature[field.name()] = feature[field.name()]
+            out_feature[mat.DIRECTION_FIELD] = bucket
+            out_feature[mat.RUN_FIELD] = written
+            out_feature.setGeometry(QgsGeometry(QgsLineString(points)))
+            writer.addFeature(out_feature)
         for feature in layer.getFeatures():
             self._check_cancel()
             geometry = feature.geometry()
             if geometry.isEmpty():
                 continue
+            if source_geometry == 2:
+                geometry = QgsGeometry(geometry.constGet().boundary())
             for part in geometry.constParts():
-                length = part.length()
-                if length <= 0:
-                    continue
-                for piece in range(pieces):
-                    t0, t1 = piece / pieces, (piece + 1) / pieces
-                    if nested:
-                        # Opaque: each piece reaches to the wide end of the body,
-                        # so a width step lies on a continuous line (pieces
-                        # meeting end to end show hairline cracks).
-                        t0, t1 = (t0, 1.0) if end >= start else (0.0, t1)
-                    line = QgsGeometry(part.curveSubstring(t0 * length, t1 * length))
-                    if line.isEmpty():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                points = [line.pointN(i) for i in range(line.numPoints())]
+                along = [0.0]
+                for a, b in zip(points, points[1:]):
+                    along.append(along[-1] + math.hypot(b.x() - a.x(), b.y() - a.y()))
+                run, bucket = [], None
+                for index, (a, b) in enumerate(zip(points, points[1:])):
+                    if along[index + 1] == along[index]:
                         continue
-                    out_feature = QgsFeature(fields)
-                    for field in fields:
-                        if field.name() != mat.WIDTH_FIELD:
-                            out_feature[field.name()] = feature[field.name()]
-                    middle = (piece + 0.5) / pieces
-                    out_feature[mat.WIDTH_FIELD] = float(start + (end - start) * middle)
-                    out_feature.setGeometry(line)
-                    writer.addFeature(out_feature)
+                    middle = (along[index] + along[index + 1]) / 2
+                    start = line.interpolatePoint(max(0.0, middle - window / 2)) if window else a
+                    end = line.interpolatePoint(min(along[-1], middle + window / 2)) if window else b
+                    dx, dy = end.x() - start.x(), end.y() - start.y()
+                    if dx == 0 and dy == 0:
+                        dx, dy = b.x() - a.x(), b.y() - a.y()
+                    # Screen y points down: the screen direction is (dx, -dy).
+                    here = int(math.floor((math.atan2(-dy, dx) % (2 * math.pi)) / step)) % buckets
+                    if here != bucket and run:
+                        write(feature, run, bucket)
+                        written += 1
+                        run = [a]
+                    elif not run:
+                        run = [a]
+                    bucket = here
+                    run.append(b)
+                if len(run) >= 2:
+                    write(feature, run, bucket)
                     written += 1
         del writer
         return out if written else None
+
+    @staticmethod
+    def _painter_visible(shapes, shifts, target: int):
+        """The visible part of fill layer ``target`` of each shape when every
+        shape is drawn with all layers (shifted by ``shifts``, map units) in
+        turn, returned unshifted (the layer's own shift is drawn on screen)."""
+        from qgis.core import QgsGeometry, QgsSpatialIndex, QgsWkbTypes  # pylint: disable=import-outside-toplevel
+        layers = len(shifts)
+        drawn = []  # (order, geometry) of every layer of every shape
+        for index, shape in enumerate(shapes):
+            for k, (dx, dy) in enumerate(shifts):
+                moved = QgsGeometry(shape)
+                moved.translate(dx, dy)
+                drawn.append((index * layers + k, moved))
+        spatial = QgsSpatialIndex()
+        for order, moved in drawn:
+            spatial.addFeature(order, moved.boundingBox())
+        visible = []
+        dx, dy = shifts[target]
+        for index in range(len(shapes)):
+            order = index * layers + target
+            mine = drawn[order][1]
+            later = [drawn[i][1] for i in spatial.intersects(mine.boundingBox()) if i > order]
+            if later:
+                mine = mine.difference(QgsGeometry.unaryUnion(later))
+                mine.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
+            if mine.isEmpty():
+                continue
+            mine.translate(-dx, -dy)
+            visible.append(mine)
+        return visible
 
     def _random_points(self, source: str, recipe: Recipe) -> str:
         """Worker: random marker fill points with QGIS's native (prepared
@@ -1754,12 +1900,6 @@ class RulesExporter:
                 EXPRESSION=mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}"))
             lines = self._run_alg_safe("removenullgeometries", "native", INPUT=lines,
                                        REMOVE_EMPTY=True)
-        if recipe.param("arrow_curved") is not None:
-            # Arrow heads sit at the ends of every (curved / per-segment) arrow.
-            lines = self._run_alg_safe(
-                "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=1,
-                EXPRESSION=mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}", cuts=False))
-            lines = self._run_alg_safe("multiparttosingleparts", "native", INPUT=lines)
         lines = self._run_alg_safe(
             "fieldcalculator", "native", INPUT=lines, FIELD_NAME=mat.COUNT_FIELD,
             FIELD_TYPE=1, FORMULA="num_points(@geometry)")
@@ -1840,6 +1980,9 @@ class RulesExporter:
                 mapping.append((6, f'"{anchor}"', anchor))
         if source_fields.indexFromName(mat.BAND_FIELD) >= 0:  # colour-band draw order
             mapping.append((2, f'"{mat.BAND_FIELD}"', mat.BAND_FIELD))
+        for name in (mat.DIRECTION_FIELD, mat.RUN_FIELD):  # inner effect strips
+            if source_fields.indexFromName(name) >= 0:
+                mapping.append((2, f'"{name}"', name))
         return [
             {"type": m[0], "expression": m[1], "name": m[2]} for m in mapping
         ]
@@ -2221,10 +2364,13 @@ class RulesExporter:
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
-        if recipe is not None and recipe.kind == "arrow_body":
-            if recipe.param("taper"):
-                return [1, "@geometry"]  # bodies built by _tapered_arrows
-            return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "arrow_polygons":
+            return [2, "@geometry"]  # polygons built by _arrow_polygons
+        if recipe is not None and recipe.kind == "direction_runs":
+            return [1, "@geometry"]  # runs built by _direction_runs
+        if recipe is not None and recipe.kind == "simplified":
+            lines = "boundary(@geometry)" if flat_rule.get_attr("g") == 2 else "@geometry"
+            return [1, f"simplify({lines}, {float(recipe.param('tolerance'))!r})"]
         if recipe is not None and recipe.kind == "callout":
             label = self._layer_point_expression(
                 f'"{CALLOUT_X_FIELD}"', f'"{CALLOUT_Y_FIELD}"', recipe.param("crs"))

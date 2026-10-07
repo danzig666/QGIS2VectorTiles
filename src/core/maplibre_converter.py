@@ -1601,6 +1601,8 @@ class QgisMapLibreStyleExporter:
         visible_polygons: Optional[Dict[str, Tuple[str, bool]]] = None,
         heatmaps: Optional[Dict[str, dict]] = None,
         translates: Optional[Dict[str, tuple]] = None,
+        effect_roles: Optional[Dict[str, str]] = None,
+        inner_effects: Optional[Dict[str, dict]] = None,
     ):
         """Initialise the exporter.
 
@@ -1631,6 +1633,10 @@ class QgisMapLibreStyleExporter:
         self.heatmaps = heatmaps or {}
         # Style name -> (x, y, unit): shifted on screen (viewport translate).
         self.translates = translates or {}
+        # Style name -> "outer" (only the line's outer effects) / "none".
+        self.effect_roles = effect_roles or {}
+        # Style name -> inner effect strips (SymbolMaterializer._inner_effects).
+        self.inner_effects = inner_effects or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1788,6 +1794,9 @@ class QgisMapLibreStyleExporter:
         self.context.source_layer = style.layerName()
         if style.styleName() in self.heatmaps:
             self._heatmap_layer(style, self.heatmaps[style.styleName()], bounds)
+            return
+        if style.styleName() in getattr(self, "inner_effects", {}):
+            self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
         first = len(self.style["layers"])
         self._convert_symbol(
@@ -3179,8 +3188,56 @@ class QgisMapLibreStyleExporter:
                                 f"{symbol_layer.layerType()} has no line conversion.")
             return
 
+        role = getattr(self, "effect_roles", {}).get(getattr(self.context, "component", None))
+        if role == "none":
+            self.style["layers"].append(layer_def)
+            return
         below, above = self._line_effect_layers(symbol_layer, layer_def)
+        if role == "outer":  # the line itself is drawn by another component
+            self.style["layers"].extend(below + above)
+            return
         self.style["layers"].extend(below + [layer_def] + above)
+
+    def _inner_effect_layers(self, style, spec: dict, bounds) -> None:
+        """Inner shadow / glow of a line as strips across it: each strip a
+        line at its offset whose colour is QGIS's rendering of the line with
+        its inner effects at that offset, for the run's screen direction
+        (mat.DIRECTION_FIELD). Under them, the runs at full width with
+        round ends take QGIS's colour of a line end of their direction, so
+        line ends and sharp turns are shaded too (earlier runs on top: a
+        turn shows the end of the run arriving at it)."""
+        def by_direction(values):
+            expression = ["match", ["to-number", ["get", mat.DIRECTION_FIELD], 0]]
+            for bucket, rgba in enumerate(values[1:], start=1):
+                expression += [bucket, rgba]
+            return expression + [values[0]]
+        if spec.get("caps"):
+            layer_def = self._base_layer_def(
+                "line", style.styleName(), style.layerName(), self.source_name,
+                bounds[0], bounds[1])
+            layer_def["id"] = f"{layer_def['id']}_ends"
+            layer_def["paint"].update({"line-color": by_direction(spec["caps"]),
+                                       "line-width": spec["width"],
+                                       "line-opacity": spec.get("opacity", 1.0)})
+            layer_def["layout"].update({
+                "line-cap": spec.get("cap", "round"), "line-join": "round",
+                "line-sort-key": ["-", 0, ["to-number", ["get", mat.RUN_FIELD], 0]],
+                "visibility": "visible"})
+            self.style["layers"].append(layer_def)
+        for index in spec.get("order") or range(len(spec["strips"])):
+            offset, width = spec["strips"][index]
+            layer_def = self._base_layer_def(
+                "line", style.styleName(), style.layerName(), self.source_name,
+                bounds[0], bounds[1])
+            layer_def["id"] = f"{layer_def['id']}_in{index}"
+            color = by_direction([row[index] for row in spec["colors"]])
+            layer_def["paint"].update({"line-color": color, "line-width": width,
+                                       "line-opacity": spec.get("opacity", 1.0)})
+            if abs(offset) > 1e-9:
+                layer_def["paint"]["line-offset"] = offset
+            layer_def["layout"].update({"line-cap": spec.get("cap", "round"),
+                                        "line-join": "round", "visibility": "visible"})
+            self.style["layers"].append(layer_def)
 
     # Paint effects a line can carry in the browser (see _line_effect_layers).
     LINE_EFFECTS = ("QgsOuterGlowEffect", "QgsDropShadowEffect")
@@ -3264,6 +3321,14 @@ class QgisMapLibreStyleExporter:
                     "fill-translate": FillPropertyExtractor.get_fill_translate(),
                     "fill-translate-anchor": FillPropertyExtractor.get_fill_translate_anchor(),
                 })
+                offset = symbol_layer.offset()
+                if (abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9) and \
+                        normalize_unit(symbol_layer.offsetUnit()) not in ("map", "m"):
+                    # QGIS shifts the fill on screen (x right, y down).
+                    layer_def["paint"]["fill-translate"] = [
+                        PropertyExtractor.static_pixels(offset.x(), symbol_layer.offsetUnit()),
+                        PropertyExtractor.static_pixels(offset.y(), symbol_layer.offsetUnit())]
+                    layer_def["paint"]["fill-translate-anchor"] = "viewport"
                 color_prop = symbol_layer.dataDefinedProperties().property(
                     QgsSymbolLayer.Property.PropertyFillColor)
                 if color_prop and color_prop.isActive():

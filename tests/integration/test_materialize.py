@@ -286,9 +286,9 @@ def test_map_unit_arrows_match_qgis(plugin, tmp_path, curved, repeated, head_typ
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
     outputs, rules, diags = _export(plugin, layer, tmp_path)
-    assert [r.recipe.kind for r in rules][0] == "arrow_body"
+    assert [r.recipe.kind for r in rules][0] == "arrow_polygons"
     ours = ink_mask(render(outputs, EXTENT, (240, 240)))
-    assert mask_difference(reference, ours) < 0.06
+    assert mask_difference(reference, ours) < 0.01
 
 
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])

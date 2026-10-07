@@ -1097,3 +1097,29 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/browser/test_browser_parity.py -k "pattern or hatch"` | 15 passed |
 | `pytest tests/integration/test_materialize.py tests/integration/test_sprites.py tests/unit/test_patterns_and_assets.py -k "pattern or hatch or texture"` | 56 passed |
 
+
+## 4.15.0: arrows, inner effects and offsets as QGIS draws them
+
+- Arrows: `fidelity/arrows.py` ports `QgsArrowSymbolLayer`'s `straightArrow`, `curvedArrow`
+  (with Qt's `QPainterPath` arcs) and the vertex pairing of `renderPolyline`; the exporter
+  (`_arrow_polygons`) builds the polygons in painter pixels of the band's zoom in the project
+  CRS. Opaque multi-layer fills keep the per-arrow order (`_painter_visible`). Layers drawn
+  from their vertices (arrows, vertex / segment-centre markers) skip the base-layer
+  simplification. Simple fill offsets in screen units become `fill-translate`.
+- Inner shadow / inner glow (`fidelity/line_effects.py`): QGIS renders a straight line of
+  each of 36 screen directions with the layer's source and inner effects; samples across
+  the width colour about one strip per pixel, a cap sample colours line ends and turns.
+  The exporter cuts lines into runs by direction (`_direction_runs`, direction over one
+  line width per zoom); the converter draws an ends layer and the strips (`match` on the
+  run's direction, darker strips first).
+- Outer glow / drop shadow: their layers are drawn from a copy simplified at an eighth of
+  the effect's width per zoom (`simplified` recipe); the line itself has no effect layers.
+- Screen-unit offsets: offset curves per eighth of a zoom up to the zoom where 99.5 % of
+  the layer's corners no longer make MapLibre's `line-offset` loop
+  (`_offset_loop_zooms`), native above.
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_line_shapes.py` | 6 passed (new) |
+| `pytest tests/integration/test_materialize.py tests/integration/test_gradient_fills.py tests/integration/test_more_symbology.py tests/integration/test_end_to_end.py tests/integration/test_units_and_properties.py tests/integration/test_flattener.py` | 163 passed |
+| `pytest tests/browser/test_browser_parity.py -k "offsets or dash or thin"` | 14 passed |

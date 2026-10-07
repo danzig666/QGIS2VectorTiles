@@ -149,9 +149,14 @@ def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     result = exporter.convert_project_to_vector_tiles()
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
     lines = [l for l in style["layers"] if l["type"] == "line"]
-    assert len(lines) == 3 and lines[0]["id"].endswith("_fx0") and lines[1]["id"].endswith("_fx1")
-    main = lines[2]["paint"]
-    shadow_paint, glow_paint = lines[0]["paint"], lines[1]["paint"]
+    # Shadow and glow per zoom (from a copy simplified at the effect's size,
+    # zooms 12-14), then the line itself without effects.
+    effects, main_def = lines[:-1], lines[-1]
+    assert len(effects) == 6 and all(l["id"].endswith(("_fx0", "_fx1")) for l in effects)
+    assert not main_def["id"].endswith(("_fx0", "_fx1"))
+    assert main_def["source-layer"] not in {l["source-layer"] for l in effects}
+    main = main_def["paint"]
+    shadow_paint, glow_paint = effects[0]["paint"], effects[1]["paint"]
     assert shadow_paint["line-translate"][0] > 0 and shadow_paint["line-translate"][1] > 0  # down right
     assert glow_paint["line-color"] == "#ef2929" and glow_paint["line-blur"] > 0
     assert glow_paint["line-width"] > main["line-width"] and glow_paint["line-opacity"] == pytest.approx(0.5)

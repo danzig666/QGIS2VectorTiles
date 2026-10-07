@@ -538,6 +538,10 @@ class QGIS2VectorTiles:
             heatmaps={rule.rule.description(): rule.heatmap for rule in rules or [] if rule.heatmap},
             translates={rule.rule.description(): rule.translate
                         for rule in rules or [] if getattr(rule, "translate", None)},
+            effect_roles={rule.rule.description(): rule.effect_role
+                          for rule in rules or [] if getattr(rule, "effect_role", None)},
+            inner_effects={rule.rule.description(): rule.inner_effect
+                           for rule in rules or [] if getattr(rule, "inner_effect", None)},
         )
         exporter.export()
         return exporter

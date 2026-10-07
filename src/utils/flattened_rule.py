@@ -52,6 +52,13 @@ class FlattenedRule:
     # Shift on screen (x, y, QGIS unit name), y down: drawn with a viewport
     # translate (an arrow fill layer's offset, e.g. a drop shadow).
     translate: Optional[tuple] = None
+    # Paint effects drawn for this component: "outer" only its outer effects
+    # (glow, drop shadow; the line itself is another component), "none" no
+    # effects; None as the symbol says.
+    effect_role: Optional[str] = None
+    # Inner effects (inner shadow / glow) as strips across the line, coloured
+    # by the run's screen direction (SymbolMaterializer._inner_effect_spec).
+    inner_effect: Optional[dict] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -59,7 +66,7 @@ class FlattenedRule:
             rule if rule is not None else self.rule.clone(),
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
-            self.point_group, self.translate,
+            self.point_group, self.translate, self.effect_role, self.inner_effect,
         )
 
     @property
