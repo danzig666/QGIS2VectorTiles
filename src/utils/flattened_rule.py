@@ -49,6 +49,9 @@ class FlattenedRule:
     # params...) applied to the whole layer before anything else (see
     # RulesExporter._point_groups).
     point_group: Optional[tuple] = None
+    # Shift on screen (x, y, QGIS unit name), y down: drawn with a viewport
+    # translate (an arrow fill layer's offset, e.g. a drop shadow).
+    translate: Optional[tuple] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -56,7 +59,7 @@ class FlattenedRule:
             rule if rule is not None else self.rule.clone(),
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
-            self.point_group,
+            self.point_group, self.translate,
         )
 
     @property

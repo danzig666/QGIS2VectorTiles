@@ -150,7 +150,9 @@ def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     assert not [d for d in report["diagnostics"] if d["code"] == "Q2VT_UNSUPPORTED_EFFECT"]
 
 
-def test_arrow_takes_the_colour_of_its_top_unshifted_fill(plugin, tmp_path):
+def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
+    """"pointing arrow": a black copy shifted on screen (drop shadow) under
+    the orange arrow, as QGIS draws the two fill layers."""
     from qgis.core import QgsArrowSymbolLayer, QgsSimpleFillSymbolLayer
     from qgis.PyQt.QtCore import QPointF
     layer = _layer("LineString", ["LINESTRING(-80 -60, 0 60, 80 -40)"], str(tmp_path / "a.gpkg"))
@@ -161,5 +163,9 @@ def test_arrow_takes_the_colour_of_its_top_unshifted_fill(plugin, tmp_path):
     arrow.setSubSymbol(QgsFillSymbol([shadow, top]))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     _, rules, _ = _export(layer, tmp_path)
-    body = rules[0].rule.symbol().symbolLayer(0)
-    assert body.color().name() == "#ff7f00"
+    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in rules]
+    shadow_rules = [r for r in rules if r.translate]
+    assert colors[0] == "#000000" and colors[-1] == "#ff7f00"
+    assert shadow_rules and all(r.translate == (-1.2, 1.4, "MM") for r in shadow_rules)
+    assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
+    assert all(r.translate is None for r in rules if r not in shadow_rules)

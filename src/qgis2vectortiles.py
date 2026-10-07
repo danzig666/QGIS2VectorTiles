@@ -536,6 +536,8 @@ class QGIS2VectorTiles:
             ordered_styles={rule.rule.description() for rule in rules or []
                             if RulesExporter._order_by(rule.layer)},
             heatmaps={rule.rule.description(): rule.heatmap for rule in rules or [] if rule.heatmap},
+            translates={rule.rule.description(): rule.translate
+                        for rule in rules or [] if getattr(rule, "translate", None)},
         )
         exporter.export()
         return exporter

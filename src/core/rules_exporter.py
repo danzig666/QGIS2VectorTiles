@@ -1109,6 +1109,10 @@ class RulesExporter:
             current_input = self._interpolated_segments(current_input, grp.recipe)
             if current_input is None:
                 return None
+        elif grp.recipe is not None and grp.recipe.kind == "arrow_body" and grp.recipe.param("taper"):
+            current_input = self._tapered_arrows(current_input, grp.recipe)
+            if current_input is None:
+                return None
 
         # Field mapping.
         field_mapping = self._build_field_mapping(grp, current_input)
@@ -1489,6 +1493,70 @@ class RulesExporter:
                             out_feature[field.name()] = feature[field.name()]
                     out_feature[mat.COLOR_FIELD] = QgsSymbolLayerUtils.encodeColor(rgba)
                     out_feature[mat.WIDTH_FIELD] = float(stroke)
+                    out_feature.setGeometry(line)
+                    writer.addFeature(out_feature)
+                    written += 1
+        del writer
+        return out if written else None
+
+    # Pieces of a tapered arrow body (width steps of 1/24 of the change).
+    ARROW_TAPER_PIECES = 24
+
+    def _tapered_arrows(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: arrow bodies (``mat.arrow_body_for``, cut at the heads)
+        whose width runs from the start to the end width, as QGIS's arrow
+        polygon does: short pieces, each with the width of its middle
+        (WIDTH_FIELD)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        bodies = self._run_alg_safe("geometrybyexpression", "native", INPUT=source, OUTPUT_GEOMETRY=1,
+                                    EXPRESSION=mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}"))
+        bodies = self._run_alg_safe("removenullgeometries", "native", INPUT=bodies, REMOVE_EMPTY=True)
+        bodies = self._run_alg_safe("multiparttosingleparts", "native", INPUT=bodies)
+        layer = QgsVectorLayer(bodies, "arrow_bodies", "ogr") if isinstance(bodies, str) else bodies
+        if layer is None or not layer.isValid():
+            return None
+        start, end = recipe.param("taper")
+        nested = bool(recipe.param("taper_nested", False))
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.WIDTH_FIELD:
+                fields.append(field)
+        fields.append(QgsField(mat.WIDTH_FIELD, QVariant.Double))
+        out = self._temp_path("arrows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written, pieces = 0, self.ARROW_TAPER_PIECES
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            for part in geometry.constParts():
+                length = part.length()
+                if length <= 0:
+                    continue
+                for piece in range(pieces):
+                    t0, t1 = piece / pieces, (piece + 1) / pieces
+                    if nested:
+                        # Opaque: each piece reaches to the wide end of the body,
+                        # so a width step lies on a continuous line (pieces
+                        # meeting end to end show hairline cracks).
+                        t0, t1 = (t0, 1.0) if end >= start else (0.0, t1)
+                    line = QgsGeometry(part.curveSubstring(t0 * length, t1 * length))
+                    if line.isEmpty():
+                        continue
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        if field.name() != mat.WIDTH_FIELD:
+                            out_feature[field.name()] = feature[field.name()]
+                    middle = (piece + 0.5) / pieces
+                    out_feature[mat.WIDTH_FIELD] = float(start + (end - start) * middle)
                     out_feature.setGeometry(line)
                     writer.addFeature(out_feature)
                     written += 1
@@ -2019,6 +2087,8 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_body":
+            if recipe.param("taper"):
+                return [1, "@geometry"]  # bodies built by _tapered_arrows
             return [1, mat.arrow_body_for(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "callout":
             label = self._layer_point_expression(

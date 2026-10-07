@@ -27,7 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol
+from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
@@ -1599,6 +1599,7 @@ class QgisMapLibreStyleExporter:
         ordered_styles: Optional[set] = None,
         visible_polygons: Optional[Dict[str, Tuple[str, bool]]] = None,
         heatmaps: Optional[Dict[str, dict]] = None,
+        translates: Optional[Dict[str, tuple]] = None,
     ):
         """Initialise the exporter.
 
@@ -1627,6 +1628,8 @@ class QgisMapLibreStyleExporter:
         self.visible_polygons = visible_polygons or {}
         # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
         self.heatmaps = heatmaps or {}
+        # Style name -> (x, y, unit): shifted on screen (viewport translate).
+        self.translates = translates or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1792,6 +1795,30 @@ class QgisMapLibreStyleExporter:
         )
         if style.styleName() in self.ordered_styles:
             self._apply_draw_order(self.style["layers"][first:])
+        if style.styleName() in self.translates:
+            self._apply_translate(self.style["layers"][first:], self.translates[style.styleName()])
+
+    _TRANSLATE = {"fill": "fill", "line": "line", "circle": "circle", "symbol": "icon"}
+
+    def _apply_translate(self, layer_defs, translate) -> None:
+        """Shift the style's layers on screen like a QGIS fill offset (painter
+        coordinates: x right, y down, not turned with the map)."""
+        x, y, unit_name = translate
+        unit, ok = QgsUnitTypes.decodeRenderUnit(unit_name)
+        if not ok:
+            return
+        shift = [PropertyExtractor.static_pixels(x, unit), PropertyExtractor.static_pixels(y, unit)]
+        for layer_def in layer_defs:
+            prefix = self._TRANSLATE.get(layer_def.get("type"))
+            if prefix is None:
+                continue
+            paint = layer_def.setdefault("paint", {})
+            current = paint.get(f"{prefix}-translate")
+            if isinstance(current, list) and len(current) == 2 and \
+                    all(isinstance(v, (int, float)) for v in current):
+                shift = [shift[0] + current[0], shift[1] + current[1]]
+            paint[f"{prefix}-translate"] = shift
+            paint[f"{prefix}-translate-anchor"] = "viewport"
 
     def _heatmap_layer(self, style, spec: dict, bounds) -> None:
         """A QGIS heatmap renderer as a MapLibre heatmap layer; the weight is
