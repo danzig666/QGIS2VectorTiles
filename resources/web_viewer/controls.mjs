@@ -329,6 +329,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   state.onChange(apply);
   apply();
   // 3D view (buildings with heights, terrain relief) and the hillshade.
+  if (manifest.terrainError) warn("error.terrain", manifest.terrainError);
   try {
     const threeD = new ThreeD({ map, manifest, manifestUrl, basemap, maplibregl });
     viewer.threeD = threeD;
@@ -367,7 +368,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   }
   parts.legend = new Legend({ map, manifest, state, control, container: panel.panes.legend, releaseBase });
   // Print: the map with the legend of what it draws, or the parcel report.
-  parts.printer = new Printer({ map, manifest, content: (mode) =>
+  parts.printer = new Printer({ map, manifest, threeD: viewer.threeD, content: (mode) =>
     (mode === "parcel" && parts.parcel ? parts.parcel.printCard() : null) || parts.legend.printList() });
   viewer.printer = parts.printer;
   if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel", parts.parcel.bounds());

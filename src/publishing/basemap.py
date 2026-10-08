@@ -452,7 +452,9 @@ def street_records(reader, bbox, clip: Optional[Callable] = None, locale: str = 
         order = sorted(range(len(boxes)), key=lambda i: boxes[i][0])
         for position, i in enumerate(order):  # boxes sorted by west edge: compare neighbours only
             for j in order[position + 1:]:
-                if boxes[j][0] - boxes[i][2] > STREET_JOIN_M / 50000.0:
+                # Degrees of longitude for STREET_JOIN_M at this latitude (narrower in the north).
+                reach = STREET_JOIN_M / (111320.0 * max(0.05, math.cos(math.radians(boxes[i][3]))))
+                if boxes[j][0] - boxes[i][2] > reach:
                     break
                 if _gap_m(boxes[i], boxes[j]) <= STREET_JOIN_M:
                     cluster[find(i)] = find(j)
@@ -501,8 +503,11 @@ class StreetIndex:
     def nearest(self, point, limit_m: float = ADDRESS_STREET_M) -> Optional[str]:
         cx, cy = int(math.floor(point[0] / self.CELL)), int(math.floor(point[1] / self.CELL))
         best, best_d = None, limit_m
-        for x in range(cx - 1, cx + 2):
-            for y in range(cy - 1, cy + 2):
+        # Cells within limit_m: a cell is narrower (in metres) east-west further north.
+        reach_x = int(math.ceil(limit_m / (self.CELL * 111320.0 * max(0.05, math.cos(math.radians(point[1]))))))
+        reach_y = int(math.ceil(limit_m / (self.CELL * 110540.0)))
+        for x in range(cx - reach_x, cx + reach_x + 1):
+            for y in range(cy - reach_y, cy + reach_y + 1):
                 for name, a, b in self.cells.get((x, y), ()):
                     distance = self._distance(point, a, b)
                     if distance <= best_d:
@@ -516,6 +521,8 @@ def address_records(points, streets: Optional["StreetIndex"] = None) -> Tuple[Li
     (records, numbers without a street)."""
     records, seen, missing = [], set(), 0
     for lon, lat, number, street in points:
+        if isinstance(number, float) and math.isnan(number):
+            continue
         if isinstance(number, float) and number.is_integer():
             number = int(number)
         number = " ".join(str("" if number is None else number).split())

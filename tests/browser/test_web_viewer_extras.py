@@ -170,7 +170,11 @@ def test_drawing_travels_in_the_link_and_exports(site, tmp_path):
           d.start('line'); d.click(at(19.049, 47.409)); d.click(at(19.051, 47.411)); d.finish();
           d.setColor('#2563eb');
           d.start('area'); d.click(at(19.048, 47.41)); d.click(at(19.049, 47.412)); d.click(at(19.05, 47.41)); d.finish();
-          d.start('text'); d.textInput.value = '<b>Új út</b>'; d.click(at(19.05, 47.41)); d.cancel();
+          d.start('text'); d.textInput.value = '<b>Új út</b>';
+          // Enter typed in the text box does not end text mode (4.25 fix).
+          d.textInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          const textMode = d.mode;
+          d.click(at(19.05, 47.41)); d.cancel();
           d.start('point'); d.click(at(19.052, 47.408)); d.cancel();
           const { toKML, toGeoJSON } = await import(new URL('assets/draw.mjs', q2vtViewer.releaseUrl).href);
           const link = q2vtViewer.permalink.links().versioned;
@@ -178,18 +182,23 @@ def test_drawing_travels_in_the_link_and_exports(site, tmp_path):
                    label: document.querySelector('.q2vt-draw-label').innerHTML,
                    geojson: toGeoJSON(d.features).features.map((f) => f.geometry.type),
                    kml: toKML(d.features, 'Arló').includes('<name>&lt;b&gt;Új út&lt;/b&gt;</name>'),
-                   identify: q2vtViewer.drawing };
+                   identify: q2vtViewer.drawing, textMode };
         """},
     ], tmp_path)[0]
     assert out["kinds"] == ["line", "area", "text", "point"]
     assert out["geojson"] == ["LineString", "Polygon", "Point", "Point"]
     assert out["label"] == "&lt;b&gt;Új út&lt;/b&gt;" and out["kml"] and out["identify"] is False
-    assert "&d=" in out["link"]
+    assert "&d=" in out["link"] and out["textMode"] == "text"
     again = _run(out["link"], [{"eval": """
-      const d = q2vtViewer.controls.draw;
-      return d.features.map((f) => [f.kind, f.color, f.text, f.coords.length, f.coords[0].map((v) => +v.toFixed(5))]);
+      const d = q2vtViewer.controls.draw, source = q2vtViewer.map.getSource('q2vt_draw');
+      return { features: d.features.map((f) => [f.kind, f.color, f.text, f.coords.length,
+                                                f.coords[0].map((v) => +v.toFixed(5))]),
+               // drawn on the map as soon as the link opens (4.25 fix: was only on the next edit)
+               drawn: source ? (await source.getData()).features.length : 0,
+               labels: document.querySelectorAll('.q2vt-draw-label').length };
     """}], tmp_path)[0]
-    assert again == [["line", "#e11d48", "", 2, [19.049, 47.409]], ["area", "#2563eb", "", 3, [19.048, 47.41]],
+    assert again["drawn"] == 3 and again["labels"] == 1
+    assert again["features"] == [["line", "#e11d48", "", 2, [19.049, 47.409]], ["area", "#2563eb", "", 3, [19.048, 47.41]],
                      ["text", "#2563eb", "<b>Új út</b>", 1, [19.05, 47.41]], ["point", "#2563eb", "", 1, [19.052, 47.408]]]
 
 
@@ -351,3 +360,32 @@ def test_variant_addons_are_installed(tmp_path):
         """}], tmp_path)[0]
     assert out == {"probe": {"identify": True, "map": True, "title": "Arló teszt"}, "button": False,
                    "overview": False, "draw": False, "extrusions": 0}
+
+
+def test_viewer_pure_helpers_of_4_25(tmp_path):
+    """Node: 3D copies skip transparent and hatch fills and stacked symbol
+    layers; a drawing too long for a link is refused; the zone code key."""
+    script = tmp_path / "helpers.mjs"
+    viewer = os.path.join(os.path.dirname(os.path.dirname(HERE)), "resources", "web_viewer")
+    script.write_text(f"""
+      const {{ extrusionLayers }} = await import({json.dumps(os.path.join(viewer, "threed.mjs"))});
+      const {{ encodeDrawing, MAX_LINK, COLORS }} = await import({json.dumps(os.path.join(viewer, "draw.mjs"))});
+      const {{ zoneKey }} = await import({json.dumps(os.path.join(viewer, "parcel_report.mjs"))});
+      const fill = (id, paint, extra = {{}}) => ({{ id, type: "fill", source: "s", "source-layer": "l", paint, ...extra }});
+      const style = {{ layers: [
+        fill("solid", {{ "fill-color": "#ff0000" }}), fill("solid2", {{ "fill-color": "#00ff00" }}),
+        fill("clear", {{ "fill-color": "rgba(0, 0, 0, 0)" }}), fill("hatch", {{ "fill-pattern": "x" }}),
+        fill("far", {{ "fill-color": "#0000ff" }}, {{ minzoom: 16 }}), fill("other", {{ "fill-color": "#123456" }}) ] }};
+      const manifest = {{ layers: [{{ id: "b", heightField: "h", geometry: "polygon" }}],
+        components: [{{ layerId: "b", styleLayerIds: ["clear", "hatch", "solid", "solid2", "far"] }},
+                     {{ layerId: "b", styleLayerIds: ["other"] }}] }};
+      const many = Array.from({{ length: 150 }}, (_, i) => ({{ kind: "text", coords: [[19 + i / 1000, 47]],
+        color: COLORS[0], text: "Hosszú megjegyzés a tervezett útról ".repeat(3) }}));
+      console.log(JSON.stringify({{ ids: extrusionLayers(style, manifest).map((l) => l.metadata["q2vt:3d-of"]),
+        long: encodeDrawing(many).length > MAX_LINK, keys: [zoneKey(12), zoneKey(" Lke-1 "), zoneKey(null)] }}));
+    """)
+    run = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    assert out["ids"] == ["solid", "far", "other"]
+    assert out["long"] and out["keys"] == ["12", "Lke-1", ""]

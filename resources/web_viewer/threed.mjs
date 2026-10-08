@@ -18,7 +18,20 @@ export function heightExpression(field) {
   return ["max", 0, ["coalesce", ["to-number", ["get", field], 0], 0]];
 }
 
-// Fill-extrusion copies of the fill style layers of layers with heights.
+// A fill drawn with a solid, visible colour (an extrusion ignores the
+// colour's alpha and fill patterns: those would become opaque blocks).
+function solidFill(paint) {
+  if (paint["fill-pattern"] !== undefined) return false;
+  if (paint["fill-opacity"] === 0) return false;
+  const color = paint["fill-color"];
+  if (typeof color !== "string") return true;  // an expression: per feature
+  const text = color.replace(/\s+/g, "").toLowerCase();
+  return text !== "transparent" && !/^(rgba|hsla)\(.*,0(\.0*)?\)$/.test(text) && !/^#[0-9a-f]{6}00$/.test(text);
+}
+
+// Fill-extrusion copies of the fill style layers of layers with heights: one
+// per component and zoom range (a rule's symbol layers would raise the same
+// block twice; its per-zoom copies are kept).
 export function extrusionLayers(style, manifest) {
   const byId = new Map((style.layers || []).map((l) => [l.id, l]));
   const out = [];
@@ -26,9 +39,13 @@ export function extrusionLayers(style, manifest) {
     if (!layer.heightField || layer.geometry !== "polygon") continue;
     for (const component of manifest.components || []) {
       if (component.layerId !== layer.id) continue;
+      const ranges = new Set();
       for (const id of component.styleLayerIds || []) {
         const fill = byId.get(id);
-        if (!fill || fill.type !== "fill") continue;
+        if (!fill || fill.type !== "fill" || !solidFill(fill.paint || {})) continue;
+        const range = `${fill.minzoom ?? ""}-${fill.maxzoom ?? ""}`;
+        if (ranges.has(range)) continue;
+        ranges.add(range);
         const paint = fill.paint || {};
         const color = paint["fill-color"] ?? "#cccccc";
         const extrusion = { id: `${id}${SUFFIX}`, type: "fill-extrusion", source: fill.source,
@@ -115,7 +132,7 @@ export class ThreeD {
     } else {
       map.off("styledata", this.onStyle);
       if (this.terrain) map.setTerrain(null);
-      map.easeTo({ pitch: 0, bearing: 0, duration: 400 });
+      // Listened to first: with reduced motion the move ends inside easeTo.
       map.once("moveend", () => {
         if (this.active) return;
         map.setMaxPitch(0);
@@ -123,6 +140,7 @@ export class ThreeD {
         map.touchZoomRotate.disableRotation();
         map.touchPitch.disable();
       });
+      map.easeTo({ pitch: 0, bearing: 0, duration: 400 });
     }
     this.syncVisibility();
     if (this.buttonNode) {
@@ -154,10 +172,11 @@ export class ThreeD {
     const z = this.terrain.maxTileZoom;
     const n = 2 ** z;
     this.tiles ??= new Map();
+    if (this.tiles.size > 48) this.tiles.clear();  // ~256 KB of pixels per tile
     const decode = async (x, y) => {
       const key = `${z}/${x}/${y}`;
       if (!this.tiles.has(key)) {
-        this.tiles.set(key, (async () => {
+        const loading = (async () => {
           const tile = await archive.getZxy(z, x, y);
           if (!tile || !tile.data) return null;
           const bitmap = await createImageBitmap(new Blob([tile.data], { type: "image/png" }));
@@ -165,7 +184,9 @@ export class ThreeD {
           const context = canvas.getContext("2d", { willReadFrequently: true });
           context.drawImage(bitmap, 0, 0);
           return { size: bitmap.width, pixels: context.getImageData(0, 0, bitmap.width, bitmap.height).data };
-        })());
+        })();
+        this.tiles.set(key, loading);
+        loading.catch(() => this.tiles.delete(key));  // tried again next time
       }
       return this.tiles.get(key);
     };

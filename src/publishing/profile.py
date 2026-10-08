@@ -56,7 +56,14 @@ def migrate(data: dict) -> dict:
 
 def load_profile(data) -> PublicationProfile:
     """Profile from a JSON string or dict; raises PublishingError listing
-    every problem."""
+    every problem (also for values of a wrong type in a hand-edited file)."""
+    try:
+        return _load_profile(data)
+    except (TypeError, ValueError, AttributeError) as error:
+        raise PublishingError("Q2VT_PUB_PROFILE_INVALID", f"A value has the wrong type: {error}") from error
+
+
+def _load_profile(data) -> PublicationProfile:
     if isinstance(data, (str, bytes)):
         try:
             data = json.loads(data)
@@ -145,7 +152,7 @@ def xyz_problems(entries) -> List[str]:
                 errors.append(f"{where}.url: a WMS address needs REQUEST=GetMap")
         elif "{z}" not in url or "{x}" not in url or ("{y}" not in url and "{-y}" not in url):
             errors.append(f"{where}.url: needs {{z}}, {{x}} and {{y}} (or {{-y}}), or a WMS {{bbox-epsg-3857}}")
-        elif "{" in url.split("/")[2].replace("{s}", ""):
+        if XYZ_URL.match(url) and "{" in url.split("/")[2].replace("{s}", ""):
             errors.append(f"{where}.url: only {{s}} may stand in the server name")
         if not (isinstance(entry.min_zoom, int) and isinstance(entry.max_zoom, int)
                 and 0 <= entry.min_zoom <= entry.max_zoom <= 24):
@@ -342,6 +349,17 @@ def dumps(profile: PublicationProfile) -> str:
     return json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True, indent=1)
 
 
+def _file_digest(path: str) -> str:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
 def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = None) -> str:
     """Hash of everything that decides *what becomes public*: included
     layers, exposed fields, search/filter/key fields, destination URL. A
@@ -355,8 +373,13 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
              layer.deep_links] + ([layer.height_field] if layer.height_field else [])
             for layer in profile.layers if layer.included),
         "allFields": profile.output.include_all_fields,
-        "documents": sorted([d.title, os.path.basename(d.path)] for d in profile.info.documents),
+        # The documents' content too: another file under the same name needs a new review.
+        "documents": sorted([d.title, os.path.basename(d.path), _file_digest(d.path)]
+                            for d in profile.info.documents),
         "terrain": profile.terrain.layer_id or None,
+        # Third parties the visitors' browsers contact (they see the visitors' addresses).
+        "external": sorted(x.url for x in profile.basemap.xyz) + (
+            ["google-street-view"] if profile.interaction.street_view else []),
         "addresses": [profile.interaction.address_layer_id, profile.interaction.address_number_field,
                       profile.interaction.address_street_field] if profile.interaction.address_layer_id else None,
         "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,

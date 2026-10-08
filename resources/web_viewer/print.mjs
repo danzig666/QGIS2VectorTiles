@@ -91,8 +91,8 @@ function idle(map, timeout = 6000) {
 
 export class Printer {
   // content(mode) -> the sheet's body for "map" (legend) or "parcel" (report).
-  constructor({ map, manifest, content }) {
-    Object.assign(this, { map, manifest, content });
+  constructor({ map, manifest, content, threeD = null }) {
+    Object.assign(this, { map, manifest, content, viewer3d: threeD });
     this.active = false;
     this.scale = 0;  // 0: the screen's scale, rounded to a standard scale
     this.paper = "a4-landscape";
@@ -135,12 +135,18 @@ export class Printer {
     this.map.resize();
     const canvas = this.map.getContainer();
     const fitted = focus ? focusView(focus, canvas.clientWidth, canvas.clientHeight) : null;
-    const center = fitted && !this.scale ? fitted.center : this.view.center;
+    // A parcel is printed centred on it, also at a chosen scale.
+    const center = fitted ? fitted.center : this.view.center;
     const lat = center.lat;
     const wanted = this.scale || (fitted ? fitted.scale : standardScale(scaleAt(this.view.zoom, lat)));
     // The centre (the parcel's, or the screen's), at the scale on paper (seen
     // from above: a scale holds on a flat map only).
+    // Flat and from above (a scale holds there only): the 3D view is left
+    // for the print and comes back after it.
+    this.threeD = this.viewer3d && this.viewer3d.active ? this.viewer3d : null;
+    if (this.threeD) this.threeD.set(false);
     this.map.jumpTo({ ...this.view, pitch: 0, center, zoom: zoomFor(wanted, lat) });
+    if (this.map.redraw) this.map.redraw();  // drawn now: Ctrl+P snapshots the page at once
     this.map.getContainer().append(northArrow(this.view.bearing));
     const actual = scaleAt(this.map.getZoom(), lat);  // the map's zoom limits may not reach it
     this.printScale = Math.abs(actual / wanted - 1) < 0.005 ? wanted : Math.round(actual);
@@ -184,6 +190,7 @@ export class Printer {
     for (const node of this.map.getContainer().querySelectorAll(".q2vt-print-north")) node.remove();
     this.map.resize();
     if (this.view) this.map.jumpTo(this.view);
+    if (this.threeD) { this.threeD.set(true); this.threeD = null; }
   }
 
   destroy() {

@@ -148,7 +148,7 @@
   "draw.hint.area": "Click the corners; double-click or Finish to close the area.",
   "draw.hint.text": "Type the text above, then click the map where it goes.",
   "draw.textNeeded": "Type the text first.",
-  "draw.full": "The drawing is full (200 items).",
+  "draw.full": "The drawing is full (200 items, or too long for a shared link).",
   "draw.empty": "Nothing is drawn yet.",
   "info.about": "About this map and documents",
   "threed.title": "3D view (tilt, buildings, relief)",

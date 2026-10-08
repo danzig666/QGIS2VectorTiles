@@ -21,7 +21,7 @@ const DOCUMENTS = new Map();
 export function setDocuments(info, pageUrl) {
   DOCUMENTS.clear();
   for (const doc of (info && Array.isArray(info.documents)) ? info.documents : []) {
-    if (typeof doc.href !== "string" || !/^docs\/[a-z0-9-]+\.[a-z]+$/.test(doc.href)) continue;
+    if (!doc || typeof doc.href !== "string" || !/^docs\/[a-z0-9-]+\.[a-z]+$/.test(doc.href)) continue;
     const url = new URL(doc.href, pageUrl).href;
     for (const name of [doc.file, doc.title]) if (typeof name === "string" && name.trim()) DOCUMENTS.set(name.trim().toLowerCase(), url);
   }

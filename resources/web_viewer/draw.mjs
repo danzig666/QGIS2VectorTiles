@@ -12,6 +12,9 @@ export const KINDS = ["point", "line", "area", "text"];
 const MAX_FEATURES = 200;
 const MAX_POINTS = 2000;
 const MAX_TEXT = 120;
+// Encoded drawing length: below decodeDrawing's 20000 and leaves room for
+// the rest of the shared link (permalink.mjs MAX_HASH).
+export const MAX_LINK = 16000;
 
 // --- link encoding --------------------------------------------------------
 // Google's polyline algorithm (precision 1e-6) for [lng, lat] lists.
@@ -54,7 +57,15 @@ export function decodeLine(text) {
 }
 
 function b64url(text) {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(text))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// At most ``max`` characters, never splitting an emoji (surrogate pair).
+function clip(text, max) {
+  return Array.from(String(text)).slice(0, max).join("");
 }
 
 function unb64url(text) {
@@ -89,7 +100,7 @@ export function decodeDrawing(text) {
     total += coords.length;
     if (total > MAX_POINTS) break;
     const color = COLORS[item[2]] || COLORS[0];
-    const label = kind === "text" ? String(item[3] ?? "").slice(0, MAX_TEXT).trim() : "";
+    const label = kind === "text" ? clip(item[3] ?? "", MAX_TEXT).trim() : "";
     if (kind === "text" && !label) continue;
     out.push({ kind, coords, color, text: label });
   }
@@ -153,13 +164,17 @@ export class Draw {
     this.color = COLORS[0];
     this.markers = [];
     this.render();
-    if (this.map.isStyleLoaded()) this.refresh(); else this.map.once("load", () => this.refresh());
+    // The map's style is loaded when the controls are mounted (isStyleLoaded()
+    // is also false while tiles load, and "load" has fired already).
+    this.refresh();
     this.onClick = (e) => this.click(e);
     this.onDblClick = (e) => { if (this.mode === "line" || this.mode === "area") { e.preventDefault(); this.finish(); } };
     this.onKey = (e) => {
       if (!this.mode) return;
-      if (e.key === "Escape") this.cancel();
-      if (e.key === "Enter") this.finish();
+      // Typing elsewhere (the search box) or in the text box: Enter is theirs.
+      const typing = e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]");
+      if (e.key === "Escape" && (!typing || e.target === this.textInput)) this.cancel();
+      if (e.key === "Enter" && !typing) this.finish();
     };
     this.map.on("click", this.onClick);
     this.map.on("dblclick", this.onDblClick);
@@ -205,7 +220,7 @@ export class Draw {
     const undo = iconButton("q2vt-chip q2vt-chip-ghost", null, "reset", { text: t("draw.undo") });
     undo.addEventListener("click", () => this.undo());
     const clear = iconButton("q2vt-chip q2vt-chip-ghost", null, "trash", { text: t("draw.clear") });
-    clear.addEventListener("click", () => { this.cancel(); this.features = []; this.changed(); });
+    clear.addEventListener("click", () => { if (this.mode) this.cancel(); this.features = []; this.changed(); });
     const geojson = iconButton("q2vt-chip q2vt-chip-ghost", null, "download", { text: "GeoJSON" });
     geojson.addEventListener("click", () => this.save("geojson"));
     const kml = iconButton("q2vt-chip q2vt-chip-ghost", null, "download", { text: "KML" });
@@ -242,6 +257,8 @@ export class Draw {
   start(kind) {
     this.viewer.streetViewControl?.stop();  // one map tool at a time
     if (this.viewer.tools?.mode) this.viewer.tools.stop(false);
+    // Phones: the map is needed to draw on; the panel sheet goes.
+    if (window.matchMedia("(max-width: 760px)").matches) this.viewer.controls?.panel?.setOpen?.(false);
     this.cancel();
     this.ensureSource();
     this.mode = kind;
@@ -275,7 +292,7 @@ export class Draw {
     if (this.mode === "point") {
       this.add({ kind: "point", coords: [point], color: this.color, text: "" });
     } else if (this.mode === "text") {
-      const text = this.textInput.value.trim().slice(0, MAX_TEXT);
+      const text = clip(this.textInput.value.trim(), MAX_TEXT);
       if (!text) { this.hint.textContent = t("draw.textNeeded"); this.textInput.focus(); return; }
       this.add({ kind: "text", coords: [point], color: this.color, text });
     } else {
@@ -285,6 +302,8 @@ export class Draw {
   }
 
   finish() {
+    // A double click also clicked twice on its last point: once is enough.
+    this.points = this.points.filter((p, i, all) => !i || p[0] !== all[i - 1][0] || p[1] !== all[i - 1][1]);
     const need = this.mode === "area" ? 3 : 2;
     if ((this.mode === "line" || this.mode === "area") && this.points.length >= need) {
       const kind = this.mode;
@@ -294,7 +313,10 @@ export class Draw {
   }
 
   add(feature, keepMode = true) {
-    if (this.features.length >= MAX_FEATURES) { this.hint.textContent = t("draw.full"); return; }
+    if (this.features.length >= MAX_FEATURES || encodeDrawing([...this.features, feature]).length > MAX_LINK) {
+      this.hint.textContent = t("draw.full");
+      return;
+    }
     this.features.push(feature);
     if (keepMode) this.points = [];
     this.changed();
@@ -343,7 +365,7 @@ export class Draw {
 
   save(format) {
     if (!this.features.length) { this.hint.textContent = t("draw.empty"); return; }
-    const base = (this.manifest.title || "map").normalize("NFKD").replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "") || "map";
+    const base = (this.manifest.title || "map").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "") || "map";
     if (format === "kml") download(toKML(this.features, this.manifest.title || ""), "application/vnd.google-earth.kml+xml", `${base}-drawing.kml`);
     else download(JSON.stringify(toGeoJSON(this.features), null, 1), "application/geo+json", `${base}-drawing.geojson`);
   }

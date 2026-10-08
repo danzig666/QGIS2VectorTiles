@@ -70,6 +70,8 @@ def render_terrain(layer, extent_3857, min_zoom: int, max_zoom: int, output: str
     band = dataset.GetRasterBand(1)
     source_nodata = band.GetNoDataValue()
     dataset = None
+    # The CRS QGIS uses for the layer (a file without one, or one set in QGIS).
+    source_srs = layer.crs().toWkt() if layer.crs().isValid() else None
     zooms = list(range(int(min_zoom), int(max_zoom) + 1))
     with TileSink(output) as sink:
         for step, z in enumerate(zooms):
@@ -85,12 +87,15 @@ def render_terrain(layer, extent_3857, min_zoom: int, max_zoom: int, output: str
             bounds = (-ORIGIN + x0 * size, ORIGIN - (y1 + 1) * size, -ORIGIN + (x1 + 1) * size, ORIGIN - y0 * size)
             options = gdal.WarpOptions(format="MEM", outputBounds=bounds, width=nx * TILE, height=ny * TILE,
                                        dstSRS="EPSG:3857", resampleAlg="bilinear", outputType=gdal.GDT_Float32,
-                                       dstNodata=NODATA, srcNodata=source_nodata, multithread=True)
+                                       dstNodata=NODATA, srcNodata=source_nodata, srcSRS=source_srs,
+                                       multithread=True)
             warped = gdal.Warp("", source, options=options)
             if warped is None:
                 raise PublishingError("Q2VT_PUB_TERRAIN", f'Terrain: "{layer.name()}" could not be resampled.')
             band = warped.GetRasterBand(1)
-            valid = np.isfinite(band.ReadAsArray()) & (band.ReadAsArray() > NODATA + 1)
+            heights = band.ReadAsArray()
+            valid = np.isfinite(heights) & (heights > NODATA + 1)
+            heights = None
             if not valid.any():
                 continue
             # Holes and the area beyond the DEM take the nearest edge heights

@@ -444,9 +444,10 @@ def scan_bundle(root: str, files: Iterable[str], secrets: Iterable[str] = (),
         if ext in TEXT_EXTENSIONS:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
-            # Third-party bundles may contain generic strings: secrets only.
             scan = scan_text_for_leaks(text, secrets)
-            if relative.startswith(("assets/vendor/", "assets/maplibre-gl")):
+            # Third-party bundles and the documents the user publishes (a decree
+            # in .txt may quote a path): secret values only.
+            if relative.startswith(("assets/vendor/", "assets/maplibre-gl", "docs/")):
                 scan = [p for p in scan if p == "credential value"]
             problems.extend(f"{relative}: {p}" for p in scan)
             for canary in canaries:

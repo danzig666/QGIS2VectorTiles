@@ -95,12 +95,17 @@ export async function openArchives(manifest, manifestUrl, maplibregl) {
     const proto = registerPmtiles(maplibregl);
     const url = resolveUrl(checkRelative(terrain.href, "terrain"), manifestUrl);
     const archive = new globalThis.pmtiles.PMTiles(url);
-    const header = await archive.getHeader();
-    if (header.tileType !== IMAGE_TILE_TYPE.png) {
-      throw new ViewerError("Q2VT_PUB_NOT_MVT", "The terrain archive does not hold PNG height tiles.", `tileType ${header.tileType}`);
+    // Optional: a missing or unreadable terrain leaves the map without relief
+    // (controls.mjs says so), never without the map.
+    try {
+      const header = await archive.getHeader();
+      if (header.tileType !== IMAGE_TILE_TYPE.png) throw new Error(`tileType ${header.tileType}, not PNG heights`);
+      proto.add(archive);
+      archives.__terrain = { archive, header, url };
+    } catch (error) {
+      manifest.terrain = null;
+      manifest.terrainError = String((error && error.message) || error);
     }
-    proto.add(archive);
-    archives.__terrain = { archive, header, url };
   }
   return archives;
 }

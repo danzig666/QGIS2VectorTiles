@@ -148,7 +148,7 @@
   "draw.hint.area": "Kattintson a sarokpontokra; dupla kattintás vagy Kész a terület lezárásához.",
   "draw.hint.text": "Írja be fent a szöveget, majd kattintson oda a térképen, ahová kerüljön.",
   "draw.textNeeded": "Előbb írja be a szöveget.",
-  "draw.full": "A rajz megtelt (200 elem).",
+  "draw.full": "A rajz megtelt (200 elem, vagy túl hosszú a megosztott linkhez).",
   "draw.empty": "Még nincs rajz.",
   "info.about": "A térképről, dokumentumok",
   "threed.title": "3D nézet (döntés, épületek, domborzat)",

@@ -177,6 +177,8 @@ def test_web_basemaps_saved_in_qgis_and_in_the_settings_file(plugin, monkeypatch
     dialog.b_initial.setCurrentIndex(dialog.b_initial.findData("xyz-1"))
     basemap = dialog.collect().basemap
     assert [(x.title, x.max_zoom) for x in basemap.xyz] == [("Teszt műhold", 20)] and basemap.initial == "xyz-1"
+    assert "Teszt műhold" not in {x.title for x in qgis_xyz_connections()}  # not on every read
+    dialog.save_settings(quiet=True)
     saved = {x.title: x for x in qgis_xyz_connections()}
     assert saved["Teszt műhold"].url == "https://{s}.tiles.example.hu/{z}/{x}/{y}.jpg"
     assert saved["Teszt műhold"].attribution == "© Példa Kft." and saved["Teszt műhold"].max_zoom == 20
