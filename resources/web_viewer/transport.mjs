@@ -89,6 +89,19 @@ export async function openArchives(manifest, manifestUrl, maplibregl) {
     proto.add(archive);
     archives[source.id] = { archive, header, url };
   }
+  // Terrain-RGB heights (manifest.terrain): PNG tiles, added by threed.mjs.
+  const terrain = manifest.terrain;
+  if (terrain && terrain.kind === "pmtiles") {
+    const proto = registerPmtiles(maplibregl);
+    const url = resolveUrl(checkRelative(terrain.href, "terrain"), manifestUrl);
+    const archive = new globalThis.pmtiles.PMTiles(url);
+    const header = await archive.getHeader();
+    if (header.tileType !== IMAGE_TILE_TYPE.png) {
+      throw new ViewerError("Q2VT_PUB_NOT_MVT", "The terrain archive does not hold PNG height tiles.", `tileType ${header.tileType}`);
+    }
+    proto.add(archive);
+    archives.__terrain = { archive, header, url };
+  }
   return archives;
 }
 

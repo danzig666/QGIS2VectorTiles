@@ -94,7 +94,8 @@ def tile_fields(profile: PublicationProfile) -> Dict[str, List[str]]:
     for layer in profile.layers:
         if not layer.included:
             continue
-        names = [f.field for f in layer.filter_fields] + ([LABEL_ANCHOR_MARKER] if layer.label_always else [])
+        names = [f.field for f in layer.filter_fields] + ([LABEL_ANCHOR_MARKER] if layer.label_always else []) \
+            + ([layer.height_field] if layer.height_field else [])
         if names:
             out[layer.layer_id] = names
     return out
@@ -231,6 +232,7 @@ def logical_model(project: QgsProject, profile: PublicationProfile, rules, style
             "toggleable": bool(config.toggleable),
             "opacity": float(config.opacity), "legend": bool(config.legend),
             "labelAlways": bool(config.label_always), "snap": bool(config.snap),
+            "heightField": config.height_field or None,
             "featureKeyProperty": "q2vt_feature_key",
             "identityScope": key_expression(config.key_fields)[1],
             "popupFields": [{"field": p.field, "title": p.alias or p.field, "type": p.type}

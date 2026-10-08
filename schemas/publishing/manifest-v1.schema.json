@@ -775,6 +775,12 @@
         "object",
         "null"
       ]
+    },
+    "terrain": {
+      "type": [
+        "object",
+        "null"
+      ]
     }
   },
   "$defs": {

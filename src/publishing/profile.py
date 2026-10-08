@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from .errors import PublishingError
 from .models import (XyzBasemap, CutLineConfig, DocumentConfig, InfoConfig, ParcelInfoConfig, RestrictionConfig,
+                     TerrainConfig,
                      DOCUMENT_EXTENSIONS,
                      ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
                      FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
@@ -72,7 +73,7 @@ def load_profile(data) -> PublicationProfile:
     nested = {
         "view": ViewConfig, "interaction": InteractionConfig, "output": OutputConfig,
         "destination": DestinationConfig, "approval": Approval, "themes": ThemeConfig,
-        "basemap": BasemapConfig,
+        "basemap": BasemapConfig, "terrain": TerrainConfig,
     }
     top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups", "parcel_info", "info")}
     profile = build(PublicationProfile, top, errors, "profile")
@@ -214,6 +215,8 @@ def validate(profile: PublicationProfile) -> List[str]:
         paths.add(tuple(group.path or ()))
         if not group.toggleable and not group.initially_visible:
             errors.append(f"{where}: a group that cannot be switched off must be visible at start")
+    if not 1.0 <= float(profile.terrain.exaggeration) <= 5.0:
+        errors.append("terrain.exaggeration: 1-5")
     titles = set()
     for index, document in enumerate(profile.info.documents):
         where = f"info.documents[{index}]"
@@ -349,10 +352,11 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
             [layer.layer_id, sorted(p.field for p in layer.popup_fields),
              sorted(layer.search_fields), sorted(layer.key_fields),
              sorted(f.field for f in layer.filter_fields), layer.display_expression,
-             layer.deep_links]
+             layer.deep_links] + ([layer.height_field] if layer.height_field else [])
             for layer in profile.layers if layer.included),
         "allFields": profile.output.include_all_fields,
         "documents": sorted([d.title, os.path.basename(d.path)] for d in profile.info.documents),
+        "terrain": profile.terrain.layer_id or None,
         "addresses": [profile.interaction.address_layer_id, profile.interaction.address_number_field,
                       profile.interaction.address_street_field] if profile.interaction.address_layer_id else None,
         "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,

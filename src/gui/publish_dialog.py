@@ -23,7 +23,7 @@ import traceback
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
                        QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
-                       QgsTask, QgsVectorLayer)
+                       QgsTask, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
@@ -933,6 +933,10 @@ class PublishDialog(QDialog):
         form.addRow("", self.i_links)
         form.addRow("", self.i_label_always)
         form.addRow("", self.i_snap)
+        self.i_height = QComboBox()
+        self.i_height.setToolTip(tr("Polygon layers (e.g. buildings): a numeric field of heights in metres. "
+                                    "The map's 3D button raises the polygons to it. The field becomes public."))
+        form.addRow(tr("3D height field (m)"), self.i_height)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
         self.i_fields.setHorizontalHeaderLabels([tr("Field"), tr("Popup"), tr("Popup title"), tr("Type"),
@@ -1161,6 +1165,36 @@ class PublishDialog(QDialog):
             "allowed to use, with the attribution the service requires. The ticked ones are also kept in "
             "the project and in the exported settings file.")))
         outer.addWidget(web)
+        # Terrain: a DEM raster layer (heights in metres) for the 3D view,
+        # the hillshade and elevation profiles.
+        relief = QGroupBox(tr("Terrain (3D relief, hillshade, elevation profiles)"))
+        relief_form = QFormLayout(relief)
+        from qgis.gui import QgsMapLayerComboBox  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsMapLayerProxyModel  # pylint: disable=import-outside-toplevel
+        self.t_layer = QgsMapLayerComboBox()
+        try:
+            self.t_layer.setFilters(QgsMapLayerProxyModel.Filter.RasterLayer)
+        except AttributeError:
+            self.t_layer.setFilters(Qgis.LayerFilter.RasterLayer)
+        try:
+            self.t_layer.setAllowEmptyLayer(True, tr("(no terrain)"))
+        except TypeError:
+            self.t_layer.setAllowEmptyLayer(True)
+        self.t_layer.setProject(self.project)
+        self.t_layer.setToolTip(tr("A raster layer of ground heights in metres (DEM, DTM), read from its file."))
+        self.t_hillshade = QCheckBox(tr("Hillshade: shaded relief drawn above the basemap (also in 2D)"))
+        self.t_exaggeration = QDoubleSpinBox()
+        self.t_exaggeration.setRange(1.0, 5.0)
+        self.t_exaggeration.setSingleStep(0.5)
+        self.t_exaggeration.setSuffix(" ×")
+        relief_form.addRow(tr("Elevation layer (DEM)"), self.t_layer)
+        relief_form.addRow("", self.t_hillshade)
+        relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
+        relief_form.addRow("", _note(tr(
+            "The heights are resampled to web tiles (data/terrain.pmtiles) for the area of the map. "
+            "Visitors get a 3D button (tilted view with relief; with a 3D height field also raised "
+            "buildings) and an elevation profile for measured lines. The heights become public.")))
+        outer.addWidget(relief)
         start = QFormLayout()
         start.addRow(tr("Basemap shown at start"), self.b_initial)
         outer.insertLayout(0, start)
@@ -1775,6 +1809,9 @@ class PublishDialog(QDialog):
         self.e_locale.setCurrentIndex(max(0, self.e_locale.findData(profile.locale)))
         self.e_attribution.setText(profile.attribution)
         self.e_logo.setText(profile.logo_path)
+        self.t_layer.setLayer(self.project.mapLayer(profile.terrain.layer_id))
+        self.t_hillshade.setChecked(profile.terrain.hillshade)
+        self.t_exaggeration.setValue(profile.terrain.exaggeration)
         info = profile.info
         self.i_issuer.setText(info.issuer)
         self.i_decree.setText(info.decree)
@@ -1932,6 +1969,14 @@ class PublishDialog(QDialog):
         self.i_label_always.setChecked(config.label_always)
         self.i_snap.setChecked(config.snap)
         self.i_links.setChecked(config.deep_links)
+        self.i_height.clear()
+        self.i_height.addItem(tr("(none)"), "")
+        polygon = getattr(layer, "geometryType", lambda: None)() == QgsWkbTypes.PolygonGeometry
+        for field in layer.fields() if polygon else []:
+            if field.isNumeric():
+                self.i_height.addItem(field.name(), field.name())
+        self.i_height.setCurrentIndex(max(0, self.i_height.findData(config.height_field)))
+        self.i_height.setEnabled(polygon)
         popups = {p.field: p for p in config.popup_fields}
         filters = {f.field: f for f in config.filter_fields}
         fields = layer.fields()
@@ -1993,6 +2038,7 @@ class PublishDialog(QDialog):
         config.label_always = self.i_label_always.isChecked()
         config.snap = self.i_snap.isChecked()
         config.deep_links = self.i_links.isChecked()
+        config.height_field = self.i_height.currentData() or ""
         popups, search, keys, filters = [], [], [], []
         for row in range(self.i_fields.rowCount()):
             name = self.i_fields.item(row, 0).text()
@@ -2018,6 +2064,10 @@ class PublishDialog(QDialog):
         profile.locale = self.e_locale.currentData()
         profile.attribution = self.e_attribution.text().strip()
         profile.logo_path = self.e_logo.text().strip()
+        terrain_layer = self.t_layer.currentLayer()
+        profile.terrain.layer_id = terrain_layer.id() if terrain_layer is not None else ""
+        profile.terrain.hillshade = self.t_hillshade.isChecked()
+        profile.terrain.exaggeration = float(self.t_exaggeration.value())
         profile.info.issuer = self.i_issuer.text().strip()
         profile.info.decree = self.i_decree.text().strip()
         profile.info.legal_date = self.i_legal_date.text().strip()
@@ -2503,6 +2553,15 @@ class PublishDialog(QDialog):
                 profile.basemap.source or "build.protomaps.com")]
         if profile.themes.names:
             lines.append(tr("Views (map themes): ") + ", ".join(profile.themes.names))
+        if profile.terrain.layer_id:
+            layer = self.project.mapLayer(profile.terrain.layer_id)
+            lines += ["", tr("Terrain: the heights of {} inside the map's area (web tiles)").format(
+                layer.name() if layer else "?")]
+        heights = [c for c in profile.layers if c.included and c.height_field]
+        if heights:
+            lines.append(tr("3D height fields (public): ") + ", ".join(
+                f"{(self.project.mapLayer(c.layer_id).name() if self.project.mapLayer(c.layer_id) else c.layer_id)}"
+                f".{c.height_field}" for c in heights))
         if profile.interaction.address_layer_id:
             layer = self.project.mapLayer(profile.interaction.address_layer_id)
             lines += ["", tr("House number search: street and number of every address in the area ({})").format(

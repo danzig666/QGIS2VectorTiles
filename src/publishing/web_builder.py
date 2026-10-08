@@ -544,9 +544,11 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         safe_relative_path(rel)
         _copy(src, os.path.join(staging, *rel.split("/")))
     info = _add_documents(profile, staging)
+    terrain = _add_terrain(bundle, staging)
     # 6. Manifest + public diagnostics.
     manifest = build_manifest(bundle, profile, release_id, source, manifest_extra)
     manifest["info"] = info
+    manifest["terrain"] = terrain
     manifest["sources"].extend(raster_sources)
     manifest["basemap"] = basemap_manifest
     manifest["logo"] = manifest_logo
@@ -560,6 +562,23 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         "tiles": archive.addressed_tiles if archive else None,
     })
     return archive, manifest, style
+
+
+def _add_terrain(bundle: ExportBundle, staging: str) -> Optional[dict]:
+    """The terrain-RGB archive (terrain.py) at ``data/terrain.pmtiles``; the
+    viewer adds it as a raster-dem source (3D relief, hillshade, profiles)."""
+    terrain = getattr(bundle, "terrain", None)
+    if not terrain:
+        return None
+    href = "data/terrain.pmtiles"
+    target = os.path.join(staging, *href.split("/"))
+    _copy(terrain["path"], target)
+    validate_pmtiles(target, sample=16, kind="image")
+    d = terrain["descriptor"]
+    return {"href": href, "kind": "pmtiles", "tileType": "png", "encoding": "mapbox", "tileSize": 256,
+            "minTileZoom": d.min_zoom, "maxTileZoom": d.max_zoom, "bounds": [round(v, 7) for v in d.bounds],
+            "sha256": d.sha256, "sizeBytes": d.size_bytes, "hillshade": bool(terrain.get("hillshade")),
+            "exaggeration": float(terrain.get("exaggeration", 1.5))}
 
 
 def _add_documents(profile: PublicationProfile, staging: str) -> Optional[dict]:

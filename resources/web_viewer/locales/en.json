@@ -150,5 +150,10 @@
   "draw.textNeeded": "Type the text first.",
   "draw.full": "The drawing is full (200 items).",
   "draw.empty": "Nothing is drawn yet.",
-  "info.about": "About this map and documents"
+  "info.about": "About this map and documents",
+  "threed.title": "3D view (tilt, buildings, relief)",
+  "error.terrain": "The terrain could not be loaded; the map is shown without it.",
+  "profile.title": "Elevation profile",
+  "profile.noData": "No height data along this line.",
+  "profile.facts": "Lowest {min} m, highest {max} m · climb {up} m, descent {down} m"
 }

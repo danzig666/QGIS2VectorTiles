@@ -546,3 +546,14 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: 186mm; h
 .q2vt-draw-hint:empty { display: none; }
 .q2vt-draw-label { font: 700 14px/1.2 system-ui, sans-serif; white-space: pre; pointer-events: none;
   text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff, 0 0 4px #fff; }
+
+/* 3D button (threed.mjs) and elevation profile (profile.mjs). */
+.q2vt-3d-btn[aria-pressed="true"] { color: var(--q2vt-accent); }
+.q2vt-profile:empty { display: none; }
+.q2vt-profile { margin: 8px 0 4px; }
+.q2vt-profile-chart { width: 100%; height: auto; display: block; }
+.q2vt-profile-area { fill: var(--q2vt-accent); fill-opacity: 0.15; stroke: none; }
+.q2vt-profile-line { fill: none; stroke: var(--q2vt-accent); stroke-width: 2; stroke-linejoin: round; }
+.q2vt-profile-grid { stroke: var(--q2vt-border); stroke-dasharray: 3 3; }
+.q2vt-profile-label { font-size: 10px; fill: var(--q2vt-muted); font-variant-numeric: tabular-nums; }
+.q2vt-profile-facts { margin: 4px 0 0; font-size: 12px; color: var(--q2vt-fg); }

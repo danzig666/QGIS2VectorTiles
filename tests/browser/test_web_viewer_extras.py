@@ -48,6 +48,26 @@ def _addresses(path_crs="EPSG:3857"):
     return layer
 
 
+def _dem(path):
+    """Heights rising from 100 m (west) to 300 m (east) over the extent, 10 m pixels."""
+    from osgeo import gdal, osr  # pylint: disable=import-outside-toplevel
+    import numpy as np  # pylint: disable=import-outside-toplevel
+    size = 440
+    x0, y1 = EXTENT.xMinimum() - 200, EXTENT.yMaximum() + 200
+    data = np.tile(np.linspace(100, 300, size, dtype=np.float32), (size, 1))
+    data[:10, :10] = -9999  # a hole
+    dataset = gdal.GetDriverByName("GTiff").Create(str(path), size, size, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform((x0, 10, 0, y1, 0, -10))
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(3857)
+    dataset.SetProjection(srs.ExportToWkt())
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(-9999)
+    band.WriteArray(data)
+    dataset = None
+    return str(path)
+
+
 @pytest.fixture(scope="module")
 def site(tmp_path_factory):
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
@@ -72,6 +92,13 @@ def site(tmp_path_factory):
     interaction.address_layer_id, interaction.address_number_field = addresses.id(), "hsz"
     interaction.address_street_field = "utca"
     profile.basemap.xyz = [XyzBasemap("Ortofotó WMS", wms_template("https://wms.example.hu/ows", "ORTO"))]
+    from qgis.core import QgsRasterLayer  # pylint: disable=import-outside-toplevel
+    dem = QgsRasterLayer(_dem(base / "dem.tif"), "Domborzat")
+    assert dem.isValid()
+    project.addMapLayer(dem)
+    profile.terrain.layer_id = dem.id()
+    profile.layers[0].height_field = "terulet"  # 1000.5 m: test heights
+    interaction.measure = True
     result = export_local(project, profile, EXTENT)
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"), "result": result}
@@ -177,3 +204,70 @@ def test_house_numbers_in_the_search(site, tmp_path):
     ], tmp_path)
     assert out[0] == ["Fő utca 12Cím"], out
     assert out[1] == 0  # outside the extent: not published
+
+
+def test_terrain_archive_heights(site):
+    from publishing.validation import open_pmtiles  # pylint: disable=import-outside-toplevel
+    from publishing.terrain import decode_rgb  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QImage  # pylint: disable=import-outside-toplevel
+    release = site["result"].release.release_dir
+    manifest = json.load(open(os.path.join(release, "manifest.json"), encoding="utf-8"))
+    terrain = manifest["terrain"]
+    assert terrain["href"] == "data/terrain.pmtiles" and terrain["encoding"] == "mapbox"
+    assert terrain["minTileZoom"] == 9 and terrain["maxTileZoom"] == 14  # map from 11; 10 m DEM at 47°
+    heights = []
+    with open_pmtiles(os.path.join(release, "data", "terrain.pmtiles")) as archive:
+        for (z, x, y), data in archive.tiles():
+            if z != 14:
+                continue
+            image = QImage.fromData(data, "PNG")
+            colour = image.pixelColor(128, 128)
+            heights.append(decode_rgb(colour.red(), colour.green(), colour.blue()))
+    assert heights and 95 <= min(heights) and max(heights) <= 305, heights
+    layer = next(l for l in manifest["layers"] if l.get("heightField"))
+    assert layer["heightField"] == "terulet"
+
+
+def test_3d_view_buildings_relief_and_profile(site, tmp_path):
+    actions = [{"eval": """
+      const v = q2vtViewer, m = v.map, d3 = v.threeD;
+      const extrusions = m.getStyle().layers.filter((l) => l.type === 'fill-extrusion');
+      const before = { pitch: m.getPitch(), terrain: !!m.getTerrain(),
+                       vis: extrusions.map((l) => m.getLayoutProperty(l.id, 'visibility')),
+                       hillshade: m.getLayer('q2vt_hillshade') ? m.getLayer('q2vt_hillshade').type : null,
+                       button: !!document.querySelector('.q2vt-3d-btn') };
+      document.querySelector('.q2vt-3d-btn').click();
+      await new Promise((r) => setTimeout(r, 900));
+      const on = { pitch: Math.round(m.getPitch()), terrain: !!m.getTerrain(),
+                   vis: extrusions.map((l) => m.getLayoutProperty(l.id, 'visibility')),
+                   height: JSON.stringify(m.getPaintProperty(extrusions[0].id, 'fill-extrusion-height')) };
+      v.controls.state.setIn('layers', v.manifest.layers[0].id, false);
+      await new Promise((r) => setTimeout(r, 100));
+      const hidden = extrusions.map((l) => m.getLayoutProperty(l.id, 'visibility'));
+      v.controls.state.setIn('layers', v.manifest.layers[0].id, true);
+      document.querySelector('.q2vt-3d-btn').click();
+      await new Promise((r) => setTimeout(r, 900));
+      const off = { pitch: Math.round(m.getPitch()), terrain: !!m.getTerrain(),
+                    vis: extrusions.map((l) => m.getLayoutProperty(l.id, 'visibility')) };
+      // Elevation profile of a west-east line across the extent.
+      const tools = v.controls.tools, c = m.getCenter();
+      tools.start('distance');
+      tools.points = [[c.lng - 0.012, c.lat], [c.lng + 0.012, c.lat]];
+      tools.finish();
+      const shown = !tools.profileButton.hidden;
+      const stats = await tools.showProfile();
+      return { before, on, hidden, off, shown, stats,
+               facts: document.querySelector('.q2vt-profile-facts').textContent,
+               chart: !!document.querySelector('.q2vt-profile-chart path.q2vt-profile-line') };
+    """}]
+    out = _run(site["url"], actions, tmp_path)[0]
+    assert out["before"] == {"pitch": 0, "terrain": False, "vis": ["none"] * len(out["before"]["vis"]),
+                             "hillshade": "hillshade", "button": True}
+    assert out["before"]["vis"]  # one extrusion per fill style layer of the layer
+    assert out["on"]["pitch"] == 55 and out["on"]["terrain"] and set(out["on"]["vis"]) == {"visible"}
+    assert "terulet" in out["on"]["height"]
+    assert set(out["hidden"]) == {"none"}  # follows the layer switch
+    assert out["off"] == {"pitch": 0, "terrain": False, "vis": out["before"]["vis"]}
+    stats = out["stats"]
+    assert out["shown"] and out["chart"]
+    assert 110 < stats["min"] < stats["max"] < 290 and stats["up"] > 80 and stats["down"] < 5, stats

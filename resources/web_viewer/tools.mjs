@@ -8,6 +8,7 @@ import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
 import { PRINT_SCALES } from "./print.mjs";
 import { Snapper } from "./snap.mjs";
+import { renderProfile, sampleLine } from "./profile.mjs";
 
 const SOURCE = "q2vt_measure";
 const SNAP_SOURCE = "q2vt_measure_snap";
@@ -141,6 +142,12 @@ export class Tools {
       label.append(box, el("span", "", t("tools.snap", { layers: this.snapper.titles.join(", ") })));
       block.append(label);
     }
+    // Elevation profile of a measured line (with terrain).
+    this.profileButton = iconButton("q2vt-chip", null, "chart", { text: t("profile.title") });
+    this.profileButton.hidden = true;
+    this.profileButton.addEventListener("click", () => this.showProfile());
+    this.profileBox = el("div", "q2vt-profile");
+    block.append(this.profileButton, this.profileBox);
     block.append(el("p", "q2vt-muted", t("tools.measureHelp")),
       ...(this.snapper.available ? [el("p", "q2vt-muted", t("tools.snapHelp"))] : []),
       el("p", "q2vt-muted", t("tools.measureMethod")));
@@ -223,6 +230,10 @@ export class Tools {
     this.showSnap(null);
     if (this.map.getSource(SOURCE) && this.points.length) this.draw();
     this.viewer.measuring = false;
+    if (this.profileButton) {
+      this.profileButton.hidden = !(this.viewer.threeD && this.viewer.threeD.terrain
+                                    && this.lastMode === "distance" && this.points.length >= 2);
+    }
     this.map.doubleClickZoom.enable();
     this.map.getCanvas().style.cursor = "";
     for (const node of Object.values(this.modeButtons || {})) node.setAttribute("aria-pressed", "false");
@@ -234,7 +245,18 @@ export class Tools {
       this.points = [];
       if (this.map.getSource(SOURCE)) this.map.getSource(SOURCE).setData({ type: "FeatureCollection", features: [] });
       if (this.result) this.result.textContent = "";
+      if (this.profileBox) this.profileBox.replaceChildren();
+      if (this.profileButton) this.profileButton.hidden = true;
     }
+  }
+
+  async showProfile() {
+    const threeD = this.viewer.threeD;
+    if (!threeD || this.points.length < 2) return null;
+    this.profileBox.replaceChildren(el("p", "q2vt-muted", t("app.loading")));
+    const { samples } = sampleLine(this.points, 200);
+    const heights = await threeD.elevations(samples.map((s) => s.point));
+    return renderProfile(this.profileBox, samples, heights || []);
   }
 
   measurement() {

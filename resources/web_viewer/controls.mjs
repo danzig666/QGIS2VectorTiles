@@ -19,6 +19,7 @@ import { ParcelReport } from "./parcel_report.mjs";
 import { StreetView } from "./streetview.mjs";
 import { OverviewControl } from "./overview.mjs";
 import { Draw } from "./draw.mjs";
+import { ThreeD } from "./threed.mjs";
 import { warn } from "./diagnostics.mjs";
 import { button, el, icon } from "./icons.mjs";
 
@@ -327,6 +328,14 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   };
   state.onChange(apply);
   apply();
+  // 3D view (buildings with heights, terrain relief) and the hillshade.
+  try {
+    const threeD = new ThreeD({ map, manifest, manifestUrl, basemap, maplibregl });
+    viewer.threeD = threeD;
+    if (threeD.available) map.addControl(threeD, "top-right");
+  } catch (error) {
+    warn("error.terrain", String(error && error.message || error));
+  }
 
   const panel = buildPanel(manifest);
   const permalink = new Permalink({ map, manifest, state, defaults: initial,

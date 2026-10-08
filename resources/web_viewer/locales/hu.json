@@ -150,5 +150,10 @@
   "draw.textNeeded": "Előbb írja be a szöveget.",
   "draw.full": "A rajz megtelt (200 elem).",
   "draw.empty": "Még nincs rajz.",
-  "info.about": "A térképről, dokumentumok"
+  "info.about": "A térképről, dokumentumok",
+  "threed.title": "3D nézet (döntés, épületek, domborzat)",
+  "error.terrain": "A domborzat nem tölthető be; a térkép nélküle látszik.",
+  "profile.title": "Magassági metszet",
+  "profile.noData": "Ezen a vonalon nincs magassági adat.",
+  "profile.facts": "Legalacsonyabb {min} m, legmagasabb {max} m · emelkedés {up} m, lejtés {down} m"
 }

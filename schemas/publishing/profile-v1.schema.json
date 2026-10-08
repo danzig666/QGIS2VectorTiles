@@ -582,6 +582,23 @@
           }
         }
       }
+    },
+    "terrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layerId": {
+          "type": "string"
+        },
+        "hillshade": {
+          "type": "boolean"
+        },
+        "exaggeration": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5
+        }
+      }
     }
   },
   "$defs": {
@@ -738,6 +755,9 @@
         "maxScale": {
           "type": "number",
           "minimum": 0
+        },
+        "heightField": {
+          "type": "string"
         }
       }
     },

@@ -165,7 +165,8 @@ def _stage_weights(profile: PublicationProfile, raster_plans) -> Dict[str, float
     return {
         "PLAN": 1.0, "EXPORT_MVT": 75.0, "RECORDS": 2.0, "LEGEND": 1.0,
         "PARCELS": 2.0 if profile.parcel_info.enabled else 0.0,
-        "RASTER": min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0,
+        "RASTER": (min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0)
+                  + (4.0 if profile.terrain.layer_id else 0.0),
         "BASEMAP": 6.0 if profile.basemap.kind == "protomaps" else 0.0,
         "STREETS": 2.0 if profile.interaction.search and (profile.interaction.street_search
                                                            or profile.interaction.address_layer_id) else 0.0,
@@ -313,6 +314,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 
     approved: Dict[str, set] = {}
     filter_by_layer = {layer_logical_id(c.layer_id): {f.field for f in c.filter_fields}
+                       | ({c.height_field} if c.height_field else set())  # the 3D height (reviewed)
                        for c in profile.layers if c.included}
     for component in bundle.components:
         names = filter_by_layer.get(component["layerId"], set())
@@ -343,6 +345,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
                                              work_dir, progress, bundle.warnings, cache)
     bundle.warnings.extend(_vector_blend_warnings(project, profile))
+    bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress, bundle.warnings)
     progress.check()
     published = {r["layerId"] for r in bundle.raster_archives}
     dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
@@ -556,6 +559,38 @@ def _street_area(project, profile, extent_3857):
     geometry = QgsGeometry.fromRect(box)
     geometry.transform(QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"), wgs84, project))
     return geometry, ""
+
+
+def _render_terrain(project, profile, extent_3857, work_dir, progress, warnings) -> Optional[dict]:
+    """The DEM layer as terrain-RGB tiles (terrain.py); None without one. A
+    failure is a warning: the map is published without terrain."""
+    from qgis.core import QgsRasterLayer, QgsRectangle  # pylint: disable=import-outside-toplevel
+    from . import terrain  # pylint: disable=import-outside-toplevel
+    config = profile.terrain
+    if not config.layer_id:
+        return None
+    layer = project.mapLayer(config.layer_id)
+    if not isinstance(layer, QgsRasterLayer):
+        warnings.append("Terrain: the elevation layer is not in the project; the map is published without it.")
+        return None
+    box = extent_3857 if isinstance(extent_3857, QgsRectangle) else QgsRectangle(*extent_3857)
+    area = terrain.grow((box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()))
+    low, high = terrain.terrain_zooms(layer, profile.view.min_zoom, terrain.latitude_of(area))
+    output = os.path.join(work_dir, "terrain.pmtiles")
+    if os.path.exists(output):
+        os.remove(output)
+    progress.info(f'Terrain: "{layer.name()}", zooms {low}-{high}')
+    try:
+        descriptor = terrain.render_terrain(layer, area, low, high, output, progress.sub(0.0, 1.0))
+    except PublishingError as error:
+        warnings.append(f"{error}; the map is published without terrain.")
+        return None
+    if descriptor is None:
+        warnings.append(f'Terrain: "{layer.name()}" has no heights inside the extent.')
+        return None
+    progress.info(f"Terrain: {descriptor.addressed_tiles} tiles, {descriptor.size_bytes / 1e6:.1f} MB")
+    return {"path": output, "descriptor": descriptor, "hillshade": bool(config.hillshade),
+            "exaggeration": float(config.exaggeration)}
 
 
 def _address_records(project, profile, street_area, pieces, progress, warnings) -> List[dict]:

@@ -89,6 +89,9 @@ class LayerConfig:
     label_always: bool = False
     # The viewer's measurement tools snap to this layer's corners and edges.
     snap: bool = False
+    # Polygon layers: a numeric field of heights in metres; the viewer's 3D
+    # view raises the polygons (e.g. buildings) to it. Written to the tiles.
+    height_field: str = ""
     toggleable: bool = True            # the viewer's user may switch it off
     # Web map only, on top of the layer's own QGIS scale range (QGIS scale
     # denominators, 0 = no limit): hidden when zoomed out beyond 1:min_scale
@@ -220,6 +223,16 @@ class InfoConfig:
 
 
 @dataclass
+class TerrainConfig:
+    """Terrain from a DEM raster layer (heights in metres): the 3D view's
+    relief, an optional hillshade and elevation profiles in the viewer."""
+
+    layer_id: str = ""                 # "" = no terrain
+    hillshade: bool = True             # shaded relief drawn under the map (also in 2D)
+    exaggeration: float = 1.5          # vertical exaggeration in 3D
+
+
+@dataclass
 class ViewConfig:
     extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857; None = canvas
     extent_layer: str = ""                # layer id: the extent follows that layer's extent
@@ -318,6 +331,7 @@ class PublicationProfile:
     accent_color: str = "#2563eb"      # viewer accent colour
     parcel_info: ParcelInfoConfig = field(default_factory=ParcelInfoConfig)
     info: InfoConfig = field(default_factory=InfoConfig)
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
     view: ViewConfig = field(default_factory=ViewConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
