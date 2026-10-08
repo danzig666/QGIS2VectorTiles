@@ -265,11 +265,15 @@ class InteractionConfig:
     address_layer_id: str = ""
     address_number_field: str = ""
     address_street_field: str = ""     # "" = the nearest named OpenStreetMap street
-    # A small overview map in a corner with the current view marked.
+    # Optional viewer extras, all off unless chosen:
+    # a small overview map in a corner with the current view marked;
     overview_map: bool = False
-    # Drawing (points, lines, areas, text) kept in the shared link, exported
+    # the 3D button (tilted view, polygons raised by their height field,
+    # terrain relief); the hillshade and elevation profiles need terrain only;
+    three_d: bool = False
+    # drawing (points, lines, areas, text) kept in the shared link, exported
     # as GeoJSON / KML; nothing is stored on the site.
-    drawing: bool = True
+    drawing: bool = False
     # Google Street View in the viewer (a tap on the map opens the panorama
     # looking toward the tapped point). The key is public in the page:
     # restrict it to the site's address (HTTP referrer) in Google Cloud.

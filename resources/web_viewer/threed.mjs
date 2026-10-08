@@ -1,8 +1,9 @@
-// 3D view: a map button that tilts the map, raises the polygons of layers
-// with a height field (fill-extrusion copies of their fill style layers,
-// shown only while their layer is) and turns on the terrain relief of the
-// publication's DEM (manifest.terrain: terrain-RGB tiles, raster-dem). The
-// optional hillshade is drawn above the basemap in 2D too.
+// 3D view (optional: manifest.interaction.threeD): a map button that tilts
+// the map, raises the polygons of layers with a height field (fill-extrusion
+// copies of their fill style layers, shown only while their layer is) and
+// turns on the terrain relief of the publication's DEM (manifest.terrain:
+// terrain-RGB tiles, raster-dem). The terrain's optional hillshade (drawn
+// above the basemap in 2D) and the elevations of profiles need no 3D view.
 import { t } from "./i18n.mjs";
 import { button } from "./icons.mjs";
 import { resolveUrl, checkRelative } from "./transport.mjs";
@@ -49,21 +50,23 @@ export class ThreeD {
   constructor({ map, manifest, manifestUrl, basemap, maplibregl }) {
     Object.assign(this, { map, manifest, manifestUrl, basemap, maplibregl });
     this.terrain = manifest.terrain && manifest.terrain.kind === "pmtiles" ? manifest.terrain : null;
+    this.enabled = manifest.interaction?.threeD === true;
     this.active = false;
     this.extrusions = [];
     if (this.terrain) this.addTerrain();
-    this.addExtrusions();
+    if (this.enabled) this.addExtrusions();
     this.onStyle = () => this.syncVisibility();
   }
 
-  get available() { return !!this.terrain || this.extrusions.length > 0; }
+  // The 3D button: switched on, with terrain or a height field to show.
+  get available() { return this.enabled && (!!this.terrain || this.extrusions.length > 0); }
 
   addTerrain() {
     const url = "pmtiles://" + resolveUrl(checkRelative(this.terrain.href, "terrain"), this.manifestUrl);
     const source = { type: "raster-dem", url, tileSize: this.terrain.tileSize || 256, encoding: "mapbox",
       minzoom: this.terrain.minTileZoom, maxzoom: this.terrain.maxTileZoom };
     if (Array.isArray(this.terrain.bounds)) source.bounds = this.terrain.bounds;
-    this.map.addSource(TERRAIN, source);
+    if (this.enabled) this.map.addSource(TERRAIN, source);
     if (this.terrain.hillshade) {
       // Its own source (MapLibre's advice for terrain + hillshade), above the basemap.
       this.map.addSource(`${HILLSHADE}_src`, { ...source });

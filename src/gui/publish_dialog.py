@@ -858,8 +858,8 @@ class PublishDialog(QDialog):
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
                 ("street_search", tr("Search street names (OpenStreetMap)")),
-                ("overview_map", tr("Overview map (inset)")), ("drawing", tr("Drawing tools")),
-                ("street_view", tr("Street View (Google)"))]):
+                ("overview_map", tr("Overview map (inset)")), ("three_d", tr("3D view")),
+                ("drawing", tr("Drawing tools")), ("street_view", tr("Street View (Google)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)
@@ -876,6 +876,13 @@ class PublishDialog(QDialog):
             "your site's address (HTTP referrers) and to these two APIs.")
         self.i_flags["street_view"].setToolTip(street_view_help)
         self.i_google_key.setToolTip(street_view_help)
+        self.i_flags["overview_map"].setToolTip(tr("A small overview map in a corner with the current view marked."))
+        self.i_flags["three_d"].setToolTip(tr(
+            "A 3D button on the map: tilted view with the terrain relief (Basemap tab) and the polygons "
+            "of layers with a 3D height field raised."))
+        self.i_flags["drawing"].setToolTip(tr(
+            "Drawing tools in the Tools tab: points, lines, areas and text, kept in the shared link "
+            "and saved as GeoJSON or KML."))
         self.i_flags["street_search"].setToolTip(tr(
             "The search also finds the named streets of OpenStreetMap inside the extent layer "
             "(Map tab; without one, inside the export extent). They are read from the basemap, or "
@@ -935,7 +942,8 @@ class PublishDialog(QDialog):
         form.addRow("", self.i_snap)
         self.i_height = QComboBox()
         self.i_height.setToolTip(tr("Polygon layers (e.g. buildings): a numeric field of heights in metres. "
-                                    "The map's 3D button raises the polygons to it. The field becomes public."))
+                                    "With \"3D view\" on (Interaction tab) the map's 3D button raises the "
+                                    "polygons to it. The field becomes public."))
         form.addRow(tr("3D height field (m)"), self.i_height)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
@@ -1192,8 +1200,9 @@ class PublishDialog(QDialog):
         relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
         relief_form.addRow("", _note(tr(
             "The heights are resampled to web tiles (data/terrain.pmtiles) for the area of the map. "
-            "Visitors get a 3D button (tilted view with relief; with a 3D height field also raised "
-            "buildings) and an elevation profile for measured lines. The heights become public.")))
+            "Visitors get an elevation profile for measured lines and, with \"3D view\" switched on "
+            "(Interaction tab), a 3D button (tilted view with relief; with a 3D height field also "
+            "raised buildings). The heights become public.")))
         outer.addWidget(relief)
         start = QFormLayout()
         start.addRow(tr("Basemap shown at start"), self.b_initial)
@@ -2562,6 +2571,14 @@ class PublishDialog(QDialog):
             lines.append(tr("3D height fields (public): ") + ", ".join(
                 f"{(self.project.mapLayer(c.layer_id).name() if self.project.mapLayer(c.layer_id) else c.layer_id)}"
                 f".{c.height_field}" for c in heights))
+        extras = [name for on, name in [(profile.interaction.overview_map, tr("overview map")),
+                                         (profile.interaction.three_d, tr("3D view")),
+                                         (profile.interaction.drawing, tr("drawing tools"))] if on]
+        if extras:
+            lines.append(tr("Viewer extras: ") + ", ".join(extras))
+        if heights and not profile.interaction.three_d:
+            lines.append(tr("NOTE: 3D height fields are set but \"3D view\" is off (Interaction tab): "
+                            "the map shows no 3D button."))
         if profile.interaction.address_layer_id:
             layer = self.project.mapLayer(profile.interaction.address_layer_id)
             lines += ["", tr("House number search: street and number of every address in the area ({})").format(

@@ -223,7 +223,7 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
     profile.info.documents = [DocumentConfig("HÉSZ", str(document))]
     profile.terrain.layer_id, profile.terrain.exaggeration = dem.id(), 2.0
     profile.interaction.address_layer_id, profile.interaction.address_number_field = addresses.id(), "hsz"
-    profile.interaction.overview_map = True
+    profile.interaction.overview_map = profile.interaction.three_d = True
     dialog._populate(profile)  # pylint: disable=protected-access
     dialog.i_layers.setCurrentRow(0)
     dialog.i_height.setCurrentIndex(dialog.i_height.findData("terulet"))  # chosen in the window
@@ -233,10 +233,12 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
     assert again.terrain.layer_id == dem.id() and again.terrain.exaggeration == 2.0 and again.terrain.hillshade
     assert again.interaction.address_layer_id == addresses.id() and again.interaction.address_number_field == "hsz"
     assert again.interaction.address_street_field == "" and again.interaction.overview_map
+    assert again.interaction.three_d and not again.interaction.drawing  # drawing: off by default
     assert again.layer(parcels.id()).height_field == "terulet"
     assert dialog.i_height.currentData() == "terulet"
     dialog.refresh_review()
     review = dialog.review.toPlainText()
     assert "HÉSZ (rendelet.pdf)" in review and "Domborzat" in review and "Házszámok" in review
+    assert "overview map, 3D view" in review
     assert "terulet" in review
     dialog.close()

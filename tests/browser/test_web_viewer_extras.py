@@ -1,6 +1,7 @@
 """Viewer additions of 4.24: the map's own data (legal / data date, issuer,
 decree) and documents, the overview map, drawing kept in the shared link and
-saved as GeoJSON/KML, house numbers in the search, web basemaps from WMS."""
+saved as GeoJSON/KML, house numbers in the search, web basemaps from WMS.
+The overview map, the 3D view and drawing are off unless chosen (4.25)."""
 
 import json
 import os
@@ -88,7 +89,7 @@ def site(tmp_path_factory):
     info.legal_date, info.data_date = "2025. 10. 01.", "2025. 09."
     info.documents = [DocumentConfig("Helyi építési szabályzat", str(document))]
     interaction = profile.interaction
-    interaction.overview_map = interaction.drawing = True
+    interaction.overview_map = interaction.drawing = interaction.three_d = True
     interaction.address_layer_id, interaction.address_number_field = addresses.id(), "hsz"
     interaction.address_street_field = "utca"
     profile.basemap.xyz = [XyzBasemap("Ortofotó WMS", wms_template("https://wms.example.hu/ows", "ORTO"))]
@@ -311,7 +312,9 @@ def test_map_extract_print_layout(site, tmp_path, paper, portrait, size):
 
 def test_variant_addons_are_installed(tmp_path):
     """resources/web_viewer/addons/*.mjs (a variant edition's add-ons; none on
-    main) are published, listed in the manifest and installed by the viewer."""
+    main) are published, listed in the manifest and installed by the viewer.
+    With the default settings the overview map, the 3D view and drawing are
+    off, even for a layer with a 3D height field."""
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
     from test_publishing_pipeline import _parcels, _profile  # pylint: disable=import-error
     from q2vt_fixtures import reset_project
@@ -328,6 +331,7 @@ def test_variant_addons_are_installed(tmp_path):
         project = reset_project()
         project.addMapLayer(parcels)
         profile = _profile(parcels, tmp_path)
+        profile.layers[0].height_field = "terulet"
         result = export_local(project, profile, EXTENT)
     finally:
         os.remove(probe)
@@ -335,6 +339,15 @@ def test_variant_addons_are_installed(tmp_path):
             os.rmdir(folder)
     manifest = json.load(open(os.path.join(result.release.release_dir, "manifest.json"), encoding="utf-8"))
     assert manifest["addons"] == ["assets/addons/zz_probe.mjs"]
+    interaction = manifest["interaction"]
+    assert not (interaction["overviewMap"] or interaction["threeD"] or interaction["drawing"])
+    assert manifest["tools"]["draw"] is False
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
-        out = _run(server.url(f"{profile.slug}/index.html"), [{"eval": "return window.q2vtProbe;"}], tmp_path)[0]
-    assert out == {"identify": True, "map": True, "title": "Arló teszt"}
+        out = _run(server.url(f"{profile.slug}/index.html"), [{"eval": """
+          const v = q2vtViewer;
+          return { probe: window.q2vtProbe, button: !!document.querySelector('.q2vt-3d-btn'),
+                   overview: !!document.querySelector('.q2vt-overview'), draw: !!v.draw,
+                   extrusions: v.map.getStyle().layers.filter((l) => l.type === 'fill-extrusion').length };
+        """}], tmp_path)[0]
+    assert out == {"probe": {"identify": True, "map": True, "title": "Arló teszt"}, "button": False,
+                   "overview": False, "draw": False, "extrusions": 0}
