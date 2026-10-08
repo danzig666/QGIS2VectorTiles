@@ -363,6 +363,7 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
                       buffer_m=config.buffer_m if kind in (0, 1) else 0.0, area=grow)
         restrictions.append((index, config, kind, legend, data))
     regulations = _regulations(project, info)
+    texts = _regulation_texts(project, info)
 
     records: Dict[str, dict] = {}
     request = QgsFeatureRequest()
@@ -403,6 +404,7 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
         legend.close()
 
     manifest = _write_shards(records, layer_logical_id(parcels.id()), out_dir)
+    text_files = _write_texts(texts, out_dir)
     catalog = {
         "schemaVersion": 1, "layerId": layer_logical_id(parcels.id()),
         "title": parcels.name(), "keyField": info.key_field,
@@ -416,6 +418,8 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
         "regulationFields": [{"field": f.field, "title": f.alias or f.field, "type": f.type}
                              for f in info.regulation_fields],
         "regulations": regulations, "disclaimer": info.disclaimer,
+        # Zone code -> file of its full regulation text (loaded when opened).
+        "texts": text_files,
         "units": {"area": "m2", "crs": crs.authid()},
     }
     with open(os.path.join(out_dir, "catalog.json"), "w", encoding="utf-8") as handle:
@@ -573,6 +577,40 @@ def _regulations(project, info: ParcelInfoConfig) -> Dict[str, dict]:
     return out
 
 
+def _regulation_texts(project, info: ParcelInfoConfig) -> Dict[str, str]:
+    """Zone code (zone_key) -> its full regulation text as safe simple HTML."""
+    from .rich_text import clean_html  # pylint: disable=import-outside-toplevel
+    if not info.text_layer_id:
+        return {}
+    layer = project.mapLayer(info.text_layer_id)
+    if layer is None or any(layer.fields().indexOf(name) < 0 for name in (info.text_code_field, info.text_field)):
+        return {}
+    out = {}
+    for feature in layer.getFeatures():
+        code = zone_key(_json_value(feature[info.text_code_field]))
+        text = _json_value(feature[info.text_field])
+        if not code or code in out or text is None:
+            continue
+        text = clean_html(text)
+        if text:
+            out[code] = text
+    return out
+
+
+def _write_texts(texts: Dict[str, str], out_dir: str) -> Dict[str, str]:
+    """One small file per zone (``text-<n>.json``, loaded only when opened)."""
+    for name in os.listdir(out_dir):
+        if name.startswith("text-") and name.endswith(".json"):
+            os.remove(os.path.join(out_dir, name))
+    files = {}
+    for number, code in enumerate(sorted(texts), start=1):
+        name = f"text-{number}.json"
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
+            json.dump({"code": code, "html": texts[code]}, handle, ensure_ascii=False, separators=(",", ":"))
+        files[code] = name
+    return files
+
+
 def _write_shards(records: Dict[str, dict], layer_id: str, out_dir: str) -> dict:
     count = len(records)
     length = 0
@@ -602,7 +640,7 @@ def _report_key(project, profile: PublicationProfile, extent_3857: QgsRectangle)
     legend graphics come from the symbols). None: some layer is not file based."""
     from ..core import export_cache  # pylint: disable=import-outside-toplevel
     info = profile.parcel_info
-    layer_ids = [info.parcel_layer_id, info.zoning_layer_id, info.regulation_layer_id] + \
+    layer_ids = [info.parcel_layer_id, info.zoning_layer_id, info.regulation_layer_id, info.text_layer_id] + \
         [cut.layer_id for cut in info.cut_lines] + [item.layer_id for item in info.restrictions]
     states = {}
     for layer_id in filter(None, layer_ids):
@@ -613,7 +651,7 @@ def _report_key(project, profile: PublicationProfile, extent_3857: QgsRectangle)
         states[layer_id] = state
     code = hashlib.sha256()
     here = os.path.dirname(os.path.abspath(__file__))
-    for name in ("parcel_report.py", "feature_index.py", "identifiers.py"):
+    for name in ("parcel_report.py", "feature_index.py", "identifiers.py", "rich_text.py"):
         with open(os.path.join(here, name), "rb") as handle:
             code.update(handle.read())
     return export_cache.make_key(

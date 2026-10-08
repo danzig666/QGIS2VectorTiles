@@ -171,3 +171,21 @@ def test_missing_document_and_address_field_stop_before_the_export(plugin, tmp_p
     profile.interaction.address_number_field, profile.interaction.address_street_field = "hsz", "utca"
     problems = " ".join(check_profile_against_project(profile, project))
     assert "nincs.pdf" in problems and 'field "utca"' in problems
+
+
+def test_regulation_texts_table_round_trip(dialog):
+    """4.26: the full regulation texts table (Parcel report tab): its fields are
+    guessed when it is chosen and kept through the window."""
+    window, project, _parcels = dialog
+    texts = QgsVectorLayer("None?field=fid_x:integer&field=szab_ov:string&field=eloiras_html:string",
+                           "HÉSZ övezeti előírások szövege", "memory")
+    project.addMapLayer(texts)
+    window.p_text.setLayer(texts)
+    assert window.p_text_code.currentField() == "szab_ov" and window.p_text_field.currentField() == "eloiras_html"
+    profile = window.collect()
+    info = profile.parcel_info
+    assert (info.text_layer_id, info.text_code_field, info.text_field) == (texts.id(), "szab_ov", "eloiras_html")
+    window.p_text.setLayer(None)
+    window._populate(profile)  # pylint: disable=protected-access
+    again = window.collect().parcel_info
+    assert (again.text_layer_id, again.text_code_field, again.text_field) == (texts.id(), "szab_ov", "eloiras_html")

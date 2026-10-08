@@ -509,6 +509,15 @@
         "regulationCodeField": {
           "type": "string"
         },
+        "textLayerId": {
+          "type": "string"
+        },
+        "textCodeField": {
+          "type": "string"
+        },
+        "textField": {
+          "type": "string"
+        },
         "regulationFields": {
           "type": "array",
           "items": {

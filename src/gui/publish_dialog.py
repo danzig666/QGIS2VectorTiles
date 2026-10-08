@@ -1491,6 +1491,18 @@ class PublishDialog(QDialog):
         form.addRow(tr("Table"), self.p_regulation)
         form.addRow(tr("Zone code field"), self.p_regulation_code)
         form.addRow(tr("Fields shown"), self.p_regulation_fields)
+        # The full regulation texts (one simple-HTML text per zone).
+        self.p_text = self._layer_combo(None, allow_empty=True)
+        self.p_text_code = self._field_combo(self.p_text, allow_empty=True)
+        self.p_text_field = self._field_combo(self.p_text, allow_empty=True)
+        self.p_text.layerChanged.connect(self._guess_text_fields)
+        self.p_text.setToolTip(tr(
+            "Optional table: a zone code field and a text field with every regulation that applies in the "
+            "zone, as simple HTML (headings, paragraphs, lists, tables; anything else is removed). The "
+            "parcel report shows it under each zone, opened on request. The texts become public."))
+        form.addRow(tr("Full texts table"), self.p_text)
+        form.addRow(tr("Its zone code field"), self.p_text_code)
+        form.addRow(tr("Its text field (HTML)"), self.p_text_field)
         bottom.addWidget(regulation_box, 1)
         other_box = QGroupBox(tr("Accuracy and notice"))
         form = QFormLayout(other_box)
@@ -1534,16 +1546,37 @@ class PublishDialog(QDialog):
                 self.p_regulation_code.setField(names[wanted.lower()])
                 return
 
+    def _guess_text_fields(self, layer):
+        """A texts table chosen: its zone code field (as the regulations table)
+        and its longest-named text field like html / szoveg / eloiras."""
+        if layer is None:
+            return
+        names = {field.name().lower(): field.name() for field in layer.fields()}
+        if not self.p_text_code.currentField():
+            for wanted in (self.p_code.currentField(), "szab_ov", "ovezet", "kod", "code", "zone"):
+                if wanted and wanted.lower() in names:
+                    self.p_text_code.setField(names[wanted.lower()])
+                    break
+        if not self.p_text_field.currentField():
+            for name in sorted(names, key=len, reverse=True):
+                if any(word in name for word in ("html", "szoveg", "szöveg", "eloiras", "előírás", "text")):
+                    self.p_text_field.setField(names[name])
+                    break
+
     def _fill_parcel_tab(self, profile):
         info = profile.parcel_info
         project_layer = self.project.mapLayer
         self.p_enabled.setChecked(info.enabled)
         for combo, layer_id in ((self.p_layer, info.parcel_layer_id), (self.p_zoning, info.zoning_layer_id),
-                                (self.p_regulation, info.regulation_layer_id)):
+                                (self.p_regulation, info.regulation_layer_id), (self.p_text, info.text_layer_id)):
             if layer_id and project_layer(layer_id) is not None:
                 combo.setLayer(project_layer(layer_id))
-            elif combo is self.p_regulation:
+            elif combo in (self.p_regulation, self.p_text):
                 combo.setLayer(None)
+        if info.text_code_field:
+            self.p_text_code.setField(info.text_code_field)
+        if info.text_field:
+            self.p_text_field.setField(info.text_field)
         self._fill_fields_table(self.p_fields, self.p_layer.currentLayer(), info.fields)
         self._fill_fields_table(self.p_zone_fields, self.p_zoning.currentLayer(), info.zoning_fields)
         self._fill_fields_table(self.p_regulation_fields, self.p_regulation.currentLayer(), info.regulation_fields)
@@ -1606,6 +1639,10 @@ class PublishDialog(QDialog):
         info.regulation_layer_id = regulation.id() if regulation else ""
         info.regulation_code_field = self.p_regulation_code.currentField() if regulation else ""
         info.regulation_fields = self._read_fields_table(self.p_regulation_fields) if regulation else []
+        texts = self.p_text.currentLayer()
+        info.text_layer_id = texts.id() if texts else ""
+        info.text_code_field = self.p_text_code.currentField() if texts else ""
+        info.text_field = self.p_text_field.currentField() if texts else ""
         info.cut_lines = [CutLineConfig(self.p_cuts.item(i).data(LAYER_ROLE), self.p_cuts.item(i).text())
                           for i in range(self.p_cuts.count()) if self.p_cuts.item(i).checkState() == CHECKED]
         restrictions = []
@@ -2649,6 +2686,11 @@ class PublishDialog(QDialog):
             names = [r.name_field for r in info.restrictions if r.name_field]
             if names:
                 lines.append("   " + tr("Restriction name fields: ") + ", ".join(names))
+            for layer_id, label in ((info.regulation_layer_id, tr("Zone regulations table: ")),
+                                    (info.text_layer_id, tr("Full regulation texts (HTML): "))):
+                if layer_id:
+                    layer = self.project.mapLayer(layer_id)
+                    lines.append("   " + label + (layer.name() if layer else "?"))
         external = [f"{tr('web basemap')} „{x.title}” ({urlparse(x.url).hostname or '?'})"
                     for x in profile.basemap.xyz]
         if profile.interaction.street_view and profile.interaction.google_api_key.strip():

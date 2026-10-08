@@ -8,6 +8,7 @@ import { t, formatNumber } from "./i18n.mjs";
 import { featureShardKey } from "./search_core.mjs";
 import { button, el, icon } from "./icons.mjs";
 import { formatValue } from "./identify.mjs";
+import { richText } from "./rich_text.mjs";
 
 export function formatArea(m2) {
   if (m2 >= 10000) return `${formatNumber(m2 / 10000, 4)} ha`;
@@ -77,6 +78,46 @@ export class ParcelReport {
       });
     }
     return this.ready;
+  }
+
+  // The full regulation text (safe simple HTML) of a zone code, or null.
+  async regulationText(code) {
+    await this.load();
+    const name = ((this.catalog && this.catalog.texts) || {})[zoneKey(code)];
+    if (typeof name !== "string" || !/^text-\d+\.json$/.test(name)) return null;
+    this.texts ??= new Map();
+    if (!this.texts.has(name)) {
+      const loading = fetch(new URL(name, this.base)).then((r) => {
+        if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+        return r.json();
+      }).then((data) => (data && typeof data.html === "string" ? data.html : null));
+      this.texts.set(name, loading);
+      loading.catch(() => this.texts.delete(name));  // tried again next time
+    }
+    return this.texts.get(name);
+  }
+
+  // A closed <details> with a zone's full regulations, loaded when opened;
+  // null when the zone has none. (Also used by variant add-ons in popups.)
+  regulationBlock(code) {
+    if (!((this.catalog && this.catalog.texts) || {})[zoneKey(code)]) return null;
+    const block = el("details", "q2vt-rich-block");
+    block.append(el("summary", "", t("parcel.fullText", { code: zoneKey(code) })));
+    let loaded = false;
+    block.addEventListener("toggle", async () => {
+      if (!block.open || loaded) return;
+      loaded = true;
+      const wait = el("p", "q2vt-muted", t("parcel.textLoading"));
+      block.append(wait);
+      try {
+        const html = await this.regulationText(code);
+        wait.replaceWith(html ? richText(html) : el("p", "q2vt-muted", t("parcel.textMissing")));
+      } catch {
+        loaded = false;
+        wait.replaceWith(el("p", "q2vt-muted", t("parcel.textMissing")));
+      }
+    });
+    return block;
   }
 
   async get(key) {
@@ -199,6 +240,14 @@ export class ParcelReport {
       section.append(row);
     }
     card.append(section);
+    // The full regulations of each zone of the parcel (opened on request).
+    const blocks = [...new Set(parts.map((part) => zoneKey(part.c)).filter(Boolean))]
+      .map((code) => this.regulationBlock(code)).filter(Boolean);
+    if (blocks.length) {
+      const texts = el("section", "q2vt-pr-section q2vt-pr-texts");
+      texts.append(...blocks);
+      card.append(texts);
+    }
     // Restrictions.
     const hits = record.r || [];
     const restrictions = el("section", "q2vt-pr-section");

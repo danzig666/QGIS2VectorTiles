@@ -571,3 +571,22 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2
 .q2vt-profile-grid { stroke: var(--q2vt-border); stroke-dasharray: 3 3; }
 .q2vt-profile-label { font-size: 10px; fill: var(--q2vt-muted); font-variant-numeric: tabular-nums; }
 .q2vt-profile-facts { margin: 4px 0 0; font-size: 12px; color: var(--q2vt-fg); }
+
+/* Full regulation texts (rich_text.mjs): simple HTML, opened on request. */
+.q2vt-rich-block { border: 1px solid var(--q2vt-border); border-radius: 10px; padding: 6px 10px; }
+.q2vt-rich-block > summary { cursor: pointer; font-weight: 600; color: var(--q2vt-accent); padding: 2px 0; }
+.q2vt-rich { font-size: 13px; line-height: 1.5; max-height: 60vh; overflow: auto; overflow-wrap: anywhere;
+  padding-right: 4px; }
+.q2vt-rich h3 { font-size: 14px; margin: 12px 0 4px; }
+.q2vt-rich h4 { font-size: 13px; margin: 10px 0 4px; }
+.q2vt-rich h5, .q2vt-rich h6 { font-size: 12.5px; margin: 8px 0 2px; color: var(--q2vt-muted); }
+.q2vt-rich p { margin: 4px 0; }
+.q2vt-rich ul, .q2vt-rich ol { margin: 4px 0; padding-left: 20px; }
+.q2vt-rich ul { list-style: none; padding-left: 14px; }  /* legal points keep their own labels: a) b) */
+.q2vt-rich blockquote { margin: 4px 0; padding-left: 10px; border-left: 3px solid var(--q2vt-border); }
+.q2vt-rich table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.q2vt-rich th, .q2vt-rich td { border: 1px solid var(--q2vt-border); padding: 2px 6px; text-align: left; vertical-align: top; }
+@media print {
+  .q2vt-rich { max-height: none; overflow: visible; }
+  .q2vt-rich-block:not([open]) { display: none; }
+}
