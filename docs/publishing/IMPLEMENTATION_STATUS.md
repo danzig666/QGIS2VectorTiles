@@ -1411,3 +1411,34 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/browser/test_web_viewer_extras.py` | 10 passed (`test_variant_addons_are_installed`) |
 | Schema-checking and parcel suites | 30 passed |
+
+## 4.25.0: optional viewer extras; review fixes for 4.22–4.24
+
+- `InteractionConfig.three_d` (new, default off) and `drawing` (default now off), with
+  `overview_map` (off): `ThreeD` adds the 3D button, extrusions and the 3D terrain source only with
+  `manifest.interaction.threeD`; the hillshade and `elevations()` (profiles) need terrain only.
+- Fixes found by three code reviews (Publish window, export, viewer); each has a regression test
+  in `tests/integration/test_review_fixes.py` (10, all failing on the 4.24.1 code) or in
+  `tests/browser/test_web_viewer_extras.py`:
+  - Publish window: `_populate` resets the Interaction tab (a preset/import was overwritten by the
+    shown layer's widgets); parcel tab keeps regulation field types; removed layers skipped; empty
+    house-number field unless named like one; start basemap kept by name; Review lists external
+    resources (web basemaps, Street View); WMTS not offered as WMS; QGIS XYZ connections written on
+    save only and never over a user's own; terrain combo excludes online providers; text height fields.
+  - Export: `Q2VT_PUB_TERRAIN` registered and GDAL `RuntimeError`/`MemoryError` caught (warning);
+    terrain warp uses the QGIS layer CRS (`srcSRS`); RASTER stage split between rasters and
+    terrain; `StreetIndex.nearest` searches cells by latitude, street joins likewise; NaN numbers
+    skipped; WMS service values fully encoded (`map=%2Fsrv…`); `docs/` files scanned for secret
+    values only; missing documents / address fields reported by `check_profile_against_project`;
+    documents' SHA-256 and external resources in `disclosure_fingerprint`; wrong value types in
+    `load_profile` are `Q2VT_PUB_PROFILE_INVALID`; regulation keys by `zone_key` (12.0 → "12", trimmed),
+    the viewer's `zoneKey` alike.
+  - Viewer: linked drawing rendered at mount; `MAX_LINK` 16000 for drawings; emoji-safe clip;
+    keys typed in fields ignored by drawing and measuring; Street View cancels drawing; extrusions
+    skip transparent/pattern fills, one per component and zoom range; terrain archive failure is a
+    warning (`manifest.terrainError`); print leaves 3D, centres a parcel at any scale and redraws;
+    profile errors caught, failed tiles retried, tile cache capped; reduced-motion 3D exit.
+
+| Run | Result |
+|---|---|
+FULLRESULT
