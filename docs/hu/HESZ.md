@@ -28,6 +28,7 @@ Az előbeállítás csak a beállításokat tölti ki; adatot nem módosít és 
 | Övezeti értékek | `p_beepmod`, `p_beepszaz`, `p_beepmag`, `p_terulet`, `p_zold`, `p_szabkieg` |
 | Vágóvonalak | „Szabályozási vonal”, „Övezethatár” (ha nincsenek: a `lszerk_ov`/`rszerk_ov` mezős vonalrétegek) |
 | Korlátozások | a lenti katalógus szerinti nevű rétegek, megnevezés-mező: `nev`, `name`, `megnevezes`, `vedettOrokErtekNev`, `azon`, `tipus`, `kategoria` |
+| Előírások teljes szövege | tábla „HÉSZ … szöveg” / „html” névvel, övezetkód mezővel (`szab_ov` …) és szövegmezővel (`eloiras_html`, `html`, `szoveg` …); a telekinformációban és az övezet felugró ablakában lenyitható |
 | Övezeti előírások | tábla (geometria nélkül is) „előírás” / „HÉSZ” / „szabályzat” / „övezeti” névvel és övezetkód mezővel (`szab_ov`, `ovezet`, `jel`, `kod`); minden más mezője megjelenik — ismert nevek magyar címmel (`beep_szaz`, `max_mag`, `min_ter`, `min_zold` …), a hivatkozás mező (`hivatkozas`, `paragrafus`, `szakasz`, `link` …) linkként |
 
 Nem korlátozás: feliratok, szintvonal, házszám, épületek, alrészletek, közigazgatási határ,
@@ -51,6 +52,12 @@ térkép övezeti jelei alapján elkészíti a CSV táblát (forráshelyekkel é
 önellenőrzéssel), a második egy új beszélgetésben függetlenül újraellenőrzi. Leírja a tábla
 oszlopait (mind magyar címmel jelenik meg; a QGIS-ben megadott mezőálnév felülírja a címet),
 és a betöltést a QGIS-be.
+
+**Az előírások teljes szövege övezetenként:** a [HESZ_SZOVEG_PROMPT.md](HESZ_SZOVEG_PROMPT.md)
+prompttal a nyelvi modell övezetenként összegyűjti a HÉSZ minden ott alkalmazandó rendelkezését (az
+általános és a feltételes előírásokat is), szó szerint, egyszerű HTML-ben. A mellékelt QGIS-szkript
+ebből egy második táblát készít („HÉSZ övezeti előírások szövege”: `szab_ov`, `eloiras_html`). A
+webtérképen minden övezet alatt lenyitható: „A(z) Lke-1 övezet teljes előírásai”.
 
 Az övezeti réteg felugró ablakába az előbeállítás felveszi az övezetkódot (enélkül nem
 találná meg az előírásokat). A webes megjelenítés egy változat-kiegészítő
