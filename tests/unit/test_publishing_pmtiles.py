@@ -206,3 +206,24 @@ def test_official_cli_verifies_the_archive(tmp_path):
         tile = subprocess.run([_cli(), "tile", archive.path, str(z), str(x), str(y)],
                               capture_output=True, check=True).stdout
         assert mvt.payload(tile) == sample_tile(z, x, y)
+
+
+def test_network_share_paths(tmp_path, monkeypatch):
+    """Owner report: a project on a Windows network share (\\\\naswork\\...,
+    also what a mapped drive resolves to) stopped at "invalid uri authority:
+    naswork". The read-only URI keeps the authority empty; where SQLite still
+    cannot name the file, a plain read-only connection is used."""
+    from publishing import pmtiles_builder
+    uri = pmtiles_builder.sqlite_readonly_uri("//naswork/terv/out #1/tiles ő.mbtiles")
+    assert uri == "file:////naswork/terv/out%20%231/tiles%20%C5%91.mbtiles?mode=ro"
+    source = make_mbtiles(str(tmp_path / "a ő #1.mbtiles"), pyramid(2))
+    monkeypatch.setattr(pmtiles_builder, "sqlite_readonly_uri", lambda path: "file://naswork/x?mode=ro")
+    with pytest.raises(sqlite3.OperationalError, match="invalid uri authority"):
+        sqlite3.connect("file://naswork/x?mode=ro", uri=True).execute("PRAGMA schema_version")
+    conn = pmtiles_builder.connect_readonly(source)
+    assert conn.execute("SELECT count(*) FROM tiles").fetchone()[0] > 0
+    with pytest.raises(sqlite3.OperationalError):
+        conn.execute("DELETE FROM tiles")  # still read-only
+    conn.close()
+    archive = build_pmtiles(source, str(tmp_path / "out.pmtiles"))
+    compare_archives(source, archive.path)

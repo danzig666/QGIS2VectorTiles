@@ -23,9 +23,9 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import mvt
@@ -80,8 +80,30 @@ class ArchiveDescriptor:
 
 
 def sqlite_readonly_uri(path: str) -> str:
-    """``file:`` URI opening ``path`` read-only (Unicode, spaces, Windows)."""
-    return Path(path).resolve().as_uri() + "?mode=ro"
+    """``file:`` URI opening ``path`` read-only (Unicode, spaces, Windows
+    drives and network shares). The authority stays empty: SQLite refuses
+    ``file://server/...`` ("invalid uri authority"), so a share path
+    ``\\\\server\\share\\x`` becomes ``file:////server/share/x``. No
+    ``resolve()``: on Windows it turns a mapped drive into its share path."""
+    full = os.path.abspath(path).replace("\\", "/")
+    if not full.startswith("/"):
+        full = "/" + full  # C:/x -> /C:/x
+    return "file://" + urllib.parse.quote(full, safe="/:") + "?mode=ro"
+
+
+def connect_readonly(path: str) -> sqlite3.Connection:
+    """Read-only SQLite connection to an existing file. Falls back to a plain
+    connection with ``query_only`` where the URI form cannot name the file."""
+    try:
+        conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+        conn.execute("PRAGMA schema_version").fetchone()  # the file is opened lazily
+        return conn
+    except sqlite3.Error:
+        if not os.path.isfile(path):
+            raise
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def sha256_file(path: str, chunk: int = 1 << 20) -> str:
@@ -127,7 +149,7 @@ def preflight_mbtiles(path: str) -> MbtilesInfo:
     if not os.path.isfile(path):
         raise PublishingError("Q2VT_PUB_MBTILES_INVALID", f"No MBTiles file at {path}.")
     try:
-        conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+        conn = connect_readonly(path)
     except sqlite3.Error as error:
         raise PublishingError("Q2VT_PUB_MBTILES_INVALID", str(error)) from error
     warnings: List[str] = []
@@ -269,7 +291,7 @@ def build_pmtiles(input_mbtiles: str, output_pmtiles: str,
     temp_dir = options.temp_dir or out_dir
     partial = os.path.join(out_dir, f".{os.path.basename(output)}.{uuid.uuid4().hex[:8]}.partial")
     index_path = os.path.join(temp_dir, f".q2vt_index_{uuid.uuid4().hex[:8]}.sqlite")
-    source = sqlite3.connect(sqlite_readonly_uri(input_mbtiles), uri=True)
+    source = connect_readonly(input_mbtiles)
     index = sqlite3.connect(index_path)
     seen_layers: Dict[str, dict] = {}
     minx = miny = float("inf")

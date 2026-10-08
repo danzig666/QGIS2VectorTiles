@@ -56,9 +56,9 @@ def portable_style(style: dict, source_name: str, tiles_template: Optional[str] 
 def write_xyz_tiles(mbtiles: str, out_dir: str, progress=None) -> int:
     """Extract an MBTiles archive to ``out_dir/{z}/{x}/{y}.pbf`` (XYZ rows,
     gzip removed so that plain static hosting works). Returns the tile count."""
-    from .pmtiles_builder import sqlite_readonly_uri  # pylint: disable=import-outside-toplevel
+    from .pmtiles_builder import connect_readonly  # pylint: disable=import-outside-toplevel
     count = 0
-    conn = sqlite3.connect(sqlite_readonly_uri(mbtiles), uri=True)
+    conn = connect_readonly(mbtiles)
     try:
         rows = conn.execute("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles")
         for zoom, column, row, data in rows:
