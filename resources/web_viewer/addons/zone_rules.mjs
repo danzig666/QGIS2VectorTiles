@@ -8,7 +8,9 @@ import { zoneKey } from "../parcel_report.mjs";
 
 const TEXT = { hu: "A(z) {code} övezet előírásai", en: "Regulations of zone {code}" };
 const STYLE = `.q2vt-zone-rules { margin-top: 8px; border-top: 1px solid var(--q2vt-border); padding-top: 6px; }
-.q2vt-zone-rules h4 { margin: 0 0 4px; font-size: 12.5px; color: var(--q2vt-accent); }`;
+.q2vt-zone-rules h4 { margin: 0 0 4px; font-size: 12.5px; color: var(--q2vt-accent); }
+.q2vt-zone-rules .q2vt-rich-block { margin-top: 6px; }
+.q2vt-zone-rules .q2vt-rich { max-height: 40vh; }`;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -45,7 +47,9 @@ export function install({ identify, parcel, manifest }) {
     if (!zoneKey(code)) return;
     await parcel.load();
     const rows = zoneRules(parcel.catalog, code);
-    if (!rows.length) return;
+    // The zone's full regulation text, opened on request (parcel_report.mjs).
+    const full = parcel.regulationBlock ? parcel.regulationBlock(code) : null;
+    if (!rows.length && !full) return;
     const section = element("section", "q2vt-zone-rules");
     section.append(element("h4", "", title(code)));
     const table = element("table");
@@ -63,7 +67,8 @@ export function install({ identify, parcel, manifest }) {
       row.append(cell);
       table.append(row);
     }
-    section.append(table);
+    if (rows.length) section.append(table);
+    if (full) section.append(full);
     box.append(section);
   };
   return true;

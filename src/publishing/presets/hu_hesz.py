@@ -71,6 +71,11 @@ REGULATION_TITLES = {
     "rendeltetes": "Elhelyezhető rendeltetések", "tiltott": "Nem helyezhető el",
     "egyeb": "Egyéb előírás", "rendelet": "Rendelet", "link": "Rendelet", "url": "Rendelet",
 }
+# The full regulation texts per zone (docs/hu/HESZ_SZOVEG_PROMPT.md): a table
+# named like "HÉSZ övezeti előírások szövege" with the zone code and an HTML text.
+TEXT_NAMES = ("szoveg", "html", "teljes")
+TEXT_FIELDS = ("eloiras_html", "html", "szoveg", "eloiras", "text")
+
 CUT_LINES = (
     ("szabalyozasi vonal", "Szabályozási vonal"),
     ("ovezethatar", "Övezethatár"),
@@ -205,6 +210,20 @@ def _find_cut_lines(layers) -> List[Tuple[object, str]]:
     return found
 
 
+def _find_texts(layers, exclude) -> Tuple[Optional[object], str, str]:
+    """(table, code field, text field) of the full regulation texts, or None."""
+    for layer in layers:
+        name = plain(layer.name())
+        if layer in exclude or not any(word in name for word in TEXT_NAMES) \
+                or not any(word in name for word in REGULATION_NAMES):
+            continue
+        code = _field(layer, REGULATION_CODE_FIELDS)
+        text = _field(layer, TEXT_FIELDS)
+        if code and text and text != code:
+            return layer, code, text
+    return None, "", ""
+
+
 def _find_regulations(layers, exclude) -> Optional[object]:
     """The zone regulation table: named like REGULATION_NAMES, with a zone code
     field and at least two other fields (with or without geometry). A table
@@ -315,8 +334,15 @@ def apply(project, profile) -> List[str]:
     notes.append(f"Övezetek: „{zoning.name()}”, övezetkód: {info.zoning_code_field}; "
                  f"{len(info.zoning_fields)} övezeti érték.")
 
+    # The full regulation texts per zone (HTML): opened under each zone.
+    texts, text_code, text_field = _find_texts(layers, [parcels, zoning])
+    if texts is not None:
+        info.text_layer_id, info.text_code_field, info.text_field = texts.id(), text_code, text_field
+        notes.append(f"Övezeti előírások teljes szövege: „{texts.name()}” ({text_code} szerint, "
+                     f"{text_field} mező); a telekinformációban és az övezetre kattintva lenyitható.")
+
     # Zone regulations (HÉSZ table): in the parcel report and the zone's popup.
-    regulations = _find_regulations(layers, [parcels, zoning])
+    regulations = _find_regulations(layers, [parcels, zoning] + ([texts] if texts is not None else []))
     if regulations is not None:
         info.regulation_layer_id = regulations.id()
         info.regulation_code_field = _field(regulations, REGULATION_CODE_FIELDS)
