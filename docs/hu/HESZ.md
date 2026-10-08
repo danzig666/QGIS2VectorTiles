@@ -45,6 +45,13 @@ Ha a projektben van övezeti előírás tábla (pl. „HÉSZ övezeti előírás
   rendeletére), oda vezet; ha egy, a térképpel publikált dokumentum (Info fül → Dokumentumok,
   pl. a HÉSZ PDF) fájlneve vagy címe, akkor arra.
 
+**A tábla elkészítése a HÉSZ szövegéből:** a [HESZ_ELOIRAS_PROMPT.md](HESZ_ELOIRAS_PROMPT.md)
+két promptot ad egy nyelvi modellhez (ChatGPT, Claude, Gemini …): az első a rendelet és a
+térkép övezeti jelei alapján elkészíti a CSV táblát (forráshelyekkel és kötelező
+önellenőrzéssel), a második egy új beszélgetésben függetlenül újraellenőrzi. Leírja a tábla
+oszlopait (mind magyar címmel jelenik meg; a QGIS-ben megadott mezőálnév felülírja a címet),
+és a betöltést a QGIS-be.
+
 Az övezeti réteg felugró ablakába az előbeállítás felveszi az övezetkódot (enélkül nem
 találná meg az előírásokat). A webes megjelenítés egy változat-kiegészítő
 (`resources/web_viewer/addons/zone_rules.mjs`), a generikus pluginban nincs benne.
@@ -70,7 +77,8 @@ találná meg az előírásokat). A webes megjelenítés egy változat-kiegész�
 | utak védőtávolsága | 1988. évi I. tv. (Kkt.) 42/A. § |
 
 A hivatkozások általános javaslatok; a település tervéhez és a hatályos jogszabályokhoz
-igazítani kell. A HÉSZ szöveges előírásainak (Word) importja egy későbbi lépés.
+igazítani kell. Az övezeti előírások táblája a HÉSZ szövegéből nyelvi modellel készíthető el
+(lásd fent).
 
 ## Ellenőrzés
 

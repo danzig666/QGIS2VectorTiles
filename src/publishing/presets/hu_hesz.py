@@ -62,6 +62,14 @@ REGULATION_TITLES = {
     "telekter": "Legkisebb telekterület (m²)", "min_zold": "Legkisebb zöldfelület (%)",
     "zold": "Legkisebb zöldfelület (%)", "hivatkozas": "HÉSZ hivatkozás", "paragrafus": "HÉSZ hivatkozás",
     "szakasz": "HÉSZ hivatkozás", "megnevezes": "Övezet megnevezése", "nev": "Övezet megnevezése",
+    # The columns of the table made with docs/hu/HESZ_ELOIRAS_PROMPT.md.
+    "min_szel": "Legkisebb telekszélesség (m)", "min_mely": "Legkisebb telekmélység (m)",
+    "terepalatti": "Terepszint alatti beépítés legnagyobb mértéke (%)",
+    "szintter": "Legnagyobb szintterületi mutató (m²/m²)", "min_mag": "Legkisebb épületmagasság (m)",
+    "max_epitm_mag": "Legnagyobb építménymagasság (m)", "elokert": "Előkert (m)",
+    "oldalkert": "Oldalkert (m)", "hatsokert": "Hátsókert (m)", "kozmu": "Közművesítettség",
+    "rendeltetes": "Elhelyezhető rendeltetések", "tiltott": "Nem helyezhető el",
+    "egyeb": "Egyéb előírás", "rendelet": "Rendelet", "link": "Rendelet", "url": "Rendelet",
 }
 CUT_LINES = (
     ("szabalyozasi vonal", "Szabályozási vonal"),
@@ -211,8 +219,9 @@ def _find_regulations(layers, exclude) -> Optional[object]:
 
 
 def _regulation_fields(layer, code: str) -> List[PopupField]:
-    """Every other field of the table, with a Hungarian title where known; the
-    reference field as a link (URL values) or text (a document name links too)."""
+    """Every other field of the table, titled by its QGIS alias, else a
+    Hungarian title where known; the reference field as a link (URL values)
+    or text (a document name links too)."""
     out = []
     for field in layer.fields():
         name = field.name()
@@ -224,7 +233,7 @@ def _regulation_fields(layer, code: str) -> List[PopupField]:
             values = [str(v) for v in layer.uniqueValues(layer.fields().indexOf(name), 20) if v]
             kind = "url" if values and all(v.strip().lower().startswith("https://") or
                                            v.strip().lower().startswith("http://") for v in values) else "string"
-        out.append(PopupField(name, REGULATION_TITLES.get(key, name), kind))
+        out.append(PopupField(name, field.alias() or REGULATION_TITLES.get(key, name), kind))
     return out
 
 
