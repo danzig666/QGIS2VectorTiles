@@ -163,5 +163,6 @@
   "print.paper.a4-landscape": "A4 landscape",
   "print.paper.a4-portrait": "A4 portrait",
   "print.paper.a3-landscape": "A3 landscape",
-  "print.paper.a3-portrait": "A3 portrait"
+  "print.paper.a3-portrait": "A3 portrait",
+  "error.addon": "An add-on of this map could not be loaded."
 }

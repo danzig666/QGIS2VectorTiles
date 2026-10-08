@@ -549,6 +549,10 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     manifest = build_manifest(bundle, profile, release_id, source, manifest_extra)
     manifest["info"] = info
     manifest["terrain"] = terrain
+    # Viewer add-ons of a variant edition (resources/web_viewer/addons/*.mjs,
+    # none in the generic plugin): the viewer imports each and calls install().
+    manifest["addons"] = sorted(f"assets/{rel}" for rel in _viewer_files()
+                                if re.fullmatch(r"addons/[a-z0-9_-]+\.mjs", rel))
     manifest["sources"].extend(raster_sources)
     manifest["basemap"] = basemap_manifest
     manifest["logo"] = manifest_logo

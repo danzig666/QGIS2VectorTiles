@@ -799,6 +799,13 @@
         "object",
         "null"
       ]
+    },
+    "addons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^assets/addons/[a-z0-9_-]+\\.mjs$"
+      }
     }
   },
   "$defs": {

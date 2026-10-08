@@ -163,5 +163,6 @@
   "print.paper.a4-landscape": "A4 fekvő",
   "print.paper.a4-portrait": "A4 álló",
   "print.paper.a3-landscape": "A3 fekvő",
-  "print.paper.a3-portrait": "A3 álló"
+  "print.paper.a3-portrait": "A3 álló",
+  "error.addon": "A térkép egyik kiegészítője nem tölthető be."
 }

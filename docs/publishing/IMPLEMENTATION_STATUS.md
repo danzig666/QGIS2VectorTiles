@@ -1398,3 +1398,16 @@ italic Liberation Sans) that was horizontal on the web.
 | `pytest tests/browser/test_web_viewer_extras.py` (new) | 9 passed (info, documents, WMS, overview, drawing in the link + exports, house numbers, terrain heights, 3D/profile, A4/A3 print layouts) |
 | Related browser suites (features, parcel, transport, smoke, static package, Street View, basemap raster) | 45 passed |
 | `pytest tests/unit/test_publishing_*.py tests/unit/test_export_cache.py tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py tests/integration/test_export_cache.py tests/integration/test_tile_progress.py` | 195 passed, 5 skipped (+ `test_info_documents_terrain_addresses_round_trip`) |
+
+## 4.24.1: viewer add-ons for variant editions; manifest schema
+
+- Generic hook (docs/BRANCHES.md rule 3): `resources/web_viewer/addons/<name>.mjs` (none on
+  `main`) are published with the viewer, listed in `manifest.addons`, and their
+  `install(parts)` is called when the viewer is ready. The Hungarian edition's zone rules use it.
+- `manifest-v1.schema.json`: `parcelInfo.zoningLayerId/zoneCodeField`, `layers[].heightField`
+  and `addons` (missing in 4.24.0; the plugin's behaviour was not affected).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_extras.py` | 10 passed (`test_variant_addons_are_installed`) |
+| Schema-checking and parcel suites | 30 passed |

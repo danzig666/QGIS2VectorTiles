@@ -430,5 +430,16 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     }).catch((error) => warn("feature.notFound", String(error)));
   }
   viewer.state = state;
+  // Add-ons of a variant edition (manifest.addons, from the release's own
+  // assets/addons/): each module's install(parts) adds to the viewer.
+  for (const href of Array.isArray(manifest.addons) ? manifest.addons : []) {
+    if (typeof href !== "string" || !/^assets\/addons\/[a-z0-9_-]+\.mjs$/.test(href)) continue;
+    try {
+      const addon = await import(new URL(href, pageUrl).href);
+      if (typeof addon.install === "function") await addon.install({ ...parts, map, manifest, manifestUrl, maplibregl, viewer });
+    } catch (error) {
+      warn("error.addon", `${href}: ${String(error && error.message || error)}`);
+    }
+  }
   return parts;
 }
