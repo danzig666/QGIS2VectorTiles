@@ -15,6 +15,9 @@
    It does not edit files that exist on `main`. Then merging `main` into it never conflicts.
 3. If a variant needs a hook that does not exist yet, add the **generic** hook on `main` first
    (like `publishing/presets`, discovered automatically), then use it from the variant.
+   Viewer add-ons: a variant's `resources/web_viewer/addons/<name>.mjs` is copied into every
+   release, listed in `manifest.addons`, and its `install(parts)` is called once the viewer is
+   ready (parts: identify, parcel report, map, manifest, …); it brings its own strings and styles.
 4. **Sync is automatic**: after every push to `main` the *Sync variant branches* workflow
    merges `main` into `hu-hesz` and pushes. If the merge has conflicts, or `main` changed a
    file under `.github/workflows/` (the Actions token may not push those), it opens an

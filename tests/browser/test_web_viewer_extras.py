@@ -307,3 +307,34 @@ def test_map_extract_print_layout(site, tmp_path, paper, portrait, size):
     assert first["info"] == ["Arló Község Önkormányzata", "12/2025. (X. 1.) önk. rendelet", "2025. 10. 01.", "2025. 09."]
     assert first["scale"] == "M 1:2000" or "2000" in first["scale"].replace(" ", "").replace("\u00a0", "")
     assert last == {"left": 0, "printing": False}
+
+
+def test_variant_addons_are_installed(tmp_path):
+    """resources/web_viewer/addons/*.mjs (a variant edition's add-ons; none on
+    main) are published, listed in the manifest and installed by the viewer."""
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_pipeline import _parcels, _profile  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    from publishing.web_builder import WEB_VIEWER  # pylint: disable=import-outside-toplevel
+    folder = os.path.join(WEB_VIEWER, "addons")
+    created = not os.path.isdir(folder)
+    probe = os.path.join(folder, "zz_probe.mjs")
+    os.makedirs(folder, exist_ok=True)
+    with open(probe, "w", encoding="utf-8") as handle:
+        handle.write("export function install(parts) { window.q2vtProbe = { identify: !!parts.identify, "
+                     "map: !!parts.map, title: parts.manifest.title }; }\n")
+    try:
+        parcels = _parcels(str(tmp_path / "parcels.gpkg"))
+        project = reset_project()
+        project.addMapLayer(parcels)
+        profile = _profile(parcels, tmp_path)
+        result = export_local(project, profile, EXTENT)
+    finally:
+        os.remove(probe)
+        if created:
+            os.rmdir(folder)
+    manifest = json.load(open(os.path.join(result.release.release_dir, "manifest.json"), encoding="utf-8"))
+    assert manifest["addons"] == ["assets/addons/zz_probe.mjs"]
+    with PreviewServer(os.path.dirname(result.publication_dir)) as server:
+        out = _run(server.url(f"{profile.slug}/index.html"), [{"eval": "return window.q2vtProbe;"}], tmp_path)[0]
+    assert out == {"identify": True, "map": True, "title": "Arló teszt"}
