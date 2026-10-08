@@ -1080,6 +1080,10 @@ class RulesExporter:
     def _dataset_key_parts(self, src: _SourceSnapshot, grp: _RuleGroupSnapshot):
         group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
                  if f.name not in ("flat_rules", "output_dataset", "layer_name")}
+        if grp.recipe is None or grp.recipe.kind != "color_bands":
+            # Only colour bands depend on the first zoom (bands under a pixel
+            # there are merged); other datasets are reused under a new range.
+            group.pop("data_min_zoom", None)
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
                   if f.name not in ("layer_id", "name", "feature_key", "key_uri")}
         if src.key_uri:  # a per-export copy: the layer's own URI
