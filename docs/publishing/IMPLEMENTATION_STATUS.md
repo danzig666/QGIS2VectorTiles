@@ -1337,3 +1337,23 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_export_cache.py tests/unit/test_export_cache.py` | 13 passed (`test_only_variables_the_rules_use_count`) |
 | `pytest tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py` | 33 passed |
+
+## 4.23.0: a progress bar that follows the export
+
+- The bar jumped to 85% when tile generation started and stayed there (ogr2ogr reports no
+  progress), and every later stage restarted it from 0.
+- `controller._staged_feedback`: every stage gets a share of the bar (`_stage_weights`: vector
+  tiles 75, rasters by planned tiles, basemap, streets, packaging); a stage's own 0..100 % maps
+  into its share and the bar never goes back. Cancel is forwarded (`canceled` signal).
+- Inside the vector export: rules 5–30, styling 30–33, **tiles 33–97** (was 85–100).
+- `tiles_generator.TileProgress`: a job's cost = dataset bytes × zoom levels + 2000 × tiles of the
+  extent per zoom; a running job advances with elapsed time / (cost × rate), the rate learnt
+  from finished jobs (start: 1e-7 s per unit, measured 6e-8 .. 1.1e-7); past its expected
+  time it creeps towards, never reaches, its end. Biggest jobs start first. The log line
+  says "about N% done".
+- Export cache: after a plugin update only "plugin, QGIS or GDAL updated" is given (the settings
+  of the older version were listed as changes, e.g. variables it no longer keeps).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_tile_progress.py tests/integration/test_export_cache.py tests/unit/test_export_cache.py tests/integration/test_publishing_pipeline.py tests/integration/test_publish_dialog.py` | 29 passed (`test_publication_bar_only_moves_forward`: tiles start below 40%, span over 40 points) |

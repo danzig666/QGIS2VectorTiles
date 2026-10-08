@@ -234,9 +234,11 @@ def miss_reasons(before: dict, now: dict, context_before: dict, context_now: dic
     """Why a dataset's key changed, in words."""
     if not before:
         return ["first export into this folder (or a new layer / rule)"]
-    reasons = []
     if before.get("code") != now.get("code"):
-        reasons.append("plugin, QGIS or GDAL updated")
+        # Everything is redone; comparing settings written by another version
+        # of the plugin would only list noise (e.g. variables it no longer keeps).
+        return ["plugin, QGIS or GDAL updated"]
+    reasons = []
     if before.get("source") != now.get("source"):
         reasons.append("layer data changed")
     if "key" in before and before.get("key") != now.get("key"):

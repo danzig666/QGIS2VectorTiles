@@ -61,8 +61,11 @@ def test_miss_reasons():
     before = {"code": "a", "context": "c", "source": "s", "rule": "r"}
     assert ec.miss_reasons({}, before, {}, {}) == ["first export into this folder (or a new layer / rule)"]
     assert ec.miss_reasons(before, {**before, "source": "s2"}, {}, {}) == ["layer data changed"]
-    assert ec.miss_reasons(before, {**before, "rule": "r2", "code": "b"}, {}, {}) == [
-        "plugin, QGIS or GDAL updated", "style, labels or fields changed"]
+    # After an update only that is said (owner report: the settings of the
+    # older version were listed as changes, e.g. variables it no longer keeps).
+    assert ec.miss_reasons(before, {**before, "rule": "r2", "code": "b", "context": "c2"},
+                           {"variables": {"abel_terv": "x"}}, {"variables": {}}) == [
+        "plugin, QGIS or GDAL updated"]
     reasons = ec.miss_reasons(before, {**before, "context": "c2"},
                               {"extent": [0, 0, 1, 1], "variables": {"x": 1}},
                               {"extent": [0, 0, 2, 2], "variables": {"x": 2}})
