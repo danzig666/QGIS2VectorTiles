@@ -139,6 +139,19 @@ def check_profile_against_project(profile: PublicationProfile, project: QgsProje
             if expression.hasParserError():
                 problems.append(f'Layer "{layer.name()}": display expression: '
                                 f"{expression.parserErrorString()}")
+    # Checked before the export starts, not after the tiles are made.
+    for document in profile.info.documents:
+        if not os.path.isfile(document.path):
+            problems.append(f'Document "{document.title}": the file does not exist ({document.path}).')
+    interaction = profile.interaction
+    if interaction.address_layer_id:
+        layer = project.mapLayer(interaction.address_layer_id)
+        names = {field.name() for field in layer.fields()} if isinstance(layer, QgsVectorLayer) else set()
+        if not isinstance(layer, QgsVectorLayer):
+            problems.append("House numbers: the layer is not in the project (Interaction tab).")
+        for name in (interaction.address_number_field, interaction.address_street_field):
+            if layer is not None and name and name not in names:
+                problems.append(f'House numbers: field "{name}" does not exist in "{layer.name()}".')
     return problems
 
 

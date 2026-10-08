@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .disclosure import assert_disclosure
-from .errors import PublishingError
+from .errors import Cancelled, PublishingError
 from .feature_index import build_feature_index
 from .models import PublicationProfile, ReleaseState
 from .progress import Progress
@@ -345,10 +345,13 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         progress.check()
 
     stage("RASTER")
+    # Raster layers, then the terrain, each in its own part of the stage's bar.
+    split = 0.6 if raster_configs and profile.terrain.layer_id else (1.0 if raster_configs else 0.0)
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
-                                             work_dir, progress, bundle.warnings, cache)
+                                             work_dir, progress.sub(0.0, split), bundle.warnings, cache)
     bundle.warnings.extend(_vector_blend_warnings(project, profile))
-    bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress, bundle.warnings)
+    bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress.sub(split, 1.0),
+                                     bundle.warnings)
     progress.check()
     published = {r["layerId"] for r in bundle.raster_archives}
     dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
@@ -584,9 +587,15 @@ def _render_terrain(project, profile, extent_3857, work_dir, progress, warnings)
         os.remove(output)
     progress.info(f'Terrain: "{layer.name()}", zooms {low}-{high}')
     try:
-        descriptor = terrain.render_terrain(layer, area, low, high, output, progress.sub(0.0, 1.0))
+        descriptor = terrain.render_terrain(layer, area, low, high, output, progress)
+    except Cancelled:
+        raise
     except PublishingError as error:
         warnings.append(f"{error}; the map is published without terrain.")
+        return None
+    except (RuntimeError, MemoryError, OSError) as error:  # GDAL (with exceptions on), memory
+        warnings.append(f'Terrain: "{layer.name()}" could not be read ({error}); '
+                        "the map is published without terrain.")
         return None
     if descriptor is None:
         warnings.append(f'Terrain: "{layer.name()}" has no heights inside the extent.')

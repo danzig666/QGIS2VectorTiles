@@ -19,6 +19,7 @@ kept in the QGIS authentication database or only for this session.
 import datetime as _dt
 import os
 import traceback
+from urllib.parse import urlparse
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
@@ -858,8 +859,8 @@ class PublishDialog(QDialog):
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
                 ("street_search", tr("Search street names (OpenStreetMap)")),
-                ("overview_map", tr("Overview map (inset)")), ("drawing", tr("Drawing tools")),
-                ("street_view", tr("Street View (Google)"))]):
+                ("overview_map", tr("Overview map (inset)")), ("three_d", tr("3D view")),
+                ("drawing", tr("Drawing tools")), ("street_view", tr("Street View (Google)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
             grid.addWidget(box, index // 3, index % 3)
@@ -876,6 +877,13 @@ class PublishDialog(QDialog):
             "your site's address (HTTP referrers) and to these two APIs.")
         self.i_flags["street_view"].setToolTip(street_view_help)
         self.i_google_key.setToolTip(street_view_help)
+        self.i_flags["overview_map"].setToolTip(tr("A small overview map in a corner with the current view marked."))
+        self.i_flags["three_d"].setToolTip(tr(
+            "A 3D button on the map: tilted view with the terrain relief (Basemap tab) and the polygons "
+            "of layers with a 3D height field raised."))
+        self.i_flags["drawing"].setToolTip(tr(
+            "Drawing tools in the Tools tab: points, lines, areas and text, kept in the shared link "
+            "and saved as GeoJSON or KML."))
         self.i_flags["street_search"].setToolTip(tr(
             "The search also finds the named streets of OpenStreetMap inside the extent layer "
             "(Map tab; without one, inside the export extent). They are read from the basemap, or "
@@ -884,7 +892,9 @@ class PublishDialog(QDialog):
         # House numbers in the search: "Fő utca 12".
         address_row = QHBoxLayout()
         self.i_address_layer = self._layer_combo(None, allow_empty=True, empty_text=tr("(none)"))
-        self.i_address_number = self._field_combo(self.i_address_layer)
+        # No field until one is chosen (the first field, often "fid", is no house number).
+        self.i_address_number = self._field_combo(self.i_address_layer, allow_empty=True)
+        self.i_address_layer.layerChanged.connect(self._guess_address_number)
         self.i_address_street = self._field_combo(self.i_address_layer, allow_empty=True)
         self.i_address_street.setToolTip(tr("Empty: the nearest named OpenStreetMap street (within 150 m)."))
         for label, combo in ((tr("House numbers"), self.i_address_layer), (tr("number"), self.i_address_number),
@@ -935,7 +945,8 @@ class PublishDialog(QDialog):
         form.addRow("", self.i_snap)
         self.i_height = QComboBox()
         self.i_height.setToolTip(tr("Polygon layers (e.g. buildings): a numeric field of heights in metres. "
-                                    "The map's 3D button raises the polygons to it. The field becomes public."))
+                                    "With \"3D view\" on (Interaction tab) the map's 3D button raises the "
+                                    "polygons to it. The field becomes public."))
         form.addRow(tr("3D height field (m)"), self.i_height)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
@@ -1181,19 +1192,28 @@ class PublishDialog(QDialog):
         except TypeError:
             self.t_layer.setAllowEmptyLayer(True)
         self.t_layer.setProject(self.project)
+        # Heights are read from a file (GDAL): online services are not offered.
+        self.t_layer.setExcludedProviders(["wms", "wcs", "arcgismapserver", "arcgisfeatureserver",
+                                           "virtualraster", "postgresraster"])
         self.t_layer.setToolTip(tr("A raster layer of ground heights in metres (DEM, DTM), read from its file."))
         self.t_hillshade = QCheckBox(tr("Hillshade: shaded relief drawn above the basemap (also in 2D)"))
         self.t_exaggeration = QDoubleSpinBox()
         self.t_exaggeration.setRange(1.0, 5.0)
         self.t_exaggeration.setSingleStep(0.5)
         self.t_exaggeration.setSuffix(" ×")
+        def terrain_chosen(layer):
+            self.t_hillshade.setEnabled(layer is not None)
+            self.t_exaggeration.setEnabled(layer is not None)
+        self.t_layer.layerChanged.connect(terrain_chosen)
+        terrain_chosen(self.t_layer.currentLayer())
         relief_form.addRow(tr("Elevation layer (DEM)"), self.t_layer)
         relief_form.addRow("", self.t_hillshade)
         relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
         relief_form.addRow("", _note(tr(
             "The heights are resampled to web tiles (data/terrain.pmtiles) for the area of the map. "
-            "Visitors get a 3D button (tilted view with relief; with a 3D height field also raised "
-            "buildings) and an elevation profile for measured lines. The heights become public.")))
+            "Visitors get an elevation profile for measured lines and, with \"3D view\" switched on "
+            "(Interaction tab), a 3D button (tilted view with relief; with a 3D height field also "
+            "raised buildings). The heights become public.")))
         outer.addWidget(relief)
         start = QFormLayout()
         start.addRow(tr("Basemap shown at start"), self.b_initial)
@@ -1213,7 +1233,8 @@ class PublishDialog(QDialog):
                 continue
             uri = QgsDataSourceUri()
             uri.setEncodedUri(layer.source())
-            if uri.param("type") == "xyz" or not uri.param("url"):
+            # XYZ and WMTS (tile matrix sets) layers use the same provider; not GetMap services.
+            if uri.param("type") in ("xyz", "wmts") or uri.param("tileMatrixSet") or not uri.param("url"):
                 continue
             out.append((layer.name(), uri.param("url"), ",".join(uri.params("layers")),
                         uri.param("format") or "image/png"))
@@ -1306,8 +1327,10 @@ class PublishDialog(QDialog):
         in_qgis = {entry.title for entry in saved}
         self.b_xyz.setRowCount(0)
         for entry in used:
-            self._add_xyz_row(entry, used=True, editable_name=entry.title not in in_qgis)
-        titles = {entry.title for entry in used}
+            self._add_xyz_row(entry, used=True,
+                              editable_name=entry.title.strip().replace("/", "-") not in in_qgis)
+        # QGIS keeps "/" in a connection's name as "-" (xyz_connections).
+        titles = {entry.title.strip().replace("/", "-") for entry in used}
         for entry in saved:
             if entry.title not in titles:
                 self._add_xyz_row(entry, used=False, editable_name=False)
@@ -1350,6 +1373,16 @@ class PublishDialog(QDialog):
         combo.setProject(self.project)
         return combo
 
+    def _guess_address_number(self, layer):
+        """A field named like a house number, else none (the user picks it)."""
+        names = {f.name().lower(): f.name() for f in layer.fields()} if layer is not None else {}
+        for name in ("hsz", "hazszam", "házszám", "haz_szam", "housenumber", "house_number",
+                     "addr:housenumber", "number", "szam"):
+            if name in names:
+                self.i_address_number.setField(names[name])
+                return
+        self.i_address_number.setField("")
+
     @staticmethod
     def _field_combo(layer_combo, allow_empty=False):
         from qgis.gui import QgsFieldComboBox  # pylint: disable=import-outside-toplevel
@@ -1378,6 +1411,8 @@ class PublishDialog(QDialog):
             item = QTableWidgetItem(name)
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(_check(name in chosen))
+            if name in chosen:  # its type (url, number …) is kept: the table has no type column
+                item.setData(Qt.ItemDataRole.UserRole, chosen[name].type)
             table.setItem(row, 0, item)
             table.setItem(row, 1, QTableWidgetItem(chosen[name].alias if name in chosen else ""))
 
@@ -1387,7 +1422,8 @@ class PublishDialog(QDialog):
         for row in range(table.rowCount()):
             if table.item(row, 0).checkState() == CHECKED:
                 title = table.item(row, 1).text().strip() if table.item(row, 1) else ""
-                out.append(PopupField(table.item(row, 0).text(), title))
+                kind = table.item(row, 0).data(Qt.ItemDataRole.UserRole) or "string"
+                out.append(PopupField(table.item(row, 0).text(), title, kind))
         return out
 
     def _parcel_tab(self):
@@ -1595,7 +1631,7 @@ class PublishDialog(QDialog):
             self.b_custom.setChecked(True)
 
     def _refresh_basemap_initial(self, *_):
-        current = self.b_initial.currentData()
+        current, current_text = self.b_initial.currentData(), self.b_initial.currentText()
         self.b_initial.blockSignals(True)
         self.b_initial.clear()
         self.b_initial.addItem(tr("None (switched off)"), "none")
@@ -1604,7 +1640,11 @@ class PublishDialog(QDialog):
                 self.b_initial.addItem(box.text(), flavor)
         for number, entry in enumerate(self._xyz_rows() if hasattr(self, "b_xyz") else [], start=1):
             self.b_initial.addItem(f"{tr('Web')}: {entry.title}", f"xyz-{number}")
-        index = self.b_initial.findData(current) if current else -1
+        # The same basemap by its name: web basemaps are numbered by position,
+        # which changes when a row above is added or unticked.
+        index = self.b_initial.findText(current_text) if current_text else -1
+        if index < 0:
+            index = self.b_initial.findData(current) if current else -1
         self.b_initial.setCurrentIndex(index if index >= 0 else min(1, self.b_initial.count() - 1))
         self.b_initial.blockSignals(False)
 
@@ -1875,7 +1915,16 @@ class PublishDialog(QDialog):
         self.i_address_number.setField(profile.interaction.address_number_field)
         self.i_address_street.setField(profile.interaction.address_street_field)
         self.i_google_key.setEnabled(profile.interaction.street_view)
+        # The Interaction tab shows the new settings: the widgets still hold
+        # the previous layer's values, which must not be stored into them.
+        self.current_layer_id = None
         self.layer_configs = {c.layer_id: c for c in profile.layers}
+        if self.tabs.tabText(self.tabs.currentIndex()) == tr("Interaction"):
+            self._fill_interaction_layers()
+        else:
+            self.i_layers.blockSignals(True)
+            self.i_layers.clear()
+            self.i_layers.blockSignals(False)
         self.o_archive.setCurrentIndex(max(0, self.o_archive.findData(profile.output.archive)))
         self.o_dir.setText(profile.output.local_directory)
         self.o_xyz.setChecked(profile.output.xyz_package)
@@ -1916,6 +1965,8 @@ class PublishDialog(QDialog):
         self.i_layers.clear()
         for layer_id in self._included_ids():
             layer = self.project.mapLayer(layer_id)
+            if layer is None:  # removed from the project while the window is open
+                continue
             item = QListWidgetItem(layer.name())
             item.setData(Qt.ItemDataRole.UserRole, layer_id)
             item.setToolTip(layer.name())
@@ -1935,6 +1986,9 @@ class PublishDialog(QDialog):
         if not self.current_layer_id:
             return
         layer = self.project.mapLayer(self.current_layer_id)
+        if layer is None:
+            self.current_layer_id = None
+            return
         config = self.layer_configs.setdefault(self.current_layer_id, LayerConfig(self.current_layer_id))
         if isinstance(layer, QgsRasterLayer):
             self.i_stack.setCurrentIndex(1)
@@ -1972,9 +2026,10 @@ class PublishDialog(QDialog):
         self.i_height.clear()
         self.i_height.addItem(tr("(none)"), "")
         polygon = getattr(layer, "geometryType", lambda: None)() == QgsWkbTypes.PolygonGeometry
-        for field in layer.fields() if polygon else []:
-            if field.isNumeric():
-                self.i_height.addItem(field.name(), field.name())
+        fields = sorted(layer.fields() if polygon else [], key=lambda f: not f.isNumeric())
+        for field in fields:  # numbers first; text holding numbers ("12.5") works too
+            self.i_height.addItem(field.name() if field.isNumeric() else f"{field.name()} ({tr('text')})",
+                                  field.name())
         self.i_height.setCurrentIndex(max(0, self.i_height.findData(config.height_field)))
         self.i_height.setEnabled(polygon)
         popups = {p.field: p for p in config.popup_fields}
@@ -2116,11 +2171,6 @@ class PublishDialog(QDialog):
         xyz_ids = [f"xyz-{n}" for n in range(1, len(basemap.xyz) + 1)]
         if basemap.initial != "none" and basemap.initial not in basemap.flavors + xyz_ids:
             basemap.initial = basemap.flavors[0]
-        try:  # the same web basemaps as QGIS XYZ connections
-            from .xyz_connections import save_qgis_xyz_connections  # pylint: disable=import-outside-toplevel
-            save_qgis_xyz_connections(self._xyz_rows(used_only=False))
-        except Exception:  # noqa: BLE001 - settings are a convenience; never block the window
-            pass
         basemap.max_zoom = self.b_max.value()
         basemap.padding = self.b_padding.value() / 100.0
         basemap.overview_zoom = min(self.b_overview_zoom.value(), basemap.max_zoom)
@@ -2173,8 +2223,18 @@ class PublishDialog(QDialog):
         self.logbox.appendPlainText(str(text))
         QgsMessageLog.logMessage(str(text), TAG, Qgis.MessageLevel.Info)
 
+    def _save_xyz_connections(self):
+        """The web basemaps also as QGIS XYZ connections (when the settings are
+        saved, not on every read of the window, so half-typed rows stay out)."""
+        try:
+            from .xyz_connections import save_qgis_xyz_connections  # pylint: disable=import-outside-toplevel
+            save_qgis_xyz_connections(self._xyz_rows(used_only=False))
+        except Exception:  # noqa: BLE001 - settings are a convenience; never block the window
+            pass
+
     def save_settings(self, quiet=False) -> bool:
         profile = self.collect()
+        self._save_xyz_connections()
         problems = validate(profile)
         if problems and not quiet:
             QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
@@ -2562,6 +2622,15 @@ class PublishDialog(QDialog):
             lines.append(tr("3D height fields (public): ") + ", ".join(
                 f"{(self.project.mapLayer(c.layer_id).name() if self.project.mapLayer(c.layer_id) else c.layer_id)}"
                 f".{c.height_field}" for c in heights))
+        extras = [name for on, name in [(profile.interaction.overview_map, tr("overview map")),
+                                         (profile.interaction.three_d, tr("3D view")),
+                                         (profile.interaction.drawing, tr("drawing tools")),
+                                         (profile.interaction.street_view, tr("Street View"))] if on]
+        if extras:
+            lines.append(tr("Viewer extras: ") + ", ".join(extras))
+        if heights and not profile.interaction.three_d:
+            lines.append(tr("NOTE: 3D height fields are set but \"3D view\" is off (Interaction tab): "
+                            "the map shows no 3D button."))
         if profile.interaction.address_layer_id:
             layer = self.project.mapLayer(profile.interaction.address_layer_id)
             lines += ["", tr("House number search: street and number of every address in the area ({})").format(
@@ -2580,7 +2649,12 @@ class PublishDialog(QDialog):
             names = [r.name_field for r in info.restrictions if r.name_field]
             if names:
                 lines.append("   " + tr("Restriction name fields: ") + ", ".join(names))
-        lines += ["", tr("External resources for visitors: none (no CDN, no third-party tiles, no telemetry)."),
+        external = [f"{tr('web basemap')} „{x.title}” ({urlparse(x.url).hostname or '?'})"
+                    for x in profile.basemap.xyz]
+        if profile.interaction.street_view and profile.interaction.google_api_key.strip():
+            external.append(tr("Google Street View (Google's script and your API key)"))
+        lines += ["", tr("External resources for visitors: ") + ("; ".join(external) if external else tr(
+                      "none (no CDN, no third-party tiles, no telemetry).")),
                   tr("Cost: storage of the archive and retained releases plus requests; R2 has no "
                      "egress fees but limits above the free tier are billed — see "
                      "https://developers.cloudflare.com/r2/pricing/ (checked 1 Oct 2026).")]

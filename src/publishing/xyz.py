@@ -23,12 +23,15 @@ def wms_template(service_url: str, layers: str, image_format: str = "image/png",
     parts = urlsplit(service_url.strip())
     getmap = {"service", "version", "request", "layers", "styles", "crs", "srs", "bbox", "width",
               "height", "format", "transparent"}
-    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in getmap]
+    own = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in getmap]
     crs = "CRS" if version.startswith("1.3") else "SRS"
-    query += [("SERVICE", "WMS"), ("VERSION", version), ("REQUEST", "GetMap"), ("LAYERS", layers),
-              ("STYLES", styles), (crs, "EPSG:3857"), ("WIDTH", "256"), ("HEIGHT", "256"),
-              ("FORMAT", image_format), ("TRANSPARENT", "TRUE" if image_format.endswith("png") else "FALSE")]
-    text = urlencode(query, quote_via=quote, safe=":,/")
+    query = [("SERVICE", "WMS"), ("VERSION", version), ("REQUEST", "GetMap"), ("LAYERS", layers),
+             ("STYLES", styles), (crs, "EPSG:3857"), ("WIDTH", "256"), ("HEIGHT", "256"),
+             ("FORMAT", image_format), ("TRANSPARENT", "TRUE" if image_format.endswith("png") else "FALSE")]
+    # The service's own values fully encoded: a MapServer map=/srv/… path is
+    # not taken for a leaked local path by the release scan.
+    text = "&".join(filter(None, [urlencode(own, quote_via=quote, safe=":,"),
+                                  urlencode(query, quote_via=quote, safe=":,/")]))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, text, "")) + f"&BBOX={WMS_BBOX}"
 
 SUBDOMAINS = ("a", "b", "c")

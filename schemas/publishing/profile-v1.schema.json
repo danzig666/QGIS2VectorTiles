@@ -147,6 +147,9 @@
         "overviewMap": {
           "type": "boolean"
         },
+        "threeD": {
+          "type": "boolean"
+        },
         "drawing": {
           "type": "boolean"
         },

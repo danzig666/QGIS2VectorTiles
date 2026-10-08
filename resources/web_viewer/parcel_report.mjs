@@ -14,6 +14,11 @@ export function formatArea(m2) {
   return `${formatNumber(m2, m2 < 100 ? 1 : 0)} m²`;
 }
 
+// A zone code as the regulation table is keyed (parcel_report.py zone_key).
+export function zoneKey(code) {
+  return code === null || code === undefined ? "" : String(code).trim();
+}
+
 function value(raw) {
   if (raw === null || raw === undefined || raw === "") return "—";
   return typeof raw === "number" ? formatNumber(raw) : String(raw);
@@ -167,7 +172,7 @@ export class ParcelReport {
         // Not the zone code again (it is the part's title).
         if (v !== null && v !== undefined && v !== "" && String(v) !== String(part.c)) rows.push([f.title || f.field, v]);
       }
-      const regulation = (c.regulations || {})[part.c];
+      const regulation = (c.regulations || {})[zoneKey(part.c)];
       if (regulation) {
         for (const f of c.regulationFields || []) {
           const v = regulation[f.field];

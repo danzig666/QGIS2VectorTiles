@@ -546,8 +546,18 @@ def _parcel(key, feature, geometry, info, zones, zone_legend, cuts, restrictions
     return record
 
 
+def zone_key(value) -> str:
+    """A zone code as the viewer looks it up: text without surrounding
+    spaces, whole numbers without ".0" (12.0 -> "12", as JSON gives it)."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
 def _regulations(project, info: ParcelInfoConfig) -> Dict[str, dict]:
-    """Zone code -> chosen fields of the optional regulation table."""
+    """Zone code (zone_key) -> chosen fields of the optional regulation table."""
     if not info.regulation_layer_id:
         return {}
     layer = project.mapLayer(info.regulation_layer_id)
@@ -555,10 +565,10 @@ def _regulations(project, info: ParcelInfoConfig) -> Dict[str, dict]:
         return {}
     out = {}
     for feature in layer.getFeatures():
-        code = feature[info.regulation_code_field]
-        if code in (None, "") or str(code) in out:
+        code = zone_key(_json_value(feature[info.regulation_code_field]))
+        if not code or code in out:
             continue
-        out[str(code)] = {f.field: _json_value(feature[f.field]) for f in info.regulation_fields
+        out[code] = {f.field: _json_value(feature[f.field]) for f in info.regulation_fields
                           if layer.fields().indexOf(f.field) >= 0}
     return out
 

@@ -175,6 +175,8 @@ export class Tools {
     this.onDblClick = (e) => { if (this.mode) { e.preventDefault(); this.finish(); } };
     this.onKey = (e) => {
       if (!this.mode) return;
+      // Keys typed in a field (the search box) are the field's.
+      if (e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]")) return;
       if (e.key === "Escape") this.stop(true);
       if (e.key === "Enter") this.finish();
     };
@@ -218,6 +220,9 @@ export class Tools {
     this.ensureSource();
     this.mode = mode;
     this.points = [];
+    // The previous line's profile does not belong to the new measurement.
+    if (this.profileBox) this.profileBox.replaceChildren();
+    if (this.profileButton) this.profileButton.hidden = true;
     this.viewer.measuring = true;
     this.map.doubleClickZoom.disable();
     this.map.getCanvas().style.cursor = "crosshair";
@@ -241,7 +246,7 @@ export class Tools {
   }
 
   stop(clear) {
-    this.finish();
+    if (this.mode) this.finish();  // (not a drawing's cursor and double-click zoom)
     if (clear) {
       this.points = [];
       if (this.map.getSource(SOURCE)) this.map.getSource(SOURCE).setData({ type: "FeatureCollection", features: [] });
@@ -256,8 +261,13 @@ export class Tools {
     if (!threeD || this.points.length < 2) return null;
     this.profileBox.replaceChildren(el("p", "q2vt-muted", t("app.loading")));
     const { samples } = sampleLine(this.points, 200);
-    const heights = await threeD.elevations(samples.map((s) => s.point));
-    return renderProfile(this.profileBox, samples, heights || []);
+    let heights = [];
+    try {
+      heights = (await threeD.elevations(samples.map((s) => s.point))) || [];
+    } catch (error) {  // network, or no OffscreenCanvas / createImageBitmap
+      console.warn("elevation profile:", error);
+    }
+    return renderProfile(this.profileBox, samples, heights);
   }
 
   measurement() {

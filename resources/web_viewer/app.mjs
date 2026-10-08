@@ -113,7 +113,7 @@ function applyInfo(manifest, pageUrl) {
   }
   if (rows.length) box.append(list);
   const documents = (Array.isArray(info.documents) ? info.documents : [])
-    .filter((d) => typeof d.href === "string" && /^docs\/[a-z0-9-]+\.[a-z]+$/.test(d.href));
+    .filter((d) => d && typeof d.href === "string" && /^docs\/[a-z0-9-]+\.[a-z]+$/.test(d.href));
   if (documents.length) {
     const heading = document.createElement("h3");
     heading.textContent = t("info.documents");

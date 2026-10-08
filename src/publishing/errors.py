@@ -10,6 +10,7 @@ from typing import Optional
 CODES = {
     "Q2VT_PUB_NOT_MVT": "The tile archive does not contain Mapbox Vector Tiles.",
     "Q2VT_PUB_RASTER_SOURCE": "The style uses a raster/image source; vector-only publication refuses it.",
+    "Q2VT_PUB_TERRAIN": "The elevation layer (terrain) cannot be used.",
     "Q2VT_PUB_MBTILES_INVALID": "The MBTiles archive is malformed.",
     "Q2VT_PUB_EMPTY_ARCHIVE": "The tile archive contains no tiles.",
     "Q2VT_PUB_PMTILES_INVALID": "The PMTiles archive failed validation.",

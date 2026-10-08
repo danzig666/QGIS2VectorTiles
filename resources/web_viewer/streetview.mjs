@@ -95,6 +95,7 @@ export class StreetView {
   async start() {
     if (this.active) return;
     if (this.viewer.controls?.tools?.stop) this.viewer.controls.tools.stop(false);  // no measuring meanwhile
+    if (this.viewer.draw?.mode) this.viewer.draw.cancel();  // nor drawing
     this.active = true;
     this.viewer.streetView = true;
     // Phones: the panorama takes the top of the screen; the panel sheet goes.

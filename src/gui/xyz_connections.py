@@ -43,7 +43,8 @@ def qgis_xyz_connections() -> List[XyzBasemap]:
 
 def save_qgis_xyz_connections(entries) -> int:
     """Add or update QGIS XYZ connections from web basemaps (by title);
-    returns how many changed. Other connections are left alone."""
+    returns how many changed. Other connections, and a connection of the same
+    name made in QGIS with another address, are left alone."""
     settings = QgsSettings()
     changed = 0
     for entry in entries:
@@ -51,6 +52,9 @@ def save_qgis_xyz_connections(entries) -> int:
         if not name or not entry.url or "{bbox-epsg-3857}" in entry.url:  # WMS: not an XYZ connection
             continue
         base = f"{ROOT}/{name}"
+        existing = str(settings.value(f"{base}/url", "") or "")
+        if existing and existing != entry.url and not settings.contains(f"{base}/q2vt-attribution"):
+            continue  # the user's own connection of the same name: never overwritten
         wanted = {"url": entry.url, "zmin": int(entry.min_zoom), "zmax": int(entry.max_zoom),
                   "q2vt-attribution": entry.attribution}
         for key, value in wanted.items():
