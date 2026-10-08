@@ -18,6 +18,7 @@ interrupted swap). The versioned, pointer-activated layout of the web
 publishing workflow is in ``src/publishing/web_builder.py``.
 """
 
+import contextlib
 import json
 import os
 import shutil
@@ -37,8 +38,13 @@ def portable_style(style: dict, source_name: str) -> dict:
 
 
 def _archive_bounds(mbtiles: str):
+    if not os.path.isfile(mbtiles):
+        return None
     try:
-        with sqlite3.connect(f"file:{mbtiles}?mode=ro", uri=True) as conn:
+        # A plain connection (a file: URI with a Windows or network path may
+        # not open), read-only by pragma.
+        with contextlib.closing(sqlite3.connect(mbtiles)) as conn:
+            conn.execute("PRAGMA query_only = ON")
             row = conn.execute("SELECT value FROM metadata WHERE name = 'bounds'").fetchone()
         values = [float(v) for v in row[0].split(",")] if row else []
     except (sqlite3.Error, ValueError):

@@ -6,8 +6,10 @@ style layers, visibility intervals, expression rules, sprite references and
 the produced MBTiles archive.
 """
 
+import contextlib
 import gzip
 import json
+import os
 import sqlite3
 from typing import Dict, Iterable, Optional, Set
 
@@ -190,8 +192,12 @@ def inspect_mbtiles(path: str, wanted: Optional[Iterable[str]] = None) -> dict:
     looked up in the tiles; ``complete`` is False when a layer could be
     missing only because the scan was bounded.
     """
-    uri = f"file:{path}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as conn:
+    if not os.path.isfile(path):
+        raise sqlite3.OperationalError(f"unable to open database file: {path}")
+    # A plain connection (a file: URI with a Windows or network path may not
+    # open), read-only by pragma.
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA query_only = ON")
         metadata = dict(conn.execute("SELECT name, value FROM metadata").fetchall())
         counts = dict(conn.execute(
             "SELECT zoom_level, COUNT(*) FROM tiles GROUP BY zoom_level").fetchall())
