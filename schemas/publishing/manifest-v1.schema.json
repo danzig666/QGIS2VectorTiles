@@ -367,6 +367,12 @@
           },
           "toggleable": {
             "type": "boolean"
+          },
+          "heightField": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }
@@ -767,6 +773,18 @@
         },
         "records": {
           "type": "integer"
+        },
+        "zoningLayerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "zoneCodeField": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
