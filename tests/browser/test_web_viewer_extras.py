@@ -271,3 +271,39 @@ def test_3d_view_buildings_relief_and_profile(site, tmp_path):
     stats = out["stats"]
     assert out["shown"] and out["chart"]
     assert 110 < stats["min"] < stats["max"] < 290 and stats["up"] > 80 and stats["down"] < 5, stats
+
+
+@pytest.mark.parametrize("paper,portrait,size", [("a4-landscape", False, (186, 190)), ("a3-portrait", True, (281, 300))])
+def test_map_extract_print_layout(site, tmp_path, paper, portrait, size):
+    mm = 96 / 25.4
+    actions = [{"eval": f"""
+      const v = q2vtViewer, p = v.printer;
+      p.paper = '{paper}'; p.scale = 2000;
+      p.prepare('map');
+      await new Promise((r) => setTimeout(r, 300));
+      p.fill('map');
+      const box = v.map.getContainer().getBoundingClientRect();
+      const head = document.querySelector('#q2vt-print-sheet .q2vt-print-head');
+      const out = {{ w: box.width, h: box.height, portrait: document.body.classList.contains('q2vt-print-portrait'),
+        page: document.getElementById('q2vt-print-page').textContent,
+        north: !!v.map.getContainer().querySelector('.q2vt-print-north svg'),
+        kicker: head.querySelector('.q2vt-print-kicker').textContent,
+        info: [...head.querySelectorAll('.q2vt-print-info dd')].map((n) => n.textContent),
+        scale: head.querySelector('.q2vt-print-scale').textContent, printScale: p.printScale }};
+      return out;
+    """}]
+    if SHOTS:
+        actions += [{"media": "print"}, {"wait": 600}, {"screenshot": os.path.join(SHOTS, f"print-{paper}.png")}]
+    actions.append({"eval": """
+      q2vtViewer.printer.restore();
+      return { left: document.querySelectorAll('.q2vt-print-north').length,
+               printing: document.body.classList.contains('q2vt-printing') };
+    """})
+    out = _run(site["url"], actions, tmp_path, 1600, 1600)
+    first, last = out[0], out[-1]
+    assert abs(first["w"] - size[0] * mm) < 2 and abs(first["h"] - size[1] * mm) < 2, first
+    assert first["portrait"] is portrait and paper.split("-")[0].upper() in first["page"]
+    assert first["north"] and first["kicker"] == "Térképkivonat" and first["printScale"] == 2000
+    assert first["info"] == ["Arló Község Önkormányzata", "12/2025. (X. 1.) önk. rendelet", "2025. 10. 01.", "2025. 09."]
+    assert first["scale"] == "M 1:2000" or "2000" in first["scale"].replace(" ", "").replace("\u00a0", "")
+    assert last == {"left": 0, "printing": False}

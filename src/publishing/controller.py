@@ -338,7 +338,10 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
             extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)
         extra_files.update(report.swatches)
         parcel_manifest = {"manifest": "parcels/manifest.json", "catalog": "parcels/catalog.json",
-                           "layerId": report.manifest["layerId"], "records": report.records}
+                           "layerId": report.manifest["layerId"], "records": report.records,
+                           # The zoning layer and its code field: zone popups can show the zone's regulations.
+                           "zoningLayerId": layer_logical_id(info.zoning_layer_id) if info.zoning_layer_id else None,
+                           "zoneCodeField": info.zoning_code_field or None}
         progress.check()
 
     stage("RASTER")

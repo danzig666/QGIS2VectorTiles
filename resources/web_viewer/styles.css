@@ -445,15 +445,29 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
    the right (print.mjs). The same sizes on screen while printing, so the map
    is drawn at its paper size before the browser prints it. */
 #q2vt-print-sheet { display: none; }
-body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: 186mm; height: 190mm; }
+body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2vt-pmap-w, 186mm);
+  height: var(--q2vt-pmap-h, 190mm); }
+.q2vt-print-north { position: absolute; top: 3mm; right: 3mm; width: 9mm; height: 13mm; z-index: 5;
+  background: rgba(255, 255, 255, .85); border-radius: 1.5mm; padding: 0.5mm; }
+.q2vt-print-north svg { width: 100%; height: 100%; display: block; }
 @media print {
   .q2vt-sv-panel, .q2vt-sv-hint, .q2vt-sv-marker { display: none !important; }
   @page { size: A4 landscape; margin: 8mm; }
   html, body { background: #fff !important; color: #000; overflow: visible; height: auto; }
-  body.q2vt-printing #q2vt-app { position: static; display: grid; grid-template-columns: 186mm 1fr;
+  body.q2vt-printing #q2vt-app { position: static; display: grid; grid-template-columns: var(--q2vt-pmap-w, 186mm) 1fr;
     column-gap: 5mm; align-items: start; height: auto; }
+  body.q2vt-printing.q2vt-print-portrait #q2vt-app { grid-template-columns: 1fr; row-gap: 4mm; }
+  body.q2vt-printing.q2vt-print-portrait .q2vt-legend-print { columns: 3; }
+  body.q2vt-printing .q2vt-basemap, body.q2vt-printing .q2vt-overview, body.q2vt-printing .q2vt-3d,
+  body.q2vt-printing .q2vt-draw-hint { display: none !important; }
+  .q2vt-print-kicker { margin: 0 0 0.5mm !important; font-size: 7pt !important; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .08em; color: #555 !important; }
+  .q2vt-print-info { display: grid; grid-template-columns: auto 1fr; gap: 0.3mm 2mm; margin: 0 0 2mm; font-size: 7.5pt; }
+  .q2vt-print-info dt { color: #555; }
+  .q2vt-print-info dd { margin: 0; }
   body.q2vt-printing #q2vt-app > *:not(#q2vt-map):not(#q2vt-print-sheet) { display: none !important; }
-  body.q2vt-printing #q2vt-map { position: relative; width: 186mm; height: 190mm; border: 0.3mm solid #000;
+  body.q2vt-printing #q2vt-map { position: relative; width: var(--q2vt-pmap-w, 186mm); height: var(--q2vt-pmap-h, 190mm);
+    border: 0.3mm solid #000;
     break-inside: avoid; }
   body.q2vt-printing .maplibregl-ctrl-top-left, body.q2vt-printing .maplibregl-ctrl-top-right,
   body.q2vt-printing .maplibregl-ctrl-bottom-left .maplibregl-ctrl-group { display: none !important; }

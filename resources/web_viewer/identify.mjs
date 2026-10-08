@@ -163,6 +163,10 @@ export class Identify {
       link.addEventListener("click", () => this.viewer.permalink.copy({ selected: { layerId, key } }));
       box.append(link);
     }
+    // Edition add-ons append their own sections (e.g. zone rules).
+    if (this.extend) {
+      try { await this.extend(box, { layerId, key, record }); } catch { /* the popup without them */ }
+    }
     const where = lngLat || (record && record.p) || this.map.getCenter();
     this.popup.setLngLat(where).setDOMContent(box).addTo(this.map);
     this.select({ layerId, key });

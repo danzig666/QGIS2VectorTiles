@@ -72,7 +72,7 @@
   "tools.measureMethod": "Geodesic (WGS 84 ellipsoid approximation); not survey accuracy.",
   "tools.clear": "Clear",
   "tools.print": "Print",
-  "tools.printNote": "Prints the current view at the chosen scale with the legend (A4 landscape). The scale is exact when printing at 100%.",
+  "tools.printNote": "Prints a map extract of the current view at the chosen scale and paper, with a north arrow, scale bar and the legend. The scale is exact when printing at 100% (set the same paper in the print dialog).",
   "legend.empty": "No legend",
   "layers.group": "Group",
   "search.typeMore": "Type a few more characters",
@@ -155,5 +155,13 @@
   "error.terrain": "The terrain could not be loaded; the map is shown without it.",
   "profile.title": "Elevation profile",
   "profile.noData": "No height data along this line.",
-  "profile.facts": "Lowest {min} m, highest {max} m · climb {up} m, descent {down} m"
+  "profile.facts": "Lowest {min} m, highest {max} m · climb {up} m, descent {down} m",
+  "print.north": "N",
+  "print.extract": "Map extract",
+  "print.date": "Printed",
+  "print.paperLabel": "Paper",
+  "print.paper.a4-landscape": "A4 landscape",
+  "print.paper.a4-portrait": "A4 portrait",
+  "print.paper.a3-landscape": "A3 landscape",
+  "print.paper.a3-portrait": "A3 portrait"
 }

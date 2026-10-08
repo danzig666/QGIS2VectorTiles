@@ -72,7 +72,7 @@
   "tools.measureMethod": "Geodéziai számítás (WGS 84 ellipszoid közelítés); nem földmérési pontosságú.",
   "tools.clear": "Törlés",
   "tools.print": "Nyomtatás",
-  "tools.printNote": "Az aktuális nézetet nyomtatja a választott méretarányban, jelmagyarázattal (A4 fekvő). A méretarány 100%-os nyomtatási méretezésnél pontos.",
+  "tools.printNote": "Térképkivonatot nyomtat az aktuális nézetről a választott méretarányban és papírra, északjellel, léptékvonalzóval és jelmagyarázattal. A méretarány 100%-os nyomtatási méretezésnél pontos (a nyomtatási ablakban ugyanazt a papírt válassza).",
   "legend.empty": "Nincs jelmagyarázat",
   "layers.group": "Csoport",
   "search.typeMore": "Írjon be még néhány karaktert",
@@ -155,5 +155,13 @@
   "error.terrain": "A domborzat nem tölthető be; a térkép nélküle látszik.",
   "profile.title": "Magassági metszet",
   "profile.noData": "Ezen a vonalon nincs magassági adat.",
-  "profile.facts": "Legalacsonyabb {min} m, legmagasabb {max} m · emelkedés {up} m, lejtés {down} m"
+  "profile.facts": "Legalacsonyabb {min} m, legmagasabb {max} m · emelkedés {up} m, lejtés {down} m",
+  "print.north": "É",
+  "print.extract": "Térképkivonat",
+  "print.date": "Nyomtatva",
+  "print.paperLabel": "Papír",
+  "print.paper.a4-landscape": "A4 fekvő",
+  "print.paper.a4-portrait": "A4 álló",
+  "print.paper.a3-landscape": "A3 fekvő",
+  "print.paper.a3-portrait": "A3 álló"
 }

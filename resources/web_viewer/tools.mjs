@@ -6,7 +6,7 @@
 import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
-import { PRINT_SCALES } from "./print.mjs";
+import { PAPERS, PRINT_SCALES } from "./print.mjs";
 import { Snapper } from "./snap.mjs";
 import { renderProfile, sampleLine } from "./profile.mjs";
 
@@ -14,6 +14,7 @@ const SOURCE = "q2vt_measure";
 const SNAP_SOURCE = "q2vt_measure_snap";
 const SNAP_KEY = "q2vt:snap";
 const SCALE_KEY = "q2vt:print-scale";
+const PAPER_KEY = "q2vt:print-paper";
 
 export function formatDistance(metres) {
   return metres >= 1000 ? `${formatNumber(metres / 1000, 3)} km` : `${formatNumber(metres, 1)} m`;
@@ -301,7 +302,21 @@ export class Tools {
     this.applyScale = apply;
     apply();  // the saved choice also for Ctrl+P and the parcel print
     label.append(el("span", "", t("print.scaleLabel")), choice);
-    block.append(label, button, el("p", "q2vt-muted", t("tools.printNote")));
+    // Paper: A4 / A3, landscape / portrait.
+    const paperLabel = el("label", "q2vt-print-choice");
+    const paper = document.createElement("select");
+    for (const id of Object.keys(PAPERS)) paper.append(new Option(t(`print.paper.${id}`), id));
+    const savedPaper = (() => { try { return localStorage.getItem(PAPER_KEY); } catch { return null; } })();
+    if (savedPaper && PAPERS[savedPaper]) paper.value = savedPaper;
+    const applyPaper = () => { if (this.viewer && this.viewer.printer) this.viewer.printer.paper = paper.value; };
+    paper.addEventListener("change", () => {
+      applyPaper();
+      try { localStorage.setItem(PAPER_KEY, paper.value); } catch { /* storage unavailable */ }
+    });
+    applyPaper();
+    this.paperChoice = paper;
+    paperLabel.append(el("span", "", t("print.paperLabel")), paper);
+    block.append(label, paperLabel, button, el("p", "q2vt-muted", t("tools.printNote")));
     this.container.append(block);
   }
 

@@ -195,3 +195,48 @@ def test_copy_embed_code(project, messages, tmp_path):
     dialog.public_url = "https://maps.example.hu/terv/index.html#v=1/47.5/19"  # after a publication
     assert 'src="https://maps.example.hu/terv/index.html?embed#v=1/47.5/19"' in dialog.copy_embed_code()
     dialog.close()
+
+
+def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path):
+    """The 4.24 settings: map info and documents (Info tab), terrain (Basemap
+    tab), house numbers, overview and drawing (Interaction tab) and a layer's
+    3D height field are kept through the window and listed in the review."""
+    from qgis.core import QgsField, QgsRasterLayer, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from publishing.models import DocumentConfig  # pylint: disable=import-error
+    sys_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browser")
+    import sys  # pylint: disable=import-outside-toplevel
+    sys.path.insert(0, sys_path)
+    from test_web_viewer_extras import _dem  # pylint: disable=import-error
+    project, parcels = project
+    dem = QgsRasterLayer(_dem(tmp_path / "dem.tif"), "Domborzat")
+    addresses = QgsVectorLayer("Point?crs=EPSG:3857", "Házszámok", "memory")
+    addresses.dataProvider().addAttributes([QgsField("hsz", QVariant.String)])
+    addresses.updateFields()
+    document = tmp_path / "rendelet.pdf"
+    document.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    dialog = _dialog()
+    _configure(dialog, parcels, tmp_path)
+    project.addMapLayers([dem, addresses])
+    profile = dialog.collect()
+    profile.info.issuer, profile.info.legal_date = "Arló", "2025. 10. 01."
+    profile.info.documents = [DocumentConfig("HÉSZ", str(document))]
+    profile.terrain.layer_id, profile.terrain.exaggeration = dem.id(), 2.0
+    profile.interaction.address_layer_id, profile.interaction.address_number_field = addresses.id(), "hsz"
+    profile.interaction.overview_map = True
+    dialog._populate(profile)  # pylint: disable=protected-access
+    dialog.i_layers.setCurrentRow(0)
+    dialog.i_height.setCurrentIndex(dialog.i_height.findData("terulet"))  # chosen in the window
+    again = dialog.collect()
+    assert again.info.issuer == "Arló" and again.info.legal_date == "2025. 10. 01."
+    assert [(d.title, d.path) for d in again.info.documents] == [("HÉSZ", str(document))]
+    assert again.terrain.layer_id == dem.id() and again.terrain.exaggeration == 2.0 and again.terrain.hillshade
+    assert again.interaction.address_layer_id == addresses.id() and again.interaction.address_number_field == "hsz"
+    assert again.interaction.address_street_field == "" and again.interaction.overview_map
+    assert again.layer(parcels.id()).height_field == "terulet"
+    assert dialog.i_height.currentData() == "terulet"
+    dialog.refresh_review()
+    review = dialog.review.toPlainText()
+    assert "HÉSZ (rendelet.pdf)" in review and "Domborzat" in review and "Házszámok" in review
+    assert "terulet" in review
+    dialog.close()
