@@ -45,6 +45,54 @@ class TilesGenerationCancelled(RuntimeError):
     """Raised when the user cancels while ogr2ogr is running."""
 
 
+# Seconds per unit of TileProgress cost until a job has finished (measured
+# 6e-8 .. 1.1e-7 with 4 jobs on 4 cores; the finished jobs correct it).
+_SECONDS_PER_COST = 1e-7
+# Cost of one output tile, in source bytes.
+_TILE_COST = 2000
+
+
+class TileProgress:
+    """Estimated progress of ogr2ogr jobs, which report none themselves.
+
+    A job's cost is the size of its datasets times their zoom levels plus
+    the tiles of the extent at those zooms. A running job advances with its
+    elapsed time against the time its cost should take at the rate of the
+    jobs already finished (a fixed guess before the first one); past that
+    time it still creeps on, never reaching its end before it finishes.
+    """
+
+    def __init__(self, costs: List[float]):
+        self.costs = [max(1.0, float(c)) for c in costs]
+        self.total = sum(self.costs)
+        self.started: Dict[int, float] = {}
+        self.finished: Dict[int, float] = {}
+        self._last = 0.0
+
+    def start(self, job: int, now: float) -> None:
+        self.started[job] = now
+
+    def finish(self, job: int, now: float) -> None:
+        self.finished[job] = now - self.started.get(job, now)
+
+    def rate(self) -> float:
+        cost = sum(self.costs[j] for j in self.finished)
+        seconds = sum(self.finished.values())
+        return seconds / cost if cost > 0 and seconds > 0 else _SECONDS_PER_COST
+
+    def fraction(self, now: float) -> float:
+        rate = self.rate()
+        done = sum(self.costs[j] for j in self.finished)
+        for job, began in self.started.items():
+            if job in self.finished:
+                continue
+            x = (now - began) / max(1e-9, self.costs[job] * rate)
+            part = 0.9 * x if x <= 1 else 0.9 + 0.09 * (1 - math.exp(-(x - 1)))
+            done += self.costs[job] * part
+        self._last = max(self._last, min(1.0, done / self.total if self.total else 1.0))
+        return self._last
+
+
 class GDALTilesGenerator:
     """Generate MBTiles vector tiles using GDAL CLI with an OGR VRT intermediary."""
 
@@ -60,6 +108,7 @@ class GDALTilesGenerator:
         cache: Optional["export_cache.ExportCache"] = None,
         dataset_keys: Optional[Dict[str, str]] = None,
         layer_groups: Optional[Dict[str, List[str]]] = None,
+        progress_range: Tuple[float, float] = (0.0, 100.0),
     ):
         # With a cache: one tile set per QGIS layer (its datasets), reused
         # while the layer's datasets are unchanged, then merged.
@@ -73,6 +122,39 @@ class GDALTilesGenerator:
         self.cpu_percent = cpu_percent
         self.feedback = feedback
         self.layer_zooms = layer_zooms or {}
+        self.progress_range = progress_range
+
+    def _report(self, fraction: float) -> None:
+        if self.feedback is not None:
+            low, high = self.progress_range
+            self.feedback.setProgress(low + (high - low) * fraction)
+
+    def _tiles_at(self, zoom: int) -> int:
+        """Tiles of the export extent at ``zoom`` (whole world without one)."""
+        n = 2 ** zoom
+        extent = self.extent
+        if extent is None or extent.isEmpty():
+            return n * n
+        half = 20037508.342789244
+        size = 2 * half / n
+
+        def span(low, high):
+            return int(math.floor((high + half) / size)) - int(math.floor((low + half) / size)) + 1
+        return max(1, min(n, span(extent.xMinimum(), extent.xMaximum()))
+                   * min(n, span(extent.yMinimum(), extent.yMaximum())))
+
+    def _job_cost(self, members: List[QgsVectorLayer]) -> float:
+        """TileProgress cost of tiling ``members``: every feature is cut at
+        every zoom, and every tile is written."""
+        cost = 0.0
+        for layer in members:
+            try:
+                size = os.path.getsize(layer.source().split("|")[0])
+            except OSError:
+                size = 0
+            low, high = self._layer_zoom_range(layer)
+            cost += sum(size + _TILE_COST * self._tiles_at(z) for z in range(low, high + 1))
+        return cost
 
     def generate(self) -> Tuple[str, int]:
         """Build VRT, run ogr2ogr, return (mbtiles URI, min_zoom)."""
@@ -206,16 +288,23 @@ class GDALTilesGenerator:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0
 
+        tracker = TileProgress([self._job_cost(self.layers)])
         with subprocess.Popen(
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             startupinfo=startupinfo, creationflags=creationflags,
         ) as proc:
-            started = last_message = time.monotonic()
+            started = last_message = last_report = time.monotonic()
+            tracker.start(0, started)
             while proc.poll() is None:
-                if self.feedback is not None and time.monotonic() - last_message > 15:
-                    last_message = time.monotonic()
+                now = time.monotonic()
+                if now - last_report > 1:
+                    last_report = now
+                    self._report(tracker.fraction(now))
+                if self.feedback is not None and now - last_message > 15:
+                    last_message = now
                     self.feedback.pushInfo(
-                        f"   Still generating tiles ({(last_message - started) / 60:.1f} minutes)...")
+                        f"   Still generating tiles ({(now - started) / 60:.1f} minutes, "
+                        f"about {100 * tracker.fraction(now):.0f}% done)...")
                 if self.feedback is not None and self.feedback.isCanceled():
                     proc.terminate()
                     try:
@@ -295,35 +384,45 @@ class GDALTilesGenerator:
             conf = join(work, f"group_{number:04d}.json")
             self._build_vrt(vrt, members)
             self._write_layer_conf(conf, members)
-            jobs.append((key, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf)))
+            jobs.append((key, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf),
+                         self._job_cost(members)))
             parts.append(target)
         if self.feedback is not None:
             self.feedback.pushInfo(f"   Tiles: {len(parts) - len(jobs)} of {len(parts)} layers "
                                    "reused from earlier exports, " f"{len(jobs)} to generate")
-        self._run_parallel([cmd for _, _, cmd in jobs])
-        stored = {target: self.cache.put_tiles(key, target) for key, target, _ in jobs if key}
+        self._run_parallel([cmd for _, _, cmd, _ in jobs], [cost for _, _, _, cost in jobs])
+        stored = {target: self.cache.put_tiles(key, target) for key, target, _, _ in jobs if key}
         merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom)
         shutil.rmtree(work, ignore_errors=True)  # kept in the cache; not needed here
 
-    def _run_parallel(self, commands: List[List[str]]):
+    def _run_parallel(self, commands: List[List[str]], costs: Optional[List[float]] = None):
         """Run ogr2ogr commands, several at a time, polled from this (main)
-        thread so QGIS stays responsive and Cancel works."""
+        thread so QGIS stays responsive and Cancel works. The biggest jobs
+        (``costs``) start first, so none of them is left running alone at
+        the end; the progress bar follows TileProgress."""
         if not commands:
+            self._report(1.0)
             return
+        costs = list(costs) if costs and len(costs) == len(commands) else [1.0] * len(commands)
+        tracker = TileProgress(costs)
         cpu = self._cpu_num()
         slots = max(1, min(len(commands), cpu))
         env = os.environ.copy()
         env["GDAL_NUM_THREADS"] = str(max(1, cpu // slots))
-        waiting, running = list(commands), []
-        started = last_message = time.monotonic()
+        waiting = sorted(range(len(commands)), key=lambda j: -costs[j])
+        running: Dict[int, subprocess.Popen] = {}
+        started = last_message = last_report = time.monotonic()
         try:
             while waiting or running:
                 while waiting and len(running) < slots:
-                    running.append(subprocess.Popen(
-                        waiting.pop(0), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        text=True, **self._popen_options()))
-                for proc in [p for p in running if p.poll() is not None]:
-                    running.remove(proc)
+                    job = waiting.pop(0)
+                    running[job] = subprocess.Popen(
+                        commands[job], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=True, **self._popen_options())
+                    tracker.start(job, time.monotonic())
+                for job, proc in [(j, p) for j, p in running.items() if p.poll() is not None]:
+                    del running[job]
+                    tracker.finish(job, time.monotonic())
                     _, stderr = proc.communicate()
                     if proc.returncode != 0:
                         error_msg = f"ogr2ogr failed.\nError: {stderr}"
@@ -332,15 +431,21 @@ class GDALTilesGenerator:
                         raise RuntimeError(error_msg)
                 if self.feedback is not None and self.feedback.isCanceled():
                     raise TilesGenerationCancelled("Tile generation cancelled")
-                if self.feedback is not None and time.monotonic() - last_message > 15:
-                    last_message = time.monotonic()
+                now = time.monotonic()
+                if now - last_report > 1:
+                    last_report = now
+                    self._report(tracker.fraction(now))
+                if self.feedback is not None and now - last_message > 15:
+                    last_message = now
                     self.feedback.pushInfo(
-                        f"   Still generating tiles ({(last_message - started) / 60:.1f} minutes, "
-                        f"{len(waiting) + len(running)} layers left)...")
+                        f"   Still generating tiles ({(now - started) / 60:.1f} minutes, "
+                        f"{len(waiting) + len(running)} layers left, "
+                        f"about {100 * tracker.fraction(now):.0f}% done)...")
                 time.sleep(0.05)
                 main_thread.keep_responsive()
+            self._report(1.0)
         finally:
-            for proc in running:
+            for proc in running.values():
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)

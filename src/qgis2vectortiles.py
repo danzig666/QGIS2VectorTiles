@@ -183,13 +183,14 @@ class QGIS2VectorTiles:
             self._log(f". Successfully exported {len(layers)} layers "
                       f"({self._elapsed_minutes(flatten_time)} minutes).")
 
+            # Shares of the bar: tile generation takes most of the time.
             self._log(". Styling tiles...")
-            self.feedback.setProgress(70)
+            self.feedback.setProgress(30)
             styled_layer = self._style_tiles(rules, temp_dir)
             self._log(". Successfully styled tiles.")
 
             self._log(". Exporting tiles style to client-side style package...")
-            self.feedback.setProgress(72)
+            self.feedback.setProgress(32)
             exporter = self._export_maplibre_style(temp_dir, styled_layer, rules)
             style = exporter.style
             self._log(". Successfully exported client-side style package.")
@@ -202,7 +203,7 @@ class QGIS2VectorTiles:
             archive = None
             if self._has_features(layers):
                 self._log(". Generating tiles...")
-                self.feedback.setProgress(85)
+                self.feedback.setProgress(33)
                 self._generate_tiles(layers, temp_dir, style, rules)
                 self._log(f". Successfully generated tiles "
                           f"({self._elapsed_minutes(export_time)} minutes).")
@@ -469,7 +470,7 @@ class QGIS2VectorTiles:
             rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
-            progress_range=(5.0, 70.0), parallel=self.parallel,
+            progress_range=(5.0, 30.0), parallel=self.parallel,
             feature_keys=self.feature_keys, extra_tile_fields=self.extra_tile_fields,
             cache=self.cache,
         )
@@ -506,6 +507,7 @@ class QGIS2VectorTiles:
             layers, style, temp_dir, self.extent, self.cpu_percent, self.feedback,
             layer_zooms=layer_zooms, cache=self.cache, dataset_keys=self.dataset_keys,
             layer_groups=export_cache.source_layer_groups(rules or []),
+            progress_range=(33.0, 97.0),
         ).generate()
         if self.cache is not None:
             self._log(f". Export {self.cache.summary()}.")

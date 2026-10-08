@@ -97,6 +97,81 @@ def _filter_fields(manifest_layers: List[dict], profile: PublicationProfile, dom
         layer["filterFields"] = out
 
 
+def _staged_feedback(parent):
+    """A feedback that maps each stage's own 0..100 % into the stage's share
+    of the whole export (``begin(stage)``; shares from ``weigh``), so the
+    progress bar only moves forward instead of restarting at every stage."""
+    from qgis.core import QgsProcessingFeedback  # pylint: disable=import-outside-toplevel
+
+    class StagedFeedback(QgsProcessingFeedback):
+        def __init__(self):
+            super().__init__()
+            self.parent = parent
+            self.weights: Dict[str, float] = {"PLAN": 1.0}
+            self.range = (0.0, 100.0)
+            self.last = 0.0
+            canceled = getattr(parent, "canceled", None)
+            if canceled is not None:
+                canceled.connect(self.cancel)  # C++ code checks this object's own flag
+
+        def weigh(self, weights: Dict[str, float]) -> None:
+            self.weights = dict(weights)
+
+        def begin(self, stage: str) -> None:
+            order = [s for s in STAGES if self.weights.get(s, 0) > 0]
+            total = sum(self.weights[s] for s in order) or 1.0
+            before = sum(self.weights[s] for s in order[:order.index(stage)]) if stage in order else None
+            if before is None:  # a stage without a share: stays where the bar is
+                self.range = (self.last, self.last)
+                return
+            low = 100.0 * before / total
+            self.range = (max(low, self.last), 100.0 * (before + self.weights[stage]) / total)
+            self.setProgress(0)
+
+        def setProgress(self, value):  # noqa: N802
+            super().setProgress(value)
+            low, high = self.range
+            overall = max(self.last, low + (high - low) * max(0.0, min(100.0, float(value))) / 100.0)
+            self.last = overall
+            self.parent.setProgress(overall)
+
+        def isCanceled(self):  # noqa: N802
+            return super().isCanceled() or bool(self.parent.isCanceled())
+
+        def pushInfo(self, info):  # noqa: N802
+            self.parent.pushInfo(info)
+
+        def pushWarning(self, warning):  # noqa: N802
+            self.parent.pushWarning(warning)
+
+        def reportError(self, error, fatalError=False):  # noqa: N802,N803
+            self.parent.reportError(error, fatalError)
+
+        def pushDebugInfo(self, info):  # noqa: N802
+            self.parent.pushDebugInfo(info)
+
+        def pushCommandInfo(self, info):  # noqa: N802
+            self.parent.pushCommandInfo(info)
+
+        def pushConsoleInfo(self, info):  # noqa: N802
+            self.parent.pushConsoleInfo(info)
+
+    return StagedFeedback()
+
+
+def _stage_weights(profile: PublicationProfile, raster_plans) -> Dict[str, float]:
+    """Rough shares of the export time: the vector tiles take most of it."""
+    raster_tiles = sum(getattr(plan, "tiles", 0) for plan in (raster_plans or {}).values())
+    return {
+        "PLAN": 1.0, "EXPORT_MVT": 75.0, "RECORDS": 2.0, "LEGEND": 1.0,
+        "PARCELS": 2.0 if profile.parcel_info.enabled else 0.0,
+        "RASTER": min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0,
+        "BASEMAP": 6.0 if profile.basemap.kind == "protomaps" else 0.0,
+        "STREETS": 2.0 if profile.interaction.search and profile.interaction.street_search else 0.0,
+        "BUILD_RELEASE": 5.0,
+    }
+
+
 def export_local(project, profile: PublicationProfile, extent_3857, feedback=None,
                  activate: bool = True, canaries=(), base_dir: Optional[str] = None,
                  stage_callback=None) -> LocalResult:
@@ -105,6 +180,11 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     from ..qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-outside-toplevel
     from . import qgis_model  # pylint: disable=import-outside-toplevel
 
+    from qgis.core import QgsFeedback  # pylint: disable=import-outside-toplevel
+    staged = _staged_feedback(feedback) if isinstance(feedback, QgsFeedback) else None
+    if staged is not None:
+        staged.weigh(_stage_weights(profile, None))  # raster shares once they are planned
+        feedback = staged
     progress = feedback if isinstance(feedback, Progress) else Progress(feedback)
     processing_feedback = feedback if hasattr(feedback, "pushInfo") and hasattr(feedback, "setProgress") \
         else QgsProcessingFeedback()
@@ -113,6 +193,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         if stage_callback:
             stage_callback(name)
         progress.info(f"[{name}]")
+        if staged is not None:
+            staged.begin(name)
 
     stage("PLAN")
     from .crs import project_crs_info  # pylint: disable=import-outside-toplevel
@@ -147,6 +229,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     publication_dir, work_dir = publication_dirs(profile, base_dir)
     os.makedirs(work_dir, exist_ok=True)
     raster_plans = _plan_rasters(project, profile, raster_configs, extent_3857)
+    if staged is not None:
+        staged.weigh(_stage_weights(profile, raster_plans))
     keys, _ = qgis_model.feature_keys(vector_profile)
 
     cache = None
