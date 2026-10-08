@@ -225,6 +225,7 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
     profile.interaction.address_layer_id, profile.interaction.address_number_field = addresses.id(), "hsz"
     profile.interaction.overview_map = profile.interaction.three_d = True
     dialog._populate(profile)  # pylint: disable=protected-access
+    dialog._fill_interaction_layers()  # the Interaction tab opened  # pylint: disable=protected-access
     dialog.i_layers.setCurrentRow(0)
     dialog.i_height.setCurrentIndex(dialog.i_height.findData("terulet"))  # chosen in the window
     again = dialog.collect()

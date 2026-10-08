@@ -220,6 +220,7 @@ def test_web_basemap_table_lists_the_qgis_xyz_connections(plugin, monkeypatch, t
         assert [(x.title, x.url, x.max_zoom, x.attribution) for x in xyz] == [
             ("QGIS ortó", "https://ortho.example.hu/{z}/{x}/{y}.jpg", 20, "© Lechner")]
         assert dialog.b_initial.findData("xyz-1") >= 0
+        dialog.save_settings(quiet=True)  # the QGIS connection is updated when the settings are saved
         assert settings.value("connections/xyz/items/QGIS ortó/q2vt-attribution") == "© Lechner"
         dialog.close()
     finally:
