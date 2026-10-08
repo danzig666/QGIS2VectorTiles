@@ -28,9 +28,26 @@ Az előbeállítás csak a beállításokat tölti ki; adatot nem módosít és 
 | Övezeti értékek | `p_beepmod`, `p_beepszaz`, `p_beepmag`, `p_terulet`, `p_zold`, `p_szabkieg` |
 | Vágóvonalak | „Szabályozási vonal”, „Övezethatár” (ha nincsenek: a `lszerk_ov`/`rszerk_ov` mezős vonalrétegek) |
 | Korlátozások | a lenti katalógus szerinti nevű rétegek, megnevezés-mező: `nev`, `name`, `megnevezes`, `vedettOrokErtekNev`, `azon`, `tipus`, `kategoria` |
+| Övezeti előírások | tábla (geometria nélkül is) „előírás” / „HÉSZ” / „szabályzat” / „övezeti” névvel és övezetkód mezővel (`szab_ov`, `ovezet`, `jel`, `kod`); minden más mezője megjelenik — ismert nevek magyar címmel (`beep_szaz`, `max_mag`, `min_ter`, `min_zold` …), a hivatkozás mező (`hivatkozas`, `paragrafus`, `szakasz`, `link` …) linkként |
 
 Nem korlátozás: feliratok, szintvonal, házszám, épületek, alrészletek, közigazgatási határ,
 települések, belterülethatár, kerékpárút, a szabályozás övezeti rétegei.
+
+## Övezeti előírások a webtérképen
+
+Ha a projektben van övezeti előírás tábla (pl. „HÉSZ övezeti előírások”: `szab_ov`,
+`beep_szaz`, `max_mag`, `min_ter`, `hivatkozas`), az előbeállítás bekapcsolja:
+
+- a **telekinformációban** minden telekrész alatt megjelennek az övezete előírásai;
+- egy **övezetre kattintva** (pl. út, telken kívüli terület) a felugró ablak alján is
+  („A(z) Lke-2 övezet előírásai”);
+- a **hivatkozás** mező linkként jelenik meg: ha https:// cím (pl. a Nemzeti Jogszabálytár
+  rendeletére), oda vezet; ha egy, a térképpel publikált dokumentum (Info fül → Dokumentumok,
+  pl. a HÉSZ PDF) fájlneve vagy címe, akkor arra.
+
+Az övezeti réteg felugró ablakába az előbeállítás felveszi az övezetkódot (enélkül nem
+találná meg az előírásokat). A webes megjelenítés egy változat-kiegészítő
+(`resources/web_viewer/addons/zone_rules.mjs`), a generikus pluginban nincs benne.
 
 ## Korlátozás-katalógus (javaslat)
 

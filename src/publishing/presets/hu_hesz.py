@@ -10,6 +10,11 @@ names of Hungarian zoning plans:
   ``p_beepmod``, ``p_beepszaz``, ``p_beepmag``, ``p_terulet``, ``p_zold``,
   ``p_szabkieg``;
 * cut lines: "Szabályozási vonal" and "Övezethatár";
+* zone regulations: a table (any layer, also one without geometry) named
+  like "övezeti előírások" / "HÉSZ" with a zone code field: its other fields
+  are shown in the parcel report and in a zone's popup, a reference field
+  (hivatkozas, paragrafus …) as a link to the decree (a URL, or the
+  name of a document published with the map);
 * restrictions: layers whose names match the catalogue below (protected
   areas, monuments, archaeological sites, safety zones, ...), each with a
   short explanation and a legal reference.
@@ -46,6 +51,18 @@ ZONE_FIELDS = (
     ("p_zold", "Legkisebb zöldfelület (%)"),
     ("p_szabkieg", "Kiegészítő előírás"),
 )
+REGULATION_NAMES = ("eloiras", "hesz", "szabalyzat", "ovezeti")
+REGULATION_CODE_FIELDS = ("szab_ov", "ovezet", "ovezet_jel", "ovezetjel", "jel", "kod")
+REGULATION_LINK_FIELDS = ("hivatkozas", "paragrafus", "szakasz", "hesz_hiv", "rendelet", "link", "url")
+REGULATION_TITLES = {
+    "beep_mod": "Beépítési mód", "beepmod": "Beépítési mód",
+    "beep_szaz": "Legnagyobb beépítettség (%)", "beepszaz": "Legnagyobb beépítettség (%)",
+    "max_mag": "Legnagyobb épületmagasság (m)", "epmag": "Legnagyobb épületmagasság (m)",
+    "beep_mag": "Legnagyobb épületmagasság (m)", "min_ter": "Legkisebb telekterület (m²)",
+    "telekter": "Legkisebb telekterület (m²)", "min_zold": "Legkisebb zöldfelület (%)",
+    "zold": "Legkisebb zöldfelület (%)", "hivatkozas": "HÉSZ hivatkozás", "paragrafus": "HÉSZ hivatkozás",
+    "szakasz": "HÉSZ hivatkozás", "megnevezes": "Övezet megnevezése", "nev": "Övezet megnevezése",
+}
 CUT_LINES = (
     ("szabalyozasi vonal", "Szabályozási vonal"),
     ("ovezethatar", "Övezethatár"),
@@ -180,6 +197,37 @@ def _find_cut_lines(layers) -> List[Tuple[object, str]]:
     return found
 
 
+def _find_regulations(layers, exclude) -> Optional[object]:
+    """The zone regulation table: named like REGULATION_NAMES, with a zone code
+    field and at least two other fields (with or without geometry)."""
+    for layer in layers:
+        if layer in exclude or not any(word in plain(layer.name()) for word in REGULATION_NAMES):
+            continue
+        code = _field(layer, REGULATION_CODE_FIELDS)
+        others = [f for f in layer.fields() if f.name() != code and plain(f.name()) not in ("fid", "id", "ogc fid")]
+        if code and len(others) >= 2:
+            return layer
+    return None
+
+
+def _regulation_fields(layer, code: str) -> List[PopupField]:
+    """Every other field of the table, with a Hungarian title where known; the
+    reference field as a link (URL values) or text (a document name links too)."""
+    out = []
+    for field in layer.fields():
+        name = field.name()
+        key = plain(name).replace(" ", "_")
+        if name == code or key in ("fid", "id", "ogc_fid"):
+            continue
+        kind = "number" if field.isNumeric() else "string"
+        if key in REGULATION_LINK_FIELDS:
+            values = [str(v) for v in layer.uniqueValues(layer.fields().indexOf(name), 20) if v]
+            kind = "url" if values and all(v.strip().lower().startswith("https://") or
+                                           v.strip().lower().startswith("http://") for v in values) else "string"
+        out.append(PopupField(name, REGULATION_TITLES.get(key, name), kind))
+    return out
+
+
 def _catalogue_entry(name: str):
     text = plain(name)
     if any(word in text for word in NOT_RESTRICTIONS):
@@ -252,6 +300,23 @@ def apply(project, profile) -> List[str]:
     notes.append(f"Telkek: „{parcels.name()}”, azonosító: {info.key_field}.")
     notes.append(f"Övezetek: „{zoning.name()}”, övezetkód: {info.zoning_code_field}; "
                  f"{len(info.zoning_fields)} övezeti érték.")
+
+    # Zone regulations (HÉSZ table): in the parcel report and the zone's popup.
+    regulations = _find_regulations(layers, [parcels, zoning])
+    if regulations is not None:
+        info.regulation_layer_id = regulations.id()
+        info.regulation_code_field = _field(regulations, REGULATION_CODE_FIELDS)
+        info.regulation_fields = _regulation_fields(regulations, info.regulation_code_field)
+        notes.append(f"Övezeti előírások: „{regulations.name()}” ({info.regulation_code_field} szerint), "
+                     f"{len(info.regulation_fields)} mező; az övezetre kattintva is megjelennek.")
+        zoning_config = profile.layer(zoning.id())
+        if zoning_config is not None and zoning_config.included and not any(
+                p.field == info.zoning_code_field for p in zoning_config.popup_fields):
+            # The zone popup needs the code to find its regulations.
+            zoning_config.popup_fields.insert(0, PopupField(info.zoning_code_field, "Övezet"))
+    else:
+        notes.append("Nem található övezeti előírás tábla (pl. „HÉSZ övezeti előírások” szab_ov mezővel): "
+                     "az övezeti értékek a szab_ov réteg mezőiből jönnek.")
 
     cut_lines = _find_cut_lines(layers)
     info.cut_lines = [CutLineConfig(layer.id(), title) for layer, title in cut_lines]
