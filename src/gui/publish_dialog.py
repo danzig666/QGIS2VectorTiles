@@ -164,7 +164,8 @@ class PublishDialog(QDialog):
         super().__init__(parent or (iface.mainWindow() if iface else None))
         self.iface = iface
         self.project = QgsProject.instance()
-        self.setWindowTitle(tr("Publish Web Map — QWebMap"))
+        from ..publishing.web_builder import plugin_version  # pylint: disable=import-outside-toplevel
+        self.setWindowTitle(tr("Publish Web Map — QWebMap {}").format(plugin_version()))
         self.resize(980, 760)
         self._restore_geometry()
         self.layer_configs = {}

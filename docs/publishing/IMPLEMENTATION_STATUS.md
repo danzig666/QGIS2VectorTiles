@@ -1323,3 +1323,17 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/integration/test_export_cache.py tests/unit/test_export_cache.py tests/unit/test_dependencies_validation_capabilities.py` | 20 passed (`test_geopackage_stamps_read_where_the_uri_form_fails`, `test_memory_layer_reused_after_the_project_is_reopened`; both fail on 4.22.1) |
 | `pytest tests/integration/test_publishing_pipeline.py tests/integration/test_end_to_end.py tests/unit/test_publishing_*.py tests/browser/test_static_package.py tests/integration/test_publish_dialog.py` | 183 passed, 5 skipped |
+
+## 4.22.3: export cache ignores variables no rule uses; version in the window title
+
+- The cache context held every project and global variable. Another plugin (a time tracker:
+  `@time_tracker_total_minutes`, `@time_tracker_last_save`, …) updates its project variables
+  all the time, so every export said "Redone (export settings changed (@time_tracker_…))".
+  `RulesExporter._cache_context(used)` keeps only the variables named in the rules' key parts
+  (expressions, as text); a variable a label uses still redoes that layer when it changes.
+- Publish window title: "Publish Web Map — QWebMap <version>".
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_export_cache.py tests/unit/test_export_cache.py` | 13 passed (`test_only_variables_the_rules_use_count`) |
+| `pytest tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py` | 33 passed |

@@ -73,6 +73,7 @@ QgsTask. This is intentional:
    * No QCoreApplication.processEvents() polling loop.
 """
 
+import json
 import math
 import dataclasses
 import os
@@ -1056,8 +1057,11 @@ class RulesExporter:
     # -------------------------------------------------------------------
     # Export cache
     # -------------------------------------------------------------------
-    def _cache_context(self) -> dict:
-        """Settings every dataset depends on (besides its rule and source)."""
+    def _cache_context(self, used: Optional[str] = None) -> dict:
+        """Settings every dataset depends on (besides its rule and source).
+        Of the project and global variables only those named in ``used`` (the
+        rules' expressions, as text): other plugins keep some up to date (a
+        time tracker's @time_tracker_total_minutes), which redid every layer."""
         extent = self.extent
         project_scope = QgsExpressionContextUtils.projectScope(QgsProject.instance())
         global_scope = QgsExpressionContextUtils.globalScope()
@@ -1066,6 +1070,8 @@ class RulesExporter:
             for name in scope.variableNames():
                 if name.startswith(("project_last_saved", "project_path", "project_home",
                                     "project_basename", "project_filename", "user_", "_")):
+                    continue
+                if used is not None and not re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", used):
                     continue
                 value = export_cache.stable_value(scope.variable(name))
                 if value is not export_cache.UNSTABLE:
@@ -1109,7 +1115,10 @@ class RulesExporter:
         reused: Dict[str, Optional[str]] = {}
         if self.cache is None:
             return reused
-        context = self._cache_context()
+        used = json.dumps([export_cache._plain(self._dataset_key_parts(sources[grp.layer_id], grp))  # pylint: disable=protected-access
+                           for grp in rule_groups if grp.layer_id in sources],
+                          ensure_ascii=False, default=repr)
+        context = self._cache_context(used)
         last = self.cache.last_components()
         last_context = last.get("_context") or {}
         components = {"_context": context}
