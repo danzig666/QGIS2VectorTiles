@@ -79,6 +79,68 @@ function applyBranding(manifest, pageUrl) {
   }
 }
 
+// The map's own data (manifest.info): the legal and data date under the
+// title (separate from the export date), and in the panel footer who issued
+// it, the decree and the documents published with it (links to docs/).
+export function infoStamp(info) {
+  if (!info) return "";
+  return [info.legalDate && `${t("info.legalDate")}: ${info.legalDate}`,
+          info.dataDate && `${t("info.dataDate")}: ${info.dataDate}`].filter(Boolean).join(" · ");
+}
+
+function applyInfo(manifest, pageUrl) {
+  const info = manifest.info;
+  if (!info || typeof info !== "object") return;
+  const stamp = document.getElementById("q2vt-stamp");
+  const text = infoStamp(info);
+  if (stamp && text) { stamp.textContent = text; stamp.hidden = false; }
+  const host = document.getElementById("q2vt-info");
+  if (!host) return;
+  // Collapsed: the dates are under the title already; the panel keeps its room.
+  const box = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = t("info.about");
+  box.append(summary);
+  const rows = [["info.issuer", info.issuer], ["info.decree", info.decree], ["info.legalDate", info.legalDate],
+                ["info.dataDate", info.dataDate]].filter(([, value]) => typeof value === "string" && value);
+  const list = document.createElement("dl");
+  for (const [key, value] of rows) {
+    const term = document.createElement("dt");
+    term.textContent = t(key);
+    const detail = document.createElement("dd");
+    detail.textContent = value;
+    list.append(term, detail);
+  }
+  if (rows.length) box.append(list);
+  const documents = (Array.isArray(info.documents) ? info.documents : [])
+    .filter((d) => typeof d.href === "string" && /^docs\/[a-z0-9-]+\.[a-z]+$/.test(d.href));
+  if (documents.length) {
+    const heading = document.createElement("h3");
+    heading.textContent = t("info.documents");
+    const items = document.createElement("ul");
+    items.className = "q2vt-documents";
+    for (const doc of documents) {
+      const link = document.createElement("a");
+      link.href = new URL(doc.href, pageUrl).href;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = doc.title || doc.file;
+      const item = document.createElement("li");
+      item.append(link);
+      const ext = doc.href.split(".").pop().toUpperCase();
+      const size = Number(doc.size) > 0 ? `${ext}, ${Math.max(1, Math.round(doc.size / 1024))} kB` : ext;
+      const note = document.createElement("span");
+      note.className = "q2vt-muted";
+      note.textContent = ` (${size})`;
+      item.append(note);
+      items.append(item);
+    }
+    box.append(heading, items);
+  }
+  if (box.childElementCount > 1) host.append(box);
+  host.hidden = !host.childElementCount;
+}
+
 // Opened through the publication's stable entry: show that (short, stable)
 // address again. Relative URLs keep resolving in the release (<base>); the
 // release's own address stays known for "this version" links.
@@ -125,6 +187,7 @@ async function start() {
   setText("q2vt-release", `${t("app.release")}: ${manifest.releaseId}`);
   setText("q2vt-loading-text", t("app.loading"));
   applyBranding(manifest, pageUrl);
+  applyInfo(manifest, pageUrl);
   viewer.manifest = manifest;
   if (maplibregl.getVersion() !== EXPECTED_MAPLIBRE) {
     warn("error.labels", `MapLibre ${maplibregl.getVersion()} is not the tested ${EXPECTED_MAPLIBRE}`);

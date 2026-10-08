@@ -165,9 +165,11 @@ def _stage_weights(profile: PublicationProfile, raster_plans) -> Dict[str, float
     return {
         "PLAN": 1.0, "EXPORT_MVT": 75.0, "RECORDS": 2.0, "LEGEND": 1.0,
         "PARCELS": 2.0 if profile.parcel_info.enabled else 0.0,
-        "RASTER": min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0,
+        "RASTER": (min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0)
+                  + (4.0 if profile.terrain.layer_id else 0.0),
         "BASEMAP": 6.0 if profile.basemap.kind == "protomaps" else 0.0,
-        "STREETS": 2.0 if profile.interaction.search and profile.interaction.street_search else 0.0,
+        "STREETS": 2.0 if profile.interaction.search and (profile.interaction.street_search
+                                                           or profile.interaction.address_layer_id) else 0.0,
         "BUILD_RELEASE": 5.0,
     }
 
@@ -219,7 +221,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
                               detail="\n".join(key_problems))
     # Before the tile export (it drops layers that are not in the layer tree).
     street_area = _street_area(project, profile, extent_3857) \
-        if profile.interaction.search and profile.interaction.street_search else None
+        if profile.interaction.search and (profile.interaction.street_search
+                                           or profile.interaction.address_layer_id) else None
     # Vector layers: MVT compiler; QGIS raster layers: their own raster archives.
     vector_profile, raster_configs = qgis_model.split_profile(profile, project)
     if not vector_profile.included_layer_ids():
@@ -288,11 +291,12 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
     lookup = {layer_logical_id(c.layer_id): {"popup": [p.field for p in c.popup_fields]}
               for c in profile.layers if c.included and (c.popup_fields or c.deep_links)}
 
-    streets: List[dict] = []  # street name records (filled in the STREETS stage)
+    streets: List[dict] = []  # street name and house number records (STREETS stage)
 
     def indexes(staging: str, manifest: dict) -> None:
-        from .basemap import STREETS_LAYER  # pylint: disable=import-outside-toplevel
-        wanted = dict(searchable, **({STREETS_LAYER: ["name"]} if streets else {}))
+        from .basemap import ADDRESSES_LAYER, STREETS_LAYER  # pylint: disable=import-outside-toplevel
+        kinds = {record["layerId"] for record in streets}
+        wanted = dict(searchable, **{k: ["name"] for k in (STREETS_LAYER, ADDRESSES_LAYER) if k in kinds})
         search = build_search_index(itertools.chain(_iter_records(records.path), streets), wanted,
                                     os.path.join(staging, "search"))
         if search:
@@ -310,6 +314,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 
     approved: Dict[str, set] = {}
     filter_by_layer = {layer_logical_id(c.layer_id): {f.field for f in c.filter_fields}
+                       | ({c.height_field} if c.height_field else set())  # the 3D height (reviewed)
                        for c in profile.layers if c.included}
     for component in bundle.components:
         names = filter_by_layer.get(component["layerId"], set())
@@ -333,13 +338,17 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
             extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)
         extra_files.update(report.swatches)
         parcel_manifest = {"manifest": "parcels/manifest.json", "catalog": "parcels/catalog.json",
-                           "layerId": report.manifest["layerId"], "records": report.records}
+                           "layerId": report.manifest["layerId"], "records": report.records,
+                           # The zoning layer and its code field: zone popups can show the zone's regulations.
+                           "zoningLayerId": layer_logical_id(info.zoning_layer_id) if info.zoning_layer_id else None,
+                           "zoneCodeField": info.zoning_code_field or None}
         progress.check()
 
     stage("RASTER")
     bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
                                              work_dir, progress, bundle.warnings, cache)
     bundle.warnings.extend(_vector_blend_warnings(project, profile))
+    bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress, bundle.warnings)
     progress.check()
     published = {r["layerId"] for r in bundle.raster_archives}
     dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
@@ -354,9 +363,18 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         bundle.basemap = _prepare_basemap(profile, extent_3857, work_dir, progress)
         progress.check()
 
-    if profile.interaction.search and profile.interaction.street_search:
+    addresses = profile.interaction.search and bool(profile.interaction.address_layer_id)
+    if profile.interaction.search and (profile.interaction.street_search or addresses):
         stage("STREETS")
-        streets.extend(_street_records(street_area, profile, bundle.basemap, progress, bundle.warnings))
+        pieces: Dict[str, list] = {}
+        needs_streets = profile.interaction.street_search or (
+            addresses and not profile.interaction.address_street_field)
+        found = _street_records(street_area, profile, bundle.basemap, progress, bundle.warnings,
+                                pieces) if needs_streets else []
+        if profile.interaction.street_search:
+            streets.extend(found)
+        if addresses:
+            streets.extend(_address_records(project, profile, street_area, pieces, progress, bundle.warnings))
         progress.check()
 
     stage("BUILD_RELEASE")
@@ -546,7 +564,85 @@ def _street_area(project, profile, extent_3857):
     return geometry, ""
 
 
-def _street_records(street_area, profile, prepared_basemap, progress, warnings) -> List[dict]:
+def _render_terrain(project, profile, extent_3857, work_dir, progress, warnings) -> Optional[dict]:
+    """The DEM layer as terrain-RGB tiles (terrain.py); None without one. A
+    failure is a warning: the map is published without terrain."""
+    from qgis.core import QgsRasterLayer, QgsRectangle  # pylint: disable=import-outside-toplevel
+    from . import terrain  # pylint: disable=import-outside-toplevel
+    config = profile.terrain
+    if not config.layer_id:
+        return None
+    layer = project.mapLayer(config.layer_id)
+    if not isinstance(layer, QgsRasterLayer):
+        warnings.append("Terrain: the elevation layer is not in the project; the map is published without it.")
+        return None
+    box = extent_3857 if isinstance(extent_3857, QgsRectangle) else QgsRectangle(*extent_3857)
+    area = terrain.grow((box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()))
+    low, high = terrain.terrain_zooms(layer, profile.view.min_zoom, terrain.latitude_of(area))
+    output = os.path.join(work_dir, "terrain.pmtiles")
+    if os.path.exists(output):
+        os.remove(output)
+    progress.info(f'Terrain: "{layer.name()}", zooms {low}-{high}')
+    try:
+        descriptor = terrain.render_terrain(layer, area, low, high, output, progress.sub(0.0, 1.0))
+    except PublishingError as error:
+        warnings.append(f"{error}; the map is published without terrain.")
+        return None
+    if descriptor is None:
+        warnings.append(f'Terrain: "{layer.name()}" has no heights inside the extent.')
+        return None
+    progress.info(f"Terrain: {descriptor.addressed_tiles} tiles, {descriptor.size_bytes / 1e6:.1f} MB")
+    return {"path": output, "descriptor": descriptor, "hillshade": bool(config.hillshade),
+            "exaggeration": float(config.exaggeration)}
+
+
+def _address_records(project, profile, street_area, pieces, progress, warnings) -> List[dict]:
+    """House numbers of the address layer inside the street search area, as
+    search records "street number" (the street: its field, else the nearest
+    named OpenStreetMap street)."""
+    from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsGeometry,  # pylint: disable=import-outside-toplevel
+                           QgsVectorLayer)
+    from . import basemap  # pylint: disable=import-outside-toplevel
+    config = profile.interaction
+    layer = project.mapLayer(config.address_layer_id)
+    if not isinstance(layer, QgsVectorLayer) or layer.fields().indexOf(config.address_number_field) < 0:
+        warnings.append("House number search: the address layer or its number field is missing; "
+                        "the map is published without house numbers.")
+        return []
+    street_field = config.address_street_field
+    if street_field and layer.fields().indexOf(street_field) < 0:
+        street_field = ""
+    area, _name = street_area
+    engine = QgsGeometry.createGeometryEngine(area.constGet()) if not area.isEmpty() else None
+    if engine:
+        engine.prepareGeometry()
+    to_wgs84 = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:4326"), project)
+    points = []
+    for feature in layer.getFeatures():
+        geometry = QgsGeometry(feature.geometry())
+        if geometry.isEmpty():
+            continue
+        geometry.transform(to_wgs84)
+        point = geometry if geometry.type() == 0 and not geometry.isMultipart() else geometry.pointOnSurface()
+        if engine and not engine.intersects(point.constGet()):
+            continue
+        xy = point.asPoint()
+
+        def value(name):
+            raw = feature[name] if name else None
+            return None if raw is None or (hasattr(raw, "isNull") and raw.isNull()) else raw
+        points.append((xy.x(), xy.y(), value(config.address_number_field), value(street_field)))
+    index = basemap.StreetIndex(pieces) if pieces and not street_field else None
+    records, missing = basemap.address_records(points, index)
+    progress.info(f"House numbers: {len(records)} addresses for the search")
+    if missing:
+        warnings.append(f"House number search: {missing} house numbers have no named street within "
+                        f"{int(basemap.ADDRESS_STREET_M)} m and are left out.")
+    return records
+
+
+def _street_records(street_area, profile, prepared_basemap, progress, warnings,
+                    pieces: Optional[Dict[str, list]] = None) -> List[dict]:
     """Named OpenStreetMap streets inside the extent layer for the search
     (from the bundled basemap, or read from its source when there is none).
     A failure is a warning: the map is published without street search."""
@@ -579,7 +675,8 @@ def _street_records(street_area, profile, prepared_basemap, progress, warnings) 
     try:
         reader = basemap.LocalReader(source) if prepared_basemap else basemap.open_source(source)
         try:
-            records = basemap.street_records(reader, bbox, clip, profile.locale, progress.sub(0.0, 1.0))
+            records = basemap.street_records(reader, bbox, clip, profile.locale, progress.sub(0.0, 1.0),
+                                             pieces_out=pieces)
         finally:
             reader.close()
     except (PublishingError, OSError, ValueError) as error:

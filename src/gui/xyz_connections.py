@@ -48,7 +48,7 @@ def save_qgis_xyz_connections(entries) -> int:
     changed = 0
     for entry in entries:
         name = str(entry.title).strip().replace("/", "-")
-        if not name or not entry.url:
+        if not name or not entry.url or "{bbox-epsg-3857}" in entry.url:  # WMS: not an XYZ connection
             continue
         base = f"{ROOT}/{name}"
         wanted = {"url": entry.url, "zmin": int(entry.min_zoom), "zmax": int(entry.max_zoom),

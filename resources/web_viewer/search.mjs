@@ -8,6 +8,7 @@ import { button, el, icon } from "./icons.mjs";
 
 const MARKER = "q2vt_search_marker";
 const STREETS = "q2vt-streets";  // OpenStreetMap street names (no map layer behind them)
+const ADDRESSES = "q2vt-addresses";  // house numbers "street number" (no map layer behind them)
 
 export class Search {
   constructor({ map, manifest, manifestUrl, assetsUrl, container, identify }) {
@@ -98,10 +99,12 @@ export class Search {
       item.setAttribute("role", "option");
       const layer = this.layers.get(result.layerId);
       const street = result.layerId === STREETS;
+      const address = result.layerId === ADDRESSES;
       item.append(icon(street ? "road" : "pin", 18));
       const text = el("span", "q2vt-result-text");
       text.append(el("span", "q2vt-result-label", result.label || result.key),
-        el("span", "q2vt-layer-name", street ? t("search.street") : (layer ? layer.title : "")));
+        el("span", "q2vt-layer-name", street ? t("search.street") : address ? t("search.address")
+          : (layer ? layer.title : "")));
       item.append(text);
       item.addEventListener("click", () => this.choose(index));
       this.list.append(item);
@@ -152,7 +155,7 @@ export class Search {
     this.input.value = result.label || result.key;
     await goTo(this.map, result);
     this.marker(result.anchor);
-    if (result.layerId !== STREETS) this.identify.open(result.layerId, result.key, result.anchor);
+    if (result.layerId !== STREETS && result.layerId !== ADDRESSES) this.identify.open(result.layerId, result.key, result.anchor);
   }
 }
 

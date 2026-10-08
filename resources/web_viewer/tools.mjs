@@ -6,13 +6,15 @@
 import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
-import { PRINT_SCALES } from "./print.mjs";
+import { PAPERS, PRINT_SCALES } from "./print.mjs";
 import { Snapper } from "./snap.mjs";
+import { renderProfile, sampleLine } from "./profile.mjs";
 
 const SOURCE = "q2vt_measure";
 const SNAP_SOURCE = "q2vt_measure_snap";
 const SNAP_KEY = "q2vt:snap";
 const SCALE_KEY = "q2vt:print-scale";
+const PAPER_KEY = "q2vt:print-paper";
 
 export function formatDistance(metres) {
   return metres >= 1000 ? `${formatNumber(metres / 1000, 3)} km` : `${formatNumber(metres, 1)} m`;
@@ -141,6 +143,12 @@ export class Tools {
       label.append(box, el("span", "", t("tools.snap", { layers: this.snapper.titles.join(", ") })));
       block.append(label);
     }
+    // Elevation profile of a measured line (with terrain).
+    this.profileButton = iconButton("q2vt-chip", null, "chart", { text: t("profile.title") });
+    this.profileButton.hidden = true;
+    this.profileButton.addEventListener("click", () => this.showProfile());
+    this.profileBox = el("div", "q2vt-profile");
+    block.append(this.profileButton, this.profileBox);
     block.append(el("p", "q2vt-muted", t("tools.measureHelp")),
       ...(this.snapper.available ? [el("p", "q2vt-muted", t("tools.snapHelp"))] : []),
       el("p", "q2vt-muted", t("tools.measureMethod")));
@@ -206,6 +214,7 @@ export class Tools {
 
   start(mode) {
     this.viewer.streetViewControl?.stop();  // one map tool at a time
+    if (this.viewer.draw?.mode) this.viewer.draw.cancel();
     this.ensureSource();
     this.mode = mode;
     this.points = [];
@@ -222,6 +231,10 @@ export class Tools {
     this.showSnap(null);
     if (this.map.getSource(SOURCE) && this.points.length) this.draw();
     this.viewer.measuring = false;
+    if (this.profileButton) {
+      this.profileButton.hidden = !(this.viewer.threeD && this.viewer.threeD.terrain
+                                    && this.lastMode === "distance" && this.points.length >= 2);
+    }
     this.map.doubleClickZoom.enable();
     this.map.getCanvas().style.cursor = "";
     for (const node of Object.values(this.modeButtons || {})) node.setAttribute("aria-pressed", "false");
@@ -233,7 +246,18 @@ export class Tools {
       this.points = [];
       if (this.map.getSource(SOURCE)) this.map.getSource(SOURCE).setData({ type: "FeatureCollection", features: [] });
       if (this.result) this.result.textContent = "";
+      if (this.profileBox) this.profileBox.replaceChildren();
+      if (this.profileButton) this.profileButton.hidden = true;
     }
+  }
+
+  async showProfile() {
+    const threeD = this.viewer.threeD;
+    if (!threeD || this.points.length < 2) return null;
+    this.profileBox.replaceChildren(el("p", "q2vt-muted", t("app.loading")));
+    const { samples } = sampleLine(this.points, 200);
+    const heights = await threeD.elevations(samples.map((s) => s.point));
+    return renderProfile(this.profileBox, samples, heights || []);
   }
 
   measurement() {
@@ -278,7 +302,21 @@ export class Tools {
     this.applyScale = apply;
     apply();  // the saved choice also for Ctrl+P and the parcel print
     label.append(el("span", "", t("print.scaleLabel")), choice);
-    block.append(label, button, el("p", "q2vt-muted", t("tools.printNote")));
+    // Paper: A4 / A3, landscape / portrait.
+    const paperLabel = el("label", "q2vt-print-choice");
+    const paper = document.createElement("select");
+    for (const id of Object.keys(PAPERS)) paper.append(new Option(t(`print.paper.${id}`), id));
+    const savedPaper = (() => { try { return localStorage.getItem(PAPER_KEY); } catch { return null; } })();
+    if (savedPaper && PAPERS[savedPaper]) paper.value = savedPaper;
+    const applyPaper = () => { if (this.viewer && this.viewer.printer) this.viewer.printer.paper = paper.value; };
+    paper.addEventListener("change", () => {
+      applyPaper();
+      try { localStorage.setItem(PAPER_KEY, paper.value); } catch { /* storage unavailable */ }
+    });
+    applyPaper();
+    this.paperChoice = paper;
+    paperLabel.append(el("span", "", t("print.paperLabel")), paper);
+    block.append(label, paperLabel, button, el("p", "q2vt-muted", t("tools.printNote")));
     this.container.append(block);
   }
 

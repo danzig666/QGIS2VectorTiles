@@ -143,6 +143,21 @@
         },
         "googleApiKey": {
           "type": "string"
+        },
+        "overviewMap": {
+          "type": "boolean"
+        },
+        "drawing": {
+          "type": "boolean"
+        },
+        "addressLayerId": {
+          "type": "string"
+        },
+        "addressNumberField": {
+          "type": "string"
+        },
+        "addressStreetField": {
+          "type": "string"
         }
       }
     },
@@ -534,6 +549,56 @@
           "type": "string"
         }
       }
+    },
+    "info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issuer": {
+          "type": "string"
+        },
+        "decree": {
+          "type": "string"
+        },
+        "legalDate": {
+          "type": "string"
+        },
+        "dataDate": {
+          "type": "string"
+        },
+        "documents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "terrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layerId": {
+          "type": "string"
+        },
+        "hillshade": {
+          "type": "boolean"
+        },
+        "exaggeration": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5
+        }
+      }
     }
   },
   "$defs": {
@@ -690,6 +755,9 @@
         "maxScale": {
           "type": "number",
           "minimum": 0
+        },
+        "heightField": {
+          "type": "string"
         }
       }
     },

@@ -15,8 +15,28 @@ const KEY = "q2vt_feature_key";
 const SAFE_URL = /^(https?:|mailto:)/i;
 const HL = "q2vt_hl_";
 
+// Documents published with the map (manifest.info.documents): a popup value
+// naming one (its file name, with or without a folder, or its title) links to it.
+const DOCUMENTS = new Map();
+export function setDocuments(info, pageUrl) {
+  DOCUMENTS.clear();
+  for (const doc of (info && Array.isArray(info.documents)) ? info.documents : []) {
+    if (typeof doc.href !== "string" || !/^docs\/[a-z0-9-]+\.[a-z]+$/.test(doc.href)) continue;
+    const url = new URL(doc.href, pageUrl).href;
+    for (const name of [doc.file, doc.title]) if (typeof name === "string" && name.trim()) DOCUMENTS.set(name.trim().toLowerCase(), url);
+  }
+}
+
+function documentUrl(value) {
+  if (typeof value !== "string" || !DOCUMENTS.size) return null;
+  const text = value.trim().toLowerCase();
+  return DOCUMENTS.get(text) || DOCUMENTS.get(text.split(/[\\/]/).pop()) || null;
+}
+
 export function formatValue(value, type) {
   if (value === null || value === undefined) return { text: t("popup.null"), muted: true };
+  const doc = documentUrl(value);
+  if (doc) return { text: String(value).trim().split(/[\\/]/).pop(), url: doc };
   if (value === "") return { text: t("popup.empty"), muted: true };
   if (type === "boolean" || typeof value === "boolean") return { text: value ? t("popup.true") : t("popup.false") };
   if ((type === "number" || type === "integer") && typeof value === "number") return { text: formatNumber(value) };
@@ -69,7 +89,7 @@ export class Identify {
   }
 
   async click(event) {
-    if (this.viewer.measuring || this.viewer.streetView) return;
+    if (this.viewer.measuring || this.viewer.streetView || this.viewer.drawing) return;
     const hits = this.hits(event.point);
     if (!hits.length) {
       this.popup.remove();
@@ -142,6 +162,10 @@ export class Identify {
       link.type = "button";
       link.addEventListener("click", () => this.viewer.permalink.copy({ selected: { layerId, key } }));
       box.append(link);
+    }
+    // Edition add-ons append their own sections (e.g. zone rules).
+    if (this.extend) {
+      try { await this.extend(box, { layerId, key, record }); } catch { /* the popup without them */ }
     }
     const where = lngLat || (record && record.p) || this.map.getCenter();
     this.popup.setLngLat(where).setDOMContent(box).addTo(this.map);

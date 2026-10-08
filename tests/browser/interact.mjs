@@ -3,7 +3,8 @@
 // actions: [{"eval": "<async JS expression>"} | {"click": [x, y]} |
 //           {"clickLngLat": [lng, lat]} | {"type": ["#selector", "text"]} |
 //           {"press": "Enter"} | {"wait": ms} | {"idle": true} |
-//           {"screenshot": "path.png"} | {"goto": "url"}]
+//           {"screenshot": "path.png"} | {"goto": "url"} | {"media": "print" | "screen"} |
+//           {"viewport": [width, height]}]
 // Every "eval" result is collected in order. Prints JSON {results, pageErrors, console}.
 import { chromium } from "playwright-core";
 import { readFileSync } from "node:fs";
@@ -63,6 +64,8 @@ for (const action of actions) {
   else if (action.idle) await idle();
   else if (action.screenshot) await page.screenshot({ path: action.screenshot });
   else if (action.goto) { await page.goto(action.goto); await waitReady(); }
+  else if (action.media) await page.emulateMedia({ media: action.media });
+  else if (action.viewport) await page.setViewportSize({ width: action.viewport[0], height: action.viewport[1] });
 }
 await browser.close();
 process.stdout.write(JSON.stringify({ results, pageErrors, console: consoleMessages.slice(0, 20) }) + "\n");

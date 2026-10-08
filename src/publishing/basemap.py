@@ -345,6 +345,8 @@ def extract(reader, output: str, detail, overview, max_zoom: int, overview_zoom:
 # --- street names for the search ----------------------------------------------------------
 
 STREETS_LAYER = "q2vt-streets"   # pseudo layer of the search index (no tiles, no style)
+ADDRESSES_LAYER = "q2vt-addresses"  # house numbers (street + number) in the search index
+ADDRESS_STREET_M = 150.0         # a house number takes the name of a street this close
 STREET_ZOOM = 15                 # Protomaps' most detailed zoom
 STREET_JOIN_M = 300.0            # pieces of one name closer than this are one street
 
@@ -390,7 +392,8 @@ def _middle(line: List[Tuple[float, float]]) -> List[float]:
 
 
 def street_records(reader, bbox, clip: Optional[Callable] = None, locale: str = "hu",
-                   progress: Optional[Progress] = None, max_tiles: int = MAX_TILES) -> List[dict]:
+                   progress: Optional[Progress] = None, max_tiles: int = MAX_TILES,
+                   pieces_out: Optional[Dict[str, list]] = None) -> List[dict]:
     """Search records of the named streets (Protomaps ``roads`` layer) in
     ``bbox`` (lon/lat). ``clip(line) -> [lines]`` keeps the parts inside the
     area (an extent layer's polygon); pieces of one name within
@@ -430,6 +433,9 @@ def street_records(reader, bbox, clip: Optional[Callable] = None, locale: str = 
                     if len(piece) >= 2:
                         entry["pieces"].append(piece)
     progress.update(0.9, "Street names: grouping")
+    if pieces_out is not None:  # for the house numbers (never published)
+        for name, entry in names.items():
+            pieces_out.setdefault(name, []).extend(entry["pieces"])
     records = []
     for name in sorted(names):
         pieces = names[name]["pieces"]
@@ -462,6 +468,71 @@ def street_records(reader, bbox, clip: Optional[Callable] = None, locale: str = 
                             "terms": terms, "anchor": _middle(pieces[longest]), "bounds": bounds,
                             "suggestedZoom": 17})
     return records
+
+
+class StreetIndex:
+    """Nearest named street of a point (lon/lat), from street pieces
+    ({name: [[(lon, lat), ...], ...]}) on a grid of about 150 m."""
+
+    CELL = 0.002  # degrees
+
+    def __init__(self, pieces: Dict[str, list]):
+        self.cells: Dict[Tuple[int, int], List[tuple]] = {}
+        for name, lines in pieces.items():
+            for line in lines:
+                for a, b in zip(line, line[1:]):
+                    x0, x1 = sorted((int(math.floor(a[0] / self.CELL)), int(math.floor(b[0] / self.CELL))))
+                    y0, y1 = sorted((int(math.floor(a[1] / self.CELL)), int(math.floor(b[1] / self.CELL))))
+                    for cx in range(x0, x1 + 1):
+                        for cy in range(y0, y1 + 1):
+                            self.cells.setdefault((cx, cy), []).append((name, a, b))
+
+    @staticmethod
+    def _distance(p, a, b) -> float:
+        """Metres from p to the segment a-b (local flat projection)."""
+        k = math.cos(math.radians(p[1]))
+        ax, ay = (a[0] - p[0]) * 111320.0 * k, (a[1] - p[1]) * 110540.0
+        bx, by = (b[0] - p[0]) * 111320.0 * k, (b[1] - p[1]) * 110540.0
+        dx, dy = bx - ax, by - ay
+        length = dx * dx + dy * dy
+        t = 0.0 if length == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / length))
+        return math.hypot(ax + t * dx, ay + t * dy)
+
+    def nearest(self, point, limit_m: float = ADDRESS_STREET_M) -> Optional[str]:
+        cx, cy = int(math.floor(point[0] / self.CELL)), int(math.floor(point[1] / self.CELL))
+        best, best_d = None, limit_m
+        for x in range(cx - 1, cx + 2):
+            for y in range(cy - 1, cy + 2):
+                for name, a, b in self.cells.get((x, y), ()):
+                    distance = self._distance(point, a, b)
+                    if distance <= best_d:
+                        best, best_d = name, distance
+        return best
+
+
+def address_records(points, streets: Optional["StreetIndex"] = None) -> Tuple[List[dict], int]:
+    """Search records of house numbers: ``points`` = [(lon, lat, number,
+    street or None)]; a missing street is the nearest named one. Returns
+    (records, numbers without a street)."""
+    records, seen, missing = [], set(), 0
+    for lon, lat, number, street in points:
+        if isinstance(number, float) and number.is_integer():
+            number = int(number)
+        number = " ".join(str("" if number is None else number).split())
+        if not number:
+            continue
+        street = " ".join(str(street or "").split()) or (streets.nearest((lon, lat)) if streets else None)
+        if not street:
+            missing += 1
+            continue
+        label = f"{street} {number}"
+        if label in seen:
+            continue
+        seen.add(label)
+        anchor = [round(lon, 6), round(lat, 6)]
+        records.append({"layerId": ADDRESSES_LAYER, "featureKey": label, "label": label,
+                        "terms": [label], "anchor": anchor, "bounds": anchor + anchor, "suggestedZoom": 18})
+    return records, missing
 
 
 # --- styles ---------------------------------------------------------------------------------

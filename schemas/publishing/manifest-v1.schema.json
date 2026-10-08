@@ -516,11 +516,21 @@
         "null"
       ],
       "properties": {
-        "authid": {"type": "string"},
-        "name": {"type": "string"},
-        "proj": {"type": "string"},
-        "geographic": {"type": "boolean"},
-        "units": {"type": "string"}
+        "authid": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "proj": {
+          "type": "string"
+        },
+        "geographic": {
+          "type": "boolean"
+        },
+        "units": {
+          "type": "string"
+        }
       },
       "additionalProperties": false
     },
@@ -759,6 +769,18 @@
           "type": "integer"
         }
       }
+    },
+    "info": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "terrain": {
+      "type": [
+        "object",
+        "null"
+      ]
     }
   },
   "$defs": {

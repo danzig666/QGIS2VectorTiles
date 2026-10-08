@@ -1357,3 +1357,44 @@ italic Liberation Sans) that was horizontal on the web.
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_tile_progress.py tests/integration/test_export_cache.py tests/unit/test_export_cache.py tests/integration/test_publishing_pipeline.py tests/integration/test_publish_dialog.py` | 29 passed (`test_publication_bar_only_moves_forward`: tiles start below 40%, span over 40 points) |
+
+## 4.24.0: map info and documents, WMS, overview, house numbers, drawing, 3D, terrain, map extract
+
+- **Info tab** (`InfoConfig`): issuer, decree, legal date ("in force from") and data date. The
+  dates are under the title (`#q2vt-stamp`); the panel footer has a collapsible block with the
+  rest and the **documents** (`DocumentConfig`, copied to `docs/<ascii-name>.<ext>`;
+  `DOCUMENT_EXTENSIONS`: PDF, Word/ODT, RTF, text, images; never HTML/SVG). A popup value naming
+  a document (file name with or without a folder, or its title) links to it
+  (`identify.setDocuments`). Documents are part of the disclosure fingerprint and the review.
+- **WMS web basemaps**: Basemap tab "Add WMS…" (from a project WMS layer or address + layers):
+  a GetMap template with `{bbox-epsg-3857}` (`xyz.wms_template`), 256 px tiles; the page's CSP
+  allows its origin like an XYZ server. Not saved as a QGIS XYZ connection.
+- **Overview map** (`overview.mjs`, `interaction.overviewMap`): bottom right, collapsible; the
+  main style without labels or runtime overlays, four zooms out, the view and the extent marked.
+- **House numbers in the search** (`interaction.addressLayerId/NumberField/StreetField`):
+  records "street number" (`basemap.address_records`, pseudo layer `q2vt-addresses`); the street
+  from a field, else the nearest named OSM street within 150 m (`basemap.StreetIndex`, a grid of
+  the street pieces read for the street search; their geometry is never published).
+- **Drawing** (`draw.mjs`, `interaction.drawing`, `tools.draw`): points, lines, areas, text in 5
+  colours; kept in the shared link (`d=`: polyline-encoded coordinates, strictly decoded, at
+  most 200 items / 2000 points); saved as GeoJSON or KML; text as DOM markers (textContent).
+- **3D** (`threed.mjs`): a polygon layer's `heightField` (numeric, metres; written to the tiles
+  and approved in the disclosure check) gives fill-extrusion copies of its fills, shown in 3D
+  while the layer is; the 3D button tilts the map (55°) and turns on the terrain.
+- **Terrain** (`terrain.py`, `TerrainConfig`): a DEM raster layer → terrain-RGB PNG tiles
+  (mapbox encoding, GDAL warp per zoom, FillNodata at the edges) in `data/terrain.pmtiles`
+  (zooms: two below the map's first zoom up to the DEM's own resolution, ≤ 15; area: extent +
+  20 %); optional hillshade above the basemap; **elevation profile** of a measured line
+  (`profile.mjs`: 200 samples decoded from the tiles, lowest/highest point, climb/descent).
+- **Map extract print** (`print.mjs PAPERS`): A4/A3, landscape/portrait (`@page` injected, map
+  size by CSS variables), north arrow, scale bar, "Map extract" header with issuer, decree, legal
+  and data date, scale and print date; printed seen from above (pitch 0).
+- Generic hooks used by the Hungarian edition's zone rules: `Identify.extend(box, {layerId,
+  key, record})`, `parcelInfo.zoningLayerId/zoneCodeField` in the manifest, regulation field
+  types (a URL or a document name is a link in the parcel report).
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_extras.py` (new) | 9 passed (info, documents, WMS, overview, drawing in the link + exports, house numbers, terrain heights, 3D/profile, A4/A3 print layouts) |
+| Related browser suites (features, parcel, transport, smoke, static package, Street View, basemap raster) | 45 passed |
+| `pytest tests/unit/test_publishing_*.py tests/unit/test_export_cache.py tests/integration/test_publish_dialog*.py tests/integration/test_publishing_pipeline.py tests/integration/test_export_cache.py tests/integration/test_tile_progress.py` | 195 passed, 5 skipped (+ `test_info_documents_terrain_addresses_round_trip`) |

@@ -413,7 +413,8 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
                           "note": config.note, "reference": config.reference,
                           "distance": config.buffer_m if kind in (0, 1) else 0}
                          for index, config, kind, _, _ in restrictions],
-        "regulationFields": [{"field": f.field, "title": f.alias or f.field} for f in info.regulation_fields],
+        "regulationFields": [{"field": f.field, "title": f.alias or f.field, "type": f.type}
+                             for f in info.regulation_fields],
         "regulations": regulations, "disclaimer": info.disclaimer,
         "units": {"area": "m2", "crs": crs.authid()},
     }

@@ -26,6 +26,8 @@ LOCALES = ("en", "hu")
 FILTER_KINDS = ("values", "range", "text")
 FIELD_TYPES = ("string", "integer", "number", "boolean", "date", "url")
 RASTER_FORMATS = ("png", "jpeg", "webp")
+# Documents published with the map (never HTML/SVG: they would run in the map's own site).
+DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".png", ".jpg", ".jpeg", ".webp")
 BASEMAP_KINDS = ("none", "protomaps")
 BASEMAP_FLAVORS = ("light", "dark", "white", "grayscale", "black")
 SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
@@ -87,6 +89,9 @@ class LayerConfig:
     label_always: bool = False
     # The viewer's measurement tools snap to this layer's corners and edges.
     snap: bool = False
+    # Polygon layers: a numeric field of heights in metres; the viewer's 3D
+    # view raises the polygons (e.g. buildings) to it. Written to the tiles.
+    height_field: str = ""
     toggleable: bool = True            # the viewer's user may switch it off
     # Web map only, on top of the layer's own QGIS scale range (QGIS scale
     # denominators, 0 = no limit): hidden when zoomed out beyond 1:min_scale
@@ -197,6 +202,37 @@ class ParcelInfoConfig:
 
 
 @dataclass
+class DocumentConfig:
+    """A document published with the map (e.g. the decree as PDF): copied
+    into the release and listed in the viewer."""
+
+    title: str = ""
+    path: str = ""                     # local file (DOCUMENT_EXTENSIONS)
+
+
+@dataclass
+class InfoConfig:
+    """What the map shows about itself: who issued it, its legal state and
+    the date of its data (separate from the export date), and documents."""
+
+    issuer: str = ""                   # e.g. the municipality
+    decree: str = ""                   # e.g. "12/2025. (X. 1.) önkormányzati rendelet"
+    legal_date: str = ""               # in force from (free text, e.g. "2025. 10. 01.")
+    data_date: str = ""                # data as of (free text)
+    documents: List[DocumentConfig] = field(default_factory=list)
+
+
+@dataclass
+class TerrainConfig:
+    """Terrain from a DEM raster layer (heights in metres): the 3D view's
+    relief, an optional hillshade and elevation profiles in the viewer."""
+
+    layer_id: str = ""                 # "" = no terrain
+    hillshade: bool = True             # shaded relief drawn under the map (also in 2D)
+    exaggeration: float = 1.5          # vertical exaggeration in 3D
+
+
+@dataclass
 class ViewConfig:
     extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857; None = canvas
     extent_layer: str = ""                # layer id: the extent follows that layer's extent
@@ -224,6 +260,16 @@ class InteractionConfig:
     # Named OpenStreetMap streets inside the extent layer in the search (read
     # from the basemap; without a basemap from its source: needs internet).
     street_search: bool = False
+    # House numbers in the search ("Fő utca 12"): a point (or polygon) layer
+    # with the number; the street from a field or the nearest OSM street.
+    address_layer_id: str = ""
+    address_number_field: str = ""
+    address_street_field: str = ""     # "" = the nearest named OpenStreetMap street
+    # A small overview map in a corner with the current view marked.
+    overview_map: bool = False
+    # Drawing (points, lines, areas, text) kept in the shared link, exported
+    # as GeoJSON / KML; nothing is stored on the site.
+    drawing: bool = True
     # Google Street View in the viewer (a tap on the map opens the panorama
     # looking toward the tapped point). The key is public in the page:
     # restrict it to the site's address (HTTP referrer) in Google Cloud.
@@ -284,6 +330,8 @@ class PublicationProfile:
     basemap: BasemapConfig = field(default_factory=BasemapConfig)
     accent_color: str = "#2563eb"      # viewer accent colour
     parcel_info: ParcelInfoConfig = field(default_factory=ParcelInfoConfig)
+    info: InfoConfig = field(default_factory=InfoConfig)
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
     view: ViewConfig = field(default_factory=ViewConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

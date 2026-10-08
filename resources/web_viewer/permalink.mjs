@@ -4,7 +4,7 @@
 // to configured fields/values, sizes are capped; nothing from the URL is
 // evaluated as code or as a style expression.
 
-const MAX_HASH = 4000;
+const MAX_HASH = 24000;  // a drawing (d=) can be long
 const RELEASE_PATH = /\/releases\/r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\/(index\.html)?$/;
 
 function b64url(text) {
@@ -39,6 +39,7 @@ export function encodeState(manifest, value, camera, defaults) {
   if (opacity.length) params.set("o", opacity.join(","));
   if (value.filters && Object.keys(value.filters).length) params.set("f", b64url(JSON.stringify(value.filters)));
   if (value.selected) params.set("sel", `${value.selected.layerId}~${value.selected.key}`);
+  if (value.drawing) params.set("d", value.drawing);  // draw.mjs encodeDrawing (decoded and checked there)
   return params.toString();
 }
 
@@ -81,6 +82,8 @@ export function decodeState(manifest, hash) {
       if (filters && typeof filters === "object") out.filters = filters;
     } catch { /* ignored */ }
   }
+  const drawing = params.get("d");
+  if (drawing && drawing.length <= 20000 && /^[A-Za-z0-9_-]+$/.test(drawing)) out.drawing = drawing;
   const selected = params.get("sel");
   if (selected && selected.length <= 600) {
     const at = selected.indexOf("~");
@@ -103,7 +106,7 @@ export class Permalink {
 
   hash(extra = {}) {
     const c = this.map.getCenter();
-    const value = { ...this.state.value, ...extra };
+    const value = { ...this.state.value, drawing: this.drawing ? this.drawing() : "", ...extra };
     return encodeState(this.manifest, value, { zoom: this.map.getZoom(), lat: c.lat, lng: c.lng }, this.defaults);
   }
 

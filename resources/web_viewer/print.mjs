@@ -1,6 +1,8 @@
-// Print on one A4 landscape page: the map at its printed size on the left,
-// the title, date and a legend of what is drawn in the printed area (or the
-// parcel report) on the right. The map is resized to its print size and
+// Print a map extract on one page (A4 or A3, landscape or portrait): the
+// map at its printed size (left, or on top in portrait) with a north arrow
+// and the scale bar, and the sheet: "map extract", the title, who issued the
+// map, its decree and legal date (manifest.info), the scale, the print date,
+// and a legend of what is drawn in the printed area (or the parcel report). The map is resized to its print size and
 // redrawn before the browser prints (a CSS-stretched map canvas printed
 // distorted or clipped); a long legend continues on the next page between
 // entries, never inside one. The map prints at a map scale (M 1:500): the
@@ -10,6 +12,36 @@ import { el } from "./icons.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 
 const SHEET = "q2vt-print-sheet";
+const PAGE_STYLE = "q2vt-print-page";
+// Paper layouts: the page, the map's printed size (mm) inside 8 mm margins
+// (the sheet takes the rest: a column beside it, or rows under it).
+export const PAPERS = {
+  "a4-landscape": { page: "A4 landscape", map: [186, 190], portrait: false },
+  "a4-portrait": { page: "A4 portrait", map: [194, 200], portrait: true },
+  "a3-landscape": { page: "A3 landscape", map: [300, 277], portrait: false },
+  "a3-portrait": { page: "A3 portrait", map: [281, 300], portrait: true },
+};
+
+function northArrow(bearing) {
+  const ns = "http://www.w3.org/2000/svg";
+  const box = document.createElement("div");
+  box.className = "q2vt-print-north";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 34");
+  svg.style.transform = `rotate(${-bearing}deg)`;
+  const add = (tag, attrs, text) => {
+    const node = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    if (text) node.textContent = text;
+    svg.append(node);
+  };
+  add("path", { d: "M12 10 L18 32 L12 27 L6 32 Z", fill: "#000" });
+  add("path", { d: "M12 10 L12 27 L6 32 Z", fill: "#fff", stroke: "#000", "stroke-width": "0.8" });
+  add("text", { x: "12", y: "8", "text-anchor": "middle", "font-size": "8", "font-weight": "700",
+                "font-family": "sans-serif" }, t("print.north"));
+  box.append(svg);
+  return box;
+}
 const EARTH = 40075016.686;      // m, equator (Web Mercator)
 const PAPER_PX = 0.0254 / 96;    // m, one CSS pixel on paper at 100 %
 export const PRINT_SCALES = [100, 200, 250, 500, 1000, 1500, 2000, 2500, 4000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 500000];
@@ -63,6 +95,7 @@ export class Printer {
     Object.assign(this, { map, manifest, content });
     this.active = false;
     this.scale = 0;  // 0: the screen's scale, rounded to a standard scale
+    this.paper = "a4-landscape";
     // Ctrl+P (the browser's own print): the same layout, without waiting.
     this.onBefore = () => { if (!this.active) this.prepare("map"); };
     this.onAfter = () => this.restore();
@@ -84,16 +117,31 @@ export class Printer {
   // (unless a print scale was chosen), else the screen's view.
   prepare(mode, focus = null) {
     this.active = true;
-    this.view = { center: this.map.getCenter(), zoom: this.map.getZoom(), bearing: this.map.getBearing() };
-    document.body.classList.add("q2vt-printing", `q2vt-printing-${mode}`);
+    this.view = { center: this.map.getCenter(), zoom: this.map.getZoom(), bearing: this.map.getBearing(),
+                  pitch: this.map.getPitch() };
+    const paper = PAPERS[this.paper] || PAPERS["a4-landscape"];
+    const body = document.body;
+    body.style.setProperty("--q2vt-pmap-w", `${paper.map[0]}mm`);
+    body.style.setProperty("--q2vt-pmap-h", `${paper.map[1]}mm`);
+    body.classList.toggle("q2vt-print-portrait", paper.portrait);
+    let page = document.getElementById(PAGE_STYLE);
+    if (!page) {
+      page = document.createElement("style");
+      page.id = PAGE_STYLE;
+      document.head.append(page);
+    }
+    page.textContent = `@media print { @page { size: ${paper.page}; margin: 8mm; } }`;
+    body.classList.add("q2vt-printing", `q2vt-printing-${mode}`);
     this.map.resize();
     const canvas = this.map.getContainer();
     const fitted = focus ? focusView(focus, canvas.clientWidth, canvas.clientHeight) : null;
     const center = fitted && !this.scale ? fitted.center : this.view.center;
     const lat = center.lat;
     const wanted = this.scale || (fitted ? fitted.scale : standardScale(scaleAt(this.view.zoom, lat)));
-    // The centre (the parcel's, or the screen's), at the scale on paper.
-    this.map.jumpTo({ ...this.view, center, zoom: zoomFor(wanted, lat) });
+    // The centre (the parcel's, or the screen's), at the scale on paper (seen
+    // from above: a scale holds on a flat map only).
+    this.map.jumpTo({ ...this.view, pitch: 0, center, zoom: zoomFor(wanted, lat) });
+    this.map.getContainer().append(northArrow(this.view.bearing));
     const actual = scaleAt(this.map.getZoom(), lat);  // the map's zoom limits may not reach it
     this.printScale = Math.abs(actual / wanted - 1) < 0.005 ? wanted : Math.round(actual);
     this.fill(mode);
@@ -101,10 +149,19 @@ export class Printer {
 
   fill(mode) {
     const head = el("header", "q2vt-print-head");
+    const info = this.manifest.info || {};
+    head.append(el("p", "q2vt-print-kicker", t("print.extract")));
     head.append(el("h1", "", this.manifest.title || ""));
+    const rows = [["info.issuer", info.issuer], ["info.decree", info.decree], ["info.legalDate", info.legalDate],
+                  ["info.dataDate", info.dataDate]].filter(([, v]) => typeof v === "string" && v);
+    if (rows.length) {
+      const list = el("dl", "q2vt-print-info");
+      for (const [key, value] of rows) list.append(el("dt", "", t(key)), el("dd", "", value));
+      head.append(list);
+    }
     if (this.printScale) head.append(el("p", "q2vt-print-scale", t("print.scale", { scale: formatNumber(this.printScale, 0) })));
     const date = new Date().toLocaleString(document.documentElement.lang || undefined);
-    head.append(el("p", "", [date, this.manifest.attribution].filter(Boolean).join(" — ")));
+    head.append(el("p", "", [`${t("print.date")}: ${date}`, this.manifest.attribution].filter(Boolean).join(" — ")));
     const body = this.content(mode) || el("div");
     body.classList.add("q2vt-print-body");
     this.sheet().replaceChildren(head, body);
@@ -121,9 +178,10 @@ export class Printer {
   restore() {
     if (!this.active) return;
     this.active = false;
-    document.body.classList.remove("q2vt-printing", "q2vt-printing-map", "q2vt-printing-parcel");
+    document.body.classList.remove("q2vt-printing", "q2vt-printing-map", "q2vt-printing-parcel", "q2vt-print-portrait");
     const sheet = document.getElementById(SHEET);
     if (sheet) sheet.replaceChildren();
+    for (const node of this.map.getContainer().querySelectorAll(".q2vt-print-north")) node.remove();
     this.map.resize();
     if (this.view) this.map.jumpTo(this.view);
   }

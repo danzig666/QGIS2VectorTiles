@@ -23,7 +23,7 @@ import traceback
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
                        QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
-                       QgsTask, QgsVectorLayer)
+                       QgsTask, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
@@ -234,6 +234,7 @@ class PublishDialog(QDialog):
         self.tabs.addTab(self._interaction_tab(), tr("Interaction"))
         self.tabs.addTab(self._basemap_tab(), tr("Basemap"))
         self.tabs.addTab(self._parcel_tab(), tr("Parcel report"))
+        self.tabs.addTab(self._info_tab(), tr("Info"))
         self.tabs.addTab(self._output_tab(), tr("Output"))
         self.tabs.addTab(self._destination_tab(), tr("Destination"))
         self.tabs.addTab(self._review_tab(), tr("Review"))
@@ -579,6 +580,80 @@ class PublishDialog(QDialog):
         self.theme_initial.setCurrentIndex(max(0, self.theme_initial.findData(current or "")))
         self.theme_initial.blockSignals(False)
 
+    def _info_tab(self):
+        """The map's own data (issuer, decree, legal and data date: shown under
+        the title, in the panel and on prints) and documents published with it."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        box = QGroupBox(tr("About the map"))
+        form = QFormLayout(box)
+        self.i_issuer = QLineEdit()
+        self.i_issuer.setPlaceholderText(tr("e.g. the municipality"))
+        self.i_decree = QLineEdit()
+        self.i_decree.setPlaceholderText(tr("e.g. 12/2025. (X. 1.) önkormányzati rendelet"))
+        self.i_legal_date = QLineEdit()
+        self.i_legal_date.setPlaceholderText(tr("e.g. 2025. 10. 01."))
+        self.i_legal_date.setToolTip(tr("In force from: shown under the title, separate from the export date."))
+        self.i_data_date = QLineEdit()
+        self.i_data_date.setPlaceholderText(tr("e.g. 2025. 09."))
+        self.i_data_date.setToolTip(tr("Date of the data shown (survey, cadastre extract …)."))
+        form.addRow(tr("Issued by"), self.i_issuer)
+        form.addRow(tr("Decree / plan number"), self.i_decree)
+        form.addRow(tr("In force from"), self.i_legal_date)
+        form.addRow(tr("Data as of"), self.i_data_date)
+        layout.addWidget(box)
+        docs = QGroupBox(tr("Documents published with the map"))
+        docs_layout = QVBoxLayout(docs)
+        self.i_docs = QTableWidget(0, 2)
+        self.i_docs.setHorizontalHeaderLabels([tr("Title"), tr("File")])
+        self.i_docs.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.i_docs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.i_docs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        buttons = QHBoxLayout()
+        add = QPushButton(tr("Add document…"))
+        add.clicked.connect(self._add_documents)
+        remove = QPushButton(tr("Remove"))
+        remove.clicked.connect(lambda: [self.i_docs.removeRow(r) for r in
+                                        sorted({i.row() for i in self.i_docs.selectedIndexes()}, reverse=True)])
+        buttons.addWidget(add)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        hint = QLabel(tr("PDF, Word/ODT, RTF, text or images. They are copied into the web map, listed in "
+                         "its panel, and a popup value naming one (its file name or title) links to it. "
+                         "Anyone can download them."))
+        hint.setWordWrap(True)
+        docs_layout.addWidget(self.i_docs)
+        docs_layout.addLayout(buttons)
+        docs_layout.addWidget(hint)
+        layout.addWidget(docs, 1)
+        return widget
+
+    def _add_document_row(self, title: str, path: str):
+        row = self.i_docs.rowCount()
+        self.i_docs.insertRow(row)
+        self.i_docs.setItem(row, 0, QTableWidgetItem(title))
+        item = QTableWidgetItem(path)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        item.setToolTip(path)
+        self.i_docs.setItem(row, 1, item)
+
+    def _add_documents(self):
+        from ..publishing.models import DOCUMENT_EXTENSIONS  # pylint: disable=import-outside-toplevel
+        pattern = " ".join(f"*{ext}" for ext in DOCUMENT_EXTENSIONS)
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("Documents"), "", f"{tr('Documents')} ({pattern})")
+        for path in paths:
+            self._add_document_row(os.path.splitext(os.path.basename(path))[0], path)
+
+    def _documents(self):
+        from ..publishing.models import DocumentConfig  # pylint: disable=import-outside-toplevel
+        out = []
+        for row in range(self.i_docs.rowCount()):
+            title = (self.i_docs.item(row, 0).text() if self.i_docs.item(row, 0) else "").strip()
+            path = self.i_docs.item(row, 1).text() if self.i_docs.item(row, 1) else ""
+            if path:
+                out.append(DocumentConfig(title=title or os.path.splitext(os.path.basename(path))[0], path=path))
+        return out
+
     def _choose_logo(self):
         path, _ = QFileDialog.getOpenFileName(self, tr("Logo"), "", "Images (*.png *.jpg *.jpeg *.webp)")
         if path:
@@ -783,6 +858,7 @@ class PublishDialog(QDialog):
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
                 ("street_search", tr("Search street names (OpenStreetMap)")),
+                ("overview_map", tr("Overview map (inset)")), ("drawing", tr("Drawing tools")),
                 ("street_view", tr("Street View (Google)"))]):
             box = QCheckBox(label)
             self.i_flags[key] = box
@@ -805,6 +881,20 @@ class PublishDialog(QDialog):
             "(Map tab; without one, inside the export extent). They are read from the basemap, or "
             "without a basemap from the Protomaps build (internet needed while exporting). Only the "
             "names, a point and the bounds of each street are published."))
+        # House numbers in the search: "Fő utca 12".
+        address_row = QHBoxLayout()
+        self.i_address_layer = self._layer_combo(None, allow_empty=True, empty_text=tr("(none)"))
+        self.i_address_number = self._field_combo(self.i_address_layer)
+        self.i_address_street = self._field_combo(self.i_address_layer, allow_empty=True)
+        self.i_address_street.setToolTip(tr("Empty: the nearest named OpenStreetMap street (within 150 m)."))
+        for label, combo in ((tr("House numbers"), self.i_address_layer), (tr("number"), self.i_address_number),
+                             (tr("street (empty: nearest OSM street)"), self.i_address_street)):
+            address_row.addWidget(QLabel(label))
+            address_row.addWidget(combo, 1)
+        self.i_address_layer.setToolTip(tr(
+            "A point (or building) layer with house numbers: the search finds \"street number\" "
+            "(e.g. Fő utca 12) and zooms there. Only the street, the number and a point are published."))
+        grid.addLayout(address_row, grid.rowCount(), 0, 1, 3)
         layout.addWidget(options)
         split = QSplitter()
         split.setChildrenCollapsible(False)
@@ -843,6 +933,10 @@ class PublishDialog(QDialog):
         form.addRow("", self.i_links)
         form.addRow("", self.i_label_always)
         form.addRow("", self.i_snap)
+        self.i_height = QComboBox()
+        self.i_height.setToolTip(tr("Polygon layers (e.g. buildings): a numeric field of heights in metres. "
+                                    "The map's 3D button raises the polygons to it. The field becomes public."))
+        form.addRow(tr("3D height field (m)"), self.i_height)
         right_layout.addLayout(form)
         self.i_fields = QTableWidget(0, 7)
         self.i_fields.setHorizontalHeaderLabels([tr("Field"), tr("Popup"), tr("Popup title"), tr("Type"),
@@ -1031,10 +1125,10 @@ class PublishDialog(QDialog):
             "OpenStreetMap contributors (ODbL), shown automatically in the attribution.")))
         # Web basemaps: QGIS's own XYZ connections (Browser -> XYZ Tiles),
         # each with "Use in web map"; loaded by the visitor's browser.
-        web = QGroupBox(tr("Web basemaps (XYZ tiles, loaded from their server while browsing)"))
+        web = QGroupBox(tr("Web basemaps (XYZ tiles or WMS, loaded from their server while browsing)"))
         web_layout = QVBoxLayout(web)
         self.b_xyz = QTableWidget(0, 6)
-        self.b_xyz.setHorizontalHeaderLabels([tr("Use"), tr("Name"), tr("XYZ tile address"),
+        self.b_xyz.setHorizontalHeaderLabels([tr("Use"), tr("Name"), tr("Tile address (XYZ or WMS)"),
                                               tr("Attribution"), tr("Min z"), tr("Max z")])
         self.b_xyz.horizontalHeaderItem(0).setToolTip(tr("Offered in the web map's basemap menu"))
         self.b_xyz.horizontalHeaderItem(1).setToolTip(tr("The name of the QGIS XYZ connection"))
@@ -1053,7 +1147,11 @@ class PublishDialog(QDialog):
         reload_button = QPushButton(tr("Reload from QGIS"))
         reload_button.setToolTip(tr("List the XYZ connections saved in QGIS again (added meanwhile in the Browser)."))
         reload_button.clicked.connect(lambda: self._fill_xyz_table(self._xyz_rows()))
-        for button in (add, reload_button):
+        wms_button = QPushButton(tr("Add WMS…"))
+        wms_button.setToolTip(tr("A WMS service (e.g. official orthophotos) as a web basemap: from a WMS layer "
+                                 "of the project or by its address and layer names."))
+        wms_button.clicked.connect(self._add_wms)
+        for button in (add, wms_button, reload_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
         web_layout.addWidget(self.b_xyz)
@@ -1067,6 +1165,36 @@ class PublishDialog(QDialog):
             "allowed to use, with the attribution the service requires. The ticked ones are also kept in "
             "the project and in the exported settings file.")))
         outer.addWidget(web)
+        # Terrain: a DEM raster layer (heights in metres) for the 3D view,
+        # the hillshade and elevation profiles.
+        relief = QGroupBox(tr("Terrain (3D relief, hillshade, elevation profiles)"))
+        relief_form = QFormLayout(relief)
+        from qgis.gui import QgsMapLayerComboBox  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsMapLayerProxyModel  # pylint: disable=import-outside-toplevel
+        self.t_layer = QgsMapLayerComboBox()
+        try:
+            self.t_layer.setFilters(QgsMapLayerProxyModel.Filter.RasterLayer)
+        except AttributeError:
+            self.t_layer.setFilters(Qgis.LayerFilter.RasterLayer)
+        try:
+            self.t_layer.setAllowEmptyLayer(True, tr("(no terrain)"))
+        except TypeError:
+            self.t_layer.setAllowEmptyLayer(True)
+        self.t_layer.setProject(self.project)
+        self.t_layer.setToolTip(tr("A raster layer of ground heights in metres (DEM, DTM), read from its file."))
+        self.t_hillshade = QCheckBox(tr("Hillshade: shaded relief drawn above the basemap (also in 2D)"))
+        self.t_exaggeration = QDoubleSpinBox()
+        self.t_exaggeration.setRange(1.0, 5.0)
+        self.t_exaggeration.setSingleStep(0.5)
+        self.t_exaggeration.setSuffix(" ×")
+        relief_form.addRow(tr("Elevation layer (DEM)"), self.t_layer)
+        relief_form.addRow("", self.t_hillshade)
+        relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
+        relief_form.addRow("", _note(tr(
+            "The heights are resampled to web tiles (data/terrain.pmtiles) for the area of the map. "
+            "Visitors get a 3D button (tilted view with relief; with a 3D height field also raised "
+            "buildings) and an elevation profile for measured lines. The heights become public.")))
+        outer.addWidget(relief)
         start = QFormLayout()
         start.addRow(tr("Basemap shown at start"), self.b_initial)
         outer.insertLayout(0, start)
@@ -1075,6 +1203,74 @@ class PublishDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setWidget(page)
         return scroll
+
+    def _project_wms_layers(self):
+        """(name, service URL, layers, format) of the project's WMS layers."""
+        from qgis.core import QgsDataSourceUri  # pylint: disable=import-outside-toplevel
+        out = []
+        for layer in self.project.mapLayers().values():
+            if not isinstance(layer, QgsRasterLayer) or (layer.providerType() or "").lower() != "wms":
+                continue
+            uri = QgsDataSourceUri()
+            uri.setEncodedUri(layer.source())
+            if uri.param("type") == "xyz" or not uri.param("url"):
+                continue
+            out.append((layer.name(), uri.param("url"), ",".join(uri.params("layers")),
+                        uri.param("format") or "image/png"))
+        return sorted(out, key=lambda item: item[0].lower())
+
+    def _add_wms(self):
+        """A WMS service as a web basemap (one GetMap image per 256 px tile)."""
+        from qgis.PyQt.QtWidgets import QDialogButtonBox  # pylint: disable=import-outside-toplevel
+        from ..publishing.xyz import wms_template  # pylint: disable=import-outside-toplevel
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Add WMS"))
+        form = QFormLayout(dialog)
+        project_layers = self._project_wms_layers()
+        source = QComboBox()
+        source.addItem(tr("(type the address below)"), None)
+        for item in project_layers:
+            source.addItem(item[0], item)
+        title, url, layers, attribution = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
+        url.setPlaceholderText("https://…/wms")
+        layers.setPlaceholderText(tr("layer names, comma separated"))
+        image_format = QComboBox()
+        for value in ("image/png", "image/jpeg"):
+            image_format.addItem(value, value)
+
+        def from_project(index):
+            item = source.itemData(index)
+            if item:
+                title.setText(item[0])
+                url.setText(item[1])
+                layers.setText(item[2])
+                image_format.setCurrentIndex(max(0, image_format.findData(item[3])))
+        source.currentIndexChanged.connect(from_project)
+        if project_layers:
+            form.addRow(tr("WMS layer of the project"), source)
+        form.addRow(tr("Name"), title)
+        form.addRow(tr("Service address"), url)
+        form.addRow(tr("Layers"), layers)
+        form.addRow(tr("Image format"), image_format)
+        form.addRow(tr("Attribution"), attribution)
+        form.addRow("", _note(tr("The service must be https:// and allow use in web maps (Web Mercator, "
+                                 "EPSG:3857). Visitors' browsers request one image per map tile from it.")))
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        box.accepted.connect(dialog.accept)
+        box.rejected.connect(dialog.reject)
+        form.addRow(box)
+        dialog.resize(560, dialog.sizeHint().height())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        if not url.text().strip().lower().startswith("https://") or not layers.text().strip():
+            QMessageBox.warning(self, tr("Add WMS"), tr("An https:// service address and at least one layer name are needed."))
+            return None
+        entry = XyzBasemap(title=title.text().strip() or layers.text().strip(),
+                           url=wms_template(url.text(), layers.text().strip(), image_format.currentData()),
+                           attribution=attribution.text().strip(), min_zoom=0, max_zoom=20)
+        self._add_xyz_row(entry, used=True, editable_name=True)
+        self._refresh_basemap_initial()
+        return entry
 
     def _add_xyz_row(self, entry, used=True, editable_name=True):
         """One web basemap row; the name of an existing QGIS connection is fixed
@@ -1613,6 +1809,17 @@ class PublishDialog(QDialog):
         self.e_locale.setCurrentIndex(max(0, self.e_locale.findData(profile.locale)))
         self.e_attribution.setText(profile.attribution)
         self.e_logo.setText(profile.logo_path)
+        self.t_layer.setLayer(self.project.mapLayer(profile.terrain.layer_id))
+        self.t_hillshade.setChecked(profile.terrain.hillshade)
+        self.t_exaggeration.setValue(profile.terrain.exaggeration)
+        info = profile.info
+        self.i_issuer.setText(info.issuer)
+        self.i_decree.setText(info.decree)
+        self.i_legal_date.setText(info.legal_date)
+        self.i_data_date.setText(info.data_date)
+        self.i_docs.setRowCount(0)
+        for document in info.documents:
+            self._add_document_row(document.title, document.path)
         self.e_min_zoom.setValue(profile.view.min_zoom)
         self.e_max_zoom.setValue(profile.view.max_zoom)
         self.e_max_view.setValue(profile.view.max_view_zoom)
@@ -1661,6 +1868,12 @@ class PublishDialog(QDialog):
         for key, box in self.i_flags.items():
             box.setChecked(bool(getattr(profile.interaction, key)))
         self.i_google_key.setText(profile.interaction.google_api_key)
+        address_layer = self.project.mapLayer(profile.interaction.address_layer_id)
+        self.i_address_layer.setLayer(address_layer)
+        self.i_address_number.setLayer(address_layer)
+        self.i_address_street.setLayer(address_layer)
+        self.i_address_number.setField(profile.interaction.address_number_field)
+        self.i_address_street.setField(profile.interaction.address_street_field)
         self.i_google_key.setEnabled(profile.interaction.street_view)
         self.layer_configs = {c.layer_id: c for c in profile.layers}
         self.o_archive.setCurrentIndex(max(0, self.o_archive.findData(profile.output.archive)))
@@ -1756,6 +1969,14 @@ class PublishDialog(QDialog):
         self.i_label_always.setChecked(config.label_always)
         self.i_snap.setChecked(config.snap)
         self.i_links.setChecked(config.deep_links)
+        self.i_height.clear()
+        self.i_height.addItem(tr("(none)"), "")
+        polygon = getattr(layer, "geometryType", lambda: None)() == QgsWkbTypes.PolygonGeometry
+        for field in layer.fields() if polygon else []:
+            if field.isNumeric():
+                self.i_height.addItem(field.name(), field.name())
+        self.i_height.setCurrentIndex(max(0, self.i_height.findData(config.height_field)))
+        self.i_height.setEnabled(polygon)
         popups = {p.field: p for p in config.popup_fields}
         filters = {f.field: f for f in config.filter_fields}
         fields = layer.fields()
@@ -1817,6 +2038,7 @@ class PublishDialog(QDialog):
         config.label_always = self.i_label_always.isChecked()
         config.snap = self.i_snap.isChecked()
         config.deep_links = self.i_links.isChecked()
+        config.height_field = self.i_height.currentData() or ""
         popups, search, keys, filters = [], [], [], []
         for row in range(self.i_fields.rowCount()):
             name = self.i_fields.item(row, 0).text()
@@ -1842,6 +2064,15 @@ class PublishDialog(QDialog):
         profile.locale = self.e_locale.currentData()
         profile.attribution = self.e_attribution.text().strip()
         profile.logo_path = self.e_logo.text().strip()
+        terrain_layer = self.t_layer.currentLayer()
+        profile.terrain.layer_id = terrain_layer.id() if terrain_layer is not None else ""
+        profile.terrain.hillshade = self.t_hillshade.isChecked()
+        profile.terrain.exaggeration = float(self.t_exaggeration.value())
+        profile.info.issuer = self.i_issuer.text().strip()
+        profile.info.decree = self.i_decree.text().strip()
+        profile.info.legal_date = self.i_legal_date.text().strip()
+        profile.info.data_date = self.i_data_date.text().strip()
+        profile.info.documents = self._documents()
         profile.view.min_zoom = self.e_min_zoom.value()
         profile.view.max_zoom = self.e_max_zoom.value()
         profile.view.max_view_zoom = max(self.e_max_view.value(), profile.view.max_zoom)
@@ -1897,6 +2128,12 @@ class PublishDialog(QDialog):
         for key, box in self.i_flags.items():
             setattr(profile.interaction, key, box.isChecked())
         profile.interaction.google_api_key = self.i_google_key.text().strip()
+        address_layer = self.i_address_layer.currentLayer()
+        profile.interaction.address_layer_id = address_layer.id() if address_layer is not None else ""
+        profile.interaction.address_number_field = self.i_address_number.currentField() if address_layer else ""
+        profile.interaction.address_street_field = self.i_address_street.currentField() if address_layer else ""
+        if address_layer is not None and not profile.interaction.address_number_field:
+            profile.interaction.address_layer_id = ""
         out = profile.output
         out.archive = self.o_archive.currentData()
         out.local_directory = self.o_dir.text().strip()
@@ -2316,6 +2553,22 @@ class PublishDialog(QDialog):
                 profile.basemap.source or "build.protomaps.com")]
         if profile.themes.names:
             lines.append(tr("Views (map themes): ") + ", ".join(profile.themes.names))
+        if profile.terrain.layer_id:
+            layer = self.project.mapLayer(profile.terrain.layer_id)
+            lines += ["", tr("Terrain: the heights of {} inside the map's area (web tiles)").format(
+                layer.name() if layer else "?")]
+        heights = [c for c in profile.layers if c.included and c.height_field]
+        if heights:
+            lines.append(tr("3D height fields (public): ") + ", ".join(
+                f"{(self.project.mapLayer(c.layer_id).name() if self.project.mapLayer(c.layer_id) else c.layer_id)}"
+                f".{c.height_field}" for c in heights))
+        if profile.interaction.address_layer_id:
+            layer = self.project.mapLayer(profile.interaction.address_layer_id)
+            lines += ["", tr("House number search: street and number of every address in the area ({})").format(
+                layer.name() if layer else "?")]
+        if profile.info.documents:
+            lines += ["", tr("Documents (downloadable by anyone): ")
+                      + ", ".join(f"{d.title} ({os.path.basename(d.path)})" for d in profile.info.documents)]
         info = profile.parcel_info
         if info.enabled:
             lines += ["", tr("Parcel report (public for every parcel in the extent): area, parts by zone, "

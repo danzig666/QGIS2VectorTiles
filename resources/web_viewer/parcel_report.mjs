@@ -7,6 +7,7 @@
 import { t, formatNumber } from "./i18n.mjs";
 import { featureShardKey } from "./search_core.mjs";
 import { button, el, icon } from "./icons.mjs";
+import { formatValue } from "./identify.mjs";
 
 export function formatArea(m2) {
   if (m2 >= 10000) return `${formatNumber(m2 / 10000, 4)} ha`;
@@ -170,12 +171,24 @@ export class ParcelReport {
       if (regulation) {
         for (const f of c.regulationFields || []) {
           const v = regulation[f.field];
-          if (v !== null && v !== undefined && v !== "") rows.push([f.title || f.field, v]);
+          if (v !== null && v !== undefined && v !== "") rows.push([f.title || f.field, v, f.type]);
         }
       }
       if (rows.length) {
         const list = el("dl", "q2vt-pr-facts q2vt-pr-zone");
-        for (const [k, v] of rows) list.append(el("dt", "", k), el("dd", "", value(v)));
+        for (const [k, v, type] of rows) {
+          // Links: a URL field, or a value naming a published document (the decree).
+          const shown = typeof v === "string" ? formatValue(v, type) : null;
+          const cell = el("dd");
+          if (shown && shown.url) {
+            const link = el("a", "", shown.text);
+            link.href = shown.url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            cell.append(link);
+          } else cell.textContent = value(v);
+          list.append(el("dt", "", k), cell);
+        }
         row.append(list);
       }
       section.append(row);
