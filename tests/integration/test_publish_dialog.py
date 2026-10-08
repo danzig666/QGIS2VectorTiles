@@ -177,3 +177,21 @@ def test_r2_publish_needs_approval_and_runs_in_a_task(project, messages, tmp_pat
     finally:
         public.stop()
         dialog.close()
+
+
+def test_copy_embed_code(project, messages, tmp_path):
+    from qgis.PyQt.QtGui import QGuiApplication
+    project, parcels = project
+    dialog = _dialog()
+    _configure(dialog, parcels, tmp_path)
+    QGuiApplication.clipboard().setText("before")
+    assert dialog.copy_embed_code() == ""  # a local copy cannot be shown in another page
+    assert QGuiApplication.clipboard().text() == "before" and "Destination" in dialog.status.text()
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("r2"))
+    dialog.d_public.setText("https://maps.example.hu/")
+    code = dialog.copy_embed_code()
+    assert code.startswith('<iframe src="https://maps.example.hu/') and "/arlo-terv/index.html?embed\"" in code
+    assert 'title="Arló szabályozási terv"' in code and QGuiApplication.clipboard().text() == code
+    dialog.public_url = "https://maps.example.hu/terv/index.html#v=1/47.5/19"  # after a publication
+    assert 'src="https://maps.example.hu/terv/index.html?embed#v=1/47.5/19"' in dialog.copy_embed_code()
+    dialog.close()

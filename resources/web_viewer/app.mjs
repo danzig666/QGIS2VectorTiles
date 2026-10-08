@@ -115,6 +115,11 @@ async function start() {
   }
   await loadLocale(manifest.locale || "en", assetsUrl).catch(() => {});
   document.title = manifest.title || document.title;
+  // Embedded in another page (?embed): compact header, panel closed, a link
+  // to the full map, and the page keeps the scroll wheel (Ctrl + scroll or
+  // two fingers zoom the map).
+  const embedded = new URLSearchParams(location.search).has("embed");
+  if (embedded) mountEmbed();
   setText("q2vt-title", manifest.title || "");
   setText("q2vt-description", manifest.description || "");
   setText("q2vt-release", `${t("app.release")}: ${manifest.releaseId}`);
@@ -147,6 +152,12 @@ async function start() {
       touchPitch: false,
       attributionControl: false,
       renderWorldCopies: false,
+      cooperativeGestures: embedded,
+      locale: {
+        "CooperativeGesturesHandler.WindowsHelpText": t("embed.zoomWindows"),
+        "CooperativeGesturesHandler.MacHelpText": t("embed.zoomMac"),
+        "CooperativeGesturesHandler.MobileHelpText": t("embed.zoomMobile"),
+      },
       transformConstrain: stay ? stay.constrain : null,
       canvasContextAttributes: { preserveDrawingBuffer: new URLSearchParams(location.search).has("print") },
     });
@@ -226,3 +237,28 @@ export function extentLimit(view, maplibregl) {
     },
   };
 }
+
+
+// Embedded mode: the body class compacts the layout (styles.css) and the
+// controls keep the panel closed; "Open the full map" opens this view
+// (the current address without ?embed, hash included) in a new tab.
+function mountEmbed() {
+  document.body.classList.add("q2vt-embed");
+  const row = document.querySelector("#q2vt-header .q2vt-header-row");
+  if (!row) return;
+  const link = document.createElement("a");
+  link.id = "q2vt-full-map";
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = t("embed.fullMap");
+  link.title = t("embed.fullMap");
+  const update = () => {
+    const url = new URL(location.href);
+    url.searchParams.delete("embed");
+    link.href = url.href;
+  };
+  update();
+  for (const name of ["mousedown", "focus", "touchstart"]) link.addEventListener(name, update, { passive: true });
+  row.append(link);
+}
+
