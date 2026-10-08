@@ -9,7 +9,7 @@ import { LayerControls } from "./layer_controls.mjs";
 import { Legend } from "./legend.mjs";
 import { Printer } from "./print.mjs";
 import { Filters } from "./filters.mjs";
-import { Identify } from "./identify.mjs";
+import { Identify, setDocuments } from "./identify.mjs";
 import { FeatureLookup } from "./features.mjs";
 import { Search, goTo } from "./search.mjs";
 import { Permalink, decodeState } from "./permalink.mjs";
@@ -17,6 +17,8 @@ import { Tools } from "./tools.mjs";
 import { Basemap } from "./basemap.mjs";
 import { ParcelReport } from "./parcel_report.mjs";
 import { StreetView } from "./streetview.mjs";
+import { OverviewControl } from "./overview.mjs";
+import { Draw } from "./draw.mjs";
 import { warn } from "./diagnostics.mjs";
 import { button, el, icon } from "./icons.mjs";
 
@@ -31,7 +33,7 @@ function panes(manifest) {
   list.push(["legend", "app.legend"]);
   if (manifest.interaction?.filters !== false && manifest.layers.some((l) => (l.filterFields || []).length)) list.push(["filters", "app.filters"]);
   const tools = manifest.tools || {};
-  if (tools.coordinates || tools.measure || tools.print) list.push(["tools", "app.tools"]);
+  if (tools.coordinates || tools.measure || tools.print || tools.draw) list.push(["tools", "app.tools"]);
   if (manifest.interaction?.permalinks !== false) list.push(["share", "app.share"]);
   return list;
 }
@@ -298,6 +300,7 @@ function trackHeader() {
 
 export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, maplibregl, viewer }) {
   const releaseBase = pageUrl;
+  setDocuments(manifest.info, pageUrl);
   const state = new ViewerState(manifest);
   const initial = defaultState(manifest);
   state.load();
@@ -360,7 +363,16 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   viewer.printer = parts.printer;
   if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel", parts.parcel.bounds());
   if (panel.panes.filters) parts.filters = new Filters({ manifest, state, container: panel.panes.filters });
-  if (panel.panes.tools) parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });
+  if (panel.panes.tools) {
+    parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });
+    viewer.tools = parts.tools;
+    if (manifest.tools?.draw) {
+      parts.draw = new Draw({ map, maplibregl, manifest, container: panel.panes.tools, viewer, permalink,
+        initial: fromUrl && fromUrl.drawing });
+      viewer.draw = parts.draw;
+      permalink.drawing = () => parts.draw.encode();
+    }
+  }
   if (panel.panes.share) shareBlock(panel.panes.share, permalink);
   if (manifest.search && manifest.interaction?.search !== false && identify) {
     parts.search = new Search({ map, manifest, manifestUrl, assetsUrl, container: document.getElementById("q2vt-searchbox"), identify });
@@ -391,6 +403,10 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
         attribution.render();
       }).catch((error) => warn("error.basemap", String(error)));
     });
+  }
+  if (manifest.interaction?.overviewMap) {
+    parts.overview = new OverviewControl({ map, manifest, maplibregl });
+    map.addControl(parts.overview, "bottom-right");
   }
   const about = document.getElementById("q2vt-about-actions");
   if (about) themeToggle(about);

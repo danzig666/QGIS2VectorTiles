@@ -143,6 +143,21 @@
         },
         "googleApiKey": {
           "type": "string"
+        },
+        "overviewMap": {
+          "type": "boolean"
+        },
+        "drawing": {
+          "type": "boolean"
+        },
+        "addressLayerId": {
+          "type": "string"
+        },
+        "addressNumberField": {
+          "type": "string"
+        },
+        "addressStreetField": {
+          "type": "string"
         }
       }
     },
@@ -532,6 +547,39 @@
         },
         "disclaimer": {
           "type": "string"
+        }
+      }
+    },
+    "info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issuer": {
+          "type": "string"
+        },
+        "decree": {
+          "type": "string"
+        },
+        "legalDate": {
+          "type": "string"
+        },
+        "dataDate": {
+          "type": "string"
+        },
+        "documents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     }

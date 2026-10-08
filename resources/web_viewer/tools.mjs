@@ -206,6 +206,7 @@ export class Tools {
 
   start(mode) {
     this.viewer.streetViewControl?.stop();  // one map tool at a time
+    if (this.viewer.draw?.mode) this.viewer.draw.cancel();
     this.ensureSource();
     this.mode = mode;
     this.points = [];

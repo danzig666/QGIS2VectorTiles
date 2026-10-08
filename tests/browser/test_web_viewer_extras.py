@@ -1,0 +1,179 @@
+"""Viewer additions of 4.24: the map's own data (legal / data date, issuer,
+decree) and documents, the overview map, drawing kept in the shared link and
+saved as GeoJSON/KML, house numbers in the search, web basemaps from WMS."""
+
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+
+import pytest
+from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsRectangle, QgsVectorLayer
+from qgis.PyQt.QtCore import QVariant
+
+from publishing.controller import export_local
+from publishing.models import DocumentConfig, XyzBasemap
+from publishing.preview_server import PreviewServer
+from publishing.xyz import wms_template
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+EXTENT = QgsRectangle(2119000, 6019000, 2123000, 6023000)
+SHOTS = os.environ.get("Q2VT_SHOTS")  # a folder: screenshots for a person to look at
+
+
+def _run(url, actions, tmp_path, width=1000, height=700):
+    path = tmp_path / f"actions_{abs(hash(json.dumps(actions)))}.json"
+    path.write_text(json.dumps(actions))
+    run = subprocess.run(["node", "interact.mjs", url, str(path), str(width), str(height)],
+                         capture_output=True, text=True, cwd=HERE, timeout=300)
+    assert run.returncode == 0, run.stderr[-3000:]
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    assert not out["pageErrors"], out
+    return out["results"]
+
+
+def _addresses(path_crs="EPSG:3857"):
+    layer = QgsVectorLayer(f"Point?crs={path_crs}", "Házszámok", "memory")
+    layer.dataProvider().addAttributes([QgsField("hsz", QVariant.String), QgsField("utca", QVariant.String)])
+    layer.updateFields()
+    features = []
+    for x, y, number, street in ((2120500, 6020500, "12", "Fő utca"), (2121500, 6021500, "3/A", "Kossuth Lajos utca"),
+                                 (2130000, 6030000, "99", "Távoli utca")):  # the last is outside the extent
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([number, street])
+        feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    return layer
+
+
+@pytest.fixture(scope="module")
+def site(tmp_path_factory):
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_pipeline import _parcels, _profile  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    base = tmp_path_factory.mktemp("extras")
+    parcels = _parcels(str(base / "parcels.gpkg"))
+    project = reset_project()
+    project.addMapLayer(parcels)
+    addresses = _addresses()
+    project.addMapLayer(addresses)
+    profile = _profile(parcels, base)
+    profile.layers[0].initially_visible = True
+    document = base / "HÉSZ rendelet (2025).pdf"
+    document.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+    info = profile.info
+    info.issuer, info.decree = "Arló Község Önkormányzata", "12/2025. (X. 1.) önk. rendelet"
+    info.legal_date, info.data_date = "2025. 10. 01.", "2025. 09."
+    info.documents = [DocumentConfig("Helyi építési szabályzat", str(document))]
+    interaction = profile.interaction
+    interaction.overview_map = interaction.drawing = True
+    interaction.address_layer_id, interaction.address_number_field = addresses.id(), "hsz"
+    interaction.address_street_field = "utca"
+    profile.basemap.xyz = [XyzBasemap("Ortofotó WMS", wms_template("https://wms.example.hu/ows", "ORTO"))]
+    result = export_local(project, profile, EXTENT)
+    with PreviewServer(os.path.dirname(result.publication_dir)) as server:
+        yield {"server": server, "url": server.url(f"{profile.slug}/index.html"), "result": result}
+
+
+def test_release_carries_the_info_documents_and_wms(site):
+    release = site["result"].release.release_dir
+    manifest = json.load(open(os.path.join(release, "manifest.json"), encoding="utf-8"))
+    info = manifest["info"]
+    assert info["legalDate"] == "2025. 10. 01." and info["issuer"].startswith("Arló")
+    assert info["documents"] == [{"title": "Helyi építési szabályzat", "href": "docs/hesz-rendelet-2025.pdf",
+                                  "file": "HÉSZ rendelet (2025).pdf", "size": 45}]
+    assert os.path.isfile(os.path.join(release, "docs", "hesz-rendelet-2025.pdf"))
+    wms = manifest["basemap"]["xyz"][0]
+    assert "{bbox-epsg-3857}" in wms["tiles"][0] and "REQUEST=GetMap" in wms["tiles"][0]
+    page = open(os.path.join(release, "index.html"), encoding="utf-8").read()
+    assert "https://wms.example.hu" in page  # allowed by the page's security policy
+    assert manifest["tools"]["draw"] is True and manifest["interaction"]["overviewMap"] is True
+
+
+def test_info_stamp_documents_and_popup_link(site, tmp_path):
+    results = _run(site["url"], [{"eval": """
+      const stamp = document.getElementById('q2vt-stamp');
+      const links = [...document.querySelectorAll('#q2vt-info .q2vt-documents a')];
+      const response = await fetch(links[0].href);
+      const { formatValue } = await import(new URL('assets/identify.mjs', q2vtViewer.releaseUrl).href);
+      return { stamp: stamp.hidden ? null : stamp.textContent,
+               terms: [...document.querySelectorAll('#q2vt-info dt')].map((n) => n.textContent),
+               link: links.map((a) => [a.textContent, a.getAttribute('href').split('/').slice(-2).join('/')]),
+               status: response.status, type: response.headers.get('content-type'),
+               popup: formatValue('C:\\\\terv\\\\HÉSZ rendelet (2025).pdf', 'string'),
+               plain: formatValue('nincs ilyen.pdf', 'string') };
+    """}], tmp_path)
+    out = results[0]
+    assert out["stamp"] == "Hatályos: 2025. 10. 01. · Adatok állapota: 2025. 09."
+    assert out["terms"] == ["Kiadó", "Rendelet", "Hatályos", "Adatok állapota"]
+    assert out["link"] == [["Helyi építési szabályzat", "docs/hesz-rendelet-2025.pdf"]]
+    assert out["status"] == 200 and out["type"] == "application/pdf"
+    assert out["popup"]["url"].endswith("docs/hesz-rendelet-2025.pdf") and out["popup"]["text"] == "HÉSZ rendelet (2025).pdf"
+    assert "url" not in out["plain"]
+
+
+def test_overview_map_follows_the_view(site, tmp_path):
+    actions = [{"eval": """
+      const o = q2vtViewer.controls.overview;
+      await new Promise((r) => (o.mini.loaded() ? r() : o.mini.once('load', r)));
+      const m = q2vtViewer.map;
+      m.jumpTo({ center: [19.05, 47.41], zoom: 15 });
+      o.sync();
+      const box = (await o.mini.getSource('q2vt_overview_view').getData()).geometry.coordinates[0];
+      return { shown: !o.box.hidden, zoom: o.mini.getZoom(), mainZoom: m.getZoom(),
+               box: [box[0][0] < 19.05, box[2][0] > 19.05],
+               labels: o.mini.getStyle().layers.filter((l) => l.type === 'symbol').length };
+    """}]
+    if SHOTS:
+        actions.append({"screenshot": os.path.join(SHOTS, "overview.png")})
+    out = _run(site["url"], actions, tmp_path)[0]
+    assert out["shown"] and abs(out["mainZoom"] - out["zoom"] - 4) < 0.01
+    assert out["box"] == [True, True] and out["labels"] == 0
+
+
+def test_drawing_travels_in_the_link_and_exports(site, tmp_path):
+    out = _run(site["url"], [
+        {"eval": """
+          const d = q2vtViewer.controls.draw, m = q2vtViewer.map;
+          m.jumpTo({ center: [19.05, 47.41], zoom: 15 });
+          const at = (lng, lat) => ({ lngLat: { lng, lat } });
+          d.start('line'); d.click(at(19.049, 47.409)); d.click(at(19.051, 47.411)); d.finish();
+          d.setColor('#2563eb');
+          d.start('area'); d.click(at(19.048, 47.41)); d.click(at(19.049, 47.412)); d.click(at(19.05, 47.41)); d.finish();
+          d.start('text'); d.textInput.value = '<b>Új út</b>'; d.click(at(19.05, 47.41)); d.cancel();
+          d.start('point'); d.click(at(19.052, 47.408)); d.cancel();
+          const { toKML, toGeoJSON } = await import(new URL('assets/draw.mjs', q2vtViewer.releaseUrl).href);
+          const link = q2vtViewer.permalink.links().versioned;
+          return { kinds: d.features.map((f) => f.kind), link,
+                   label: document.querySelector('.q2vt-draw-label').innerHTML,
+                   geojson: toGeoJSON(d.features).features.map((f) => f.geometry.type),
+                   kml: toKML(d.features, 'Arló').includes('<name>&lt;b&gt;Új út&lt;/b&gt;</name>'),
+                   identify: q2vtViewer.drawing };
+        """},
+    ], tmp_path)[0]
+    assert out["kinds"] == ["line", "area", "text", "point"]
+    assert out["geojson"] == ["LineString", "Polygon", "Point", "Point"]
+    assert out["label"] == "&lt;b&gt;Új út&lt;/b&gt;" and out["kml"] and out["identify"] is False
+    assert "&d=" in out["link"]
+    again = _run(out["link"], [{"eval": """
+      const d = q2vtViewer.controls.draw;
+      return d.features.map((f) => [f.kind, f.color, f.text, f.coords.length, f.coords[0].map((v) => +v.toFixed(5))]);
+    """}], tmp_path)[0]
+    assert again == [["line", "#e11d48", "", 2, [19.049, 47.409]], ["area", "#2563eb", "", 3, [19.048, 47.41]],
+                     ["text", "#2563eb", "<b>Új út</b>", 1, [19.05, 47.41]], ["point", "#2563eb", "", 1, [19.052, 47.408]]]
+
+
+def test_house_numbers_in_the_search(site, tmp_path):
+    out = _run(site["url"], [
+        {"type": ["#q2vt-searchbox input", "fő u 12"]}, {"wait": 900},
+        {"eval": """
+          const items = [...document.querySelectorAll('#q2vt-results [role=option]')];
+          return items.map((n) => n.textContent);
+        """},
+        {"type": ["#q2vt-searchbox input", "távoli"]}, {"wait": 900},
+        {"eval": "return document.querySelectorAll('#q2vt-results [role=option]').length;"},
+    ], tmp_path)
+    assert out[0] == ["Fő utca 12Cím"], out
+    assert out[1] == 0  # outside the extent: not published

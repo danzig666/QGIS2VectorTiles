@@ -7,12 +7,14 @@ secrets; any key that looks like one is rejected instead of being stored.
 
 import hashlib
 import json
+import os
 import re
 from typing import List, Optional
 from urllib.parse import urlparse
 
 from .errors import PublishingError
-from .models import (XyzBasemap, CutLineConfig, ParcelInfoConfig, RestrictionConfig,
+from .models import (XyzBasemap, CutLineConfig, DocumentConfig, InfoConfig, ParcelInfoConfig, RestrictionConfig,
+                     DOCUMENT_EXTENSIONS,
                      ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
                      FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
                      SECRET_KEYS, SLUG, Approval, BasemapConfig, DestinationConfig, FilterField,
@@ -72,7 +74,7 @@ def load_profile(data) -> PublicationProfile:
         "destination": DestinationConfig, "approval": Approval, "themes": ThemeConfig,
         "basemap": BasemapConfig,
     }
-    top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups", "parcel_info")}
+    top = {k: v for k, v in data.items() if k not in nested and k not in ("layers", "groups", "parcel_info", "info")}
     profile = build(PublicationProfile, top, errors, "profile")
     raw_basemap = dict(data.get("basemap") or {}) if isinstance(data.get("basemap"), dict) else data.get("basemap")
     xyz_raw = raw_basemap.pop("xyz", []) if isinstance(raw_basemap, dict) else []
@@ -96,6 +98,11 @@ def load_profile(data) -> PublicationProfile:
     profile.groups = [build(GroupConfig, raw, errors, f"groups[{index}]")
                       for index, raw in enumerate(data.get("groups") or [])]
     profile.parcel_info = _parcel_info(data.get("parcel_info"), errors)
+    raw_info = dict(data.get("info") or {}) if isinstance(data.get("info"), dict) else {}
+    documents = raw_info.pop("documents", []) or []
+    profile.info = build(InfoConfig, raw_info, errors, "info")
+    profile.info.documents = [build(DocumentConfig, item, errors, f"info.documents[{index}]")
+                              for index, item in enumerate(documents)]
     errors.extend(validate(profile))
     if errors:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "; ".join(errors[:12]),
@@ -132,8 +139,11 @@ def xyz_problems(entries) -> List[str]:
         url = str(entry.url or "")
         if not XYZ_URL.match(url):
             errors.append(f"{where}.url: an https:// tile address")
+        elif "{bbox-epsg-3857}" in url:  # a WMS GetMap template (xyz.wms_template)
+            if "request=getmap" not in url.lower():
+                errors.append(f"{where}.url: a WMS address needs REQUEST=GetMap")
         elif "{z}" not in url or "{x}" not in url or ("{y}" not in url and "{-y}" not in url):
-            errors.append(f"{where}.url: needs {{z}}, {{x}} and {{y}} (or {{-y}})")
+            errors.append(f"{where}.url: needs {{z}}, {{x}} and {{y}} (or {{-y}}), or a WMS {{bbox-epsg-3857}}")
         elif "{" in url.split("/")[2].replace("{s}", ""):
             errors.append(f"{where}.url: only {{s}} may stand in the server name")
         if not (isinstance(entry.min_zoom, int) and isinstance(entry.max_zoom, int)
@@ -204,6 +214,16 @@ def validate(profile: PublicationProfile) -> List[str]:
         paths.add(tuple(group.path or ()))
         if not group.toggleable and not group.initially_visible:
             errors.append(f"{where}: a group that cannot be switched off must be visible at start")
+    titles = set()
+    for index, document in enumerate(profile.info.documents):
+        where = f"info.documents[{index}]"
+        if not str(document.title).strip():
+            errors.append(f"{where}.title: required")
+        elif document.title.strip() in titles:
+            errors.append(f"{where}.title: '{document.title}' is used twice")
+        titles.add(str(document.title).strip())
+        if os.path.splitext(str(document.path))[1].lower() not in DOCUMENT_EXTENSIONS:
+            errors.append(f"{where}.path: one of {', '.join(DOCUMENT_EXTENSIONS)}")
     themes = profile.themes
     if any(not isinstance(name, str) or not name for name in themes.names) \
             or len(set(themes.names)) != len(themes.names):
@@ -332,6 +352,9 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
              layer.deep_links]
             for layer in profile.layers if layer.included),
         "allFields": profile.output.include_all_fields,
+        "documents": sorted([d.title, os.path.basename(d.path)] for d in profile.info.documents),
+        "addresses": [profile.interaction.address_layer_id, profile.interaction.address_number_field,
+                      profile.interaction.address_street_field] if profile.interaction.address_layer_id else None,
         "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,
         "destination": [profile.destination.kind, profile.destination.public_base_url,
                         profile.destination.bucket, publication_prefix(profile)],

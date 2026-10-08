@@ -38,7 +38,7 @@ from .bundle import (inventory, portable_style, style_semantic_diff, walk_files,
                      write_json_atomic, write_text_atomic, write_xyz_tiles)
 from .content_types import NO_CACHE
 from .errors import Cancelled, PublishingError
-from .models import ExportBundle, PublicationProfile
+from .models import DOCUMENT_EXTENSIONS, ExportBundle, PublicationProfile, slugify
 from .pmtiles_builder import ArchiveDescriptor, PmtilesOptions, build_pmtiles
 from .progress import Progress
 from .validation import (assert_vector_only, check_public_file, required_source_layers,
@@ -322,7 +322,8 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
         "interaction": _interaction(profile),
         "tools": {"measure": profile.interaction.measure,
                   "coordinates": profile.interaction.coordinates,
-                  "print": profile.interaction.print},
+                  "print": profile.interaction.print,
+                  "draw": profile.interaction.drawing},
         "diagnostics": "public-diagnostics.json",
         "generator": {"name": "QWebMap", "version": plugin_version()},
         # The project CRS: the coordinate readout shows coordinates in it.
@@ -542,8 +543,10 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     for rel, src in extra_files.items():
         safe_relative_path(rel)
         _copy(src, os.path.join(staging, *rel.split("/")))
+    info = _add_documents(profile, staging)
     # 6. Manifest + public diagnostics.
     manifest = build_manifest(bundle, profile, release_id, source, manifest_extra)
+    manifest["info"] = info
     manifest["sources"].extend(raster_sources)
     manifest["basemap"] = basemap_manifest
     manifest["logo"] = manifest_logo
@@ -557,6 +560,36 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
         "tiles": archive.addressed_tiles if archive else None,
     })
     return archive, manifest, style
+
+
+def _add_documents(profile: PublicationProfile, staging: str) -> Optional[dict]:
+    """The map's own data (issuer, decree, legal and data date) and its
+    documents, copied to ``docs/`` under ASCII names; None when empty."""
+    documents, used = [], set()
+    for document in profile.info.documents:
+        if not os.path.isfile(document.path):
+            raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
+                                  f"Document '{document.title}': the file does not exist.")
+        stem, ext = os.path.splitext(os.path.basename(document.path))
+        ext = ext.lower()
+        if ext not in DOCUMENT_EXTENSIONS:
+            raise PublishingError("Q2VT_PUB_PROFILE_INVALID",
+                                  f"Document '{document.title}': not a {', '.join(DOCUMENT_EXTENSIONS)} file.")
+        name, number = slugify(stem, "document"), 1
+        while f"{name}{ext}" in used:
+            number += 1
+            name = f"{slugify(stem, 'document')}-{number}"
+        used.add(f"{name}{ext}")
+        rel = f"docs/{name}{ext}"
+        _copy(document.path, os.path.join(staging, *rel.split("/")))
+        documents.append({"title": document.title.strip(), "href": rel,
+                          "file": os.path.basename(document.path), "size": os.path.getsize(document.path)})
+    info = profile.info
+    fields = {"issuer": info.issuer.strip(), "decree": info.decree.strip(),
+              "legalDate": info.legal_date.strip(), "dataDate": info.data_date.strip()}
+    if not any(fields.values()) and not documents:
+        return None
+    return {**fields, "documents": documents}
 
 
 def _add_raster_layers(style: dict, bundle: ExportBundle, staging: str, progress) -> List[dict]:

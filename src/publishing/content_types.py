@@ -30,6 +30,12 @@ CONTENT_TYPES = {
     ".map": "application/json; charset=utf-8",
     ".ico": "image/x-icon",
     ".woff2": "font/woff2",
+    # Documents published with the map (models.DOCUMENT_EXTENSIONS).
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".rtf": "application/rtf",
 }
 TILE_TYPE = "application/vnd.mapbox-vector-tile"
 GLYPH_TYPE = "application/x-protobuf"
