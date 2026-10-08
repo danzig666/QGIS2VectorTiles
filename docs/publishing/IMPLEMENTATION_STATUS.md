@@ -1303,3 +1303,23 @@ italic Liberation Sans) that was horizontal on the web.
 | Run | Result |
 |---|---|
 | `pytest tests/unit/test_publishing_*.py tests/integration/test_publishing_pipeline.py tests/browser/test_static_package.py` | 157 passed, 5 skipped (`test_network_share_paths` reproduces the error, then opens and packages the file) |
+
+## 4.22.2: export cache works for GeoPackage layers on Windows and for memory layers
+
+- A GeoPackage layer is reused when its edit stamps (`gpkg_contents.last_change`) are unchanged.
+  They were read through a hand-made `file:` URI; where SQLite refused it (Windows or network
+  paths) `source_fingerprint` returned None and the layer was **silently** left out of the cache
+  on every export. `export_cache._connect_readonly` builds the URI with an empty authority
+  and falls back to a plain `query_only` connection; the connection is closed at once.
+- A layer that still cannot be cached is named in the log: "Redone (not cached: cannot read the
+  file's change stamps)" or "(not cached: database or web layer…)".
+- Memory layers: QGIS gives them a new random `uid={…}` on every project load, which was part
+  of the key, so they were redone after each restart. `RulesExporter._stable_source` drops it;
+  the content digest decides.
+- `inspect_mbtiles` and `publisher._archive_bounds` no longer open `file:{path}` URIs (plain
+  read-only connections, closed).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_export_cache.py tests/unit/test_export_cache.py tests/unit/test_dependencies_validation_capabilities.py` | 20 passed (`test_geopackage_stamps_read_where_the_uri_form_fails`, `test_memory_layer_reused_after_the_project_is_reopened`; both fail on 4.22.1) |
+| `pytest tests/integration/test_publishing_pipeline.py tests/integration/test_end_to_end.py tests/unit/test_publishing_*.py tests/browser/test_static_package.py tests/integration/test_publish_dialog.py` | 183 passed, 5 skipped |

@@ -518,7 +518,7 @@ class RulesExporter:
                 # Reopening the URI would lose data the project shows (see
                 # _snapshot_reason): its features are copied here, on the
                 # caller thread, as QGIS has them.
-                key_uri = f"{reason}:{source_uri}"
+                key_uri = f"{reason}:{self._stable_source(source_uri)}"
                 source_uri, fingerprint = self._memory_snapshot(r.layer)
                 provider = "ogr"
             sources[lid] = _SourceSnapshot(
@@ -667,6 +667,13 @@ class RulesExporter:
             return "fields"
         return ""
 
+    @staticmethod
+    def _stable_source(uri: str) -> str:
+        """The layer source without what changes on every project load: QGIS
+        gives a memory layer a new random ``uid={...}`` each time (the
+        content digest tells whether its features changed)."""
+        return re.sub(r"[&?]uid=\{[^}]*\}", "", uri)
+
     def _memory_snapshot(self, layer) -> Tuple[str, Optional[str]]:
         """Caller thread: the layer's features as the project has them
         (feature ids kept; joined and virtual fields, unsaved edits) in a
@@ -686,7 +693,7 @@ class RulesExporter:
             layer, path, QgsProject.instance().transformContext(), options)
         if error[0] != QgsVectorFileWriter.NoError:
             self.feedback.reportError(f"Cannot copy temporary layer '{layer.name()}': {error[1]}")
-        digest = hashlib.sha256(layer.source().encode("utf-8"))
+        digest = hashlib.sha256(self._stable_source(layer.source()).encode("utf-8"))
         digest.update(repr(layer.fields().names()).encode("utf-8"))
         for feature in layer.getFeatures():
             digest.update(str(feature.id()).encode())
@@ -1111,6 +1118,11 @@ class RulesExporter:
         for grp in rule_groups:
             src = sources.get(grp.layer_id)
             if src is None or not src.data_fingerprint:
+                if src is not None:  # said, not silently redone every time
+                    reason = ("cannot read the file's change stamps"
+                              if src.provider in export_cache.FILE_PROVIDERS
+                              else "database or web layer: changes cannot be detected")
+                    redone.setdefault(f"not cached: {reason}", set()).add(grp.layer_name or grp.layer_id)
                 continue
             key = self._dataset_key(context, src, grp)
             self.dataset_keys[grp.output_dataset] = key

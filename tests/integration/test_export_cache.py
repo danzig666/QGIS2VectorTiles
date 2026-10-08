@@ -248,3 +248,94 @@ def test_layers_sharing_a_geopackage_and_key_changes(plugin, tmp_path):
     line = log.cache_line()
     hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
     assert hits == total > 0, line
+
+
+
+def test_memory_layer_reused_after_the_project_is_reopened(plugin, tmp_path):
+    """Owner report: the cache was never used. QGIS gives a memory layer (e.g.
+    one restored by the Memory Layer Saver plugin) a new random uid={...} in
+    its source on every project load, and that uid was part of the key: every
+    memory layer was redone after each restart. Its content decides now."""
+    from qgis.core import QgsFeature, QgsProject, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    project, profile, parcels, zones = _setup(tmp_path)
+    fields = [f for f in parcels.fields() if f.name().lower() != "fid"]
+    uri = f"Polygon?crs={parcels.crs().authid()}&" + "&".join(
+        f"field={f.name()}:{'integer' if f.isNumeric() else 'string'}" for f in fields)
+    memory = QgsVectorLayer(uri, "Memória", "memory")
+    memory.setRenderer(parcels.renderer().clone())
+    rows = [(f.geometry(), [f[x.name()] for x in fields]) for f in parcels.getFeatures()]
+
+    def fill(layer):  # what the Memory Layer Saver plugin does after a load
+        features = []
+        for geometry, values in rows:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(geometry)
+            feature.setAttributes(values)
+            features.append(feature)
+        assert layer.dataProvider().addFeatures(features)[0]
+
+    fill(memory)
+    project.removeMapLayer(zones.id())
+    project.addMapLayer(memory)
+    profile.layers[1].layer_id = layer_id = memory.id()
+    path = str(tmp_path / "terv.qgz")
+    assert project.write(path)
+
+    def reopen():  # same layer id, a new uid, no features until refilled
+        project.clear()
+        assert QgsProject.instance().read(path)
+        layer = QgsProject.instance().mapLayer(layer_id)
+        assert layer.featureCount() == 0
+        fill(layer)
+        return QgsProject.instance(), layer.source()
+
+    project, source = reopen()
+    export_local(project, profile, EXTENT, Log())
+    project, again = reopen()
+    assert again != source  # QGIS gave the memory layer a new uid
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    line = log.cache_line()
+    hits, total = (int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
+    assert hits == total > 0, [l for l in log.lines if "Redone (" in l]
+
+    rows[0][1][[f.name() for f in fields].index("hrsz")] = "EDITED-3"  # a real change is still seen
+    project, _ = reopen()
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    assert any("layer data changed" in l and "Memória" in l for l in log.lines if "Redone (" in l), log.lines
+
+
+def test_geopackage_stamps_read_where_the_uri_form_fails(plugin, tmp_path, monkeypatch):
+    """Owner report: GeoPackage layers exported twice in a row were never
+    reused, and the log said nothing. Their edit stamps were read through a
+    hand-made ``file:`` URI; where SQLite refused it (Windows paths, network
+    shares: "invalid uri authority") the layer was silently left uncached.
+    Now a plain read-only connection is the fallback, and a layer that still
+    cannot be cached is named in the log."""
+    import sqlite3  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import export_cache  # pylint: disable=import-error
+    project, profile, parcels, _zones = _setup(tmp_path)
+    expected = export_cache.source_fingerprint("ogr", parcels.source())
+    assert expected
+    connect = sqlite3.connect
+
+    def refuse_uris(target, *args, **kwargs):
+        if kwargs.get("uri"):
+            raise sqlite3.OperationalError("invalid uri authority: naswork")
+        return connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", refuse_uris)
+    assert export_cache.source_fingerprint("ogr", parcels.source()) == expected
+    export_local(project, profile, EXTENT, Log())
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    hits, total = (int(v) for v in log.cache_line().split("cache: ")[1].split(" datasets")[0].split(" of "))
+    assert hits == total > 0, [l for l in log.lines if "Redone (" in l]
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+    monkeypatch.setattr(export_cache, "source_fingerprint", lambda provider, uri: None)
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    assert any("not cached: cannot read the file's change stamps" in l and "Földrészletek" in l
+               for l in log.lines), [l for l in log.lines if "Redone (" in l]

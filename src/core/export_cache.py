@@ -42,7 +42,7 @@ from urllib.parse import quote as urllib_quote, unquote, urlparse
 CACHE_VERSION = 1
 MAX_AGE_DAYS = 30
 MAX_BYTES = 4 * 1024 ** 3
-_FILE_PROVIDERS = {"ogr", "delimitedtext", "spatialite", "gpx"}
+FILE_PROVIDERS = {"ogr", "delimitedtext", "spatialite", "gpx"}
 _SIDE_CARS = (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx")
 
 
@@ -76,7 +76,7 @@ def code_fingerprint() -> str:
 
 def _source_files(provider: str, uri: str) -> Optional[List[str]]:
     """The files a layer reads, or None when it is not file based."""
-    if provider not in _FILE_PROVIDERS:
+    if provider not in FILE_PROVIDERS:
         return None
     if provider == "delimitedtext" or uri.startswith("file:"):
         path = unquote(urlparse(uri).path)
@@ -99,6 +99,28 @@ def _source_files(provider: str, uri: str) -> Optional[List[str]]:
     return sorted(set(files))
 
 
+def _connect_readonly(path: str):
+    """Read-only SQLite connection to an existing file. The ``file:`` URI keeps
+    an empty authority (``file:////server/share/x`` for a network share:
+    SQLite refuses ``file://server/...``, and a Windows path written into a
+    URI as is may not open); where the URI form still fails, a plain
+    connection with ``query_only``."""
+    import sqlite3  # pylint: disable=import-outside-toplevel
+    full = os.path.abspath(path).replace("\\", "/")
+    if not full.startswith("/"):
+        full = "/" + full  # C:/x -> /C:/x
+    try:
+        conn = sqlite3.connect("file://" + urllib_quote(full, safe="/:") + "?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA schema_version").fetchone()  # the file is opened lazily
+        return conn
+    except sqlite3.Error:
+        if not os.path.isfile(path):
+            raise
+    conn = sqlite3.connect(path, timeout=5)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 def _gpkg_changes(path: str, table: Optional[str] = None) -> Optional[str]:
     """GeoPackage edit stamps (``gpkg_contents.last_change``, set by GDAL on
     every write) of ``table``, or of every table when the layer does not name
@@ -109,18 +131,22 @@ def _gpkg_changes(path: str, table: Optional[str] = None) -> Optional[str]:
     which says nothing about edits)."""
     import sqlite3  # pylint: disable=import-outside-toplevel
     try:
-        uri = "file:" + urllib_quote(os.path.abspath(path)) + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
-            rows = []
-            if table:
-                rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
-                                    "WHERE lower(table_name) = lower(?)", (table,)).fetchall()
-            if not rows:
-                rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
-                                    "ORDER BY table_name").fetchall()
+        conn = _connect_readonly(path)
+    except sqlite3.Error:
+        return None
+    try:  # closed at once: an open handle keeps the file busy on Windows
+        rows = []
+        if table:
+            rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
+                                "WHERE lower(table_name) = lower(?)", (table,)).fetchall()
+        if not rows:
+            rows = conn.execute("SELECT table_name, last_change FROM gpkg_contents "
+                                "ORDER BY table_name").fetchall()
         return json.dumps(rows)
     except sqlite3.Error:
         return None
+    finally:
+        conn.close()
 
 
 def _layer_name(uri: str) -> Optional[str]:
