@@ -1274,3 +1274,19 @@ italic Liberation Sans) that was horizontal on the web.
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_export_cache.py tests/integration/test_gradient_fills.py` | 15 passed (`test_reused_dataset_under_a_new_zoom_range_keeps_its_features`: 24 of 24 datasets reused, was 18) |
+
+## 4.22.0: embed the web map in another web page
+
+- Publish window: **Copy embed code** copies an `<iframe>` (`publish_dialog.embed_code`) for the
+  published address, or for the online destination's address before the first publication. The
+  map address gets `?embed` before any `#view` part; the title is escaped. A local-only
+  destination shows a message instead (a `file:` page cannot be shown in another site).
+- Viewer `?embed` mode (`app.mjs mountEmbed`): compact header (smaller logo and title, no
+  subtitle), side panel closed at start, an "Open the full map ↗" link (the current view without
+  `?embed`, new tab), and MapLibre `cooperativeGestures`: the host page keeps the scroll wheel;
+  Ctrl/⌘ + scroll or two fingers move the map, with a hint in the viewer's language.
+
+| Run | Result |
+|---|---|
+| `pytest tests/browser/test_web_viewer_features.py tests/browser/test_web_viewer_parcel.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_smoke.py tests/browser/test_static_package.py tests/browser/test_web_viewer_streetview.py` | 29 passed (`test_compact_embed_mode_in_another_page`: framed viewer in a host page, panel closed, plain scroll leaves the zoom unchanged) |
+| `pytest tests/integration/test_publish_dialog*.py tests/unit/test_publishing_web_builder.py` | 35 passed (`test_copy_embed_code`) |

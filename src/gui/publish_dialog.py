@@ -56,6 +56,17 @@ def publishable(layer) -> bool:
     return (isinstance(layer, QgsVectorLayer) and layer.isSpatial()) or isinstance(layer, QgsRasterLayer)
 
 
+def embed_code(url: str, title: str, height: int = 600) -> str:
+    """HTML of the web map in another page: the stable address in embed mode
+    (?embed: compact, panel closed, scroll wheel left to the page)."""
+    import html  # pylint: disable=import-outside-toplevel
+    base, hash_mark, fragment = url.partition("#")  # a shared view (#…) stays at the end
+    src = base + ("&" if "?" in base else "?") + "embed" + hash_mark + fragment
+    return (f'<iframe src="{html.escape(src, quote=True)}" title="{html.escape(title, quote=True)}" '
+            f'style="width:100%;height:{int(height)}px;border:0" allow="fullscreen; geolocation" '
+            'loading="lazy"></iframe>')
+
+
 def _metres(value: float) -> str:
     return f"{value:.2f} m" if value < 10 else f"{value:.0f} m"
 
@@ -245,6 +256,9 @@ class PublishDialog(QDialog):
         self.btn_publish = QPushButton(tr("Publish"))
         self.btn_open = QPushButton(tr("Open map"))
         self.btn_copy = QPushButton(tr("Copy link"))
+        self.btn_embed = QPushButton(tr("Copy embed code"))
+        self.btn_embed.setToolTip(tr("HTML that shows this web map inside another web page (e.g. the "
+                                     "municipality's site): a compact map, with a link to the full one"))
         self.btn_folder = QPushButton(tr("Open local package"))
         self.btn_cancel = QPushButton(tr("Cancel"))
         self.btn_close = QPushButton(tr("Close"))
@@ -259,7 +273,7 @@ class PublishDialog(QDialog):
         file_menu.addAction(tr("Import settings from a file…"), self.import_settings_file)
         self.btn_settings_file.setMenu(file_menu)
         for button in (self.btn_save, self.btn_settings_file, self.btn_export, self.btn_preview,
-                       self.btn_publish, self.btn_open, self.btn_copy, self.btn_folder):
+                       self.btn_publish, self.btn_open, self.btn_copy, self.btn_embed, self.btn_folder):
             buttons.addWidget(button)
         # Presets (domain conventions, e.g. a national zoning plan): only when a
         # variant of the plugin ships some (publishing/presets).
@@ -285,6 +299,7 @@ class PublishDialog(QDialog):
         self.btn_publish.clicked.connect(self.publish)
         self.btn_open.clicked.connect(self.open_map)
         self.btn_copy.clicked.connect(self.copy_link)
+        self.btn_embed.clicked.connect(self.copy_embed_code)
         self.btn_folder.clicked.connect(self.open_folder)
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_close.clicked.connect(self.close)
@@ -2115,6 +2130,20 @@ class PublishDialog(QDialog):
         if self.public_url:
             QGuiApplication.clipboard().setText(self.public_url)
             self.status.setText(tr("Link copied: {}").format(self.public_url))
+
+    def copy_embed_code(self) -> str:
+        """Copy an <iframe> of the online map in embed mode (?embed); a local
+        copy cannot be shown in another site. Returns the code ("" = none)."""
+        url = self.public_url if self.public_url.startswith(("http://", "https://")) else \
+            self._target_url(self.collect())
+        if not url:
+            self.status.setText(tr("Publish the map online first (Destination tab): a local copy "
+                                   "cannot be shown in another web page."))
+            return ""
+        code = embed_code(url, self.e_title.text().strip() or self.profile.title)
+        QGuiApplication.clipboard().setText(code)
+        self.status.setText(tr("Embed code copied. Paste it into the other page's HTML:\n{}").format(code))
+        return code
 
     def _credentials(self):
         from ..publishing.credentials import from_auth_config  # pylint: disable=import-outside-toplevel

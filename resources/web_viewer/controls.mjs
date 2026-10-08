@@ -110,7 +110,7 @@ function buildPanel(manifest) {
     }, { passive: true });
     handle.addEventListener("touchend", () => { startY = null; });
   }
-  setOpen(!isMobile());
+  setOpen(!isMobile() && !document.body.classList.contains("q2vt-embed"));
   return { panes: result, select, setOpen };
 }
 

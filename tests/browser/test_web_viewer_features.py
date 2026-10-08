@@ -256,3 +256,31 @@ def test_map_stays_on_the_extent(site, tmp_path):
     out = results[0]
     assert out["limit"] is True and out["inside"]
     assert out["zoom"] >= out["fit"] - 1 - 1e-6 and out["zoom"] > 5
+
+
+def test_compact_embed_mode_in_another_page(site, tmp_path):
+    """"Copy embed code" (?embed) in an <iframe> of another page: the map
+    loads framed, compact, with the panel closed and a link to the full map
+    (this view, without ?embed); the wheel scrolls the page, not the map
+    (Ctrl + scroll / two fingers zoom it)."""
+    from q2vt_plugin.src.gui.publish_dialog import embed_code  # pylint: disable=import-error
+    server = site["server"]
+    code = embed_code(site["url"] + "#v=1", "Térkép <teszt>")
+    assert code.startswith('<iframe src="') and "index.html?embed#v=1" in code  # a view link keeps its #…
+    assert 'title="Térkép &lt;teszt&gt;"' in code
+    host = os.path.join(server.root, "host.html")
+    with open(host, "w", encoding="utf-8") as handle:
+        handle.write("<!doctype html><html><body style='margin:0'><h1>Önkormányzat</h1>"
+                     + embed_code(site["url"], "Térkép") + "<div style='height:2000px'></div></body></html>")
+    run = subprocess.run(["node", "embed_check.mjs", server.url("host.html")], capture_output=True,
+                         text=True, cwd=HERE, timeout=300)
+    assert run.returncode == 0, run.stderr[-3000:]
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    assert out["ready"] and not out["errors"] and not out["pageErrors"], out
+    assert out["framed"] and out["embed"] and out["panelHidden"] and out["cooperative"], out
+    assert out["fullMap"].startswith(site["url"].split("?")[0]) and "embed" not in out["fullMap"], out
+    assert out["zoomAfterWheel"] == 0, out
+    normal = _run(site["url"], [{"eval": "return [document.body.classList.contains('q2vt-embed'), "
+                                         "document.getElementById('q2vt-panel').hidden, "
+                                         "q2vtViewer.map.cooperativeGestures.isEnabled()];"}], tmp_path)
+    assert normal[0] == [False, False, False]  # the full map is unchanged

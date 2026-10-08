@@ -119,5 +119,9 @@
   "streetview.close": "Close Street View",
   "streetview.coverageFailed": "The blue Street View lines cannot be shown ({reason}). Tapping still opens the nearest Street View.",
   "streetview.reasonKey": "Google refused the API key for the Map Tiles API: enable that API in Google Cloud and allow it in the key's API restrictions",
-  "streetview.reasonNetwork": "no connection to Google"
+  "streetview.reasonNetwork": "no connection to Google",
+  "embed.fullMap": "Open the full map ↗",
+  "embed.zoomWindows": "Use Ctrl + scroll to zoom the map",
+  "embed.zoomMac": "Use ⌘ + scroll to zoom the map",
+  "embed.zoomMobile": "Use two fingers to move the map"
 }

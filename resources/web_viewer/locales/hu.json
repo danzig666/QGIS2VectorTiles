@@ -119,5 +119,9 @@
   "streetview.close": "Utcakép bezárása",
   "streetview.coverageFailed": "A kék utcakép-vonalak nem jeleníthetők meg ({reason}). Koppintásra a legközelebbi utcakép így is megnyílik.",
   "streetview.reasonKey": "a Google elutasította az API-kulcsot a Map Tiles API-hoz: engedélyezze ezt az API-t a Google Cloudban, és vegye fel a kulcs API-korlátozásai közé",
-  "streetview.reasonNetwork": "nincs kapcsolat a Google-lal"
+  "streetview.reasonNetwork": "nincs kapcsolat a Google-lal",
+  "embed.fullMap": "Teljes térkép ↗",
+  "embed.zoomWindows": "A nagyításhoz használja a Ctrl + görgetést",
+  "embed.zoomMac": "A nagyításhoz használja a ⌘ + görgetést",
+  "embed.zoomMobile": "A térkép mozgatásához használja két ujját"
 }
