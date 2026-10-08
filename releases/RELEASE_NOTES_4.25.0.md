@@ -63,4 +63,7 @@ This is the **generic** edition — the one to download. (A special Hungarian zo
 
 | Run | Result |
 |---|---|
-FULLRESULT
+| Full test suite (`pytest`: unit, PyQGIS, browser; QGIS 3.34, Chromium) | 660 passed, 5 skipped. The 2 failures were tests written for the old behaviour (the Interaction tab refills when opened; web basemaps become QGIS connections when the settings are saved); updated, 14 passed |
+| New regression tests (`tests/integration/test_review_fixes.py`) | 10 passed; all 10 fail on the 4.24.1 code |
+| Viewer tests (`tests/browser/test_web_viewer_extras.py`) | 11 passed (a linked drawing is drawn at once, Enter in the text box, 3D fill choice, zone code keys) |
+| Full test suite before the fixes (4.24.1) | 651 passed, 5 skipped |
