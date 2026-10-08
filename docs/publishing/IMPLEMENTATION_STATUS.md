@@ -1262,3 +1262,15 @@ italic Liberation Sans) that was horizontal on the web.
 | Run | Result |
 |---|---|
 | `pytest tests/integration/test_publish_dialog_layers.py tests/integration/test_publishing_raster.py tests/unit/test_publishing_profile.py tests/integration/test_publish_dialog.py tests/integration/test_publishing_pipeline.py` | 58 passed (new: the choices in metres, the default, coarser / finer texts, saving, the old 512 px setting carried over) |
+
+## 4.21.1: export cache reuses datasets under a new zoom range again
+
+- Since 4.15 (gradient bands kept clear of the feature's vertices) the dataset cache key held
+  the rule group's first zoom (`data_min_zoom`), so a changed zoom or scale range (e.g. a
+  label's scale range) redid every dataset of that layer although only its name changes. The
+  key keeps it only for colour bands, whose content depends on it
+  (`RulesExporter._dataset_key_parts`).
+
+| Run | Result |
+|---|---|
+| `pytest tests/integration/test_export_cache.py tests/integration/test_gradient_fills.py` | 15 passed (`test_reused_dataset_under_a_new_zoom_range_keeps_its_features`: 24 of 24 datasets reused, was 18) |
