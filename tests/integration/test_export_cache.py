@@ -339,3 +339,41 @@ def test_geopackage_stamps_read_where_the_uri_form_fails(plugin, tmp_path, monke
     export_local(project, profile, EXTENT, log)
     assert any("not cached: cannot read the file's change stamps" in l and "Földrészletek" in l
                for l in log.lines), [l for l in log.lines if "Redone (" in l]
+
+
+def test_only_variables_the_rules_use_count(plugin, tmp_path):
+    """Owner report (log): "Redone (export settings changed
+    (@time_tracker_last_save, @time_tracker_session_count, ...))" on every
+    export: a time tracker plugin keeps project variables up to date. Only
+    the variables named in the layers' expressions are part of the key."""
+    from qgis.core import QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+
+    def counts(log):
+        line = log.cache_line()
+        return tuple(int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
+
+    project, profile, parcels, _zones = _setup(tmp_path)
+    settings = parcels.labeling().settings()
+    settings.fieldName = "@felirat_elotag || \"hrsz\""
+    settings.isExpression = True
+    parcels.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    QgsExpressionContextUtils.setProjectVariable(project, "felirat_elotag", "Hrsz. ")
+    QgsExpressionContextUtils.setProjectVariable(project, "time_tracker_total_minutes", 10)
+    export_local(project, profile, EXTENT, Log())
+
+    QgsExpressionContextUtils.setProjectVariable(project, "time_tracker_total_minutes", 11)
+    QgsExpressionContextUtils.setProjectVariable(project, "time_tracker_last_save", "2026-10-08T10:24")
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    hits, total = counts(log)
+    assert hits == total > 0, [l for l in log.lines if "Redone (" in l]
+
+    QgsExpressionContextUtils.setProjectVariable(project, "felirat_elotag", "Helyrajzi szám: ")
+    log = Log()
+    edited = export_local(project, profile, EXTENT, log)
+    hits, total = counts(log)
+    assert hits < total
+    assert any("@felirat_elotag" in l for l in log.lines if "Redone (" in l), log.lines
+    assert "Helyrajzi szám: ".encode() in b"".join(
+        value for layers in _tiles(edited).values() for features in layers.values()
+        for _, _, props in features for _, value in props if isinstance(value, bytes))
