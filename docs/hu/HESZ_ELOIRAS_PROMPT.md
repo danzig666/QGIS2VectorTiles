@@ -17,15 +17,17 @@ szövegéből elkészíti ezt a táblát, majd egy második, független menetben
 
    ```python
    layer = iface.activeLayer()  # a szab_ov mezős övezeti réteg
-   codes = sorted({str(f["szab_ov"]) for f in layer.getFeatures() if f["szab_ov"]})
+   def jel(v):  # a jel úgy, ahogy a plugin összeveti (12.0 -> 12, szóközök nélkül)
+       if isinstance(v, float) and v.is_integer():
+           v = int(v)
+       return str(v).strip()
+   codes = sorted({jel(f["szab_ov"]) for f in layer.getFeatures() if f["szab_ov"]})
    print("\n".join(codes))
-   bad = [c for c in codes if c != c.strip()]
-   if bad:
-       print("FIGYELEM, szóköz a jel elején vagy végén:", bad)
    ```
 
    A kiírt listát másold ki. A plugin a táblát a jel **pontos** egyezésével köti az övezetekhez
-   (`Lke-2` ≠ `Lke2` ≠ `lke-2`), ezért a modell ezt a listát kapja meg mérvadónak.
+   (`Lke-2` ≠ `Lke2` ≠ `lke-2`; csak a jel elején és végén lévő szóközöket hagyja figyelmen
+   kívül), ezért a modell ezt a listát kapja meg mérvadónak.
 2. **A HÉSZ szövege.** Az egységes szerkezetű, hatályos rendelet a mellékleteivel együtt (az
    övezeti táblázatok gyakran mellékletben vannak). Word vagy szöveges PDF a legjobb; szkennelt
    PDF-et előbb szövegfelismerővel (OCR) alakíts szöveggé, és nézd meg, hogy a táblázatok
@@ -45,12 +47,21 @@ szövegéből elkészíti ezt a táblát, majd egy második, független menetben
 7. **Betöltés a QGIS-be:** Réteg → Réteg hozzáadása → *Tagolt szöveges réteg hozzáadása*: fájl a
    CSV, formátum *CSV*, geometria: **Nincs geometria (csak attribútumtábla)**, a *Mezőtípusok
    felismerése* legyen bekapcsolva. A réteg neve legyen **„HÉSZ övezeti előírások”** (a névben
-   legyen benne a „HÉSZ” vagy az „előírás” szó, erről ismeri fel az előbeállítás). Tartósabb, ha
-   utána a projekt GeoPackage-ébe mented (jobb klikk → Exportálás → Elemek mentése másként →
-   GeoPackage), és azt a táblát használod.
+   legyen benne a „HÉSZ” vagy az „előírás” szó, erről ismeri fel az előbeállítás; ha több réteg
+   is illik rá, a geometria nélküli tábla az elsődleges). Tartósabb, ha utána a projekt
+   GeoPackage-ébe mented (jobb klikk → Exportálás → Elemek mentése másként → GeoPackage), és azt
+   a táblát használod.
+   - Csupa számból álló övezeti jelek (pl. `12`): a mezőtípus-felismerés számnak veszi őket, ez
+     rendben van (a plugin a 12-t és a 12.0-t is „12”-nek veszi). **Kezdő nullás** jeleknél
+     (`012`) viszont a nulla elveszne: ilyenkor a CSV mellé tegyél egy `hesz_eloirasok.csvt`
+     fájlt, egyetlen sorral, amely minden oszlopot szövegnek jelöl:
+     `"String","String",…` (22-szer), vagy kapcsold ki a mezőtípusok felismerését.
+   - Ha egy számoszlopban szöveg is van (pl. „kialakult”), a QGIS az egész oszlopot szövegnek
+     veszi; a számok ekkor a CSV-beli alakjukban (tizedesponttal) jelennek meg.
 8. **Publish ablak → Előbeállítás (HÉSZ):** a jegyzetekben megjelenik: „Övezeti előírások:
-   „HÉSZ övezeti előírások” (szab_ov szerint), N mező”. A Telekinfó fülön ellenőrizd, és tegyél
-   egy próbapublikálást: kattints néhány telekre és övezetre.
+   „HÉSZ övezeti előírások” (szab_ov szerint), N mező”. A *Parcel report* (telekinformáció) fülön
+   ellenőrizd, és tegyél egy próbapublikálást: kattints néhány telekre (a telekinformációban
+   telekrészenként látszanak az előírások) és telken kívüli övezetre, pl. útra (felugró ablak).
 
 ## A tábla oszlopai
 
@@ -93,7 +104,7 @@ település helyi építési szabályzatából (HÉSZ) elkészíteni az övezete
 formátumban, majd ezt tételesen ellenőrizni. A tábla egy webes térkép telekinformációjában
 jelenik meg; minden hibás szám félrevezeti a telektulajdonosokat, ezért a pontosság mindennél
 fontosabb. Ha valamit nem találsz vagy nem egyértelmű, hagyd üresen és jelezd – soha ne
-találj ki, ne becsülj és ne pótolj értéket általános tudásból (OTÉK, más települések, szokásos
+találj ki, ne becsülj és ne pótolj értéket általános tudásból (OTÉK, TÉKA, más települések, szokásos
 értékek).
 
 === BEMENETEK ===
@@ -162,7 +173,8 @@ szab_ov,megnevezes,beep_mod,min_ter,min_szel,min_mely,beep_szaz,terepalatti,szin
 3. Az értékek rögzítése:
    - Számok tizedesponttal, mértékegység, ezres elválasztó és szóköz nélkül: „30%” → 30;
      „4,5 m” → 4.5; „1 200 m²” → 1200.
-   - „K” vagy „kialakult” → a szöveg: kialakult.
+   - „K” vagy „kialakult” egy számoszlopban → a szöveg: kialakult. (A beep_mod oszlopban a
+     fenti alak: „kialakult (K)”.)
    - „–”, „-”, „nem szabályozott”, üres cella → üres cella. A 0 csak akkor 0, ha a HÉSZ
      tényleg 0-t ír.
    - Tartomány (pl. épületmagasság „3,5–6,0”) → min_mag 3.5 és max_mag 6.0, ha a HÉSZ

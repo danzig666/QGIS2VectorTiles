@@ -207,15 +207,20 @@ def _find_cut_lines(layers) -> List[Tuple[object, str]]:
 
 def _find_regulations(layers, exclude) -> Optional[object]:
     """The zone regulation table: named like REGULATION_NAMES, with a zone code
-    field and at least two other fields (with or without geometry)."""
-    for layer in layers:
-        if layer in exclude or not any(word in plain(layer.name()) for word in REGULATION_NAMES):
+    field and at least two other fields (with or without geometry). A table
+    without geometry and a name with "előírás" / "HÉSZ" come first: a zone
+    polygon layer ("Övezeti jelek") may carry the same code field."""
+    found = []
+    for order, layer in enumerate(layers):
+        name = plain(layer.name())
+        if layer in exclude or not any(word in name for word in REGULATION_NAMES):
             continue
         code = _field(layer, REGULATION_CODE_FIELDS)
         others = [f for f in layer.fields() if f.name() != code and plain(f.name()) not in ("fid", "id", "ogc fid")]
         if code and len(others) >= 2:
-            return layer
-    return None
+            strong = any(word in name for word in ("eloiras", "hesz"))
+            found.append((_geometry(layer) != "none", not strong, order, layer))
+    return min(found, key=lambda item: item[:3])[3] if found else None
 
 
 def _regulation_fields(layer, code: str) -> List[PopupField]:
@@ -319,9 +324,10 @@ def apply(project, profile) -> List[str]:
         notes.append(f"Övezeti előírások: „{regulations.name()}” ({info.regulation_code_field} szerint), "
                      f"{len(info.regulation_fields)} mező; az övezetre kattintva is megjelennek.")
         zoning_config = profile.layer(zoning.id())
-        if zoning_config is not None and zoning_config.included and not any(
+        if zoning_config is not None and not any(
                 p.field == info.zoning_code_field for p in zoning_config.popup_fields):
-            # The zone popup needs the code to find its regulations.
+            # The zone popup needs the code to find its regulations (also when
+            # the zone layer is ticked for publishing later).
             zoning_config.popup_fields.insert(0, PopupField(info.zoning_code_field, "Övezet"))
     else:
         notes.append("Nem található övezeti előírás tábla (pl. „HÉSZ övezeti előírások” szab_ov mezővel): "

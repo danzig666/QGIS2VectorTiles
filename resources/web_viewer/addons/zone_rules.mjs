@@ -4,6 +4,7 @@
 // a document published with the map). Installed by controls.mjs from
 // manifest.addons; it brings its own strings and styles.
 import { formatValue } from "../identify.mjs";
+import { zoneKey } from "../parcel_report.mjs";
 
 const TEXT = { hu: "A(z) {code} övezet előírásai", en: "Regulations of zone {code}" };
 const STYLE = `.q2vt-zone-rules { margin-top: 8px; border-top: 1px solid var(--q2vt-border); padding-top: 6px; }
@@ -18,7 +19,8 @@ function element(tag, className, text) {
 
 // The rows [title, text, url] of a zone code's regulations.
 export function zoneRules(catalog, code) {
-  const regulation = ((catalog && catalog.regulations) || {})[String(code)];
+  // The table's keys: trimmed text, whole numbers without ".0" (zone_key).
+  const regulation = ((catalog && catalog.regulations) || {})[zoneKey(code)];
   if (!regulation) return [];
   const rows = [];
   for (const field of catalog.regulationFields || []) {
@@ -40,7 +42,7 @@ export function install({ identify, parcel, manifest }) {
   identify.extend = async (box, { layerId, record }) => {
     if (layerId !== info.zoningLayerId || !record || !record.a) return;
     const code = record.a[info.zoneCodeField];
-    if (code === undefined || code === null || code === "") return;
+    if (!zoneKey(code)) return;
     await parcel.load();
     const rows = zoneRules(parcel.catalog, code);
     if (!rows.length) return;

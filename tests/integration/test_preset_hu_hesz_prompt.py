@@ -91,3 +91,29 @@ def test_aliases_win_over_the_known_titles(plugin):
     table.setFieldAlias(table.fields().indexOf("beep_szaz"), "Beépítettség (%)")
     fields = {f.field: f.alias for f in hu_hesz._regulation_fields(table, "szab_ov")}  # pylint: disable=protected-access
     assert fields == {"beep_szaz": "Beépítettség (%)", "sajat": "sajat"}
+
+
+def test_the_table_wins_over_a_zone_layer_with_the_same_fields(plugin):
+    """A zone polygon layer named "Övezeti jelek" with szab_ov and two other
+    fields is no regulation table; the zone popup gets the code even when the
+    zone layer is not (yet) ticked for publishing."""
+    from q2vt_plugin.src.publishing import presets  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.models import LayerConfig, PublicationProfile  # pylint: disable=import-error
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_preset_hu_hesz import _layer, _plan  # pylint: disable=import-error
+    preset = next(m for m in presets.available() if m.PRESET_ID == "hu-hesz")
+    project = QgsProject()
+    layers = _plan(project)
+    square = "POLYGON((650000 230000, 650100 230000, 650100 230100, 650000 230100, 650000 230000))"
+    _layer(project, "Övezeti jelek", "Polygon", ["szab_ov:string", "felirat:string", "meret:double"], square)
+    table = QgsVectorLayer("None?field=szab_ov:string&field=beep_szaz:double&field=max_mag:double",
+                           "HÉSZ övezeti előírások", "memory")
+    project.addMapLayer(table)
+    profile = PublicationProfile()
+    profile.layers = [LayerConfig(layer.id(), included=False) for layer in project.mapLayers().values()]
+    preset.apply(project, profile)
+    info = profile.parcel_info
+    assert info.regulation_layer_id == table.id()
+    zoning = profile.layer(info.zoning_layer_id)
+    assert zoning.popup_fields and zoning.popup_fields[0].field == "szab_ov"
+    assert info.zoning_layer_id == layers["colours"].id()
