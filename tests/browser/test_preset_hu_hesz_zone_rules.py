@@ -43,7 +43,11 @@ def site(tmp_path_factory):
                    [(("Lke-1",), box(0, 0, 70, 40)), (("Gksz",), box(70, -60, 150, 40))])
     table = layer("None", "HÉSZ övezeti előírások", ["szab_ov", "beep_szaz", "max_mag", "hivatkozas"],
                   [(("Lke-1", "30", "7,5", DECREE), QgsGeometry()), (("Gksz", "50", "12", DECREE), QgsGeometry())])
-    for item in (parcels, zoning, table):
+    # The full texts (4.26): only for Gksz.
+    texts = layer("None", "HÉSZ övezeti előírások szövege", ["szab_ov", "eloiras_html"],
+                  [(("Gksz", "<h3>Az övezet saját előírásai</h3><p>(2) A Gksz övezetben raktár is lehet.</p>"),
+                    QgsGeometry())])
+    for item in (parcels, zoning, table, texts):
         project.addMapLayer(item)
     profile = PublicationProfile(title="Övezetek", slug="ovezetek", locale="hu")
     profile.view.min_zoom, profile.view.max_zoom = 14, 15
@@ -83,7 +87,10 @@ def test_zone_popup_and_parcel_report_list_the_regulations(site, tmp_path):
         {"clickLngLat": site["zone"]}, {"wait": 900},
         {"eval": """
           const popup = document.querySelector('.maplibregl-popup .q2vt-zone-rules');
+          const full = popup && popup.querySelector('details.q2vt-rich-block');
+          if (full) { full.open = true; await new Promise((r) => setTimeout(r, 600)); }
           return popup && { title: popup.querySelector('h4').textContent,
+            full: full && [full.querySelector('summary').textContent, full.querySelector('.q2vt-rich p').textContent],
             rows: [...popup.querySelectorAll('tr')].map((r) => [r.querySelector('th').textContent, r.querySelector('td').textContent]),
             link: popup.querySelector('a') && popup.querySelector('a').href };
         """},
@@ -101,4 +108,5 @@ def test_zone_popup_and_parcel_report_list_the_regulations(site, tmp_path):
     assert popup["rows"] == [["Legnagyobb beépítettség (%)", "50"], ["Legnagyobb épületmagasság (m)", "12"],
                              ["HÉSZ hivatkozás", DECREE]]
     assert popup["link"] == DECREE
+    assert popup["full"] == ["A(z) Gksz övezet teljes előírásai", "(2) A Gksz övezetben raktár is lehet."]
     assert report["links"] == [DECREE, DECREE] and "Legnagyobb beépítettség (%)" in report["facts"], report

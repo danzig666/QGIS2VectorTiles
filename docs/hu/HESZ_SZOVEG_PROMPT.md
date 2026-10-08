@@ -303,14 +303,16 @@ def kibont(tartalom, lanc=()):
     return re.sub(r"<!--\s*BEILLESZT:\s*(.+?)\s*-->", csere, tartalom)
 
 
-reteg = QgsVectorLayer("None?field=szab_ov:string&field=eloiras_html:string", NEV, "memory")
+# string(0): korlátlan hosszú szöveg (a „string” 255 karakternél levágná, illetve eldobná)
+reteg = QgsVectorLayer("None?field=szab_ov:string(0)&field=eloiras_html:string(0)", NEV, "memory")
 elemek = []
 for jel, tartalom in ovezetek.items():
     html = re.sub(r"<!--.*?-->", "", kibont(tartalom), flags=re.S).strip()
     elem = QgsFeature(reteg.fields())
     elem.setAttributes([jel, html])
     elemek.append(elem)
-reteg.dataProvider().addFeatures(elemek)
+if not reteg.dataProvider().addFeatures(elemek)[0]:
+    raise RuntimeError("Az övezetek nem tárolhatók: " + reteg.dataProvider().lastError())
 for azon in sorted(set(kozos) - hasznalt):
     hibak.append(f"fel nem használt KÖZÖS blokk: {azon}")
 vart = {sor.strip() for sor in JELEK.splitlines() if sor.strip()}
