@@ -1290,3 +1290,16 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | `pytest tests/browser/test_web_viewer_features.py tests/browser/test_web_viewer_parcel.py tests/browser/test_pmtiles_transport.py tests/browser/test_browser_smoke.py tests/browser/test_static_package.py tests/browser/test_web_viewer_streetview.py` | 29 passed (`test_compact_embed_mode_in_another_page`: framed viewer in a host page, panel closed, plain scroll leaves the zoom unchanged) |
 | `pytest tests/integration/test_publish_dialog*.py tests/unit/test_publishing_web_builder.py` | 35 passed (`test_copy_embed_code`) |
+
+## 4.22.1: export on a Windows network share
+
+- Packaging stopped with `Q2VT_PUB_MBTILES_INVALID: invalid uri authority: <server>` when the
+  output folder was on a network share: `Path.resolve().as_uri()` turns a mapped drive (or a
+  `\\\\server\\share` path) into `file://server/...`, and SQLite refuses a URI authority.
+  `sqlite_readonly_uri` now builds `file:////server/share/...` (empty authority, no
+  `resolve()`), and `connect_readonly` falls back to a plain `query_only` connection when the
+  URI form cannot name the file. Used by the PMTiles builder, validation and XYZ extraction.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_publishing_*.py tests/integration/test_publishing_pipeline.py tests/browser/test_static_package.py` | 157 passed, 5 skipped (`test_network_share_paths` reproduces the error, then opens and packages the file) |

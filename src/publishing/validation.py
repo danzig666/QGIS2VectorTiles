@@ -349,8 +349,8 @@ def _sample_indices(entries: Sequence, sample: int) -> List[int]:
 
 def mbtiles_tiles(path: str) -> Iterator[Tuple[Tuple[int, int, int], bytes]]:
     """((z, x, y XYZ), payload) of every MBTiles tile (read-only)."""
-    from .pmtiles_builder import sqlite_readonly_uri  # pylint: disable=import-outside-toplevel
-    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+    from .pmtiles_builder import connect_readonly  # pylint: disable=import-outside-toplevel
+    conn = connect_readonly(path)
     try:
         for z, x, row, data in conn.execute(
                 "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles"):
