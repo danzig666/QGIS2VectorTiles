@@ -9,7 +9,7 @@
 # releases/RELEASE_NOTES_<version>[-<suffix>].md (the variant file if it
 # exists, else the generic one). "replace" first deletes an existing release
 # and tag of that version. "notes_only" only rewrites the title and notes of
-# an existing release (no zip, no tag change). Only generic releases become
+# an existing release (no zip, no tag change, "Latest" left as it is). Only generic releases become
 # the repository's "Latest" release; variant releases never do, so the
 # default download stays the generic plugin. A variant's release title is
 # variant.json "releaseTitle" (else its "name") plus the version.
@@ -94,7 +94,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # No --latest: rewriting an older release's notes must not make it
+          # the repository's "Latest" release.
           gh release edit "${TAG}" \
             --title "${TITLE}" \
-            --notes-file "${NOTES}" \
-            --latest="${LATEST}"
+            --notes-file "${NOTES}"

@@ -116,9 +116,14 @@ public base URL. Only enable *conditional writes* when the service supports `If-
 
 Copy the publication folder to the server (e.g. with *Destination: Local* into a web root).
 The server must answer `Range` requests with `206 Partial Content`, must not gzip
-`.pmtiles` and `.pack` responses, and must serve `.mjs` as `text/javascript`. (A server that
-ignores `Range` still works for the `.pack` files, but then each is downloaded whole.) nginx and Apache do this
-by default for static files (add `types { text/javascript mjs; }` to old nginx versions).
+`.pmtiles` and `.pack` responses, and must serve `.mjs` as `text/javascript`. nginx and Apache
+do this by default for static files (add `types { text/javascript mjs; }` to old nginx versions).
+
+Range support is required: a server that answers a range request with the whole file
+(`200 OK`) cannot serve the map, and the viewer shows `Q2VT_PUB_RANGE_UNSUPPORTED` instead of
+it. Python's `python -m http.server`, for example, does not support ranges; use the plugin's
+*Preview* to look at an export locally. (The `.pack` files are read even from a server that
+sometimes sends a whole file, but the map archive is not.)
 
 ## Troubleshooting (viewer error codes)
 

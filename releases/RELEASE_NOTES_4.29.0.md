@@ -13,7 +13,7 @@ A city's map was over 40,000 files, slow to upload anywhere. Almost all of them 
 | Search manifest, loaded when the search starts | about 7 MB | 224 KB (64 KB compressed) |
 
 A search for a street name then loads about 40 KB.
-The parcel report's records are one file too. Any host that serves the map archive serves these files the same way (byte ranges, no added compression); a server that ignores byte ranges still works, it just sends each such file whole.
+The parcel report's records are one file too. Any host that serves the map archive serves these files the same way (byte ranges, no added compression). As before, the web server must support byte ranges (HTTP `Range`): without them the map archive cannot be read and the viewer shows an error instead of the map.
 
 ### Draw the published area on the map
 *Map* tab → *Extent* → **Draw…**: the window steps aside, drag a rectangle on the QGIS map, and it becomes the published area. Esc cancels.
