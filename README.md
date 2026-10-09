@@ -62,9 +62,9 @@ This README describes QWebMap **4.31.0**. Newest first:
   (it was ignored).
 - **Labels:** a feature drawn by two renderer rules (a category and a filterless outline rule) has
   one label again (it had one per rule); the viewer measures each character's own width, so Free
-  labels that fit in QGIS are
-  no longer dropped; labels with empty text no longer draw their background; DemiBold, Medium
-  and Light fonts use the face QGIS draws; repeat distances in map units grow with the map;
+  labels that fit in QGIS are no longer dropped; labels with empty text no longer draw their
+  background; DemiBold, Medium and Light fonts use the face QGIS draws; repeat distances in map
+  units grow with the map;
   around-point labels try QGIS's positions in QGIS's order, keep clear of other labels, and small
   polygons keep theirs.
 - **Markers:** hairline (zero-width) marker outlines are one pixel wide, and point-pattern dots
