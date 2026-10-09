@@ -1307,29 +1307,25 @@ export function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) 
   for (const group of groups.values()) {
     for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
   }
-  // The style's own layer definitions: a rendered feature's ``layer.layout``
-  // holds that feature's evaluated values (text-field: its own text), so a
-  // box function made from it measured every label of the layer as the first.
   const defs = new Map(map.getStyle().layers.filter((l) => l.type === "symbol" && !ours.has(l.id)
     && (l.layout || {})["text-field"] !== undefined).map((l) => [l.id, l]));
   const layers = [...defs.keys()];
   if (!layers.length) return [];
   const boxes = [];
-  const sizes = new Map();
   for (const f of map.queryRenderedFeatures({ layers })) {
     if (f.geometry.type !== "Point") continue;  // labels along lines: their position is unknown here
-    const def = defs.get(f.layer.id) || f.layer;
-    if (!sizes.has(def.id)) {
-      const metadata = def.metadata || {};
-      sizes.set(def.id, layoutBoxes(def.layout || {}, zoom, perPx,
-        Number(metadata["q2vt:char-width"]) || 0.6, fonts?.get(metadata["q2vt:font"]) || null));
-    }
-    const half = sizes.get(def.id)(f.properties);
+    // A rendered feature's ``layer.layout`` is MapLibre's evaluation for
+    // that feature (its own text, size and offset, whatever the expression:
+    // case, format...): each label is measured on its own. The metadata
+    // (the font's widths) comes from the style's definition.
+    const layout = f.layer.layout || {};
+    const metadata = (defs.get(f.layer.id) || f.layer).metadata || {};
+    const half = layoutBoxes(layout, zoom, perPx, Number(metadata["q2vt:char-width"]) || 0.6,
+      fonts?.get(metadata["q2vt:font"]) || null)(f.properties);
     if (!half) continue;
     const p = maplibregl.MercatorCoordinate.fromLngLat(f.geometry.coordinates);
     // text-offset (ems of the text size): the label is drawn off its point
     // (a town name 4 mm above its dot).
-    const layout = def.layout || {};
     const offset = layout["text-variable-anchor"] ? null : evaluate(layout["text-offset"], zoom, f.properties);
     const em = Number(evaluate(layout["text-size"] ?? 16, zoom, f.properties)) || 16;
     const [dx, dy] = Array.isArray(offset) ? offset.map((v) => (Number(v) || 0) * em * perPx) : [0, 0];

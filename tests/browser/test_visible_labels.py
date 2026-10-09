@@ -692,6 +692,29 @@ def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
     assert 0.098 < park[0] and park[2] < 0.902 and 0.098 < park[1] and park[3] < 0.902
 
 
+def test_rendered_labels_of_any_expression_are_measured():
+    """Basemap place names (text-field a "case" expression) and HTML labels
+    ("format"): the viewer's own small evaluator does not know these, so the
+    boxes come from MapLibre's evaluation of each rendered feature; labels
+    made from the style's definitions got no box and were overlapped."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {
+        'text-field': ['case', ['has', 'name'], ['get', 'name'], ''], 'text-size': 10}};
+      const html = {id: 'html', type: 'symbol', layout: {
+        'text-field': ['format', ['get', 'a'], {}, ['get', 'b'], {'font-scale': 0.8}], 'text-size': 10}};
+      const evaluated = (layer, t) => ({...layer, layout: {...layer.layout,
+        'text-field': {sections: [{text: t}], toString() { return t; }}}});
+      const map = {getStyle: () => ({layers: [town, html]}), queryRenderedFeatures: () => [
+        {layer: evaluated(town, 'Suburb'), properties: {name: 'Suburb'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
+        {layer: evaluated(html, 'AB12'), properties: {a: 'AB', b: '12'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001).map((b) => b[2] - b[0]);
+    })()"""
+    town_width, html_width = _js(expr)
+    assert town_width == pytest.approx((6 * 0.6 * 10 + 4) * 0.001)
+    assert html_width == pytest.approx((4 * 0.6 * 10 + 4) * 0.001)
+
+
 def test_rendered_label_boxes_measure_each_label_with_its_own_text():
     """A rendered feature's ``layer.layout`` holds that feature's own
     evaluated values (text-field: a Formatted of its text): each label is
