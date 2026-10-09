@@ -2922,12 +2922,20 @@ class RulesExporter:
             # default, the rule does not match, no label or generated
             # geometry - while the algorithm would abort the whole step. (The
             # line break keeps a trailing "--" comment from eating the ")".)
-            params[key] = f"try({params[key]}\n)"
+            # A value a numeric field cannot hold (text in a rotation field)
+            # is NULL too: the writer dropped the whole feature (its label).
+            cast = {0: "to_real", 1: "to_int"}.get(params.get("FIELD_TYPE")) \
+                if algorithm == "fieldcalculator" else None
+            params[key] = f"try({cast}({params[key]}\n))" if cast else f"try({params[key]}\n)"
         if algorithm == "refactorfields" and algorithm_type == "native":
-            params["FIELDS_MAPPING"] = [
-                {**field, "expression": f"try({field['expression']}\n)"}
-                if str(field.get("expression") or "").strip() else field
-                for field in params.get("FIELDS_MAPPING") or []]
+            def safe(field):
+                expression = str(field.get("expression") or "")
+                if not expression.strip():
+                    return field
+                cast = {6: "to_real", 2: "to_int", 4: "to_int"}.get(field.get("type"))
+                wrapped = f"try({cast}({expression}\n))" if cast else f"try({expression}\n)"
+                return {**field, "expression": wrapped}
+            params["FIELDS_MAPPING"] = [safe(field) for field in params.get("FIELDS_MAPPING") or []]
         if self._memory_active:
             return self._run_in_memory(full_name, params, context, feedback)
 

@@ -134,6 +134,33 @@ def test_labels_with_null_or_empty_text_are_left_out(tmp_path, plugin, text):
     assert _labels(tmp_path, layer) == expected
 
 
+def test_a_value_a_numeric_property_cannot_hold_keeps_its_label(tmp_path, plugin):
+    """A label rotation read from a text field: QGIS draws the labels whose
+    value is not a number unrotated. The export wrote the rotation into a
+    numeric field, and the writer dropped every such feature (half the
+    labels of a layer were missing)."""
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    layer.dataProvider().addAttributes([QgsField("angle", QVariant.String), QgsField("name", QVariant.String)])
+    layer.updateFields()
+    for i, (angle, name) in enumerate((("30", "a"), ("north", "b"), ("", "c"), ("-15.5", "d"))):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([angle, name])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({2120000 + 100 * i} 6020000)"))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "r.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({"name": "circle", "size": "2"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.setFormat(QgsTextFormat())
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.LabelRotation, QgsProperty.fromField("angle"))
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    layers, rules = _export(tmp_path, layer, QgsRectangle(2119000, 6019000, 2123000, 6023000))
+    labels = [l for l, r in zip(layers, rules) if r.get_attr("t") == 1]
+    assert sorted(str(f["q2vt_label"]) for f in labels[0].getFeatures()) == ["a", "b", "c", "d"]
+
+
 def test_an_expression_failing_on_one_feature_does_not_drop_the_layer(tmp_path, plugin):
     """Text in a field a numeric expression reads: QGIS skips the failing
     value (default size, no match, no label) and draws the rest; the
