@@ -45,10 +45,11 @@ def get(field: str) -> List:
 
 
 def to_number(expr: Expression, fallback: float = 0) -> Expression:
-    """Coerce to a number; nulls and unparsable values become ``fallback``."""
+    """Coerce to a number; nulls and unparsable values become ``fallback``
+    (MapLibre's to-number turns null into 0, not into its next argument)."""
     if is_number(expr):
         return finite(expr)
-    return ["to-number", expr, finite(fallback)]
+    return ["to-number", ["coalesce", expr, finite(fallback)], finite(fallback)]
 
 
 def to_color(expr: Expression, fallback: str) -> Expression:

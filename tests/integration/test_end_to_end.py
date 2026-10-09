@@ -133,7 +133,7 @@ def test_vector_first_export(export, tmp_path):
     assert width[0] == "case"  # zero width -> one-pixel hairline, as QGIS
     width = width[3]
     assert width[0] == "*" and width[1][0] == "to-number"
-    field = width[1][1][1]
+    field = width[1][1][1][1]
     assert field in archive["vector_layers"][outline["source-layer"]]["fields"]
 
     # Labels: glyphs generated for the exact text-font, including ő/ű.

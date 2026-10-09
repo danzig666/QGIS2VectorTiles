@@ -53,7 +53,7 @@ def test_field_and_expression_reference_are_equivalent(mc):
     by_field = mc.PropertyExtractor.get_value_or_expression(2, QgsProperty.fromField(field))
     by_expr = mc.PropertyExtractor.get_value_or_expression(
         2, QgsProperty.fromExpression(f'"{field}"'))
-    assert by_field == by_expr == ["to-number", ["get", field], 2]
+    assert by_field == by_expr == ["to-number", ["coalesce", ["get", field], 2], 2]
 
 
 def test_color_field_reference_is_typed(mc):

@@ -13,7 +13,15 @@ def test_mul_constant_folds_numbers():
 def test_mul_never_uses_python_list_arithmetic():
     # Regression: icon-size used `list / number` and raised TypeError.
     expr = ex.div(ex.to_number(ex.get("q2vt_size"), 1), 3)
-    assert expr == ["*", ["to-number", ["get", "q2vt_size"], 1], 1.0 / 3]
+    assert expr == ["*", ["to-number", ["coalesce", ["get", "q2vt_size"], 1], 1], 1.0 / 3]
+
+
+def test_to_number_falls_back_on_null():
+    """MapLibre's to-number turns null (a feature without the property) into
+    0, not into its next argument: a null data-defined size drew labels at
+    size 0. The fallback is put in place of null first."""
+    assert ex.to_number(ex.get("size"), 9) == \
+        ["to-number", ["coalesce", ["get", "size"], 9], 9]
 
 
 def test_zero_divisor_returns_fallback():
