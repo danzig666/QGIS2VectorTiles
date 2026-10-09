@@ -584,6 +584,31 @@ def test_a_fill_offset_moves_its_outline_too(tmp_path):
     assert _compare(tmp_path, layer, metric="shape") < 0.05
 
 
+@pytest.mark.parametrize("join", ["miter", "bevel"])
+def test_a_ring_is_joined_at_its_first_vertex(tmp_path, join):
+    """A polygon outline travels as a closed line. Qt strokes a closed path
+    with a join at its first vertex; MapLibre gave that vertex two caps (a
+    square knob, twice the ink of a translucent outline)."""
+    from qgis.PyQt.QtCore import Qt
+    layer = _polygon_layer(str(tmp_path / "ring.gpkg"), False)
+    symbol = QgsFillSymbol.createSimple({"color": "0,0,0,0", "outline_color": "0,0,0,128",
+                                         "outline_width": "8", "outline_width_unit": "Pixel"})
+    symbol.symbolLayer(0).setPenJoinStyle({"miter": Qt.PenJoinStyle.MiterJoin,
+                                           "bevel": Qt.PenJoinStyle.BevelJoin}[join])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    assert _compare(tmp_path, layer, metric="shape") < 0.03
+    from PIL import Image
+    # Ink around the ring's first vertex, (-120, -90) from the centre. With
+    # bevel joins MapLibre draws a ring's closing wedge twice (as on its own
+    # polygon rings): 7 % more ink there; the caps gave 28 %.
+    scale = gallery.EARTH / (512 * 2 ** ZOOM)
+    x, y = round(SIZE / 2 - 120 / scale), round(SIZE / 2 + 90 / scale)
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L")
+                         .crop((x - 12, y - 12, x + 12, y + 12)).getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.01 if join == "miter" else 0.1)
+
+
 def test_a_wide_map_unit_line_crossing_a_tile_edge_has_straight_sides(tmp_path):
     """A line 60 map units wide crossing a tile edge at a shallow angle: the
     tiles keep it beyond their edge for its width (the default 10 px clip

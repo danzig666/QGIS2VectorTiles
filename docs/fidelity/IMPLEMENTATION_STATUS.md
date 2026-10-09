@@ -115,6 +115,10 @@ overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`
 * Valid polygons keep their rings exactly as stored (start vertex, hole orientation);
   only invalid geometries are repaired. Marker intervals, dashes and offsets on polygon
   outlines now start where QGIS starts them, on every ring.
+* A closed line (a polygon outline, a closed contour) is joined at its first vertex as
+  Qt strokes a closed path, without the two caps MapLibre drew there (a square knob, a
+  darker spot on translucent outlines; patched MapLibre). With bevel or round joins the
+  closing wedge is still drawn twice, as on MapLibre's own polygon rings.
 * Map-unit custom dashes are exported as their dashes from the zoom where the pattern is
   6 px long, so markers drawn in the gaps stay in the gaps.
 * Random marker fills draw the QGIS number of markers (positions differ: QGIS draws them
