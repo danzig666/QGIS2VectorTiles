@@ -401,8 +401,8 @@ Always there:
 - **Desktop and phone:** a floating panel with tabs on desktop, a bottom sheet on phones; light
   and dark appearance (follows the system until the visitor chooses); your accent colour and logo.
 - The visitor's layer, label, opacity, filter and basemap choices are remembered in their
-  browser. A shared link sets what the sender changed from the published map; the visitor's other
-  remembered choices stay (*Reset* clears them).
+  browser. A shared link shows the published map with the sender's changes instead, also when it
+  is pasted into a tab where the map is already open.
 - When the map cannot be shown (no WebGL, no Range support, a missing or damaged map file …), the
   viewer says why in plain words, with the technical detail. A basemap, terrain or symbol that
   fails to load gives a warning while the map still works.

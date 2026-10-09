@@ -56,7 +56,8 @@ def site(tmp_path_factory):
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),
                "lid": layer_logical_id(parcels.id()),
-               "records": {r["k"]: r for r in records}}
+               "records": {r["k"]: r for r in records},
+               "manifest": json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))}
 
 
 PRELUDE = "const v = q2vtViewer, m = v.map, c = v.controls.control, s = v.controls.state, man = v.manifest;"
@@ -222,6 +223,37 @@ def test_permalink_round_trip(site, tmp_path):
     bad = _run(site["url"] + "#v=1&r-=not-a-rule&o=lyr-x:500&f=%%%&map=99/999/999", [
         {"eval": PRELUDE + "return { errors: v.diagnostics.errors.length, zoom: m.getZoom() };"}], tmp_path)
     assert bad[0]["errors"] == 0 and bad[0]["zoom"] <= 24  # untrusted URL state ignored safely
+
+
+def test_a_link_shows_what_its_sender_saw(site, tmp_path):
+    """A returning visitor's remembered choices (labels off, a rule off) used
+    to stay when they opened someone's link: the link only names what the
+    sender changed from the published map, and it was merged into the saved
+    state. Pasted into a tab where the map was open, only the hash changed
+    and the viewer ignored the link altogether. A link now shows the
+    published map with the sender's changes, in a new tab or the same one."""
+    rules = [r["id"] for r in site["manifest"]["rules"]]
+    link = f"{site['url']}#v=1&r-={urllib.parse.quote(rules[1], safe='')}"
+    state = PRELUDE + ("return { labels: s.value.labels, r0: s.value.rules[man.rules[0].id], "
+                       "r1: s.value.rules[man.rules[1].id] };")
+    remember = PRELUDE + "s.set({ labels: false }); s.setIn('rules', man.rules[0].id, false); return 1;"
+    # The same tab: only the hash changes.
+    results = _run(site["url"], [
+        {"eval": remember},
+        {"goto": link},
+        {"eval": "for (let i = 0; i < 100 && !(window.q2vtViewer && q2vtViewer.ready && q2vtViewer.controls); i++) "
+                 "await new Promise((r) => setTimeout(r, 100)); return 1;"},
+        {"wait": 500},
+        {"eval": state},
+    ], tmp_path)
+    assert results[2] == {"labels": True, "r0": True, "r1": False}
+    # A new visit (a new tab) with the remembered choices in storage.
+    results = _run(site["url"], [
+        {"eval": remember},
+        {"goto": site["url"] + "?new-tab=1" + link[len(site["url"]):]},
+        {"eval": state},
+    ], tmp_path)
+    assert results[1] == {"labels": True, "r0": True, "r1": False}
 
 
 def test_measure_distance(site, tmp_path):

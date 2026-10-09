@@ -304,8 +304,13 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   setDocuments(manifest.info, pageUrl);
   const state = new ViewerState(manifest);
   const initial = defaultState(manifest);
-  state.load();
-  const fromUrl = decodeState(manifest, location.hash);  // URL wins over saved state
+  // A link names what its sender changed from the published map, so it is
+  // applied to the published map, not to this visitor's remembered choices.
+  const fromUrl = decodeState(manifest, location.hash);
+  if (!fromUrl) state.load();
+  // A link pasted into this tab changes only the hash (the viewer itself
+  // rewrites it with replaceState, which fires nothing): open it afresh.
+  window.addEventListener("hashchange", () => location.reload());
   if (fromUrl) {
     state.merge({ ...fromUrl, filters: fromUrl.filters ? sanitizeFilters(manifest, fromUrl.filters) : undefined });
     if (fromUrl.camera) map.jumpTo({ center: [fromUrl.camera.lng, fromUrl.camera.lat], zoom: fromUrl.camera.zoom });
