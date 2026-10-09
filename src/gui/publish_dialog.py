@@ -177,6 +177,8 @@ class PublishDialog(QDialog):
         self.session_credentials = None
         self.task = None
         self.feedback = None
+        self._extent_tool = None   # drawing the extent on the map canvas
+        self._draw_notice = None   # its message bar notice
         self.profile = self._load_profile()
         self._build()
         self._populate(self.profile)
@@ -744,15 +746,19 @@ class PublishDialog(QDialog):
         """The published area drawn on the map: this window steps aside
         while two opposite corners are clicked; the status bar says which
         corner comes next."""
+        from qgis.gui import QgsMessageBarItem  # pylint: disable=import-outside-toplevel
         from .extent_tool import ExtentTool  # pylint: disable=import-outside-toplevel
         canvas = self.iface.mapCanvas()
         self._extent_tool = ExtentTool(canvas, self._extent_drawn, self._extent_hint)
         canvas.setMapTool(self._extent_tool)
         self.hide()
-        self.iface.messageBar().pushMessage(
+        canvas.setFocus()  # Esc reaches the tool before the map is clicked
+        # Removed again when the drawing ends (see _extent_drawn).
+        self._draw_notice = QgsMessageBarItem(
             tr("Web map"), tr("Click two opposite corners of the published area on the map. "
                               "Right click or Esc cancels."),
             Qgis.MessageLevel.Info, 8)
+        self.iface.messageBar().pushItem(self._draw_notice)
 
     def _extent_hint(self, text):
         bar = self.iface.statusBarIface()
@@ -763,6 +769,12 @@ class PublishDialog(QDialog):
 
     def _extent_drawn(self, rect):
         self._extent_tool = None
+        notice, self._draw_notice = self._draw_notice, None
+        if notice is not None:
+            try:
+                self.iface.messageBar().popWidget(notice)
+            except RuntimeError:  # gone by itself already
+                pass
         if rect is not None:
             self._use_canvas_extent(rect)
         self.show()
@@ -2927,6 +2939,13 @@ class PublishDialog(QDialog):
             QgsSettings().setValue(self.GEOMETRY_KEY, self.saveGeometry())
         except (TypeError, ValueError):
             pass
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # Opened again (Web menu) while the extent is being drawn: the
+        # drawing is given up, the previous map tool comes back.
+        if self._extent_tool is not None:
+            self._extent_tool.cancel()
 
     def done(self, result):  # Escape / reject() close without a closeEvent
         self._save_geometry()

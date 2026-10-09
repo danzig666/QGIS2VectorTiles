@@ -1645,11 +1645,21 @@ feature-lookup shards.
   the window steps aside, a dragged rectangle (map canvas CRS → EPSG:3857) becomes the fixed
   extent; Esc or another map tool cancels; the previous map tool comes back. From 4.31.0 the
   tool is a `QgsMapTool` drawn by two clicks (first corner, opposite corner; a rubber band in
-  the canvas CRS in between; press-drag-release still works; a second click within 3 pixels
-  of the first corner is ignored), with the canvas snapping (`QgsMapMouseEvent.snapPoint`,
-  snap indicator), step hints in the QGIS status bar, and right click as another way to
-  cancel. Tests: `tests/integration/test_publish_dialog_extent.py` (synthetic
-  `QgsMapMouseEvent`s on an offscreen canvas), `test_publish_dialog.py`.
+  the canvas CRS in between; press-drag-release still works), with the canvas snapping
+  (`QgsMapMouseEvent.snapPoint`, snap indicator), step hints in the QGIS status bar, and right
+  click as another way to cancel. Click or drag is decided on the unsnapped screen position:
+  a release less than `QApplication.startDragDistance()` (10 px by default) from where the
+  first corner was clicked is a click on it and is ignored, and so is a rectangle under 4
+  pixels wide or high. The tool goes only once every mouse button is up (right click or Esc
+  while dragging cancels at the release; the canvas gives keys to its `keyPressed` signal only
+  while a button is down), and a short-lived event filter on the canvas viewport eats the rest
+  of a double click on the last corner, so the tool that comes back (Pan: zoom in, re-centre)
+  gets none of the gesture. The window gives the map canvas the keyboard focus (Esc before
+  the first click), takes its message bar notice back when the drawing ends, and opening the
+  window again (Web menu) while drawing cancels the drawing. Tests:
+  `tests/integration/test_publish_dialog_extent.py` (synthetic `QgsMapMouseEvent`s, and mouse
+  and key events sent through the canvas viewport, on an offscreen canvas),
+  `test_publish_dialog.py`.
 - The action is in the Web menu itself (`iface.webMenu().addAction`), named
   "QWebMap: Publish Web Map…", not in a QWebMap submenu.
 

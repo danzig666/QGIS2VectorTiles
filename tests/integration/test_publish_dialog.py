@@ -265,9 +265,10 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
 
 def test_the_extent_is_drawn_on_the_map(project, messages):
     """The published area drawn on the QGIS map by clicking two opposite
-    corners: the window steps aside meanwhile and the status bar says which
-    corner comes next; right click, Esc or another map tool cancels; the
-    tool used before comes back."""
+    corners: the window steps aside meanwhile, the map gets the keyboard (Esc)
+    and the status bar says which corner comes next; right click, Esc,
+    another map tool or opening the window again cancels; the tool used
+    before comes back and the message bar notice goes."""
     from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
     from qgis.gui import QgsMapCanvas, QgsMapMouseEvent, QgsMapToolPan
     from qgis.PyQt.QtCore import QEvent, QPoint
@@ -280,10 +281,11 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
     canvas.setExtent(QgsRectangle(2100000, 6000000, 2140000, 6030000))
     pan = QgsMapToolPan(canvas)
     canvas.setMapTool(pan)
-    bar, status = [], []
+    bar, popped, status = [], [], []
 
     class Bar:
-        def pushMessage(self, *args): bar.append(args)
+        def pushItem(self, item): bar.append(item)
+        def popWidget(self, item): popped.append(item)
 
     class StatusBar:
         def showMessage(self, text, timeout=0): status.append(text)
@@ -304,13 +306,17 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
 
     dialog = PublishDialog(iface=Iface())
     dialog.show()
+    assert canvas.focusWidget() is None
     dialog._draw_extent()  # pylint: disable=protected-access
     assert isinstance(canvas.mapTool(), ExtentTool) and not dialog.isVisible() and bar
-    assert "two opposite corners" in bar[-1][1] and "first corner" in status[-1]
+    assert "two opposite corners" in bar[-1].text() and "first corner" in status[-1]
+    assert canvas.focusWidget() is canvas  # Esc goes to the map tool
     click(100, 50)
     assert isinstance(canvas.mapTool(), ExtentTool) and "opposite corner" in status[-1]  # still drawing
+    assert popped == []
     click(200, 110)
     assert canvas.mapTool() is pan and dialog.isVisible() and status[-1] == ""
+    assert popped == [bar[-1]]  # the notice goes with the drawing
     to_map = canvas.getCoordinateTransform()
     drawn = QgsRectangle(to_map.toMapCoordinates(100, 50), to_map.toMapCoordinates(200, 110))
     expected = [round(drawn.xMinimum()), round(drawn.yMinimum()), round(drawn.xMaximum()), round(drawn.yMaximum())]
@@ -329,5 +335,16 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
     assert [round(v) for v in dialog.profile.view.extent] == expected
     dialog._draw_extent()  # pylint: disable=protected-access
     canvas.setMapTool(pan)  # another tool chosen
-    assert dialog.isVisible() and status[-1] == ""
+    assert dialog.isVisible() and status[-1] == "" and popped[-1] is bar[-1]
+    # The window opened again from the Web menu while drawing: drawing given
+    # up; drawing again starts from the tool used before.
+    dialog._draw_extent()  # pylint: disable=protected-access
+    click(150, 80)
+    dialog.show()
+    assert canvas.mapTool() is pan and status[-1] == "" and popped[-1] is bar[-1]
+    assert [round(v) for v in dialog.profile.view.extent] == expected
+    dialog._draw_extent()  # pylint: disable=protected-access
+    canvas.mapTool().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                             Qt.KeyboardModifier.NoModifier))
+    assert canvas.mapTool() is pan and dialog.isVisible()
     dialog.close()

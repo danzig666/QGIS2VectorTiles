@@ -69,10 +69,13 @@ This README describes QWebMap **4.31.0**. Newest first:
   polygons keep theirs.
 - **Markers:** hairline (zero-width) marker outlines are one pixel wide, and point-pattern dots
   are crisp.
+
+Also in 4.31.0, in the Publish window:
 - **Drawing the extent:** *Map* tab → *Extent* → **Draw…** works like QGIS's own rectangle tools:
   click one corner, then the opposite one (no need to hold the mouse button; dragging still
-  works). Corners snap when QGIS snapping is on; the status bar says which corner comes next;
-  right click or Esc cancels.
+  works, and a click that slips a few pixels is still a click). Corners snap when QGIS snapping
+  is on; the status bar says which corner comes next; right click or Esc cancels, also while
+  dragging.
 
 **4.30**
 - *Map* tab → **Zoomed-out load…** estimates which layers make the web map slow when zoomed out
