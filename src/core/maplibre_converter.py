@@ -1699,6 +1699,7 @@ class QgisMapLibreStyleExporter:
         z_orders: Optional[Dict[str, str]] = None,
         feature_filters: Optional[Dict[str, list]] = None,
         label_windows: Optional[set] = None,
+        layer_opacities: Optional[Dict[str, float]] = None,
     ):
         """Initialise the exporter.
 
@@ -1740,6 +1741,8 @@ class QgisMapLibreStyleExporter:
         # Style names of repeated curved line labels laid out at export time:
         # one short line per label (RulesExporter._label_windows).
         self.label_windows = label_windows or set()
+        # Style name -> the QGIS layer's opacity (Layer Rendering), below 1.
+        self.layer_opacities = layer_opacities or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1895,13 +1898,38 @@ class QgisMapLibreStyleExporter:
             return
         self.context.component = style.styleName()
         self.context.source_layer = style.layerName()
+        first = len(self.style["layers"])
+        try:
+            self._convert_style_layers(style, bounds, first)
+        finally:
+            opacity = self.layer_opacities.get(style.styleName())
+            if opacity is not None:
+                self._apply_layer_opacity(self.style["layers"][first:], opacity)
+
+    _OPACITY_PAINT = {"fill": ("fill-opacity",), "line": ("line-opacity",),
+                      "circle": ("circle-opacity", "circle-stroke-opacity"),
+                      "symbol": ("icon-opacity", "text-opacity"),
+                      "fill-extrusion": ("fill-extrusion-opacity",), "heatmap": ("heatmap-opacity",)}
+
+    def _apply_layer_opacity(self, layer_defs, opacity: float) -> None:
+        """QGIS draws a layer with an opacity below 1 as one image and blends
+        it once; the browser can only make each of its style layers that
+        transparent (where they overlap, the result is a little darker)."""
+        for layer_def in layer_defs:
+            if layer_def.get("metadata", {}).get("q2vt:layer-opacity"):
+                continue  # a feature-order copy of layers already done
+            paint = layer_def.setdefault("paint", {})
+            for prop in self._OPACITY_PAINT.get(layer_def.get("type"), ()):
+                paint[prop] = ex.mul(paint.get(prop, 1), float(opacity))
+            layer_def.setdefault("metadata", {})["q2vt:layer-opacity"] = float(opacity)
+
+    def _convert_style_layers(self, style, bounds, first: int) -> None:
         if style.styleName() in self.heatmaps:
             self._heatmap_layer(style, self.heatmaps[style.styleName()], bounds)
             return
         if style.styleName() in getattr(self, "inner_effects", {}):
             self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
-        first = len(self.style["layers"])
         feature_filter = getattr(self, "feature_filters", {}).get(style.styleName())
         sources = self.__dict__.setdefault("_stratum_sources", {})
         base = feature_order.copied_from(style.styleName())

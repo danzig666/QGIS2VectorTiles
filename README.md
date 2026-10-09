@@ -58,7 +58,8 @@ This README describes QWebMap **4.31.0**. Newest first:
   distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %;
   big layers get one setting per half zoom or per zoom, within about 19 % or 41 %, reported).
   Gradient fills of small features (a village green published from zoom 11) keep their outer
-  colours instead of ending in one flat band.
+  colours instead of ending in one flat band. A layer's opacity (*Layer Rendering*) is converted
+  (it was ignored).
 - **Labels:** the viewer measures each character's own width, so Free labels that fit in QGIS are
   no longer dropped; labels with empty text no longer draw their background; DemiBold, Medium
   and Light fonts use the face QGIS draws; repeat distances in map units grow with the map;
@@ -150,7 +151,9 @@ What carries over:
   Overlapping lines and polygons of different categories or rules also keep QGIS's order, up to
   5,000 re-ordered features and 8 levels of overlap per layer, in layers of up to 100,000 features
   (beyond that, rule order, reported; layers with inner shadow or inner glow lines keep rule
-  order). Point layers are drawn
+  order). The layer's opacity (*Layer Rendering*) fades its symbols, not its labels, as in QGIS;
+  QGIS blends the layer as one image, the browser each style layer, so overlaps come out a little
+  darker. Point layers are drawn
   rule by rule, and a symbol with several layers (a road casing and its fill) is drawn one layer
   at a time for all features, as with symbol levels.
 - **Fills:** solid fills and outlines (with their offsets), line-pattern hatches, point-pattern,

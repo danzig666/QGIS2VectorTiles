@@ -740,6 +740,10 @@ class QGIS2VectorTiles:
                              for rule in rules or [] if getattr(rule, "feature_filter", None)},
             label_windows={rule.rule.description() for rule in rules or []
                            if rule.recipe is not None and rule.recipe.kind == "label_windows"},
+            # QGIS layer opacity applies to the features, not to the labels.
+            layer_opacities={rule.rule.description(): rule.layer.opacity() for rule in rules or []
+                             if rule.layer is not None and rule.get_attr("t") == 0
+                             and rule.layer.opacity() < 1.0},
         )
         exporter.export()
         return exporter

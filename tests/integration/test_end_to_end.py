@@ -732,6 +732,29 @@ def test_properties_on_missing_fields_are_ignored_as_in_qgis(export, tmp_path):
     assert not exporter.diagnostics.by_code("Q2VT_PROJECT_MUTATED")
 
 
+def test_layer_opacity_fades_the_symbols_not_the_labels(export, tmp_path):
+    """QGIS's layer opacity (Layer Rendering) was never exported: a layer at
+    50 % came out fully opaque on the web. Its symbols now get it; its labels
+    do not, as in QGIS."""
+    layer = zoning_layer(path=str(tmp_path / "op.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "255,0,0,200", "outline_color": "black", "outline_width": "0.5"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    layer.setOpacity(0.5)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    fills = [l for l in style["layers"] if l["type"] == "fill"]
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert fills and lines and labels
+    assert all(l["paint"]["fill-opacity"] == pytest.approx(0.5) for l in fills)
+    assert all(l["paint"]["line-opacity"] == pytest.approx(0.5) for l in lines)
+    assert all(l.get("paint", {}).get("text-opacity", 1) == 1 for l in labels)
+
+
 def test_source_without_prj_uses_the_project_crs(export, tmp_path):
     """Épületek: a shapefile without .prj (CRS set in the project) reopened
     without a CRS; the extent filter then dropped every feature."""
