@@ -2,7 +2,9 @@
 
 The map is a folder of static files. The map data is one PMTiles archive read with HTTP
 byte ranges, so any static host that answers `Range` requests correctly works; no tile
-server, database or Docker is needed.
+server, database or Docker is needed. The search index, the feature records (popups, links)
+and the parcel report are one `.pack` file each, read the same way, so even a city's map is
+a few hundred files to upload, not tens of thousands.
 
 ```text
 <publication>/index.html        stable address (follows current.json)
@@ -110,7 +112,8 @@ public base URL. Only enable *conditional writes* when the service supports `If-
 
 Copy the publication folder to the server (e.g. with *Destination: Local* into a web root).
 The server must answer `Range` requests with `206 Partial Content`, must not gzip
-`.pmtiles` responses, and must serve `.mjs` as `text/javascript`. nginx and Apache do this
+`.pmtiles` and `.pack` responses, and must serve `.mjs` as `text/javascript`. (A server that
+ignores `Range` still works for the `.pack` files, but then each is downloaded whole.) nginx and Apache do this
 by default for static files (add `types { text/javascript mjs; }` to old nginx versions).
 
 ## Troubleshooting (viewer error codes)
