@@ -1464,3 +1464,27 @@ italic Liberation Sans) that was horizontal on the web.
 |---|---|
 | Full test suite (`pytest`: unit, PyQGIS, browser; QGIS 3.34, Chromium) | 667 passed, 5 skipped |
 | New: `tests/unit/test_rich_text.py`, `tests/browser/test_parcel_texts.py`, `test_regulation_texts_table_round_trip` | 5 passed (scripts, links, images and attributes removed at export and in the browser; one file per zone, loaded when opened; the window keeps the table) |
+
+## 4.27.0: faster rule export (in-memory chains, shared steps)
+
+- Profiling an 88-layer plan (z0–16, no cache): 21.5 min, of which ogr2ogr tiling 17 s; the rest
+  was `RulesExporter`: 3573 rule groups, 27,701 Processing calls at 26–76 ms each, mostly fixed
+  cost (opening a GeoPackage ~12 ms, the second open by `checkParameterValues`, creating the
+  output file). One single-feature layer (letters along a boundary as 12 screen-unit marker
+  lines × 17 zooms) made half of the groups.
+- `RulesExporter._run_in_memory` (serial export only; `Q2VT_FILE_CHAINS=1` restores files):
+  inside a rule group each step runs `QgsProcessingAlgorithm.run` directly with memory output,
+  handed on as a `q2vtmem:` token (`_open` resolves tokens and files); a step identical to one
+  already run in the export (`_step_key`: deterministic native algorithms, plain parameters, no
+  random/now/uuid expressions) returns the shared result (≤ 1 M features kept); inputs over
+  50,000 features write files; the group's final dataset is a file; a group whose memory chain
+  raises is redone with files (its diagnostics dropped first). Base layers stay files. Dataset
+  files are opened without the default-style lookup (`_open_file`).
+- Result: 21.5 → 6.9 min on that plan; remaining time mostly `interval_points_expression`
+  (real per-point work) and opening the 3573 dataset files.
+
+| Run | Result |
+|---|---|
+| Full test suite (`pytest`: unit, PyQGIS, browser) | 669 passed, 5 skipped, in 14 min (17.7 min before: the tests' own exports are faster too) |
+| New `tests/integration/test_memory_chains.py` | 2 passed (memory and file steps give the same tiles and steps are shared; a failing memory step is redone with files) |
+| 88-layer plan: every tile decoded and compared with 4.26.0 | identical (label layers as sets of features) |
