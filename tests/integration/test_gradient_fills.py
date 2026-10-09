@@ -8,10 +8,10 @@ import sys
 
 import numpy as np
 import pytest
-from qgis.core import (Qgis, QgsFeatureRequest, QgsFillSymbol, QgsGradientColorRamp, QgsGradientFillSymbolLayer, QgsGradientStop,
-                       QgsLineSymbol, QgsShapeburstFillSymbolLayer, QgsSimpleLineSymbolLayer,
-                       QgsSingleSymbolRenderer)
-from qgis.PyQt.QtGui import QColor
+from qgis.core import (Qgis, QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsGradientColorRamp, QgsGradientFillSymbolLayer,
+                       QgsGradientStop, QgsLineSymbol, QgsPointXY, QgsRectangle, QgsShapeburstFillSymbolLayer,
+                       QgsSimpleLineSymbolLayer, QgsSingleSymbolRenderer)
+from qgis.PyQt.QtGui import QColor, QTransform
 
 from q2vt_render import render
 
@@ -30,7 +30,7 @@ def _pixels(image):
     return np.frombuffer(ptr, np.uint8).reshape(image.height(), image.width(), 4)[..., :3].astype(int)
 
 
-def _export(layer, tmp_path):
+def _export(layer, tmp_path, min_zoom=14):
     """Like test_materialize._export, at a few zooms (bands are per rule)."""
     from qgis.core import QgsProcessingFeedback
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
@@ -39,10 +39,10 @@ def _export(layer, tmp_path):
     from q2vt_fixtures import reset_project
     reset_project(layer)
     diags = DiagnosticCollector()
-    rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    rules = RulesFlattener(min_zoom, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     utils = tmp_path / "utils"
     utils.mkdir()
-    layers, rules = RulesExporter(rules, EXTENT, 14, 15, str(utils), 0, QgsProcessingFeedback(),
+    layers, rules = RulesExporter(rules, EXTENT, min_zoom, 15, str(utils), 0, QgsProcessingFeedback(),
                                   diagnostics=diags).export()
     by_name = {l.name(): l for l in layers}
     rendered = []
@@ -60,13 +60,19 @@ def _export(layer, tmp_path):
     return rendered, rules, diags
 
 
-def _compare(plugin, tmp_path, fill_layer):
+def _compare(plugin, tmp_path, fill_layer, scale=1.0, min_zoom=14):
+    """QGIS against the exported bands, the house scaled by ``scale`` (and
+    the view with it)."""
     from scipy import ndimage
-    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    house = QgsGeometry.fromWkt(HOUSE)
+    house.transform(QTransform.fromScale(scale, scale))
+    extent = QgsRectangle(EXTENT)
+    extent.scale(scale, QgsPointXY(0, 0))
+    layer = _layer("Polygon", [house.asWkt()], str(tmp_path / "src.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill_layer])))
-    expected = _pixels(render([layer], EXTENT))
-    rendered, rules, diags = _export(layer, tmp_path)
-    got = _pixels(render(list(reversed(rendered)), EXTENT))  # first rule = bottom band
+    expected = _pixels(render([layer], extent))
+    rendered, rules, diags = _export(layer, tmp_path, min_zoom)
+    got = _pixels(render(list(reversed(rendered)), extent))  # first rule = bottom band
     # Inside the polygon, away from its anti-aliased edge.
     inside = ndimage.binary_erosion((expected != 255).any(axis=2), iterations=2)
     diff = np.abs(expected - got).max(axis=2)
@@ -109,6 +115,18 @@ def test_colour_ramp_gradient_matches_qgis(plugin, tmp_path):
     fill.setReferencePoint2(fill.referencePoint2().__class__(1, 1))
     _, _, mean, p99 = _compare(plugin, tmp_path, fill)
     assert mean < 3.5 and p99 < 30, (mean, p99)
+
+
+def test_small_feature_keeps_its_outer_bands_at_a_low_min_zoom(plugin, tmp_path):
+    """A 30 m feature published from zoom 11 is a pixel or two wide there:
+    the band edges' clearance from its vertices (two tile units at zoom 11,
+    ~10 m) must not swallow the outer half of its gradient at every zoom."""
+    fill = QgsGradientFillSymbolLayer(QColor("#cfe8b6"), QColor("#2f6b37"),
+                                      Qgis.GradientColorSource.SimpleTwoColor, Qgis.GradientType.Radial)
+    fill.setReferencePoint1(fill.referencePoint1().__class__(0.5, 0.5))
+    fill.setReferencePoint2(fill.referencePoint2().__class__(1, 1))
+    _, _, mean, p99 = _compare(plugin, tmp_path, fill, scale=1 / 6, min_zoom=11)
+    assert mean < 3.5 and p99 < 8, (mean, p99)
 
 
 @pytest.mark.parametrize("whole", [True, False])
