@@ -184,6 +184,7 @@ class QGIS2VectorTiles:
         cache=None,
         scale_limits=None,
         background_tiles: bool = False,
+        fast_markers: bool = False,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -224,6 +225,8 @@ class QGIS2VectorTiles:
         self.extra_tile_fields = dict(extra_tile_fields or {})
         self.cache = cache
         self.background_tiles = background_tiles
+        # Screen-size interval marker lines placed by the browser (faster, approximate).
+        self.fast_markers = fast_markers
         self._pending: Optional[_Conversion] = None
         self.dataset_keys: Dict[str, str] = {}
         # Results of the last run (the publishing workflow builds its
@@ -559,6 +562,7 @@ class QGIS2VectorTiles:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
+            fast_markers=self.fast_markers,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).

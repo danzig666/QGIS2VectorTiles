@@ -134,3 +134,55 @@ def test_merge_reads_the_parts_in_tile_order(plugin, tmp_path):
     assert set(tiles) == {(2, 0, 0), (2, 1, 1), (3, 0, 0)}
     assert tiles[(2, 0, 0)] == single  # copied, not gzipped again
     assert zlib.decompress(tiles[(2, 1, 1)], 47) == bodies[0] + bodies[1] + bodies[2]
+
+
+def test_fast_marker_lines_are_placed_by_the_browser(plugin, tmp_path, monkeypatch):
+    """The "fast marker lines" option: screen-size interval markers are not
+    computed per zoom but drawn by MapLibre along the lines (reported)."""
+    import json as _json  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.publishing.controller import export_local  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.models import LayerConfig, PublicationProfile  # pylint: disable=import-error
+    sys.path.insert(0, HERE)
+    from test_memory_chains import _lines  # pylint: disable=import-error
+    from test_publishing_pipeline import EXTENT  # pylint: disable=import-error
+    monkeypatch.setenv("Q2VT_WORKERS", "0")
+
+    def export(name, fast):
+        project = reset_project()
+        roads = _lines(str(tmp_path / f"{name}_roads.gpkg"))
+        project.addMapLayer(roads)
+        profile = PublicationProfile(title="Utak", slug="utak", locale="hu")
+        profile.view.min_zoom, profile.view.max_zoom = 12, 14
+        profile.output.local_directory = str(tmp_path / name)
+        profile.output.reuse_unchanged = False
+        profile.output.fast_markers = fast
+        profile.layers = [LayerConfig(roads.id())]
+        result = export_local(project, profile, EXTENT)
+        with open(os.path.join(result.export_dir, "style", "style.json"), encoding="utf-8") as handle:
+            style = _json.load(handle)
+        with open(os.path.join(result.export_dir, "fidelity_report.json"), encoding="utf-8") as handle:
+            report = _json.load(handle)
+        return style, report
+    exact_style, exact_report = export("exact", False)
+    fast_style, fast_report = export("fast", True)
+    def line_markers(style):
+        return [layer for layer in style["layers"] if layer.get("type") == "symbol"
+                and layer.get("layout", {}).get("symbol-placement") == "line"]
+    def point_sources(style):  # the datasets (materialized markers: one per zoom band)
+        return {layer.get("source-layer") for layer in style["layers"] if layer.get("source-layer")}
+    # Exact: the browser places them only beyond the archive's last zoom.
+    assert min(layer.get("minzoom", 0) for layer in line_markers(fast_style)) == 12
+    assert all(layer.get("minzoom", 0) > 14 for layer in line_markers(exact_style))
+    assert len(point_sources(exact_style)) > len(point_sources(fast_style))
+    assert any("Fast marker lines" in d["message"] for d in fast_report["diagnostics"])
+    assert not any("Fast marker lines" in d["message"] for d in exact_report["diagnostics"])
+
+
+def test_fast_marker_option_round_trip(plugin):
+    from q2vt_plugin.src.publishing.models import PublicationProfile  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.profile import dumps, load_profile  # pylint: disable=import-error
+    profile = PublicationProfile(title="T", slug="t")
+    profile.output.fast_markers = True
+    assert '"fastMarkers": true' in dumps(profile)
+    assert load_profile(dumps(profile)).output.fast_markers is True
+    assert load_profile(dumps(PublicationProfile(title="T", slug="t"))).output.fast_markers is False

@@ -338,7 +338,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache,
         scale_limits={c.layer_id: (c.min_scale, c.max_scale) for c in vector_profile.layers
                       if c.included and (c.min_scale or c.max_scale)},
-        background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1")
+        background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1",
+        fast_markers=profile.output.fast_markers)
     progress.check()
     # The tiles are made in the background (ogr2ogr processes) while the
     # stages after the datasets run: finish_tiles() before BUILD_RELEASE.

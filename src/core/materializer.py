@@ -134,9 +134,13 @@ def svg_fill_draws(layer) -> bool:
 class SymbolMaterializer:
     """Rewrite flattened rules into materialized or simplified components."""
 
-    def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24):
+    def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24,
+                 fast_markers: bool = False):
         self.diagnostics = diagnostics
         self.max_zoom = max_zoom
+        # Screen-size interval markers placed by the browser (no per-zoom
+        # positions): the publishing "fast marker lines" option.
+        self.fast_markers = fast_markers
         crs = QgsProject.instance().crs()
         self.project_crs = crs.authid() if crs.isValid() else ""
 
@@ -1240,6 +1244,11 @@ class SymbolMaterializer:
         the native placement keeps the screen spacing."""
         low, high = native.get_attr("o"), min(native.get_attr("i"), self.max_zoom)
         if low > high:
+            return None
+        if self.fast_markers:
+            self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                         "Fast marker lines: screen-size interval markers are placed by the browser "
+                         "along the lines, not at QGIS's positions.", native)
             return None
         try:
             along, along_unit = float(layer.offsetAlongLine()), layer.offsetAlongLineUnit()
