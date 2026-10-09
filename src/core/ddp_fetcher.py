@@ -60,6 +60,10 @@ class DataDefinedPropertiesFetcher:
 
     FIELD_PREFIX = "q2vt"
 
+    # The safe getter names of each class (dir() and the name checks were most
+    # of the walk's time, every rule of every zoom walking the same classes).
+    _safe_attrs: dict = {}
+
     def __init__(self, qgis_object, min_scale, suffix=0, diagnostics=None, context=None):
         self._root = qgis_object
         self._min_scale = float(min_scale)
@@ -104,10 +108,17 @@ class DataDefinedPropertiesFetcher:
         finally:
             self._in_texture -= texture
 
+    def _attributes(self, obj) -> list:
+        if getattr(obj, "__dict__", None):  # instance attributes: not the class's list
+            return [attr for attr in dir(obj) if self._is_safe_attr(attr)]
+        kind = type(obj)
+        names = self._safe_attrs.get(kind)
+        if names is None:
+            names = self._safe_attrs[kind] = [attr for attr in dir(obj) if self._is_safe_attr(attr)]
+        return names
+
     def _walk_attributes(self, obj):
-        for attr in dir(obj):
-            if not self._is_safe_attr(attr):
-                continue
+        for attr in self._attributes(obj):
             try:
                 getter = getattr(obj, attr)
                 if not callable(getter):

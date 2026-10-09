@@ -56,6 +56,10 @@ def test_publication_bar_only_moves_forward(plugin, tmp_path):
     def bar_at(line):
         index = next(i for i, (kind, v) in enumerate(bar.events) if kind == "log" and v == line)
         return max([v for kind, v in bar.events[:index] if kind == "bar"] or [0])
-    # The vector tiles get most of the bar (was: 85% at their start).
-    start, end = bar_at(". Generating tiles..."), bar_at("[RECORDS]")
-    assert start < 40 and end - start > 40, (start, end)
+    # The vector tiles get most of the bar (was: 85% at their start): the
+    # datasets, then (4.28) the tiles, made in the background meanwhile and
+    # waited for at TILES.
+    start, end = bar_at(". Exporting rules to datasets..."), bar_at(". Generating tiles...")
+    assert start < 10 and end - start > 25, (start, end)
+    start, end = bar_at("[TILES]"), bar_at("[BUILD_RELEASE]")
+    assert end - start > 40, (start, end)

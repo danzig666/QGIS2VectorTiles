@@ -29,7 +29,8 @@ from .progress import Progress
 from .search_index import build_search_index
 from .web_builder import ReleaseResult, build_release, write_zip
 
-STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "STREETS", "BUILD_RELEASE",
+STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "STREETS", "TILES",
+          "BUILD_RELEASE",
           "UPLOAD", "VERIFY_PUBLIC", "ACTIVATE", "COMPLETE"]
 
 
@@ -238,8 +239,12 @@ def _staged_feedback(parent):
 def _stage_weights(profile: PublicationProfile, raster_plans) -> Dict[str, float]:
     """Rough shares of the export time: the vector tiles take most of it."""
     raster_tiles = sum(getattr(plan, "tiles", 0) for plan in (raster_plans or {}).values())
+    # The vector tiles' own share (TILES): they are made while the stages
+    # after the datasets run, waited for before BUILD_RELEASE.
+    background = os.environ.get("Q2VT_FOREGROUND_TILES") != "1"
     return {
-        "PLAN": 1.0, "EXPORT_MVT": 75.0, "RECORDS": 2.0, "LEGEND": 1.0,
+        "PLAN": 1.0, "EXPORT_MVT": 30.0 if background else 75.0, "TILES": 45.0 if background else 0.0,
+        "RECORDS": 2.0, "LEGEND": 1.0,
         "PARCELS": 2.0 if profile.parcel_info.enabled else 0.0,
         "RASTER": (min(25.0, 2.0 + raster_tiles / 150.0) if raster_plans else 0.0)
                   + (4.0 if profile.terrain.layer_id else 0.0),
@@ -332,154 +337,164 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         add_result_layer=False, feature_keys=keys,
         extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache,
         scale_limits={c.layer_id: (c.min_scale, c.max_scale) for c in vector_profile.layers
-                      if c.included and (c.min_scale or c.max_scale)})
+                      if c.included and (c.min_scale or c.max_scale)},
+        background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1")
     progress.check()
+    # The tiles are made in the background (ogr2ogr processes) while the
+    # stages after the datasets run: finish_tiles() before BUILD_RELEASE.
     try:
-        converted = exporter.convert_project_to_vector_tiles()
+        if not exporter.convert_project_to_vector_tiles():
+            raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
+                                  "The vector tile export produced no tiles (see the export log).")
+        bundle = exporter.export_bundle(profile.publication_id)
+        bundle.crs = crs_info
+        progress.check()
+
+        stage("RECORDS")
+        records = qgis_model.collect_records(
+            project, vector_profile, exporter.rules, extent_3857,
+            os.path.join(exporter.output_path, "q2vt_records.jsonl"), progress,
+            max_zoom=profile.view.max_view_zoom)
+        qgis_model.raise_identity_problems(records)
+        progress.check()
+
+        stage("LEGEND")
+        legend_dir = os.path.join(exporter.output_path, "legend")
+        swatches = qgis_model.render_swatches(project, vector_profile, legend_dir)
+        model = qgis_model.logical_model(project, profile, exporter.rules, bundle.style, swatches)
+        bundle.groups, bundle.layers = model["groups"], model["layers"]
+        bundle.rules, bundle.components = model["rules"], model["components"]
+        _filter_fields(bundle.layers, profile, records.filter_domains)
+        themes = qgis_model.theme_presets(project, profile, model, bundle.warnings)
+        bundle.feature_count = dict(records.counts)
+        extra_files = {path: os.path.join(legend_dir, os.path.basename(path))
+                       for path in set(swatches.values())}
+
+        from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
+        searchable = {layer_logical_id(c.layer_id): list(c.search_fields)
+                      for c in profile.layers if c.included and c.search_fields}
+        lookup = {layer_logical_id(c.layer_id): {"popup": [p.field for p in c.popup_fields]}
+                  for c in profile.layers if c.included and (c.popup_fields or c.deep_links)}
+
+        streets: List[dict] = []  # street name and house number records (STREETS stage)
+
+        def indexes(staging: str, manifest: dict) -> None:
+            from .basemap import ADDRESSES_LAYER, STREETS_LAYER  # pylint: disable=import-outside-toplevel
+            kinds = {record["layerId"] for record in streets}
+            wanted = dict(searchable, **{k: ["name"] for k in (STREETS_LAYER, ADDRESSES_LAYER) if k in kinds})
+            search = build_search_index(itertools.chain(_iter_records(records.path), streets), wanted,
+                                        os.path.join(staging, "search"))
+            if search:
+                with open(os.path.join(staging, "search", "manifest.json"), "w", encoding="utf-8") as h:
+                    json.dump(search, h, ensure_ascii=False)
+                manifest["search"] = {"manifest": "search/manifest.json", "mode": search["mode"],
+                                      "records": search["records"]}
+            features = build_feature_index(_iter_records(records.path), lookup,
+                                           os.path.join(staging, "features"))
+            if features:
+                with open(os.path.join(staging, "features", "manifest.json"), "w", encoding="utf-8") as h:
+                    json.dump(features, h, ensure_ascii=False)
+                manifest["featureLookup"] = {"manifest": "features/manifest.json",
+                                             "records": features["records"]}
+
+        approved: Dict[str, set] = {}
+        filter_by_layer = {layer_logical_id(c.layer_id): {f.field for f in c.filter_fields}
+                           | ({c.height_field} if c.height_field else set())  # the 3D height (reviewed)
+                           for c in profile.layers if c.included}
+        for component in bundle.components:
+            names = filter_by_layer.get(component["layerId"], set())
+            for source_layer in [component.get("sourceLayer")] + component["dependsOnSourceLayers"]:
+                if source_layer:
+                    approved.setdefault(source_layer, set()).update(names)
+
+        def disclosure(staging: str, manifest: dict) -> None:
+            archive = os.path.join(staging, "data", "map.pmtiles")
+            assert_disclosure(archive, approved, allow_all=profile.output.include_all_fields)
+
+        parcel_manifest = None
+        if info.enabled:
+            stage("PARCELS")
+            from .parcel_report import cached_parcel_report  # pylint: disable=import-outside-toplevel
+            parcel_dir = os.path.join(exporter.output_path, "parcels")
+            report = cached_parcel_report(cache, project, profile, extent_3857, parcel_dir, legend_dir,
+                                          progress.sub(0.0, 1.0))
+            bundle.warnings.extend(report.warnings)
+            for name in os.listdir(parcel_dir):
+                extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)
+            extra_files.update(report.swatches)
+            parcel_manifest = {"manifest": "parcels/manifest.json", "catalog": "parcels/catalog.json",
+                               "layerId": report.manifest["layerId"], "records": report.records,
+                               # The zoning layer and its code field: zone popups can show the zone's regulations.
+                               "zoningLayerId": layer_logical_id(info.zoning_layer_id) if info.zoning_layer_id else None,
+                               "zoneCodeField": info.zoning_code_field or None}
+            progress.check()
+
+        stage("RASTER")
+        # Raster layers, then the terrain, each in its own part of the stage's bar.
+        split = 0.6 if raster_configs and profile.terrain.layer_id else (1.0 if raster_configs else 0.0)
+        bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
+                                                 work_dir, progress.sub(0.0, split), bundle.warnings, cache)
+        bundle.warnings.extend(_vector_blend_warnings(project, profile))
+        bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress.sub(split, 1.0),
+                                         bundle.warnings)
+        progress.check()
+        published = {r["layerId"] for r in bundle.raster_archives}
+        dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
+        if dropped:  # raster layers that draw nothing in the extent
+            bundle.layers = [layer for layer in bundle.layers if layer["id"] not in dropped]
+            bundle.components = [c for c in bundle.components if c["layerId"] not in dropped]
+            for preset in themes["presets"]:
+                preset["layers"] = {k: v for k, v in preset["layers"].items() if k not in dropped}
+
+        if profile.basemap.kind == "protomaps":
+            stage("BASEMAP")
+            bundle.basemap = _prepare_basemap(profile, extent_3857, work_dir, progress)
+            progress.check()
+
+        addresses = profile.interaction.search and bool(profile.interaction.address_layer_id)
+        if profile.interaction.search and (profile.interaction.street_search or addresses):
+            stage("STREETS")
+            pieces: Dict[str, list] = {}
+            needs_streets = profile.interaction.street_search or (
+                addresses and not profile.interaction.address_street_field)
+            found = _street_records(street_area, profile, bundle.basemap, progress, bundle.warnings,
+                                    pieces) if needs_streets else []
+            if profile.interaction.street_search:
+                streets.extend(found)
+            if addresses:
+                streets.extend(_address_records(project, profile, street_area, pieces, progress, bundle.warnings))
+            progress.check()
+
+        stage("TILES")
+        if not exporter.finish_tiles():
+            raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
+                                  "The vector tile export produced no tiles (see the export log).")
+        bundle.diagnostics_summary = exporter.diagnostics.counts()
+        if cache is not None:
+            cache.prune()
+        progress.check()
+
+        stage("BUILD_RELEASE")
+        release = build_release(
+            bundle, profile, publication_dir, transport="pmtiles", activate=activate,
+            feedback=progress, canaries=canaries, extra_files=extra_files, extra_builders=[indexes],
+            extra_validators=[disclosure], manifest_extra={
+                "themes": themes, "ui": {"accent": profile.accent_color}, "parcelInfo": parcel_manifest})
+        result = LocalResult(ReleaseState.LOCAL_READY, release, publication_dir, exporter.output_path,
+                             records.path, dict(records.counts), list(release.warnings))
+        if profile.output.archive == "both":
+            result.mbtiles_copy = os.path.join(os.path.dirname(publication_dir),
+                                               f"{profile.slug}-{release.release_id}.mbtiles")
+            shutil.copyfile(bundle.mbtiles_path, result.mbtiles_copy)
+        if profile.output.zip:
+            result.zip_path = write_zip(release.release_dir, os.path.join(
+                os.path.dirname(publication_dir), f"{profile.slug}-{release.release_id}.zip"))
+        for warning in bundle.warnings:
+            result.warnings.append(warning)
+        return result
     finally:
+        exporter.abort_tiles()  # cancelled or failed before the tiles were finished
         _copy_logs(exporter.export_folder, profile, base_dir)
-    if not converted:
-        raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
-                              "The vector tile export produced no tiles (see the export log).")
-    bundle = exporter.export_bundle(profile.publication_id)
-    bundle.crs = crs_info
-    if cache is not None:
-        cache.prune()
-    progress.check()
-
-    stage("RECORDS")
-    records = qgis_model.collect_records(
-        project, vector_profile, exporter.rules, extent_3857,
-        os.path.join(exporter.output_path, "q2vt_records.jsonl"), progress,
-        max_zoom=profile.view.max_view_zoom)
-    qgis_model.raise_identity_problems(records)
-    progress.check()
-
-    stage("LEGEND")
-    legend_dir = os.path.join(exporter.output_path, "legend")
-    swatches = qgis_model.render_swatches(project, vector_profile, legend_dir)
-    model = qgis_model.logical_model(project, profile, exporter.rules, bundle.style, swatches)
-    bundle.groups, bundle.layers = model["groups"], model["layers"]
-    bundle.rules, bundle.components = model["rules"], model["components"]
-    _filter_fields(bundle.layers, profile, records.filter_domains)
-    themes = qgis_model.theme_presets(project, profile, model, bundle.warnings)
-    bundle.feature_count = dict(records.counts)
-    extra_files = {path: os.path.join(legend_dir, os.path.basename(path))
-                   for path in set(swatches.values())}
-
-    from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
-    searchable = {layer_logical_id(c.layer_id): list(c.search_fields)
-                  for c in profile.layers if c.included and c.search_fields}
-    lookup = {layer_logical_id(c.layer_id): {"popup": [p.field for p in c.popup_fields]}
-              for c in profile.layers if c.included and (c.popup_fields or c.deep_links)}
-
-    streets: List[dict] = []  # street name and house number records (STREETS stage)
-
-    def indexes(staging: str, manifest: dict) -> None:
-        from .basemap import ADDRESSES_LAYER, STREETS_LAYER  # pylint: disable=import-outside-toplevel
-        kinds = {record["layerId"] for record in streets}
-        wanted = dict(searchable, **{k: ["name"] for k in (STREETS_LAYER, ADDRESSES_LAYER) if k in kinds})
-        search = build_search_index(itertools.chain(_iter_records(records.path), streets), wanted,
-                                    os.path.join(staging, "search"))
-        if search:
-            with open(os.path.join(staging, "search", "manifest.json"), "w", encoding="utf-8") as h:
-                json.dump(search, h, ensure_ascii=False)
-            manifest["search"] = {"manifest": "search/manifest.json", "mode": search["mode"],
-                                  "records": search["records"]}
-        features = build_feature_index(_iter_records(records.path), lookup,
-                                       os.path.join(staging, "features"))
-        if features:
-            with open(os.path.join(staging, "features", "manifest.json"), "w", encoding="utf-8") as h:
-                json.dump(features, h, ensure_ascii=False)
-            manifest["featureLookup"] = {"manifest": "features/manifest.json",
-                                         "records": features["records"]}
-
-    approved: Dict[str, set] = {}
-    filter_by_layer = {layer_logical_id(c.layer_id): {f.field for f in c.filter_fields}
-                       | ({c.height_field} if c.height_field else set())  # the 3D height (reviewed)
-                       for c in profile.layers if c.included}
-    for component in bundle.components:
-        names = filter_by_layer.get(component["layerId"], set())
-        for source_layer in [component.get("sourceLayer")] + component["dependsOnSourceLayers"]:
-            if source_layer:
-                approved.setdefault(source_layer, set()).update(names)
-
-    def disclosure(staging: str, manifest: dict) -> None:
-        archive = os.path.join(staging, "data", "map.pmtiles")
-        assert_disclosure(archive, approved, allow_all=profile.output.include_all_fields)
-
-    parcel_manifest = None
-    if info.enabled:
-        stage("PARCELS")
-        from .parcel_report import cached_parcel_report  # pylint: disable=import-outside-toplevel
-        parcel_dir = os.path.join(exporter.output_path, "parcels")
-        report = cached_parcel_report(cache, project, profile, extent_3857, parcel_dir, legend_dir,
-                                      progress.sub(0.0, 1.0))
-        bundle.warnings.extend(report.warnings)
-        for name in os.listdir(parcel_dir):
-            extra_files[f"parcels/{name}"] = os.path.join(parcel_dir, name)
-        extra_files.update(report.swatches)
-        parcel_manifest = {"manifest": "parcels/manifest.json", "catalog": "parcels/catalog.json",
-                           "layerId": report.manifest["layerId"], "records": report.records,
-                           # The zoning layer and its code field: zone popups can show the zone's regulations.
-                           "zoningLayerId": layer_logical_id(info.zoning_layer_id) if info.zoning_layer_id else None,
-                           "zoneCodeField": info.zoning_code_field or None}
-        progress.check()
-
-    stage("RASTER")
-    # Raster layers, then the terrain, each in its own part of the stage's bar.
-    split = 0.6 if raster_configs and profile.terrain.layer_id else (1.0 if raster_configs else 0.0)
-    bundle.raster_archives = _render_rasters(project, profile, raster_configs, raster_plans,
-                                             work_dir, progress.sub(0.0, split), bundle.warnings, cache)
-    bundle.warnings.extend(_vector_blend_warnings(project, profile))
-    bundle.terrain = _render_terrain(project, profile, extent_3857, work_dir, progress.sub(split, 1.0),
-                                     bundle.warnings)
-    progress.check()
-    published = {r["layerId"] for r in bundle.raster_archives}
-    dropped = {c["layerId"] for c in bundle.components if c["role"] == "raster"} - published
-    if dropped:  # raster layers that draw nothing in the extent
-        bundle.layers = [layer for layer in bundle.layers if layer["id"] not in dropped]
-        bundle.components = [c for c in bundle.components if c["layerId"] not in dropped]
-        for preset in themes["presets"]:
-            preset["layers"] = {k: v for k, v in preset["layers"].items() if k not in dropped}
-
-    if profile.basemap.kind == "protomaps":
-        stage("BASEMAP")
-        bundle.basemap = _prepare_basemap(profile, extent_3857, work_dir, progress)
-        progress.check()
-
-    addresses = profile.interaction.search and bool(profile.interaction.address_layer_id)
-    if profile.interaction.search and (profile.interaction.street_search or addresses):
-        stage("STREETS")
-        pieces: Dict[str, list] = {}
-        needs_streets = profile.interaction.street_search or (
-            addresses and not profile.interaction.address_street_field)
-        found = _street_records(street_area, profile, bundle.basemap, progress, bundle.warnings,
-                                pieces) if needs_streets else []
-        if profile.interaction.street_search:
-            streets.extend(found)
-        if addresses:
-            streets.extend(_address_records(project, profile, street_area, pieces, progress, bundle.warnings))
-        progress.check()
-
-    stage("BUILD_RELEASE")
-    release = build_release(
-        bundle, profile, publication_dir, transport="pmtiles", activate=activate,
-        feedback=progress, canaries=canaries, extra_files=extra_files, extra_builders=[indexes],
-        extra_validators=[disclosure], manifest_extra={
-            "themes": themes, "ui": {"accent": profile.accent_color}, "parcelInfo": parcel_manifest})
-    result = LocalResult(ReleaseState.LOCAL_READY, release, publication_dir, exporter.output_path,
-                         records.path, dict(records.counts), list(release.warnings))
-    if profile.output.archive == "both":
-        result.mbtiles_copy = os.path.join(os.path.dirname(publication_dir),
-                                           f"{profile.slug}-{release.release_id}.mbtiles")
-        shutil.copyfile(bundle.mbtiles_path, result.mbtiles_copy)
-    if profile.output.zip:
-        result.zip_path = write_zip(release.release_dir, os.path.join(
-            os.path.dirname(publication_dir), f"{profile.slug}-{release.release_id}.zip"))
-    for warning in bundle.warnings:
-        result.warnings.append(warning)
-    return result
 
 
 def _plan_rasters(project, profile, configs, extent_3857) -> Dict[str, object]:

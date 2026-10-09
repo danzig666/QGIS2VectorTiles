@@ -487,8 +487,23 @@ class RulesExporter:
     # -------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------
+    # The export's GeoPackages are work files: SQLite need not wait for the
+    # disk after every write (thread-local GDAL options, the export's thread).
+    _SQLITE_OPTIONS = (("OGR_SQLITE_SYNCHRONOUS", "OFF"), ("OGR_SQLITE_JOURNAL", "MEMORY"))
+
     def export(self) -> Tuple[List[QgsVectorLayer], List[FlattenedRule]]:
         """Run the full export pipeline. Synchronous. Always returns."""
+        from osgeo import gdal  # pylint: disable=import-outside-toplevel
+        previous = [(name, gdal.GetThreadLocalConfigOption(name, None)) for name, _ in self._SQLITE_OPTIONS]
+        for name, value in self._SQLITE_OPTIONS:
+            gdal.SetThreadLocalConfigOption(name, value)
+        try:
+            return self._export()
+        finally:
+            for name, value in previous:
+                gdal.SetThreadLocalConfigOption(name, value)
+
+    def _export(self) -> Tuple[List[QgsVectorLayer], List[FlattenedRule]]:
         try:
             # Phase 0 — caller-thread snapshot.
             if self._is_cancelled():

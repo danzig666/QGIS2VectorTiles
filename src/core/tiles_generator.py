@@ -244,8 +244,11 @@ class GDALTilesGenerator:
             ET.SubElement(node, "GeometryType").text = "wkbUnknown"
         ET.ElementTree(root).write(vrt_path, encoding="utf-8", xml_declaration=True)
 
-    def _write_layer_conf(self, conf_path: str, layers: Optional[List[QgsVectorLayer]] = None):
-        """Per-layer zoom ranges for the MVT writer (``-dsco CONF``).
+    def _write_layer_conf(self, conf_path: str, layers: Optional[List[QgsVectorLayer]] = None,
+                          band: Optional[Tuple[int, int]] = None):
+        """Per-layer zoom ranges for the MVT writer (``-dsco CONF``), cut to
+        ``band`` for a piece of zoom levels (the writer makes every zoom of
+        CONF, whatever the dataset's MINZOOM / MAXZOOM).
 
         OGR VRT has no layer-creation options, so zoom ranges put there are
         ignored and every dataset would be written at every zoom level.
@@ -253,6 +256,8 @@ class GDALTilesGenerator:
         conf = {}
         for layer in self.layers if layers is None else layers:
             min_zoom, max_zoom = self._layer_zoom_range(layer)
+            if band is not None:
+                min_zoom, max_zoom = max(min_zoom, band[0]), min(max_zoom, band[1])
             conf[self._layer_name(layer)] = {"minzoom": int(min_zoom), "maxzoom": int(max_zoom)}
         with open(conf_path, "w", encoding="utf-8") as handle:
             json.dump(conf, handle)
@@ -268,7 +273,11 @@ class GDALTilesGenerator:
         return max(1, int((cpu_count() or 1) * self.cpu_percent / 100))
 
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
-                         conf_path: Optional[str] = None) -> List[str]:
+                         conf_path: Optional[str] = None, top_zoom: Optional[int] = None) -> List[str]:
+        """``top_zoom``: the export's highest zoom when ``max_zoom`` is that of
+        a piece below it (the writer simplifies its MAXZOOM as the highest)."""
+        top_simplification = _SIMPLIFICATION if top_zoom is not None and max_zoom < top_zoom \
+            else _SIMPLIFICATION_MAX_ZOOM
         cmd = [
             self._ogr2ogr_executable(), "-f", "MBTiles", output, vrt_path,
             "-dsco", f"MINZOOM={min_zoom}",
@@ -277,7 +286,7 @@ class GDALTilesGenerator:
             "-dsco", "MAX_SIZE=5000000",
             "-dsco", "MAX_FEATURES=2000000",
             "-dsco", f"SIMPLIFICATION={_SIMPLIFICATION}",
-            "-dsco", f"SIMPLIFICATION_MAX_ZOOM={_SIMPLIFICATION_MAX_ZOOM}",
+            "-dsco", f"SIMPLIFICATION_MAX_ZOOM={top_simplification}",
         ]
         if conf_path:
             cmd += ["-dsco", f"CONF={conf_path}"]
@@ -402,7 +411,7 @@ class GDALTilesGenerator:
         self._zooms = [min_zoom, max_zoom]
         work = join(self.output_dir, "layer_tiles")
         os.makedirs(work, exist_ok=True)
-        parts, jobs = [], []
+        parts, groups = [], []
         for number, (owner, key, members) in enumerate(self._tile_groups()):
             cached = self.cache.get_tiles(key) if key and self.cache is not None else None
             if cached:
@@ -413,18 +422,72 @@ class GDALTilesGenerator:
             conf = join(work, f"group_{number:04d}.json")
             self._build_vrt(vrt, members)
             self._write_layer_conf(conf, members)
-            jobs.append((key, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf),
-                         self._job_cost(members), owner))
+            groups.append((key, target, vrt, conf, members, owner))
             parts.append(target)
         if self.feedback is not None and self.cache is not None:
-            self.feedback.pushInfo(f"   Tiles: {len(parts) - len(jobs)} of {len(parts)} layers "
-                                   "reused from earlier exports, " f"{len(jobs)} to generate")
+            self.feedback.pushInfo(f"   Tiles: {len(parts) - len(groups)} of {len(parts)} layers "
+                                   "reused from earlier exports, " f"{len(groups)} to generate")
+        # A layer's tiles in several pieces (bands of zoom levels) when it alone
+        # would keep one core busy after the others are done.
+        cpu = self._cpu_num()
+        target_cost = sum(self._job_cost(g[4]) for g in groups) / max(1, cpu) / 2
+        jobs = []  # (group index, piece file, command, cost, owner)
+        for index, (key, target, vrt, conf, members, owner) in enumerate(groups):
+            pieces = self._pieces(members, target_cost) if cpu > 1 else [(min_zoom, max_zoom, 0.0)]
+            for number, (low, high, cost) in enumerate(pieces):
+                piece = target if len(pieces) == 1 else f"{target[:-8]}_{number:02d}.mbtiles"
+                piece_vrt, piece_conf = vrt, conf
+                if len(pieces) > 1:  # the datasets of the band, their zooms cut to it
+                    inside = [m for m in members if self._layer_zoom_range(m)[0] <= high
+                              and self._layer_zoom_range(m)[1] >= low]
+                    piece_vrt, piece_conf = piece[:-8] + ".vrt", piece[:-8] + ".json"
+                    self._build_vrt(piece_vrt, inside)
+                    self._write_layer_conf(piece_conf, inside, (low, high))
+                command = self._ogr2ogr_command(piece_vrt, piece, low, high, piece_conf, top_zoom=max_zoom)
+                jobs.append((index, piece, command, cost or self._job_cost(members), owner))
         self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
+        for index, (key, target, *_rest) in enumerate(groups):
+            pieces = [job for job in jobs if job[0] == index]
+            if len(pieces) > 1:  # no tile in two pieces: their tiles are copied
+                merge_mbtiles([job[1] for job in pieces], target, min_zoom, max_zoom, workers=cpu)
         stored = {target: self.cache.put_tiles(key, target)
-                  for key, target, *_ in jobs if key and self.cache is not None}
+                  for key, target, *_ in groups if key and self.cache is not None}
         merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom,
-                      workers=self._cpu_num())
+                      workers=cpu)
         shutil.rmtree(work, ignore_errors=True)  # kept in the cache; not needed here
+
+    def _zoom_costs(self, members: List[QgsVectorLayer]) -> Dict[int, float]:
+        """TileProgress cost of each zoom level of a layer's datasets."""
+        costs: Dict[int, float] = {}
+        for layer in members:
+            try:
+                size = os.path.getsize(layer.source().split("|")[0])
+            except OSError:
+                size = 0
+            low, high = self._layer_zoom_range(layer)
+            for zoom in range(low, high + 1):
+                costs[zoom] = costs.get(zoom, 0.0) + size + _TILE_COST * self._tiles_at(zoom)
+        return costs
+
+    def _pieces(self, members: List[QgsVectorLayer], target: float) -> List[Tuple[int, int, float]]:
+        """[(min zoom, max zoom, cost)]: one layer's tile job in bands of zoom
+        levels of about ``target`` cost, the highest zooms (most tiles)
+        first. The MVT writer makes each zoom level on its own: a band's
+        tiles are those of one run (its CONF cut to the band, its highest
+        zoom simplified as below the top: _ogr2ogr_command). Not cut into
+        areas: a spatial filter reads the features in another order."""
+        costs = self._zoom_costs(members)
+        whole = sum(costs.values())
+        if not costs or whole <= 1.2 * target:
+            return [(self._zooms[0], self._zooms[1], whole)]
+        bands, band = [], []
+        for zoom in sorted(costs, reverse=True):
+            if band and sum(costs[z] for z in band) + costs[zoom] > target:
+                bands.append(band)
+                band = []
+            band.append(zoom)
+        bands.append(band)
+        return [(min(band), max(band), sum(costs[z] for z in band)) for band in bands]
 
     def _run_parallel(self, commands: List[List[str]], costs: Optional[List[float]] = None,
                       labels: Optional[List[str]] = None):
@@ -618,6 +681,7 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,
                 data = pool.map(_merged_tile, [chunks for _, chunks in batch])
                 out.executemany("INSERT INTO tiles VALUES (?, ?, ?, ?)",
                                 ((z, x, y, blob) for ((z, x, y), _), blob in zip(batch, data)))
+        vector_layers, stats = _unique_layers(vector_layers, "id"), _unique_layers(stats, "layer")
         bounds = bounds or [-180.0, -85.0511, 180.0, 85.0511]
         center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2, min_zoom]
         metadata = {
@@ -632,6 +696,24 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,
         }
         out.executemany("INSERT INTO metadata VALUES (?, ?)", metadata.items())
         out.commit()
+
+
+def _unique_layers(entries: List[dict], key: str) -> List[dict]:
+    """Metadata entries of the same layer from several pieces (zoom bands,
+    columns) as one: the widest zoom range, every field."""
+    out: Dict[str, dict] = {}
+    for entry in entries:
+        name = entry.get(key) if isinstance(entry, dict) else None
+        if name is None or name not in out:
+            out[name if name is not None else f"#{len(out)}"] = dict(entry) if isinstance(entry, dict) else entry
+            continue
+        merged = out[name]
+        for bound, pick in (("minzoom", min), ("maxzoom", max)):
+            if bound in entry and bound in merged:
+                merged[bound] = pick(merged[bound], entry[bound])
+        if isinstance(entry.get("fields"), dict) and isinstance(merged.get("fields"), dict):
+            merged["fields"] = dict(entry["fields"], **merged["fields"])
+    return list(out.values())
 
 
 def _gzip(data: bytes) -> bytes:

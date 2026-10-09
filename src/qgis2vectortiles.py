@@ -19,7 +19,10 @@ written to ``fidelity_report.json`` / ``fidelity_report.html`` either way.
 """
 
 import json
+import queue
+import threading
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from os import makedirs, listdir
 from os.path import join, exists
@@ -47,7 +50,7 @@ from qgis.core import (
 from qgis.PyQt.QtXml import QDomDocument
 
 from .utils.config import _EPSG_CRS
-from .utils import crash_log
+from .utils import crash_log, main_thread
 from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
 from .core.fidelity import zoom as fidelity_zoom
@@ -67,6 +70,90 @@ from .core.fidelity.model import ExportProfile, FidelityMode, OverzoomPolicy, Zo
 from .core.fidelity.units import LengthConverter, MapUnitContext
 from .core.fidelity.validation import (
     inspect_mbtiles, tile_layer_fields, validate_archive, validate_glyphs, validate_style)
+
+
+class _ThreadFeedback:
+    """The tile generator's feedback while it runs in the background: its
+    messages reach the real feedback on the main thread (BackgroundTiles.
+    flush); its progress is not shown (other stages own the bar then)."""
+
+    def __init__(self, job: "BackgroundTiles"):
+        self.job = job
+
+    def setProgress(self, value):  # noqa: N802
+        self.job.progress = value  # shown by wait()
+
+    def pushInfo(self, text):  # noqa: N802
+        self.job.messages.put(("pushInfo", text))
+
+    def reportError(self, text, fatalError=False):  # noqa: N802,N803
+        self.job.messages.put(("reportError", text))
+
+    def isCanceled(self):  # noqa: N802
+        return self.job.cancelled.is_set()
+
+
+class BackgroundTiles:
+    """GDALTilesGenerator.generate() in a thread: its ogr2ogr processes make
+    the tiles while the main thread goes on; the thread only starts and
+    polls them (and merges their tiles at the end)."""
+
+    def __init__(self, generator: GDALTilesGenerator):
+        self.generator = generator
+        self.messages: "queue.Queue" = queue.Queue()
+        self.cancelled = threading.Event()
+        self.result = None
+        self.error: Optional[BaseException] = None
+        self.progress = 0.0
+        generator.feedback = _ThreadFeedback(self)
+        generator.progress_range = (0.0, 100.0)  # a stage of its own while waited for
+        self.thread = threading.Thread(target=self._run, name="q2vt-tiles", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.result = self.generator.generate()
+        except BaseException as error:  # noqa: BLE001 - raised again by wait()
+            self.error = error
+
+    def flush(self, feedback) -> None:
+        while True:
+            try:
+                kind, text = self.messages.get_nowait()
+            except queue.Empty:
+                return
+            if feedback is not None:
+                getattr(feedback, kind)(text)
+
+    def wait(self, feedback):
+        """(tiles uri, min zoom) once done; Cancel on ``feedback`` stops it."""
+        while self.thread.is_alive():
+            self.thread.join(0.1)
+            self.flush(feedback)
+            if feedback is not None:
+                feedback.setProgress(self.progress)
+                if feedback.isCanceled():
+                    self.cancelled.set()
+            main_thread.keep_responsive()
+        self.flush(feedback)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def abort(self) -> None:
+        """Stop the ogr2ogr processes and the thread (cancelled or failed export)."""
+        self.cancelled.set()
+        self.thread.join(60)
+
+
+@dataclass
+class _Conversion:
+    """What completing a conversion needs (after its tiles)."""
+    temp_dir: str
+    start_time: float
+    export_time: float
+    has_features: bool
+    job: Optional[BackgroundTiles] = None
 
 
 class QGIS2VectorTiles:
@@ -96,6 +183,7 @@ class QGIS2VectorTiles:
         extra_tile_fields=None,
         cache=None,
         scale_limits=None,
+        background_tiles: bool = False,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -107,7 +195,10 @@ class QGIS2VectorTiles:
         local viewer files (the publishing workflow turns this off so the
         project is not changed). ``feature_keys`` ({layer id: QGIS
         expression}) and ``extra_tile_fields`` ({layer id: [field]}) are the
-        publishing identity/filter fields (see RulesExporter)."""
+        publishing identity/filter fields (see RulesExporter).
+        ``background_tiles``: convert_project_to_vector_tiles() returns once
+        the tile processes are started; finish_tiles() waits for them and
+        completes the export (the publishing workflow goes on meanwhile)."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -132,6 +223,8 @@ class QGIS2VectorTiles:
         self.feature_keys = dict(feature_keys or {})
         self.extra_tile_fields = dict(extra_tile_fields or {})
         self.cache = cache
+        self.background_tiles = background_tiles
+        self._pending: Optional[_Conversion] = None
         self.dataset_keys: Dict[str, str] = {}
         # Results of the last run (the publishing workflow builds its
         # ExportBundle from them; see export_bundle()).
@@ -157,8 +250,11 @@ class QGIS2VectorTiles:
         self.export_folder = ""  # this run's folder (also when it fails)
 
     def convert_project_to_vector_tiles(self) -> Optional[QgsVectorTileLayer]:
-        """Run the full conversion pipeline; return the output directory or None."""
+        """Run the full conversion pipeline; return the output directory or None.
+        With ``background_tiles`` the tiles are still being made when this
+        returns: finish_tiles() completes the export."""
         temp_dir = None
+        background = False
         try:
             self._clear_project()
             fingerprint_before = self._project_style_fingerprint()
@@ -188,12 +284,12 @@ class QGIS2VectorTiles:
 
             # Shares of the bar: tile generation takes most of the time.
             self._log(". Styling tiles...")
-            self.feedback.setProgress(30)
+            self.feedback.setProgress(self._bar(30))
             styled_layer = self._style_tiles(rules, temp_dir)
             self._log(". Successfully styled tiles.")
 
             self._log(". Exporting tiles style to client-side style package...")
-            self.feedback.setProgress(32)
+            self.feedback.setProgress(self._bar(32))
             exporter = self._export_maplibre_style(temp_dir, styled_layer, rules)
             style = exporter.style
             self._log(". Successfully exported client-side style package.")
@@ -202,38 +298,20 @@ class QGIS2VectorTiles:
             validate_glyphs(style, join(temp_dir, "style", "glyphs"), self.diagnostics)
             self._enforce_strict(temp_dir)
 
-            export_time = perf_counter()
-            archive = None
-            if self._has_features(layers):
-                self._log(". Generating tiles...")
-                self.feedback.setProgress(33)
-                self._generate_tiles(layers, temp_dir, style, rules)
-                self._log(f". Successfully generated tiles "
-                          f"({self._elapsed_minutes(export_time)} minutes).")
-                archive = self._validate_tiles(temp_dir, style, exporter.sprite_names)
-            else:
-                self.diagnostics.add("Q2VT_EXPORT_EMPTY")
-
+            # The tiles do not touch the project: checked before they are made.
             if self._project_style_fingerprint() != fingerprint_before:
                 self.diagnostics.add("Q2VT_PROJECT_MUTATED")
-            if archive is not None and self.static_package:
-                self._write_static_package(temp_dir, style, exporter.source_name)
-            if archive is not None and self.archive_format in ("pmtiles", "both"):
-                self._write_pmtiles(temp_dir)
             self.rules, self.style, self.style_exporter = rules, style, exporter
-            self._write_report(temp_dir, style, archive, rules)
-            self._enforce_strict(temp_dir)
-            self.feedback.setProgress(100)
-            self._log(f". Process completed successfully "
-                      f"({self._elapsed_minutes(start_time)} minutes).")
-            self._clear_project()
-            self.output_path = temp_dir
-            if self.archive_format == "pmtiles" and self.pmtiles is not None:
-                # QGIS cannot open PMTiles: no result layer / MBTiles viewer.
-                self._remove_mbtiles(temp_dir)
-            elif self.add_result_layer:
-                self.serve_tiles(temp_dir)
-            return temp_dir
+            state = _Conversion(temp_dir, start_time, perf_counter(), self._has_features(layers))
+            if state.has_features:
+                self._log(". Generating tiles...")
+                self.feedback.setProgress(self._bar(33))
+                if self.background_tiles:
+                    state.job = BackgroundTiles(self._tiles_generator(layers, temp_dir, style, rules))
+                    self._pending, self.output_path, background = state, temp_dir, True
+                    return temp_dir
+                self._generate_tiles(layers, temp_dir, style, rules)
+            return self._complete(state)
 
         except StrictModeError as e:
             self._clear_project()
@@ -246,6 +324,74 @@ class QGIS2VectorTiles:
             crash_log.note("Export failed:\n" + traceback.format_exc())
             raise
         finally:
+            if not background:
+                crash_log.stop()
+
+    def _bar(self, value: float) -> float:
+        """A point of the progress bar before the tiles: with background tiles
+        the bar of this run ends where they start (their bar is their own)."""
+        return value if not self.background_tiles else 5.0 + (value - 5.0) * 95.0 / 28.0
+
+    def _complete(self, state: _Conversion) -> str:
+        """Validate the tiles, package and report: the end of a conversion."""
+        temp_dir, style, exporter = state.temp_dir, self.style, self.style_exporter
+        archive = None
+        if state.has_features:
+            self._log(f". Successfully generated tiles "
+                      f"({self._elapsed_minutes(state.export_time)} minutes).")
+            archive = self._validate_tiles(temp_dir, style, exporter.sprite_names)
+        else:
+            self.diagnostics.add("Q2VT_EXPORT_EMPTY")
+        if archive is not None and self.static_package:
+            self._write_static_package(temp_dir, style, exporter.source_name)
+        if archive is not None and self.archive_format in ("pmtiles", "both"):
+            self._write_pmtiles(temp_dir)
+        self._write_report(temp_dir, style, archive, self.rules)
+        self._enforce_strict(temp_dir)
+        self.feedback.setProgress(100)
+        self._log(f". Process completed successfully "
+                  f"({self._elapsed_minutes(state.start_time)} minutes).")
+        self._clear_project()
+        self.output_path = temp_dir
+        if self.archive_format == "pmtiles" and self.pmtiles is not None:
+            # QGIS cannot open PMTiles: no result layer / MBTiles viewer.
+            self._remove_mbtiles(temp_dir)
+        elif self.add_result_layer:
+            self.serve_tiles(temp_dir)
+        return temp_dir
+
+    def finish_tiles(self) -> Optional[str]:
+        """``background_tiles``: wait for the tiles, then complete the export
+        as convert_project_to_vector_tiles() does without it; the export
+        folder, or None when it failed."""
+        state, self._pending = self._pending, None
+        if state is None:
+            return self.output_path
+        try:
+            self._log(". Waiting for the tiles..." if state.job.thread.is_alive() else ". Tiles ready.")
+            _, min_zoom = state.job.wait(self.feedback)
+            self._tiles_done(state.job.generator, min_zoom)
+            return self._complete(state)
+        except StrictModeError as e:
+            self._clear_project()
+            raise QgsProcessingException(str(e)) from e
+        except QgsProcessingException as e:
+            self._log(f". Processing failed: {str(e)}")
+            self._clear_project()
+            self.output_path = None
+            return None
+        except BaseException:
+            crash_log.note("Export failed:\n" + traceback.format_exc())
+            raise
+        finally:
+            crash_log.stop()
+
+    def abort_tiles(self) -> None:
+        """Stop background tiles that are no longer wanted (no-op otherwise)."""
+        state, self._pending = self._pending, None
+        if state is not None:
+            state.job.abort()
+            crash_log.note("Export stopped before its tiles were finished.")
             crash_log.stop()
 
     def _log_header(self) -> str:
@@ -473,7 +619,7 @@ class QGIS2VectorTiles:
             rules, self._extent_with_symbol_reach(rules), self.include_required_fields_only,
             self.max_zoom, self.utils_dir, self.cent_source, self.feedback,
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
-            progress_range=(5.0, 30.0), parallel=self.parallel,
+            progress_range=(5.0, self._bar(30)), parallel=self.parallel,
             feature_keys=self.feature_keys, extra_tile_fields=self.extra_tile_fields,
             cache=self.cache, light_results=True,
         )
@@ -501,8 +647,8 @@ class QGIS2VectorTiles:
                 zooms[polygons] = (min(low, old_low), max(high, old_high))
         return zooms
 
-    def _generate_tiles(self, layers: List[QgsVectorLayer], temp_dir: str, style: dict,
-                        rules: Optional[List[FlattenedRule]] = None) -> str:
+    def _tiles_generator(self, layers: List[QgsVectorLayer], temp_dir: str, style: dict,
+                         rules: Optional[List[FlattenedRule]] = None) -> GDALTilesGenerator:
         layer_zooms = self._layer_zooms(rules or [])
         present = [layer_zooms[n] for n in (layer.name() for layer in layers) if n in layer_zooms]
         if present:
@@ -513,12 +659,21 @@ class QGIS2VectorTiles:
             layer_groups=export_cache.source_layer_groups(rules or []),
             progress_range=(33.0, 97.0),
         )
-        tiles_uri, min_zoom = generator.generate()
+        self.min_zoom = generator._get_global_min_zoom()  # pylint: disable=protected-access
+        return generator
+
+    def _tiles_done(self, generator: GDALTilesGenerator, min_zoom: int) -> None:
         if self.cache is not None:
             self._log(f". Export {self.cache.summary()}.")
         self.layer_seconds["tiles"] = dict(generator.layer_seconds)
         self._log_slowest_layers()
         self.min_zoom = min_zoom
+
+    def _generate_tiles(self, layers: List[QgsVectorLayer], temp_dir: str, style: dict,
+                        rules: Optional[List[FlattenedRule]] = None) -> str:
+        generator = self._tiles_generator(layers, temp_dir, style, rules)
+        tiles_uri, min_zoom = generator.generate()
+        self._tiles_done(generator, min_zoom)
         return tiles_uri
 
     def _log_slowest_layers(self, count: int = 8) -> None:
