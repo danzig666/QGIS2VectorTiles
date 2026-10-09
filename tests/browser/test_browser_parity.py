@@ -416,6 +416,77 @@ def test_label_frames_with_a_data_defined_size_keep_a_map_unit_border(tmp_path, 
         assert abs(a - b) <= 2, (qf, bf, qt, bt)
 
 
+def test_millimetre_label_frame_wraps_the_text_like_qgis(tmp_path):
+    """A frame sized as a millimetre buffer around Open Sans text: QGIS fits
+    it to the font's ascent and descent (1.36 em), MapLibre to its own
+    1.2 em line box. The frame was 2.5 px too short at 16 px, all of it
+    above the text, which then sat high in its frame."""
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from qgis.PyQt.QtGui import QFont, QFontDatabase
+    from q2vt_fixtures import to_geopackage as save
+    if "Open Sans" not in QFontDatabase().families():
+        pytest.skip("Open Sans is not installed")
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Hg"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setFont(QFont("Open Sans"))
+    fmt.setSize(12)  # points: 16 px
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(1.4, 0.7))
+    frame.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    frame.setRadii(QSizeF(1, 1))
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(0.3)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (q_top, q_bottom, q_text), (b_top, b_bottom, b_text) = (
+        _frame_and_text_rows(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    # QGIS rounds the ascent up to whole pixels (18 px, not 17.1): about 1 px
+    # more room above the text remains.
+    assert b_bottom - b_top == pytest.approx(q_bottom - q_top, abs=1)
+    assert b_text - b_top == pytest.approx(q_text - q_top, abs=1.5)
+    assert b_bottom - b_text == pytest.approx(q_bottom - q_text, abs=1.5)
+
+
+def _frame_and_text_rows(path):
+    """Rows (anti-aliasing weighted) of a red frame's top and bottom stroke
+    across the text's columns, and of the middle of the blue text's ink."""
+    import numpy as np
+    from PIL import Image
+    rgb = np.asarray(Image.open(path).convert("RGB")).astype(float)
+    red = np.clip((255 - rgb[..., 1]) / 255, 0, 1) * (rgb[..., 0] - rgb[..., 2] > 60)
+    blue = np.clip((255 - rgb[..., 0]) / 255, 0, 1) * (rgb[..., 2] - rgb[..., 0] > 60)
+    ys, xs = np.nonzero(blue > 0.4)
+    rows = np.arange(rgb.shape[0])
+    cover = red[:, xs.min():xs.max() + 1].mean(axis=1)
+    middle = int(ys.mean())
+    top = (rows[:middle] * cover[:middle]).sum() / cover[:middle].sum()
+    bottom = (rows[middle:] * cover[middle:]).sum() / cover[middle:].sum()
+    ink = blue.sum(axis=1)
+    return top, bottom, (rows * ink).sum() / ink.sum()
+
+
 def _period(png, axis=0):
     """Dominant repeat distance (px) of a pattern's ink along ``axis``."""
     import numpy as np

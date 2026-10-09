@@ -145,3 +145,12 @@ overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`
 * 4.14: screen-size marker intervals, point clusters and point displacement are exported in
   eighths of a zoom: more datasets and a longer export for such layers.
 * 4.14: arrows draw their tapered body, QGIS-size heads and every fill layer (drop shadows).
+* Label backgrounds sized as a buffer wrap the font's ascent and descent as in QGIS: they
+  were fitted to MapLibre's 1.2 em line box (Open Sans: 0.16 em too short, all of it above
+  the text). The frame's stroke is centred on QGIS's rectangle, rounded corners have QGIS's
+  radius at the middle of the stroke, and the stroke keeps its colour (no darker edge with a
+  light line inside). Map-unit text (zoom-curve sizes) keeps the bare buffer; QGIS's
+  whole-pixel ascent at 96 dpi can leave about 1 px more room above the text. Tests:
+  `tests/browser/test_browser_parity.py -k millimetre_label_frame`,
+  `tests/integration/test_label_font_style.py -k frame_padding`,
+  `tests/unit/test_patterns_and_assets.py -k label_frame`.

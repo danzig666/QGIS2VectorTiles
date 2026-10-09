@@ -584,6 +584,18 @@ def test_label_boxes_read_plain_array_layout_values():
     assert box == pytest.approx([16, 11]) and text == pytest.approx([10, 6])
 
 
+def test_framed_label_box_is_the_frame_maplibre_draws():
+    """MapLibre fits a frame to its own line box (1.2 em a line); the
+    exporter's padding brings it out to the font's ascent and descent. The
+    box is that frame, not the font's height plus the padding once more."""
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': [4.4, 4, 2.5, 4]}, 15, 1, 0.5, "
+            "{advance: new Map(), height: 1.362})({t: 'abcd'}); return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert box == pytest.approx([16, (12 + 6.9) / 2 + 2])
+    assert text == pytest.approx([10, 6.81])  # the bare text keeps the font's height
+
+
 def test_rendered_label_boxes_follow_text_offset():
     """A town name drawn 0.75 em above its dot: its box is where the text is."""
     expr = """(() => {

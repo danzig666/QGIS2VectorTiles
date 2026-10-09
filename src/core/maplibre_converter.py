@@ -42,7 +42,8 @@ from .materializer import pattern_anchor_kind, pattern_in_viewport
 from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
                                  solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
-from ..utils.config import _SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX
+from ..utils.config import (_SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX,
+                            _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM)
 
 
 def _enum_int(value, default=None):
@@ -4126,6 +4127,9 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-text-fit"] = text_fit
 
         text_fit_padding = IconPropertyExtractor.get_icon_text_fit_padding(background)
+        if text_fit_padding and label_settings is not None:
+            text_fit_padding = self._frame_fit_padding(text_fit_padding, label_settings.format(),
+                                                       layer_def["layout"])
         if text_fit_padding:
             layer_def["layout"]["icon-text-fit-padding"] = text_fit_padding
 
@@ -4199,15 +4203,7 @@ class QgisMapLibreStyleExporter:
             return True
         try:
             from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
-            from qgis.core import QgsFontUtils  # pylint: disable=import-outside-toplevel
-            named = QgsTextFormat(text_format)
-            if text_format.namedStyle():
-                font = QFont(text_format.font())
-                QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
-                named.setFont(font)
-            font = TextPropertyExtractor.drawn_font(named)  # the B/I buttons on top
-            font.setPixelSize(1000)
-            metrics = QFontMetricsF(font)
+            metrics = QFontMetricsF(self._metrics_font(text_format))
             advances = [round(metrics.horizontalAdvance(char)) for char in self._METRIC_CHARS]
             height = metrics.height() / 1000.0
         except (AttributeError, RuntimeError, TypeError):
@@ -4216,6 +4212,44 @@ class QgisMapLibreStyleExporter:
             return False
         fonts[font_name] = {"chars": self._METRIC_CHARS, "advances": advances, "height": round(height, 3)}
         return True
+
+    @staticmethod
+    def _metrics_font(text_format) -> QFont:
+        """The label font QGIS draws (its named style, the B/I buttons on
+        top) at 1000 px: Qt's font metrics in thousandths of an em."""
+        from qgis.core import QgsFontUtils  # pylint: disable=import-outside-toplevel
+        named = QgsTextFormat(text_format)
+        if text_format.namedStyle():
+            font = QFont(text_format.font())
+            QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
+            named.setFont(font)
+        font = TextPropertyExtractor.drawn_font(named)  # the B/I buttons on top
+        font.setPixelSize(1000)
+        return font
+
+    def _frame_fit_padding(self, padding, text_format, layout):
+        """``icon-text-fit-padding`` around QGIS's text box. MapLibre fits a
+        frame to its own line box (text-line-height ems, the baseline 7/24 em
+        below its middle); QGIS's frame wraps the font's ascent and descent.
+        The difference goes into the top and bottom padding. Map-unit text
+        (a text-size zoom curve) keeps the bare buffer."""
+        size = layout.get("text-size")
+        if not ex.is_number(size) or not (isinstance(padding, list) and len(padding) == 4
+                                          and all(ex.is_number(v) for v in padding)):
+            return padding
+        try:
+            from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+            metrics = QFontMetricsF(self._metrics_font(text_format))
+            ascent, descent = metrics.ascent() / 1000.0, metrics.descent() / 1000.0
+        except (AttributeError, RuntimeError, TypeError):
+            return padding
+        if not 0.5 <= ascent + descent <= 3:
+            return padding
+        line_height = layout.get("text-line-height", 1.2)
+        half = (line_height if ex.is_number(line_height) else 1.2) / 2
+        top = (ascent - half - _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
+        bottom = (descent - half + _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
+        return [round(padding[0] + top, 4), padding[1], round(padding[2] + bottom, 4), padding[3]]
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:

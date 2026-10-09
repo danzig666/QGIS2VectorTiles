@@ -186,3 +186,26 @@ def test_snapped_markers_sit_on_whole_pixels_like_qgis_draw_image():
     assert alphas <= {0, 255}, alphas
     smooth = tile_markers(marker, width, height, positions, wrap=False)
     assert {a for *_rgb, a in smooth.getdata()} - {0, 255}  # the default still supersamples
+
+
+def test_label_frame_is_stroked_like_qgis():
+    """A label frame (rounded rectangle, 0.3 mm stroke, 1 mm corners): QGIS
+    strokes the shape centred on its outline, so the text box + buffer is
+    the stroke's middle and the corner radius is the radius of that middle
+    line. The stroke keeps its colour when the supersampled image is reduced
+    (Lanczos darkened it and drew a light line just inside it)."""
+    from fidelity.patterns import frame_image
+    fill, stroke = (255, 248, 230, 235), (214, 137, 16, 255)
+    for ratio in (1, 2):
+        img, meta = frame_image("rectangle", fill, stroke, 1.134, 3.78, ratio)
+        mid = img.width // 2
+        assert img.getpixel((mid, 0)) == pytest.approx(stroke, abs=1)
+        assert img.getpixel((mid, 4)) == pytest.approx(fill, abs=1)
+        assert max(b for _r, _g, b, a in img.getdata() if a) <= fill[2] + 1
+    assert meta["content"] == pytest.approx([0.567, 0.567, 31.433, 31.433], abs=1e-3)
+    # 10 px stroke, 20 px radius: the outer edge of the corner has a radius
+    # of 25 px, so (6, 6) is outside it (an outer radius of 20 covered it).
+    img, meta = frame_image("rectangle", fill, stroke, 10, 20, 1)
+    assert img.getpixel((6, 6))[3] == 0 and img.getpixel((9, 9))[3] > 200
+    fixed = meta["stretchX"][0][0]
+    assert fixed >= 25 + 1  # the whole corner stays out of the stretched part

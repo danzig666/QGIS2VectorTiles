@@ -335,9 +335,15 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     if shape == "ellipse":
         draw.ellipse(box, fill=fill, outline=outline, width=width)
     else:
-        draw.rounded_rectangle(box, radius=radius * scale, fill=fill, outline=outline,
+        # QGIS strokes the rounded rectangle centred on its outline: the
+        # outer edge has the radius plus half the stroke (PIL's radius is
+        # the outer one).
+        outer = radius + edge / 2 if radius > 0 else 0.0
+        draw.rounded_rectangle(box, radius=outer * scale, fill=fill, outline=outline,
                                width=width)
-    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.LANCZOS)
+    # Area average of the supersampled image (Lanczos overshoots: a darker
+    # stroke with a light line just inside it).
+    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.BOX)
     metadata = {}
     if shape != "ellipse" and not size_px:
         fixed = math.ceil(radius + edge) + 1

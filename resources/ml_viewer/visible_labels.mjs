@@ -1263,6 +1263,7 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
     if (transform === "uppercase") text = text.toUpperCase();
     else if (transform === "lowercase") text = text.toLowerCase();
     const lines = text.split("\n");
+    const lineHeight = Number(evaluate(layout["text-line-height"] ?? 1.2, zoom, properties)) || 1.2;
     let width, height;
     if (metrics) {
       const spacing = Number(evaluate(layout["text-letter-spacing"] ?? 0, zoom, properties)) || 0;
@@ -1271,7 +1272,6 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
         return chars.reduce((sum, char) => sum + (metrics.advance.get(char) ?? charWidth), 0)
           + spacing * Math.max(0, chars.length - 1);
       };
-      const lineHeight = Number(evaluate(layout["text-line-height"] ?? 1.2, zoom, properties)) || 1.2;
       width = Math.max(...lines.map(ems)) * size;
       height = (metrics.height + (lines.length - 1) * lineHeight) * size;
     } else {
@@ -1279,6 +1279,9 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
       height = lines.length * 1.2 * size;
     }
     const bare = [width / 2 * perPx, height / 2 * perPx];
+    // MapLibre fits a frame to its own line box (text-line-height a line);
+    // the exporter's padding brings it out to QGIS's ascent and descent.
+    if (layout["icon-text-fit"]) height = lines.length * lineHeight * size;
     width += pad[1] + pad[3];
     height += pad[0] + pad[2];
     const box = [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];

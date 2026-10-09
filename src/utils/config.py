@@ -76,6 +76,9 @@ _SDF_RADIUS = 8.0              # = _REFERENCE_RADIUS * (_FONT_RENDER_SIZE / _REF
 _BUFFER = 10                   # = ceil(max(_REFERENCE_BUFFER * scale, _SDF_RADIUS + 2, _MAPLIBRE_GLYPH_BORDER))
 _SDF_COVERAGE_THRESHOLD = 127  # AA coverage midpoint used to binarize the glyph mask
 _MAPLIBRE_LABELS_FACTOR = 1.0   # Measured parity with QGIS after the glyph-metric and zoom-scale fixes (was an empirical 1.4).
+# MapLibre draws a glyph's baseline 7/24 em below the middle of its line box
+# (SHAPING_DEFAULT_OFFSET -17; glyph "top" = bearing - one em, glyphs_generator).
+_MAPLIBRE_BASELINE_BELOW_MIDDLE_EM = (_FONT_RENDER_SIZE - 17) / _FONT_RENDER_SIZE
 
 # =====================================================================
 # PyQt VERSION GUARD
@@ -118,6 +121,7 @@ __all__ = [
     "_BUFFER",
     "_SDF_COVERAGE_THRESHOLD",
     "_MAPLIBRE_LABELS_FACTOR",
+    "_MAPLIBRE_BASELINE_BELOW_MIDDLE_EM",
     # PyQt re-exports
     "Qt",
     "QDomDocument",
