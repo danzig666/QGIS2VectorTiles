@@ -1392,14 +1392,23 @@ class TextPropertyExtractor:
     @staticmethod
     def line_side(label_settings: QgsPalLayerSettings) -> str:
         """"on", "above" or "below": where QGIS places a line label
-        (``QgsLabelLineSettings.placementFlags``; on-line wins when allowed)."""
+        (``QgsLabelLineSettings.placementFlags``)."""
         try:
             flags = _enum_int(label_settings.lineSettings().placementFlags(), 1)
         except (AttributeError, TypeError):
             return "on"
-        if flags & 1 or not flags & 6:
-            return "on"
-        return "above" if flags & 2 else "below"
+        curved = TextPropertyExtractor.placement_name(label_settings) in ("Curved", "PerimeterCurved")
+        return TextPropertyExtractor.side_of(flags, curved)
+
+    @staticmethod
+    def side_of(flags: int, curved: bool = False) -> str:
+        """The side QGIS picks among the allowed ones (OnLine 1, AboveLine 2,
+        BelowLine 4), measured on lone straight labels: beside the line wins
+        over on it, above over below (a curved label allowed all three took
+        either, as its candidates' costs tie)."""
+        if flags & 2:
+            return "above"
+        return "below" if flags & 4 else "on"
 
     @staticmethod
     def get_line_text_offset(label_settings: QgsPalLayerSettings,

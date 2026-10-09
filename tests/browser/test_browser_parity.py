@@ -313,6 +313,63 @@ def test_a_font_marker_offset_in_map_units_with_a_scale_limit(tmp_path, limited)
     assert abs((top + bottom) / 2 - (btop + bbottom) / 2) <= 3, ((top, bottom), (btop, bbottom))
 
 
+@pytest.mark.parametrize("placement,flags,repeat", [
+    ("line", ("OnLine", "AboveLine"), 0), ("line", ("OnLine", "BelowLine"), 0),
+    ("curved", ("OnLine", "AboveLine", "BelowLine"), 0), ("line", ("OnLine", "AboveLine"), 120)])
+def test_line_labels_take_the_side_qgis_takes(tmp_path, placement, flags, repeat):
+    """Line labels allowed on the line and beside it: QGIS puts a label
+    beside the line at the label distance (above first; curved labels allowed
+    everywhere below); the web always put it on the line."""
+    from qgis.core import (QgsLabeling, QgsPalLayerSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=t:string", "lines", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Mill Road"])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 140} {CENTER[1]}, {CENTER[0] + 140} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple(
+        {"color": "255,0,0", "width": "0.4"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = {"line": Qgis.LabelPlacement.Line, "curved": Qgis.LabelPlacement.Curved}[placement]
+    settings.dist = 4
+    settings.distUnits = Qgis.RenderUnit.Millimeters
+    settings.repeatDistance = repeat
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(18)
+    fmt.setSizeUnit(Qgis.RenderUnit.Pixels)
+    fmt.setColor(QColor("black"))
+    settings.setFormat(fmt)
+    value = QgsLabeling.LinePlacementFlags(getattr(QgsLabeling.LinePlacementFlag, flags[0]))
+    for name in flags[1:]:
+        value = value | getattr(QgsLabeling.LinePlacementFlag, name)
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(value)
+    settings.setLineSettings(line_settings)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (_, qtop, _, qbottom), (_, btop, _, bbottom) = (_black_box(tmp_path, n) for n in ("qgis", "browser"))
+    line = SIZE / 2
+    qgis, browser = (qtop + qbottom) / 2 - line, (btop + bbottom) / 2 - line
+    assert qgis * browser > 0 and abs(browser) > 8, (qgis, browser)  # the same side, off the line
+    if repeat:  # drawn once per line, the viewer places it (see the follow-up below)
+        assert abs(qgis - browser) <= 4, (qgis, browser)
+
+
+def _black_box(tmp_path, name):
+    """Bounding box of the black (text) ink of a capture, red left out."""
+    from PIL import Image
+    image = Image.open(str(tmp_path / f"v_{name}.png")).convert("RGB")
+    mask = Image.new("L", image.size)
+    mask.putdata([255 if max(p) < 110 else 0 for p in image.getdata()])
+    return mask.getbbox()
+
+
 def _ink_boxes(tmp_path, name="qgis"):
     """Bounding box of the dark ink of a capture, and its ink count."""
     from PIL import Image

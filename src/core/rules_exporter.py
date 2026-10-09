@@ -3347,7 +3347,9 @@ class RulesExporter:
             flags = int(settings.lineSettings().placementFlags())
         except (AttributeError, TypeError):
             flags = 1
-        side = "on" if flags & 1 or not flags & 6 else ("above" if flags & 2 else "below")
+        from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+        side = TextPropertyExtractor.side_of(
+            flags, TextPropertyExtractor.placement_name(settings) in ("Curved", "PerimeterCurved"))
         quadrant = {"on": Qgis.LabelQuadrantPosition.Over,
                     "above": Qgis.LabelQuadrantPosition.Above,
                     "below": Qgis.LabelQuadrantPosition.Below}[side]
