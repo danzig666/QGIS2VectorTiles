@@ -1,7 +1,7 @@
 """Publish window: the extent from a layer (combo; follows the layer's
 extent), a fixed extent, a readable summary instead of raw coordinates, the
-setting saved in the profile; and room for the layer list on the
-Interaction tab."""
+setting saved in the profile; the extent drawn on the map canvas by clicking
+two corners; and room for the layer list on the Interaction tab."""
 
 import os
 import sys
@@ -226,3 +226,155 @@ def test_web_basemap_table_lists_the_qgis_xyz_connections(plugin, monkeypatch, t
     finally:
         settings.remove("connections/xyz/items/QGIS ortó")
         settings.remove("connections/xyz/items/Régi http")
+
+
+# The extent drawn on the map canvas (ExtentTool), driven by synthetic
+# QgsMapMouseEvents on an offscreen canvas.
+
+def _drawing():
+    """An offscreen canvas with the pan tool, the extent tool on it, what it
+    reported (``done``), what it told the user (``hints``) and the number of
+    canvas items before drawing."""
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle  # pylint: disable=import-outside-toplevel
+    from qgis.gui import QgsMapCanvas, QgsMapToolPan  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error,import-outside-toplevel
+    canvas = QgsMapCanvas()
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    canvas.resize(400, 300)
+    canvas.setExtent(QgsRectangle(2100000, 6000000, 2140000, 6030000))
+    pan = QgsMapToolPan(canvas)
+    canvas.setMapTool(pan)
+    done, hints = [], []
+    items = len(canvas.scene().items())
+    tool = ExtentTool(canvas, done.append, hints.append)
+    canvas.setMapTool(tool)
+    return canvas, pan, tool, done, hints, items
+
+
+def _mouse(tool, kind, x, y, button=Qt.MouseButton.LeftButton):
+    from qgis.gui import QgsMapMouseEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QEvent, QPoint  # pylint: disable=import-outside-toplevel
+    kinds = {"press": (QEvent.Type.MouseButtonPress, tool.canvasPressEvent, button, button),
+             "move": (QEvent.Type.MouseMove, tool.canvasMoveEvent, Qt.MouseButton.NoButton, button),
+             "release": (QEvent.Type.MouseButtonRelease, tool.canvasReleaseEvent, button,
+                         Qt.MouseButton.NoButton)}
+    event_type, handler, which, held = kinds[kind]
+    handler(QgsMapMouseEvent(tool.canvas(), event_type, QPoint(x, y), which, held,
+                             Qt.KeyboardModifier.NoModifier))
+
+
+def _click(tool, x, y, button=Qt.MouseButton.LeftButton):
+    _mouse(tool, "press", x, y, button)
+    _mouse(tool, "release", x, y, button)
+
+
+def _map_rect(canvas, x0, y0, x1, y1):
+    """The rectangle between two pixels, in map (canvas CRS) coordinates."""
+    from qgis.core import QgsRectangle  # pylint: disable=import-outside-toplevel
+    to_map = canvas.getCoordinateTransform()
+    return QgsRectangle(to_map.toMapCoordinates(x0, y0), to_map.toMapCoordinates(x1, y1))
+
+
+def _bands(canvas):
+    from qgis.gui import QgsRubberBand  # pylint: disable=import-outside-toplevel
+    return [item for item in canvas.scene().items() if isinstance(item, QgsRubberBand)]
+
+
+def test_extent_drawn_by_clicking_two_corners(plugin):
+    canvas, pan, tool, done, hints, items = _drawing()
+    assert "first corner" in hints[-1]
+    _click(tool, 50, 40)
+    assert canvas.mapTool() is tool and done == []  # a click: one corner, not a rectangle
+    assert "opposite corner" in hints[-1]
+    _mouse(tool, "move", 250, 200)  # the rectangle follows the mouse
+    bands = _bands(canvas)
+    assert len(bands) == 1 and bands[0].asGeometry().boundingBox() == _map_rect(canvas, 50, 40, 250, 200)
+    _click(tool, 250, 200)
+    assert len(done) == 1 and done[0] == _map_rect(canvas, 50, 40, 250, 200)
+    assert done[0].width() > 0 and done[0].height() > 0
+    assert canvas.mapTool() is pan and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items  # nothing left on the canvas
+
+
+def test_extent_drawn_by_dragging(plugin):
+    canvas, pan, tool, done, _hints, items = _drawing()
+    _mouse(tool, "press", 300, 220)
+    _mouse(tool, "move", 200, 150)
+    _mouse(tool, "move", 60, 30)
+    _mouse(tool, "release", 60, 30)
+    assert done == [_map_rect(canvas, 60, 30, 300, 220)]
+    assert canvas.mapTool() is pan and len(canvas.scene().items()) == items
+
+
+def test_extent_second_click_on_the_first_corner_is_ignored(plugin):
+    canvas, _pan, tool, done, hints, _items = _drawing()
+    _click(tool, 100, 100)
+    _click(tool, 101, 101)   # (almost) the same pixel
+    _click(tool, 300, 100)   # a line, no area
+    assert done == [] and canvas.mapTool() is tool and "opposite corner" in hints[-1]
+    assert len(_bands(canvas)) == 1
+    _click(tool, 300, 250)
+    assert done == [_map_rect(canvas, 100, 100, 300, 250)]  # from the first corner
+
+
+def test_extent_drawing_cancelled_by_right_click_esc_or_another_tool(plugin):
+    from qgis.gui import QgsMapToolZoom  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QKeyEvent  # pylint: disable=import-outside-toplevel
+    # Right click after the first corner.
+    canvas, pan, tool, done, hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    _click(tool, 200, 150, Qt.MouseButton.RightButton)
+    assert done == [None] and canvas.mapTool() is pan and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+    # Right click before any corner.
+    canvas, pan, tool, done, _hints, _items = _drawing()
+    _click(tool, 200, 150, Qt.MouseButton.RightButton)
+    assert done == [None] and canvas.mapTool() is pan
+    # Esc.
+    canvas, pan, tool, done, _hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    tool.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    assert done == [None] and canvas.mapTool() is pan
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+    # Another map tool chosen while drawing: that tool stays.
+    canvas, _pan, tool, done, hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    zoom = QgsMapToolZoom(canvas, False)
+    canvas.setMapTool(zoom)
+    assert done == [None] and canvas.mapTool() is zoom and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+
+
+def test_extent_corners_snap_when_snapping_is_on(plugin):
+    from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                           QgsSnappingConfig, QgsSnappingUtils, QgsTolerance, QgsVectorLayer)
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "corners", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(2110000, 6020000)))
+    layer.dataProvider().addFeatures([feature])
+    canvas.setLayers([layer])
+    utils = QgsSnappingUtils(canvas)
+    utils.setIndexingStrategy(QgsSnappingUtils.IndexingStrategy.IndexAlwaysFull)
+    utils.setMapSettings(canvas.mapSettings())
+    config = QgsSnappingConfig()
+    config.setEnabled(True)
+    config.setMode(Qgis.SnappingMode.AllLayers)
+    config.setTypeFlag(Qgis.SnappingType.Vertex)
+    config.setTolerance(10)
+    config.setUnits(QgsTolerance.UnitType.Pixels)
+    utils.setConfig(config)
+    canvas.setSnappingUtils(utils)
+    vertex = canvas.getCoordinateTransform().transform(QgsPointXY(2110000, 6020000))
+    x, y = round(vertex.x()) + 4, round(vertex.y()) - 3  # near the point, not on it
+    _mouse(tool, "move", x, y)
+    _click(tool, x, y)
+    _click(tool, x + 150, y + 100)
+    corner = canvas.getCoordinateTransform().toMapCoordinates(x + 150, y + 100)
+    assert len(done) == 1
+    assert (done[0].xMinimum(), done[0].yMaximum()) == (2110000, 6020000)  # snapped
+    assert (done[0].xMaximum(), done[0].yMinimum()) == (corner.x(), corner.y())  # nothing to snap to

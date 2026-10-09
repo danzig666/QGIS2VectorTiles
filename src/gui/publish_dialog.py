@@ -362,8 +362,8 @@ class PublishDialog(QDialog):
         extent_button.clicked.connect(lambda: self._use_canvas_extent())
         extent_button.setEnabled(self.iface is not None)
         draw_button = QPushButton(tr("Draw…"))
-        draw_button.setToolTip(tr("Draw the published area on the QGIS map: drag a rectangle "
-                                  "(Esc cancels)."))
+        draw_button.setToolTip(tr("Draw the published area on the QGIS map: click one corner, "
+                                  "then the opposite corner (right click or Esc cancels)."))
         draw_button.clicked.connect(self._draw_extent)
         draw_button.setEnabled(self.iface is not None)
         self.e_extent_layer.setMinimumContentsLength(12)
@@ -742,15 +742,24 @@ class PublishDialog(QDialog):
 
     def _draw_extent(self):
         """The published area drawn on the map: this window steps aside
-        while the rectangle is dragged."""
+        while two opposite corners are clicked; the status bar says which
+        corner comes next."""
         from .extent_tool import ExtentTool  # pylint: disable=import-outside-toplevel
         canvas = self.iface.mapCanvas()
-        self._extent_tool = ExtentTool(canvas, self._extent_drawn)
+        self._extent_tool = ExtentTool(canvas, self._extent_drawn, self._extent_hint)
         canvas.setMapTool(self._extent_tool)
         self.hide()
         self.iface.messageBar().pushMessage(
-            tr("Web map"), tr("Drag a rectangle on the map: the published area. Esc cancels."),
+            tr("Web map"), tr("Click two opposite corners of the published area on the map. "
+                              "Right click or Esc cancels."),
             Qgis.MessageLevel.Info, 8)
+
+    def _extent_hint(self, text):
+        bar = self.iface.statusBarIface()
+        if text:
+            bar.showMessage(text)
+        else:
+            bar.clearMessage()
 
     def _extent_drawn(self, rect):
         self._extent_tool = None

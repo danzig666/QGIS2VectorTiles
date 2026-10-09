@@ -1643,7 +1643,13 @@ feature-lookup shards.
   a 224 KB manifest (64 KB gzip), queries load 9–42 KB (gzip).
 - Publish window: *Draw…* next to *Map canvas* (`gui/extent_tool.py`, a `QgsMapToolExtent`):
   the window steps aside, a dragged rectangle (map canvas CRS → EPSG:3857) becomes the fixed
-  extent; Esc or another map tool cancels; the previous map tool comes back.
+  extent; Esc or another map tool cancels; the previous map tool comes back. From 4.31.0 the
+  tool is a `QgsMapTool` drawn by two clicks (first corner, opposite corner; a rubber band in
+  the canvas CRS in between; press-drag-release still works; a second click within 3 pixels
+  of the first corner is ignored), with the canvas snapping (`QgsMapMouseEvent.snapPoint`,
+  snap indicator), step hints in the QGIS status bar, and right click as another way to
+  cancel. Tests: `tests/integration/test_publish_dialog_extent.py` (synthetic
+  `QgsMapMouseEvent`s on an offscreen canvas), `test_publish_dialog.py`.
 - The action is in the Web menu itself (`iface.webMenu().addAction`), named
   "QWebMap: Publish Web Map…", not in a QWebMap submenu.
 
