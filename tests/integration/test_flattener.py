@@ -47,6 +47,30 @@ def test_inactive_categories_are_dropped(flattener):
     assert "'Lk'" not in filters and "'K1'" in filters
 
 
+def test_a_category_field_with_an_operator_in_its_name_is_the_field(flattener):
+    """A categorized renderer on a field named "a/b": QGIS reads the field
+    (a field of that name exists), not the division of fields a and b."""
+    from qgis.core import (QgsCategorizedSymbolRenderer, QgsFeature, QgsField, QgsFillSymbol,
+                           QgsGeometry, QgsRendererCategory, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "stops", "memory")
+    layer.dataProvider().addAttributes([QgsField(name, QVariant.Int) for name in ("a", "b", "a/b")])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([6, 3, 1])  # a / b = 2, the field "a/b" = 1
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 10 0, 10 10, 0 0))"))
+    layer.dataProvider().addFeatures([feature])
+    layer.setRenderer(QgsCategorizedSymbolRenderer("a/b", [
+        QgsRendererCategory(value, QgsFillSymbol.createSimple({"color": color, "outline_style": "no"}),
+                            str(value))
+        for value, color in ((1, "red"), (2, "blue"))]))
+    reset_project(layer)
+    rules, _ = flattener()
+    drawn = [r.rule.symbol().color().name() for r in rules
+             if list(layer.getFeatures(QgsFeatureRequest(QgsExpression(r.rule.filterExpression()))))]
+    assert drawn == ["#ff0000"]
+
+
 def test_single_zoom_rule_has_nonempty_interval(flattener):
     layer = rule_based(zoning_layer(), [
         ("narrow", "", zm.zoom_to_scale(3.2), zm.zoom_to_scale(3.8), True, "255,0,0")])

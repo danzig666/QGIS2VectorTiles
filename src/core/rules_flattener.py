@@ -640,11 +640,26 @@ class RulesFlattener:
         system = system.clone()
         if isinstance(system, QgsRuleBasedRenderer):
             return system
+        self._quote_class_fields(system, layer.fields())
         if system.type() == "heatmapRenderer":
             return self._heatmap_placeholder(system)
         if system.type() in self.POINT_GROUP_MODES and system.embeddedRenderer() is not None:
             return self._point_group_rules(system)
         return self._as_rule_renderer(system)
+
+    @classmethod
+    def _quote_class_fields(cls, renderer, fields) -> None:
+        """A categorized / graduated attribute that names a field is that
+        field, as QGIS reads it (lookupField first, an expression only
+        otherwise). convertFromRenderer parses it as an expression first:
+        a field named "a/b" became the division a / b."""
+        if isinstance(renderer, (QgsCategorizedSymbolRenderer, QgsGraduatedSymbolRenderer)):
+            attribute = renderer.classAttribute()
+            if attribute and not attribute.startswith('"') and fields.lookupField(attribute) >= 0:
+                renderer.setClassAttribute(QgsExpression.quotedColumnRef(attribute))
+        embedded = getattr(renderer, "embeddedRenderer", None)
+        if callable(embedded) and embedded() is not None:
+            cls._quote_class_fields(embedded(), fields)
 
     def _as_rule_renderer(self, system):
         """Rule-based copy of a (non rule-based) renderer, active items only."""
