@@ -273,11 +273,10 @@ class GDALTilesGenerator:
         return max(1, int((cpu_count() or 1) * self.cpu_percent / 100))
 
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
-                         conf_path: Optional[str] = None, top_zoom: Optional[int] = None) -> List[str]:
-        """``top_zoom``: the export's highest zoom when ``max_zoom`` is that of
-        a piece below it (the writer simplifies its MAXZOOM as the highest)."""
-        top_simplification = _SIMPLIFICATION if top_zoom is not None and max_zoom < top_zoom \
-            else _SIMPLIFICATION_MAX_ZOOM
+                         conf_path: Optional[str] = None,
+                         top_simplification: float = _SIMPLIFICATION_MAX_ZOOM) -> List[str]:
+        """``top_simplification``: of each dataset's last zoom (its CONF
+        maxzoom), as the writer applies SIMPLIFICATION_MAX_ZOOM."""
         cmd = [
             self._ogr2ogr_executable(), "-f", "MBTiles", output, vrt_path,
             "-dsco", f"MINZOOM={min_zoom}",
@@ -434,21 +433,34 @@ class GDALTilesGenerator:
         jobs = []  # (group index, piece file, command, cost, owner)
         for index, (key, target, vrt, conf, members, owner) in enumerate(groups):
             pieces = self._pieces(members, target_cost) if cpu > 1 else [(min_zoom, max_zoom, 0.0)]
-            for number, (low, high, cost) in enumerate(pieces):
-                piece = target if len(pieces) == 1 else f"{target[:-8]}_{number:02d}.mbtiles"
-                piece_vrt, piece_conf = vrt, conf
-                if len(pieces) > 1:  # the datasets of the band, their zooms cut to it
-                    inside = [m for m in members if self._layer_zoom_range(m)[0] <= high
-                              and self._layer_zoom_range(m)[1] >= low]
+            if len(pieces) == 1:
+                jobs.append((index, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf),
+                             pieces[0][2] or self._job_cost(members), owner))
+                continue
+            number = 0
+            for low, high, cost in pieces:
+                # The datasets of the band, their zooms cut to it. The writer
+                # simplifies a dataset's last CONF zoom as its highest: those
+                # that end in the band apart from those that go on above it.
+                inside = [m for m in members if self._layer_zoom_range(m)[0] <= high
+                          and self._layer_zoom_range(m)[1] >= low]
+                ending = [m for m in inside if self._layer_zoom_range(m)[1] <= high]
+                going_on = [m for m in inside if self._layer_zoom_range(m)[1] > high]
+                for part, top in ((ending, _SIMPLIFICATION_MAX_ZOOM), (going_on, _SIMPLIFICATION)):
+                    if not part:
+                        continue
+                    piece = f"{target[:-8]}_{number:02d}.mbtiles"
+                    number += 1
                     piece_vrt, piece_conf = piece[:-8] + ".vrt", piece[:-8] + ".json"
-                    self._build_vrt(piece_vrt, inside)
-                    self._write_layer_conf(piece_conf, inside, (low, high))
-                command = self._ogr2ogr_command(piece_vrt, piece, low, high, piece_conf, top_zoom=max_zoom)
-                jobs.append((index, piece, command, cost or self._job_cost(members), owner))
+                    self._build_vrt(piece_vrt, part)
+                    self._write_layer_conf(piece_conf, part, (low, high))
+                    command = self._ogr2ogr_command(piece_vrt, piece, low, high, piece_conf,
+                                                    top_simplification=top)
+                    jobs.append((index, piece, command, cost * len(part) / max(1, len(inside)), owner))
         self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
         for index, (key, target, *_rest) in enumerate(groups):
             pieces = [job for job in jobs if job[0] == index]
-            if len(pieces) > 1:  # no tile in two pieces: their tiles are copied
+            if len(pieces) > 1:  # a tile of one piece is copied as it is
                 merge_mbtiles([job[1] for job in pieces], target, min_zoom, max_zoom, workers=cpu)
         stored = {target: self.cache.put_tiles(key, target)
                   for key, target, *_ in groups if key and self.cache is not None}
@@ -473,9 +485,10 @@ class GDALTilesGenerator:
         """[(min zoom, max zoom, cost)]: one layer's tile job in bands of zoom
         levels of about ``target`` cost, the highest zooms (most tiles)
         first. The MVT writer makes each zoom level on its own: a band's
-        tiles are those of one run (its CONF cut to the band, its highest
-        zoom simplified as below the top: _ogr2ogr_command). Not cut into
-        areas: a spatial filter reads the features in another order."""
+        tiles are those of one run with its CONF cut to the band (datasets
+        that end in the band apart from those that go on: _generate_per_layer).
+        Not cut into areas: a spatial filter reads the features in another
+        order."""
         costs = self._zoom_costs(members)
         whole = sum(costs.values())
         if not costs or whole <= 1.2 * target:

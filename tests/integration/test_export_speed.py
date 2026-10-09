@@ -186,3 +186,67 @@ def test_fast_marker_option_round_trip(plugin):
     assert '"fastMarkers": true' in dumps(profile)
     assert load_profile(dumps(profile)).output.fast_markers is True
     assert load_profile(dumps(PublicationProfile(title="T", slug="t"))).output.fast_markers is False
+
+
+def test_zoom_band_pieces_give_the_tiles_of_one_run(plugin, tmp_path, monkeypatch):
+    """A layer tiled in bands of zoom levels: the same tiles as one ogr2ogr
+    run, also for a dataset whose last zoom falls inside a band (the writer
+    simplifies a dataset's last zoom differently)."""
+    import random as _random  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsRectangle  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import tiles_generator  # pylint: disable=import-error
+    from q2vt_plugin.src.core.datasets import ExportedDataset  # pylint: disable=import-error
+    rng = _random.Random(4)
+    names = {"l00t00d01r00g00c00o03i09s00": (3, 9), "l00t00d01r00g00c00o05i05s00": (5, 5)}
+    fields = QgsFields()
+    fields.append(QgsField("k", QVariant.Int))
+
+    def datasets(folder):
+        os.makedirs(folder, exist_ok=True)
+        out = []
+        for name in names:
+            path = os.path.join(folder, f"{name}.gpkg")
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "GPKG"
+            writer = QgsVectorFileWriter.create(path, fields, QgsWkbTypes.Polygon,
+                                                QgsCoordinateReferenceSystem("EPSG:3857"),
+                                                QgsCoordinateTransformContext(), options)
+            features = []
+            for number in range(300):
+                x, y = 2110000 + rng.uniform(0, 30000), 6010000 + rng.uniform(0, 30000)
+                size = rng.uniform(20, 400)
+                feature = QgsFeature(fields)
+                feature.setAttributes([number])
+                feature.setGeometry(QgsGeometry.fromWkt(
+                    f"POLYGON(({x} {y}, {x + size} {y + size * 0.1}, {x + size * 0.8} {y + size}, "
+                    f"{x + size * 0.1} {y + size * 0.7}, {x} {y}))"))
+                features.append(feature)
+            writer.addFeatures(features)
+            del writer
+            out.append(ExportedDataset(path, name, 300, None))
+        return out
+
+    def tiles(folder, single):
+        rng.seed(4)
+        layers = datasets(folder)
+        if single:
+            monkeypatch.setenv("Q2VT_SINGLE_OGR2OGR", "1")
+        else:
+            monkeypatch.delenv("Q2VT_SINGLE_OGR2OGR", raising=False)
+            monkeypatch.setattr(tiles_generator.GDALTilesGenerator, "_pieces",
+                                lambda self, members, target: [(8, 9, 1.0), (5, 7, 1.0), (3, 4, 1.0)])
+            monkeypatch.setattr(tiles_generator.GDALTilesGenerator, "_cpu_num", lambda self: 2)
+        generator = tiles_generator.GDALTilesGenerator(
+            layers, {"layers": []}, folder, QgsRectangle(2110000, 6010000, 2140000, 6040000), 100, None,
+            layer_zooms=names, layer_groups={"one": list(names)})
+        generator.generate()
+        out = {}
+        with sqlite3.connect(os.path.join(folder, "tiles.mbtiles")) as conn:
+            for z, x, y, data in conn.execute("SELECT * FROM tiles"):
+                from publishing import mvt  # pylint: disable=import-outside-toplevel
+                out[(z, x, y)] = {name: [(f["type"], tuple(f["geometry"])) for f in layer["features"]]
+                                  for name, layer in mvt.decode(data, geometry=True).items()}
+        return out
+    one = tiles(str(tmp_path / "one"), True)
+    bands = tiles(str(tmp_path / "bands"), False)
+    assert one == bands and any(z == 5 for z, _, _ in one)
