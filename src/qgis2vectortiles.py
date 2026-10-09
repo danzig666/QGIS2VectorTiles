@@ -250,6 +250,7 @@ class QGIS2VectorTiles:
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
         self.layer_seconds: Dict[str, Dict[str, float]] = {}
+        self.tile_pieces: Dict[str, int] = {}  # ogr2ogr jobs per layer id
         self.export_folder = ""  # this run's folder (also when it fails)
 
     def convert_project_to_vector_tiles(self) -> Optional[QgsVectorTileLayer]:
@@ -670,6 +671,7 @@ class QGIS2VectorTiles:
         if self.cache is not None:
             self._log(f". Export {self.cache.summary()}.")
         self.layer_seconds["tiles"] = dict(generator.layer_seconds)
+        self.tile_pieces = dict(generator.layer_pieces)
         self._log_slowest_layers()
         self.min_zoom = min_zoom
 
@@ -682,7 +684,8 @@ class QGIS2VectorTiles:
 
     def _log_slowest_layers(self, count: int = 8) -> None:
         """The layers that took longest (their datasets, their tiles): where
-        to look first when an export is slow."""
+        to look first when an export is slow. A layer's tiles made in pieces
+        side by side count every piece's seconds."""
         datasets = self.layer_seconds.get("datasets", {})
         tiles = self.layer_seconds.get("tiles", {})
         total = {lid: datasets.get(lid, 0.0) + tiles.get(lid, 0.0) for lid in set(datasets) | set(tiles)}
@@ -694,9 +697,12 @@ class QGIS2VectorTiles:
         def name(lid):
             layer = project.mapLayer(lid)
             return layer.name() if layer is not None else lid
+        def pieces(lid):
+            count = self.tile_pieces.get(lid, 0)
+            return f" in {count} parallel pieces" if count > 1 else ""
         self._log(". Slowest layers: " + "; ".join(
             f"{name(lid)} {total[lid]:.0f} s (datasets {datasets.get(lid, 0.0):.0f} s, "
-            f"tiles {tiles.get(lid, 0.0):.0f} s)" for lid in slowest))
+            f"tiles {tiles.get(lid, 0.0):.0f} s{pieces(lid)})" for lid in slowest))
 
     def _style_tiles(self, rules, temp_dir) -> Optional[QgsVectorTileLayer]:
         return TilesStyler(rules, temp_dir).apply_styling()

@@ -101,6 +101,11 @@ def test_the_log_names_the_slowest_layers(plugin, tmp_path):
     exporter.layer_seconds = {"datasets": {slow.id(): 12.4, "other": 0.2}, "tiles": {slow.id(): 3.0}}
     exporter._log_slowest_layers()  # pylint: disable=protected-access
     assert messages == [". Slowest layers: Lassú réteg 15 s (datasets 12 s, tiles 3 s)"]
+    # Debrecen: a layer's tiles in pieces made side by side add up to more
+    # seconds than the tiles took; the log says so.
+    exporter.tile_pieces = {slow.id(): 26}
+    exporter._log_slowest_layers()  # pylint: disable=protected-access
+    assert messages[-1] == ". Slowest layers: Lassú réteg 15 s (datasets 12 s, tiles 3 s in 26 parallel pieces)"
 
 
 def test_merge_reads_the_parts_in_tile_order(plugin, tmp_path):

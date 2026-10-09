@@ -169,3 +169,25 @@ def test_last_zoom_of_a_map_scale_split_stays_open(flattener):
     assert last.get_attr("o") == 15 and last.visibility.max_zoom is None
     assert all(r.visibility.max_zoom == r.get_attr("o") + 1 for r in split if r is not last
                and r.get_attr("o") == r.get_attr("i") and r.get_attr("o") < 15)
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_switched_off_map_scale_property_does_not_split_per_zoom(flattener, active):
+    """Debrecen: a parcel fill kept an unused (switched off) outline width
+    reading @map_scale; the fill became a dataset of every parcel per zoom.
+    Only an active property splits the rule."""
+    from qgis.core import (QgsFillSymbol, QgsProperty, QgsSingleSymbolRenderer,
+                           QgsSymbolLayer)
+    layer = zoning_layer()
+    symbol = QgsFillSymbol.createSimple({"color": "red", "outline_style": "no"})
+    width = QgsProperty.fromExpression("CASE WHEN @map_scale < 1000 THEN 0 ELSE 0.8 END")
+    width.setActive(active)
+    symbol.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth, width)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reset_project(layer)
+    rules, _ = flattener(min_zoom=12, max_zoom=15)
+    assert len(rules) == (4 if active else 1), [r.output_dataset for r in rules]
+    # The project's own symbol keeps its switched-off property.
+    kept = layer.renderer().symbol().symbolLayer(0).dataDefinedProperties().property(
+        QgsSymbolLayer.Property.PropertyStrokeWidth)
+    assert kept.expressionString() == width.expressionString() and kept.isActive() == active

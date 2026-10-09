@@ -30,6 +30,36 @@ def test_tile_progress_moves_while_jobs_run_and_never_goes_back(plugin):
     assert tracker.fraction(10 ** 6) == 1.0
 
 
+def test_tile_progress_follows_what_ogr2ogr_reports(plugin):
+    """Debrecen: the bar sat at 45% for four minutes while the big pieces
+    ran longer than their cost guessed. ogr2ogr -progress (features written)
+    moves it; the tiles are put together after the last feature."""
+    import io  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import tiles_generator as tg  # pylint: disable=import-error
+    tracker = tg.TileProgress([100.0, 100.0], reporting=True)
+    tracker.start(0, 0.0)
+    tracker.start(1, 0.0)
+    assert tracker.fraction(1000.0) == 0.0  # nothing written yet: no guess
+    tracker.report(0, 0.5, 100.0)
+    tracker.report(1, 0.2, 100.0)
+    assert abs(tracker.fraction(100.0) - 0.85 * 0.35) < 1e-9
+    tracker.report(0, 1.0, 200.0)  # job 0 writes its tiles
+    assembling = [tracker.fraction(t) for t in (200.0, 230.0, 1000.0)]
+    assert assembling == sorted(assembling) and assembling[-1] < 0.5 * (0.99 + 0.85 * 0.2) + 1e-9
+    tracker.finish(0, 1000.0)
+    tracker.finish(1, 1000.0)
+    assert tracker.fraction(1000.0) == 1.0
+    reader = tg._OutputReader(io.StringIO("0...10...20...30.."), True)  # pylint: disable=protected-access
+    reader.run()
+    assert reader.fraction == 0.35
+    reader = tg._OutputReader(io.StringIO("0...10...20...30...40...50...60...70...80...90...100 - done.\n"), True)  # pylint: disable=protected-access
+    reader.run()
+    assert reader.fraction == 1.0
+    errors = tg._OutputReader(io.StringIO("ERROR 1: x\n" * 5000), False)  # pylint: disable=protected-access
+    errors.run()
+    assert errors.text.endswith("ERROR 1: x\n") and len(errors.text) == 20000
+
+
 class Bar(QgsProcessingFeedback):
     def __init__(self):
         super().__init__()
@@ -63,3 +93,42 @@ def test_publication_bar_only_moves_forward(plugin, tmp_path):
     assert start < 10 and end - start > 25, (start, end)
     start, end = bar_at("[TILES]"), bar_at("[BUILD_RELEASE]")
     assert end - start > 40, (start, end)
+
+
+_FLAKY_JOB = r'''
+import os, sys
+marker, output = sys.argv[1], sys.argv[2]
+if os.path.exists(output):
+    sys.exit("the partial output of the failed try was left")
+if not os.path.exists(marker) or sys.argv[3] == "always":
+    open(marker, "w").close()
+    open(output, "w").write("partial")
+    sys.stderr.write("ERROR 1: IllegalArgumentException: encountered NaN/Inf numbers\n")
+    sys.exit(1)
+print("0...10...20...30...40...50...60...70...80...90...100 - done.")
+open(output, "w").write("tiles")
+'''
+
+
+def test_a_failed_tile_job_runs_once_more(plugin, tmp_path):
+    """ogr2ogr once stopped on a dataset it tiled in every other run (GEOS
+    "NaN/Inf numbers"): a failed job runs once more; a second failure fails
+    the export as before."""
+    import sys as _sys  # pylint: disable=import-outside-toplevel
+    import pytest  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import tiles_generator as tg  # pylint: disable=import-error
+    script = tmp_path / "job.py"
+    script.write_text(_FLAKY_JOB)
+    feedback = Bar()
+    generator = tg.GDALTilesGenerator([], {}, str(tmp_path), None, 100, feedback)
+    output = tmp_path / "piece.mbtiles"
+    generator._run_parallel([[_sys.executable, str(script), str(tmp_path / "tried"), str(output), "once"]],  # pylint: disable=protected-access
+                            [1.0], ["layer"])
+    assert output.read_text() == "tiles"
+    assert any(kind == "log" and "running it once more" in text and "NaN/Inf" in text
+               for kind, text in feedback.events)
+    assert generator.layer_pieces == {"layer": 1}
+    output.unlink()
+    with pytest.raises(RuntimeError, match="NaN/Inf"):
+        generator._run_parallel([[_sys.executable, str(script), str(tmp_path / "tried"), str(output), "always"]],  # pylint: disable=protected-access
+                                [1.0], ["layer"])

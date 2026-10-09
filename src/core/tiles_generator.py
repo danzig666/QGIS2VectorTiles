@@ -26,6 +26,7 @@ import re
 import sqlite3
 import shutil
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 import zlib
@@ -57,32 +58,61 @@ _TILE_COST = 2000
 
 
 class TileProgress:
-    """Estimated progress of ogr2ogr jobs, which report none themselves.
+    """Estimated progress of ogr2ogr jobs.
 
     A job's cost is the size of its datasets times their zoom levels plus
-    the tiles of the extent at those zooms. A running job advances with its
-    elapsed time against the time its cost should take at the rate of the
-    jobs already finished (a fixed guess before the first one); past that
-    time it still creeps on, never reaching its end before it finishes.
+    the tiles of the extent at those zooms. A job that reports its progress
+    (ogr2ogr -progress: the share of its features written; the tiles are
+    put together after the last ones) advances with it. Otherwise a running
+    job advances with its elapsed time against the time its cost should
+    take at the rate of the jobs already finished (a fixed guess before the
+    first one); past that time it still creeps on, never reaching its end
+    before it finishes.
     """
 
-    def __init__(self, costs: List[float]):
+    # Share of a job done when all its features are written.
+    _FEATURES = 0.85
+
+    def __init__(self, costs: List[float], reporting: bool = False):
         self.costs = [max(1.0, float(c)) for c in costs]
         self.total = sum(self.costs)
+        self.reporting = reporting  # the jobs report their progress
         self.started: Dict[int, float] = {}
         self.finished: Dict[int, float] = {}
+        self.reported: Dict[int, float] = {}
+        self._written: Dict[int, float] = {}
         self._last = 0.0
 
     def start(self, job: int, now: float) -> None:
         self.started[job] = now
 
+    def report(self, job: int, fraction: float, now: float) -> None:
+        """``fraction`` of the job's features written (ogr2ogr -progress)."""
+        self.reported[job] = max(self.reported.get(job, 0.0), min(1.0, fraction))
+        if self.reported[job] >= 0.97 and job not in self._written:
+            self._written[job] = now
+
     def finish(self, job: int, now: float) -> None:
         self.finished[job] = now - self.started.get(job, now)
+
+    def forget(self, job: int) -> None:
+        """A job to be run again: its progress so far does not count."""
+        for known in (self.started, self.reported, self._written):
+            known.pop(job, None)
 
     def rate(self) -> float:
         cost = sum(self.costs[j] for j in self.finished)
         seconds = sum(self.finished.values())
         return seconds / cost if cost > 0 and seconds > 0 else _SECONDS_PER_COST
+
+    def _reported_part(self, job: int, now: float) -> float:
+        reported = self.reported[job]
+        written = self._written.get(job)
+        if written is None:
+            return self._FEATURES * reported
+        # Putting the tiles together: about a fifth of the time the features took.
+        tau = max(1.0, 0.25 * (written - self.started[job]))
+        return self._FEATURES + (0.99 - self._FEATURES) * (1 - math.exp(-(now - written) / tau))
 
     def fraction(self, now: float) -> float:
         rate = self.rate()
@@ -90,11 +120,47 @@ class TileProgress:
         for job, began in self.started.items():
             if job in self.finished:
                 continue
+            if job in self.reported:
+                done += self.costs[job] * self._reported_part(job, now)
+                continue
+            if self.reporting:
+                continue  # not one feature written yet
             x = (now - began) / max(1e-9, self.costs[job] * rate)
             part = 0.9 * x if x <= 1 else 0.9 + 0.09 * (1 - math.exp(-(x - 1)))
             done += self.costs[job] * part
         self._last = max(self._last, min(1.0, done / self.total if self.total else 1.0))
         return self._last
+
+
+class _OutputReader(threading.Thread):
+    """Reads a job's output as it comes, so a full pipe never stops it:
+    ogr2ogr -progress on stdout ("0...10...20..." up to "100 - done."),
+    the end of stderr for the error message."""
+
+    def __init__(self, stream, progress: bool):
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.progress = progress
+        self.fraction = 0.0
+        self.text = ""
+
+    def run(self) -> None:
+        number, dots, last = "", 0, 0
+        try:
+            for char in iter(lambda: self.stream.read(1), ""):
+                if not self.progress:
+                    self.text = (self.text + char)[-20000:]
+                    continue
+                if char.isdigit():
+                    number += char
+                    continue
+                if number:
+                    last, dots, number = int(number), 0, ""
+                if char == ".":
+                    dots += 1  # each dot is 2.5 %
+                self.fraction = min(1.0, (last + 2.5 * dots) / 100.0)
+        except (OSError, ValueError):
+            pass
 
 
 class GDALTilesGenerator:
@@ -129,8 +195,10 @@ class GDALTilesGenerator:
         self.progress_range = progress_range
         # (table, fields) per dataset file, read once (remove_unused_fields).
         self._datasets: Dict[str, Tuple[Optional[str], List[str]]] = {}
-        # ogr2ogr seconds per QGIS layer id (layer_groups), for the export log.
+        # ogr2ogr seconds per QGIS layer id (layer_groups), for the export log,
+        # and the number of jobs (pieces of zoom levels run side by side).
         self.layer_seconds: Dict[str, float] = {}
+        self.layer_pieces: Dict[str, int] = {}
 
     def _report(self, fraction: float) -> None:
         if self.feedback is not None:
@@ -507,56 +575,86 @@ class GDALTilesGenerator:
         """Run ogr2ogr commands, several at a time, polled from this (main)
         thread so QGIS stays responsive and Cancel works. The biggest jobs
         (``costs``) start first, so none of them is left running alone at
-        the end; the progress bar follows TileProgress."""
+        the end; the progress bar follows TileProgress (ogr2ogr -progress).
+        A job that fails is run once more before the export fails."""
         if not commands:
             self._report(1.0)
             return
         costs = list(costs) if costs and len(costs) == len(commands) else [1.0] * len(commands)
-        tracker = TileProgress(costs)
+        tracker = TileProgress(costs, reporting=True)
         cpu = self._cpu_num()
         slots = max(1, min(len(commands), cpu))
         env = os.environ.copy()
         env["GDAL_NUM_THREADS"] = str(max(1, cpu // slots))
         waiting = sorted(range(len(commands)), key=lambda j: -costs[j])
-        running: Dict[int, subprocess.Popen] = {}
+        running: Dict[int, Tuple[subprocess.Popen, _OutputReader, _OutputReader]] = {}
+        # A layer's tiles may be made in several pieces: count layers, not pieces.
+        owners = list(labels) if labels and len(labels) == len(commands) else list(range(len(commands)))
+        retried = set()
         started = last_message = last_report = time.monotonic()
         try:
             while waiting or running:
                 while waiting and len(running) < slots:
                     job = waiting.pop(0)
-                    running[job] = subprocess.Popen(
-                        commands[job], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        text=True, **self._popen_options())
+                    proc = subprocess.Popen(
+                        commands[job] + ["-progress"], env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, errors="replace", **self._popen_options())
+                    readers = (_OutputReader(proc.stdout, True), _OutputReader(proc.stderr, False))
+                    for reader in readers:
+                        reader.start()
+                    running[job] = (proc, *readers)
                     tracker.start(job, time.monotonic())
-                for job, proc in [(j, p) for j, p in running.items() if p.poll() is not None]:
+                for job, (proc, progress, errors) in [(j, r) for j, r in running.items()
+                                                      if r[0].poll() is not None]:
                     del running[job]
-                    tracker.finish(job, time.monotonic())
+                    progress.join(timeout=5)
+                    errors.join(timeout=5)
+                    now = time.monotonic()
                     if labels and job < len(labels):
                         self.layer_seconds[labels[job]] = \
-                            self.layer_seconds.get(labels[job], 0.0) + tracker.finished[job]
-                    _, stderr = proc.communicate()
+                            self.layer_seconds.get(labels[job], 0.0) + now - tracker.started[job]
+                    if proc.returncode != 0 and job not in retried:
+                        # Once seen: ogr2ogr stopped on a dataset that it tiled
+                        # in every other run (GEOS "NaN/Inf numbers"); run once more.
+                        retried.add(job)
+                        first = next((line for line in errors.text.splitlines() if line.strip()), "")
+                        if self.feedback is not None:
+                            self.feedback.pushInfo(f"   A tile job stopped with an error ({first[:200]}); "
+                                                   "running it once more.")
+                        if os.path.exists(commands[job][3]):
+                            os.remove(commands[job][3])  # its partial tiles
+                        tracker.forget(job)
+                        waiting.insert(0, job)
+                        continue
+                    tracker.finish(job, now)
+                    if labels and job < len(labels):
+                        self.layer_pieces[labels[job]] = self.layer_pieces.get(labels[job], 0) + 1
                     if proc.returncode != 0:
-                        error_msg = f"ogr2ogr failed.\nError: {stderr}"
+                        error_msg = f"ogr2ogr failed.\nError: {errors.text}"
                         if self.feedback:
                             self.feedback.reportError(error_msg)
                         raise RuntimeError(error_msg)
                 if self.feedback is not None and self.feedback.isCanceled():
                     raise TilesGenerationCancelled("Tile generation cancelled")
                 now = time.monotonic()
+                for job, (_proc, progress, _errors) in running.items():
+                    if progress.fraction > 0:
+                        tracker.report(job, progress.fraction, now)
                 if now - last_report > 1:
                     last_report = now
                     self._report(tracker.fraction(now))
                 if self.feedback is not None and now - last_message > 15:
                     last_message = now
+                    left = len({owners[j] for j in itertools.chain(waiting, running)})
                     self.feedback.pushInfo(
                         f"   Still generating tiles ({(now - started) / 60:.1f} minutes, "
-                        f"{len(waiting) + len(running)} layers left, "
+                        f"{left} of {len(set(owners))} layers left, "
                         f"about {100 * tracker.fraction(now):.0f}% done)...")
                 time.sleep(0.05)
                 main_thread.keep_responsive()
             self._report(1.0)
         finally:
-            for proc in running.values():
+            for proc, *_readers in running.values():
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
