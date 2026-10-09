@@ -135,6 +135,20 @@ def test_polygon_outline_offsets_follow_the_source_ring(tmp_path, kind, clockwis
     assert _compare(tmp_path, layer) > 0.95
 
 
+@pytest.mark.parametrize("offset", [-3.0, 3.0])
+@pytest.mark.parametrize("clockwise", [False, True])
+def test_polygon_outline_screen_offsets_follow_qgis(tmp_path, clockwise, offset):
+    """A millimetre offset stays a native line offset: a positive one moves
+    the outline inside the polygon like QGIS, whatever the ring order."""
+    layer = _polygon_layer(str(tmp_path / "rings.gpkg"), clockwise)
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    # The wrong side is 6 mm (about 22 px) away from QGIS's outline.
+    assert _compare(tmp_path, layer) > 0.95
+
+
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])
 @pytest.mark.parametrize("pattern", ["custom", "dash", "dashdot"])
 def test_dash_patterns_follow_qt(tmp_path, cap, pattern):

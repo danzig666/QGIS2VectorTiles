@@ -694,19 +694,22 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
     1 exterior only, 2 interior only). With an ``offset`` every ring is
     buffered as its own polygon, so positive offsets move exterior and holes
     towards the feature's interior (``QgsSymbolLayerUtils::offsetLine``);
-    ``ccw`` orients rings so MapLibre's right-hand offsets point inside."""
+    ``rhr`` orients rings by the right-hand rule (exterior clockwise, holes
+    counter-clockwise, map y up: the feature's interior on the right of
+    every ring), so MapLibre's positive (right-hand) offsets point inside,
+    like QGIS's."""
     offset = float(recipe.param("offset", 0.0) or 0.0)
     ring_filter = int(recipe.param("ring_filter", 0) or 0)
-    ccw = bool(recipe.param("ccw", False))
+    rhr = bool(recipe.param("rhr", False))
     crs = recipe.param("crs") or export_crs
 
     def ring(ring_expr: str, exterior: bool) -> str:
         if offset:
             return _ring_buffer(ring_expr, repr(-offset if exterior else offset))
-        if ccw:  # exterior counter-clockwise, holes clockwise (map y up)
+        if rhr:  # exterior clockwise, holes counter-clockwise (map y up)
             polygon = f"make_polygon({ring_expr})"
-            oriented = f"force_polygon_ccw({polygon})" if exterior else \
-                f"force_polygon_cw({polygon})"
+            oriented = f"force_polygon_cw({polygon})" if exterior else \
+                f"force_polygon_ccw({polygon})"
             return f"exterior_ring({oriented})"
         return ring_expr
 

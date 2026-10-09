@@ -347,6 +347,26 @@ def test_polygon_offset_moves_every_ring_inwards(plugin, wkt):
     assert result.asWkt() == "MultiLineString ((1 1, 9 1, 9 9, 1 9, 1 1),(2 2, 8 2, 8 8, 2 8, 2 2))"
 
 
+@pytest.mark.parametrize("wkt", [
+    "POLYGON((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3))",
+    "POLYGON((0 0,0 10,10 10,10 0,0 0),(3 3,3 7,7 7,7 3,3 3))",
+    "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3)))"])
+def test_screen_offset_rings_have_the_interior_on_their_right(plugin, wkt):
+    """Screen-unit polygon offsets stay native (MapLibre line-offset, positive
+    = right of the line): exterior clockwise, holes counter-clockwise (map y
+    up) put the feature's interior on the right, where QGIS offsets inward."""
+    from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature, QgsGeometry
+    from fidelity import materialize as mat
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(wkt))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    expr = QgsExpression(mat.polygon_offset_expression(
+        mat.Recipe("polygon_offset", params=(("rhr", True),))))
+    assert expr.evaluate(context).asWkt() == \
+        "MultiLineString ((0 0, 0 10, 10 10, 10 0, 0 0),(3 3, 7 3, 7 7, 3 7, 3 3))"
+
+
 @pytest.mark.parametrize("on_surface", [False, True])
 def test_centroid_fill_position_matches_qgis(plugin, tmp_path, on_surface):
     from qgis.core import QgsCentroidFillSymbolLayer

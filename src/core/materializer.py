@@ -393,8 +393,9 @@ class SymbolMaterializer:
         every ring is buffered as its own polygon, so a positive offset moves
         exterior and holes towards the feature's interior whatever the ring
         orientation. Map-unit offsets are materialized exactly; screen-unit
-        offsets keep a native offset on counter-clockwise rings, where
-        MapLibre's right-hand side is the interior. Placed markers (vertex,
+        offsets keep a native offset on right-hand-rule rings (exterior
+        clockwise, holes counter-clockwise), where MapLibre's right-hand side
+        is the feature's interior. Placed markers (vertex,
         centre...) are handled by the marker-line materialization."""
         if layer.layerType() != "SimpleLine":
             placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
@@ -413,7 +414,7 @@ class SymbolMaterializer:
             params.append(("offset", float(layer.offset())))
             clone.setOffset(0.0)
         else:
-            params.append(("ccw", True))
+            params.append(("rhr", True))
         rule.recipe = mat.Recipe("polygon_offset", params=tuple(params))
         rule.set_attr("m", 1)
         if layer.layerType() == "HashLine":
