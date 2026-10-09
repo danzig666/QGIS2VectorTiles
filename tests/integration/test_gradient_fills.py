@@ -183,3 +183,30 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     assert shadow_rules and all(r.translate == (-1.2, 1.4, "MM") for r in shadow_rules)
     assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
     assert all(r.translate is None for r in rules if r not in shadow_rules)
+
+
+def test_screen_unit_shapeburst_distance_is_taken_at_the_exported_zooms(plugin, tmp_path):
+    """A shapeburst distance in millimetres is converted to map units at the
+    middle of the exported zooms (14-15 here), also for a rule without a
+    scale limit (it used the middle of zoom 0 and the last zoom: bands spread
+    over a far larger distance, the fill one colour)."""
+    from qgis.core import QgsProcessingFeedback
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_fixtures import reset_project
+    fill = QgsShapeburstFillSymbolLayer(QColor("#5f9fd2"), QColor("#d3e9f7"))
+    fill.setUseWholeShape(False)
+    fill.setMaxDistance(2.2)
+    fill.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    bands = [r for r in rules if r.recipe is not None and r.recipe.kind == "color_bands"]
+    assert len(bands) == 1
+    distance = dict(dict(bands[0].recipe.params)["bands"][1].params)["distance"]
+    expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** 14.5)
+    assert distance == pytest.approx(expected, rel=1e-6)
+    assert any("fixed at zoom 14.5" in d.message for d in diags.items)
+

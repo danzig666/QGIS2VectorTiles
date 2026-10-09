@@ -10,7 +10,7 @@ Depends on: config, zoom_levels, flattened_rule
 """
 
 import math
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from qgis.core import (
     Qgis,
@@ -103,7 +103,7 @@ class RulesFlattener:
         # user's project (renderer, labeling, ELSE rules, scale visibility).
         self._rule_systems: list = []
         self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom,
-                                               fast_markers=fast_markers)
+                                               fast_markers=fast_markers, min_zoom=min_zoom)
         # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
         # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
         self._unique_counter = 0
@@ -1426,36 +1426,70 @@ class RulesFlattener:
     def _split_by_matching_renderers(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
         """Split a label rule by matching renderer rules with overlapping scale ranges."""
         split_rules = []
-        seen_datasets: set = set()
-        renderer_idx = 0
+        for renderer_idx, (renderer_rule, span, visibility) in enumerate(
+                self._renderer_runs(label_rule.layer)):
+            matched = self._match_label_to_renderer(label_rule, renderer_rule, renderer_idx,
+                                                    span, visibility)
+            if matched:
+                split_rules.append(matched)
+        return split_rules if split_rules else [label_rule]
 
+    def _renderer_runs(self, layer):
+        """[(renderer rule, (first zoom, last zoom), visibility)] of a layer's
+        renderer rules, in drawing order. A rule materialized per zoom (marker
+        positions, effects, @map_scale splits) is many one-zoom slices of the
+        same rule (the same rule index and depth): its contiguous zooms count
+        as one renderer rule. Matching a label to the first slice alone showed
+        the labels at that slice's zoom only (a river's labels with flow arrows
+        only at the last zoom)."""
+        groups: Dict[str, list] = {}
         for renderer_rule in self.flattened_rules:
-            if label_rule.layer.id() != renderer_rule.layer.id():
-                continue
-            if renderer_rule.get_attr("t") == 1:
+            if renderer_rule.layer.id() != layer.id() or renderer_rule.get_attr("t") == 1:
                 continue
             if renderer_rule.recipe is not None and renderer_rule.recipe.kind == "callout":
                 continue
             filter_id = f'{renderer_rule.get_attr("r")}{renderer_rule.get_attr("d")}'
-            if filter_id in seen_datasets:
-                continue
-            matched = self._match_label_to_renderer(label_rule, renderer_rule, renderer_idx)
-            if matched:
-                split_rules.append(matched)
-                seen_datasets.add(filter_id)
-            renderer_idx += 1
+            groups.setdefault(filter_id, []).append(renderer_rule)
+        runs = []
+        for rules in groups.values():
+            current = None
+            for rule in sorted(rules, key=lambda r: (r.get_attr("o"), r.get_attr("i"))):
+                low, high, visibility = rule.get_attr("o"), rule.get_attr("i"), rule.visibility
+                if current is not None and low <= current[1][1] + 1:
+                    first, (start, end), seen = current
+                    current = (first, (start, max(end, high)), self._visibility_hull(seen, visibility))
+                    continue
+                if current is not None:
+                    runs.append(current)
+                current = (rule, (low, high), visibility)
+            if current is not None:
+                runs.append(current)
+        return runs
 
-        return split_rules if split_rules else [label_rule]
+    @staticmethod
+    def _visibility_hull(first, second):
+        """The browser interval covering two touching intervals (None: unknown)."""
+        if first is None or second is None:
+            return None
+        high = None if first.max_zoom is None or second.max_zoom is None \
+            else max(first.max_zoom, second.max_zoom)
+        return ZoomInterval(min(first.min_zoom, second.min_zoom), high)
 
     def _match_label_to_renderer(
         self,
         label_rule: FlattenedRule,
         renderer_rule: FlattenedRule,
         renderer_idx: int,
+        span=None,
+        visibility=None,
     ) -> Optional[FlattenedRule]:
-        """Return a combined label/renderer rule if their zoom ranges overlap."""
+        """Return a combined label/renderer rule if their zoom ranges overlap
+        (``span``, ``visibility``: the renderer rule's, or of its run of
+        per-zoom slices)."""
         label_min, label_max = label_rule.get_attr("o"), label_rule.get_attr("i")
-        renderer_min, renderer_max = renderer_rule.get_attr("o"), renderer_rule.get_attr("i")
+        renderer_min, renderer_max = span if span is not None else \
+            (renderer_rule.get_attr("o"), renderer_rule.get_attr("i"))
+        renderer_visibility = visibility if span is not None else renderer_rule.visibility
 
         if not self._ranges_overlap(label_min, label_max, renderer_min, renderer_max):
             return None
@@ -1474,8 +1508,8 @@ class RulesFlattener:
             rule_clone.set_attr("o", renderer_min)
         if label_max > renderer_max:
             rule_clone.set_attr("i", renderer_max)
-        if label_rule.visibility is not None and renderer_rule.visibility is not None:
-            rule_clone.visibility = label_rule.visibility.intersect(renderer_rule.visibility)
+        if label_rule.visibility is not None and renderer_visibility is not None:
+            rule_clone.visibility = label_rule.visibility.intersect(renderer_visibility)
             if rule_clone.visibility.is_empty:
                 return None
 

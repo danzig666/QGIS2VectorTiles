@@ -47,3 +47,46 @@ def test_bold_and_italic_labels_use_their_face(extractor, kwargs, expected):
         pytest.skip(f"{expected} is not installed")
     assert extractor.get_text_font(_format(**kwargs)) == expected
 
+
+
+@pytest.mark.parametrize("kind, spacing, size, expected", [
+    (QFont.SpacingType.AbsoluteSpacing, 3.0, 15.0, 0.2),     # letter-spaced town name: 3 pt at 15 pt
+    (QFont.SpacingType.AbsoluteSpacing, -0.5, 10.0, -0.05),  # tightened
+    (QFont.SpacingType.AbsoluteSpacing, 0.0, 10.0, 0),
+    (QFont.SpacingType.PercentageSpacing, 100.0, 10.0, 0),   # 100 %: none
+    (QFont.SpacingType.PercentageSpacing, 120.0, 10.0, 0.1),
+])
+def test_letter_spacing_becomes_ems(extractor, kind, spacing, size, expected):
+    """QGIS letter spacing (absolute, in the text size's units) is
+    text-letter-spacing in ems; it was always 0 (letter-spaced labels
+    narrower on the web)."""
+    text_format = _format()
+    font = text_format.font()
+    font.setLetterSpacing(kind, spacing)
+    text_format.setFont(font)
+    text_format.setSize(size)
+    assert extractor.get_text_letter_spacing(text_format) == pytest.approx(expected)
+
+
+def test_unset_multiline_alignment_of_an_old_project_is_left(extractor):
+    """Projects from older QGIS versions can store multilineAlign="4294967295"
+    (-1, unset). PyQGIS refuses to read it (ValueError: -1 is not a valid
+    Qgis.LabelMultiLineAlignment), which stopped the export; QGIS draws such
+    labels left aligned."""
+    from qgis.core import QgsPalLayerSettings, QgsReadWriteContext
+    from qgis.PyQt.QtXml import QDomDocument
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    doc = QDomDocument()
+    element = settings.writeXml(doc, QgsReadWriteContext())
+    text_format = element.firstChildElement("text-format")
+    text_format.setAttribute("multilineAlign", "4294967295")
+    old = QgsPalLayerSettings()
+    old.readXml(element, QgsReadWriteContext())
+    try:
+        old.multilineAlign  # pylint: disable=pointless-statement
+    except ValueError:
+        pass  # the PyQGIS of this QGIS cannot read it either
+    assert extractor.get_text_justify(old) == "left"
+    assert extractor.get_text_anchor(old) in ("center", "bottom-right", "bottom", "bottom-left", "right",
+                                              "left", "top-right", "top", "top-left")

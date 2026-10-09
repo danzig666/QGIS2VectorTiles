@@ -20,7 +20,7 @@ attribute keeps output datasets of derived components apart.
 """
 
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from qgis.core import (
     Qgis,
@@ -135,9 +135,13 @@ class SymbolMaterializer:
     """Rewrite flattened rules into materialized or simplified components."""
 
     def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24,
-                 fast_markers: bool = False):
+                 fast_markers: bool = False, min_zoom: int = 0):
         self.diagnostics = diagnostics
         self.max_zoom = max_zoom
+        # The export's first zoom: rules are materialized before the flattener
+        # clamps their zoom range, so a rule without a scale limit still
+        # starts at zoom 0 here (see _zoom_range).
+        self.min_zoom = min_zoom
         # Screen-size interval markers placed by the browser (no per-zoom
         # positions): the publishing "fast marker lines" option.
         self.fast_markers = fast_markers
@@ -145,6 +149,11 @@ class SymbolMaterializer:
         self.project_crs = crs.authid() if crs.isValid() else ""
 
     # -- helpers -----------------------------------------------------------
+    def _zoom_range(self, rule: FlattenedRule) -> Tuple[int, int]:
+        """(first, last) zoom of a rule within the export's zooms (first >
+        last: none of them)."""
+        return max(rule.get_attr("o"), self.min_zoom), min(rule.get_attr("i"), self.max_zoom)
+
     def _report(self, code: str, message: str, flat_rule: FlattenedRule, **extra):
         self.diagnostics.add(code, message, layer_id=flat_rule.layer.id(),
                              rule_id=flat_rule.rule_id, **extra)
@@ -254,7 +263,7 @@ class SymbolMaterializer:
                 return None  # feature-dependent: not placed exactly
             if "map_scale" in expression.referencedVariables():
                 scale_only.append(key)
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(flat_rule)
         if not scale_only or low >= high:
             if scale_only:
                 for key in scale_only:
@@ -274,8 +283,10 @@ class SymbolMaterializer:
 
     def _per_zoom(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
         """One rule per zoom of ``flat_rule``; the last keeps its overzoom."""
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
-        if low >= high:
+        low, high = self._zoom_range(flat_rule)
+        if low > high:
+            return [flat_rule]
+        if low == high and (flat_rule.get_attr("o"), flat_rule.get_attr("i")) == (low, high):
             return [flat_rule]
         rules = []
         for zoom in range(low, high + 1):
@@ -483,7 +494,7 @@ class SymbolMaterializer:
         corners: per eighth of a zoom (the offset within +-4.5 %), the offset
         converted at the band's middle; native above them."""
         offset_px = _to_mm(layer.offset(), layer.offsetUnit()) * 96.0 / 25.4
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(flat_rule)
         if low > high:
             return None
         zooms = self._offset_loop_zooms(flat_rule.layer, offset_px > 0)
@@ -764,7 +775,7 @@ class SymbolMaterializer:
         estimates the features the materialized part would create."""
         if self._over_budget(flat_rule, elements, what):
             return None
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(flat_rule)
         switch = None
         for zoom in range(low, high + 1):
             px = spacing * 96.0 / (0.0254 * ZoomLevels.zoom_to_scale(zoom))
@@ -917,7 +928,7 @@ class SymbolMaterializer:
         if not dx_mm or not dy_mm or dx_mm <= 0 or dy_mm <= 0 \
                 or dx_mm * 96.0 / 25.4 < self.GRID_MIN_SPACING_PX:
             return None
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(flat_rule)
         if low > high:
             return None
 
@@ -1242,7 +1253,7 @@ class SymbolMaterializer:
         and ring start), so the positions are materialized per zoom instead,
         converted at the middle of the zoom; beyond the archive's last zoom
         the native placement keeps the screen spacing."""
-        low, high = native.get_attr("o"), min(native.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(native)
         if low > high:
             return None
         if self.fast_markers:
@@ -1614,7 +1625,7 @@ class SymbolMaterializer:
                 params += (("painter", shifts), ("layer", copy))
             return mat.Recipe("arrow_polygons", params=params)
 
-        low, high = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low, high = self._zoom_range(flat_rule)
         if screen and low <= high:
             features = self._layer_totals(flat_rule.layer)[2]
             arrows = features * (10 if layer.isRepeated() else 1) * (high - low + 1)
@@ -1776,11 +1787,13 @@ class SymbolMaterializer:
             mm = _to_mm(distance, layer.distanceUnit())
             if mm is not None:
                 # Screen units: the map distance at the middle of the rule's
-                # zoom range (Web Mercator metres; 96 dpi CSS pixels).
-                low, high = flat_rule.get_attr("o"), flat_rule.get_attr("i")
-                if low is not None and high is not None:
-                    high = min(float(high), float(self.max_zoom))
-                    zoom = (min(float(low), high) + high) / 2
+                # zoom range within the export's zooms (Web Mercator metres;
+                # 96 dpi CSS pixels). A rule without a scale limit starts at
+                # zoom 0: its middle was far below the exported zooms, the
+                # bands spread over a far larger distance than QGIS's.
+                if flat_rule.get_attr("o") is not None and flat_rule.get_attr("i") is not None:
+                    low, high = self._zoom_range(flat_rule)
+                    zoom = (min(float(low), float(high)) + float(high)) / 2
                 else:
                     zoom = 16.0
                 distance = mm * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** zoom)
