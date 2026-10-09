@@ -71,6 +71,46 @@ def test_a_category_field_with_an_operator_in_its_name_is_the_field(flattener):
     assert drawn == ["#ff0000"]
 
 
+def test_a_position_that_is_not_a_number_leaves_the_label_free(flattener):
+    """Data-defined label X/Y read from text fields: QGIS pins a label only
+    where both convert to numbers; text that does not ("n/a") is no
+    position and the label is placed normally. Such features went to the
+    pinned labels, where no point could be made: the label was lost."""
+    from qgis.core import (QgsFeature, QgsField, QgsFillSymbol, QgsGeometry, QgsPalLayerSettings,
+                           QgsProperty, QgsSingleSymbolRenderer, QgsVectorLayer,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QVariant
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "lots", "memory")
+    layer.dataProvider().addAttributes([QgsField(n, QVariant.String) for n in ("name", "px", "py")])
+    layer.updateFields()
+    features = []
+    for values in (["A", "10.5", "20"], ["B", "n/a", "20"], ["C", None, None]):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes(values)
+        feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 50 0, 50 50, 0 0))"))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    props = settings.dataDefinedProperties()
+    props.setProperty(QgsPalLayerSettings.Property.PositionX, QgsProperty.fromField("px"))
+    props.setProperty(QgsPalLayerSettings.Property.PositionY, QgsProperty.fromField("py"))
+    settings.setDataDefinedProperties(props)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener()
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    pinned = [r for r in labels if r.get_attr("p") == 1]
+    free = [r for r in labels if r.get_attr("p") != 1]
+
+    def names(group):
+        return sorted({f["name"] for r in group for f in layer.getFeatures(
+            QgsFeatureRequest(QgsExpression(r.rule.filterExpression())))})
+    assert names(pinned) == ["A"] and names(free) == ["B", "C"]
+
+
 def test_single_zoom_rule_has_nonempty_interval(flattener):
     layer = rule_based(zoning_layer(), [
         ("narrow", "", zm.zoom_to_scale(3.2), zm.zoom_to_scale(3.8), True, "255,0,0")])

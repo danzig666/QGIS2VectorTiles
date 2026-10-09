@@ -1422,7 +1422,9 @@ class RulesFlattener:
         if not (x_prop and y_prop and x_prop.isActive() and y_prop.isActive()):
             return [label_rule]
         x, y = x_prop.asExpression(), y_prop.asExpression()
-        condition = f"({x}) IS NOT NULL AND ({y}) IS NOT NULL"
+        # QGIS takes a position only when both convert to numbers (a text
+        # that does not is no position: the label is placed normally).
+        condition = f"try(to_real({x})) IS NOT NULL AND try(to_real({y})) IS NOT NULL"
         base_filter = label_rule.rule.filterExpression()
 
         free = label_rule.derive()

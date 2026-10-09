@@ -3312,7 +3312,7 @@ class RulesExporter:
 
     @staticmethod
     def _layer_point_expression(x: str, y: str, layer_crs: str) -> str:
-        point = f"make_point({x}, {y})"
+        point = f"make_point(to_real({x}), to_real({y}))"
         export_crs = f"EPSG:{_EPSG_CRS}"
         if not layer_crs or layer_crs == export_crs:
             return point
