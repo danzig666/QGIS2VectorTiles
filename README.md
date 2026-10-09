@@ -94,7 +94,7 @@ the status of each item of the fidelity plan.
 
 ## Publish Web Map
 
-*Web → QWebMap → Publish Web Map…* (also on the Web toolbar) opens a
+*Web → QWebMap: Publish Web Map…* (also on the Web toolbar) opens a
 window that turns the project into a public, self-contained web map:
 
 - The map stays **vector tiles** (MVT). They are packed into one **PMTiles** archive that

@@ -21,6 +21,7 @@ from publishing.controller import export_local
 from publishing.feature_index import shard_key
 from publishing.models import CutLineConfig, LayerConfig, PopupField, PublicationProfile, RestrictionConfig
 from publishing.parcel_report import split_by_lines
+from publishing.shard_pack import read_shard
 from publishing.validation import open_pmtiles
 from q2vt_fixtures import reset_project, to_geopackage
 
@@ -104,7 +105,7 @@ def build_site(tmp_path, **profile_changes):
     pm = json.load(open(os.path.join(rel, "parcels", "manifest.json"), encoding="utf-8"))
     records = {}
     for shard in pm["shards"]:
-        for record in json.load(open(os.path.join(rel, "parcels", shard["path"]), encoding="utf-8")):
+        for record in read_shard(os.path.join(rel, "parcels"), shard):
             records[record["k"]] = record
     catalog = json.load(open(os.path.join(rel, "parcels", "catalog.json"), encoding="utf-8"))
     return {"rel": rel, "manifest": manifest, "pm": pm, "records": records, "catalog": catalog,
@@ -163,7 +164,7 @@ def test_keys_match_the_tiles_and_nothing_private_is_public(site):
     manifest, pm = site["manifest"], site["pm"]
     assert manifest["parcelInfo"]["layerId"] == pm["layerId"] and manifest["parcelInfo"]["records"] == 2
     for shard in pm["shards"]:
-        for record in json.load(open(os.path.join(site["rel"], "parcels", shard["path"]), encoding="utf-8")):
+        for record in read_shard(os.path.join(site["rel"], "parcels"), shard):
             assert shard_key(pm["layerId"], record["k"], pm["prefixLength"]) == shard["key"]
     keys = set()
     with open_pmtiles(os.path.join(site["rel"], "data", "map.pmtiles")) as archive:

@@ -1617,3 +1617,36 @@ reading every tile, ~15 s).
 | Debrecen-size copy, BUILD_RELEASE | 107 s → 32 s (PMTiles 50 → 23 s, web release check 50 → 2.5 s) |
 | Publishing tests (17 `test_publishing_*` files + review fixes) | 192 passed, 5 skipped |
 | New tests | big tiles checked by their layers, a checked archive not decoded again, a damaged big tile still refused; field check from the keys gathered while writing, an archive built elsewhere read tile by tile |
+
+## 4.29.0: indexes in one file each, extent drawn on the map, Web menu entry
+
+Owner: the Debrecen release was 41,498 files ("slow to upload anywhere"), almost all of them
+search shards (street + house number search: 2,012 streets, 37,838 addresses) and
+feature-lookup shards.
+
+- `publishing/shard_pack.py`: an index's shards are gzip members one after another in one
+  `.pack` file (`search/index.pack`, `features/features.pack`, `parcels/parcels.pack`); each
+  manifest shard gives `path`, `offset`, `length`, `encoding: gzip`, `bytes` and `sha256` of
+  its JSON. Packs have no outer Content-Encoding (`application/octet-stream`), so offsets stay
+  valid on R2/S3 and static servers, as for PMTiles. `read_shard` reads one back;
+  `pack_text` gives the leak scan (`scan_bundle`) the text of every shard.
+- Viewer `shards.mjs`: `fetchShard` reads a packed shard with one `Range` request and
+  `DecompressionStream("gzip")`; a server that answers 200 instead of 206 gets the whole pack
+  kept and sliced. `shardId` keys the caches (packed shards share their path). Used by the
+  search worker, the feature lookup and the parcel report.
+- Search prefix length (`_prefix_shards`): the shortest whose largest shard fits; otherwise
+  the one with the least to download (a manifest line per shard + the size-weighted mean
+  shard, i.e. what a query word loads on average). It used to go to the maximum (6) whenever
+  a common word (a street name shared by thousands of addresses) kept one shard large at any
+  length: a city-size test index had 47,703 shards and a 7 MB manifest; now 1,145 shards,
+  a 224 KB manifest (64 KB gzip), queries load 9–42 KB (gzip).
+- Publish window: *Draw…* next to *Map canvas* (`gui/extent_tool.py`, a `QgsMapToolExtent`):
+  the window steps aside, a dragged rectangle (map canvas CRS → EPSG:3857) becomes the fixed
+  extent; Esc or another map tool cancels; the previous map tool comes back.
+- The action is in the Web menu itself (`iface.webMenu().addAction`), named
+  "QWebMap: Publish Web Map…", not in a QWebMap submenu.
+
+| Run | Result |
+|---|---|
+| City-size test index (2,012 streets, 37,838 addresses, 110,000 parcels searchable; parcel records) | 47,959 files / 45.8 MB → 2 files / 4.8 MB |
+| Tests | 244 passed, 5 skipped (publishing unit and integration tests, indexes, browser: feature lookup, parcel report, texts, extras, smoke; plugin package, Publish window, review fixes, export cache) |

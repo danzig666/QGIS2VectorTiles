@@ -18,6 +18,7 @@ from publishing.controller import export_local
 from publishing.errors import PublishingError
 from publishing.models import FilterField, LayerConfig, PopupField, PublicationProfile
 from publishing.provenance import layer_logical_id
+from publishing.shard_pack import pack_text, read_shard
 from publishing.validation import open_pmtiles
 from q2vt_fixtures import SQUARES, reset_project, to_geopackage
 
@@ -138,13 +139,15 @@ def test_local_publication_end_to_end(project, tmp_path):
     for path in _public_files(result.publication_dir):
         with open(path, "rb") as handle:
             assert CANARY.encode() not in handle.read(), path
+        if path.endswith(".pack"):  # index shards, gzip-compressed
+            assert CANARY not in pack_text(path), path
     # Search and feature lookup: complete, exact keys, approved fields only.
     search = json.load(open(os.path.join(rel, "search", "manifest.json"), encoding="utf-8"))
     assert search["records"] == 3 and search["coverage"][lid]["records"] == 3
-    entries = json.load(open(os.path.join(rel, "search", search["shards"][0]["path"]), encoding="utf-8"))
+    entries = read_shard(os.path.join(rel, "search"), search["shards"][0])
     assert sorted(e[1] for e in entries["entries"]) == sorted(PUBLISHED)
     features = json.load(open(os.path.join(rel, "features", "manifest.json"), encoding="utf-8"))
-    shard = json.load(open(os.path.join(rel, "features", features["shards"][0]["path"]), encoding="utf-8"))
+    shard = read_shard(os.path.join(rel, "features"), features["shards"][0])
     record = next(r for r in shard if r["k"] == "00123/4")
     assert record["a"] == {"hrsz": "00123/4", "terulet": 1000.5, "note": "<script>alert(1)</script>"}
     assert record["p"] and record["b"] and record["l"] == lid

@@ -15,7 +15,8 @@ Modes (chosen by measured size, never by silently dropping records):
 * ``single``: one ``search/index.json`` when it is at most ``budget_bytes``
   and ``budget_records``;
 * ``prefix``: deterministic shards by the first characters of every word of
-  every term (``search/p-<hex>.json``); the prefix length grows until shards
+  every term, all in ``search/index.pack`` (gzip members read by range; see
+  shard_pack); the prefix length grows until shards
   fit ``shard_bytes``, and a bucket that still does not fit (a word shared
   by most records) is split into numbered parts. Queries match word
   prefixes (documented: no arbitrary substring search in this mode); the
@@ -32,9 +33,13 @@ import re
 import unicodedata
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .shard_pack import ShardPack
+
 DEFAULT_BUDGET_BYTES = 10 * 1024 * 1024
 DEFAULT_BUDGET_RECORDS = 50000
 DEFAULT_SHARD_BYTES = 512 * 1024
+PACK_NAME = "index.pack"  # the prefix shards, one after another (shard_pack)
+_MANIFEST_LINE_BYTES = 150  # a shard's line in the manifest
 NORMALIZATION = "NFKD, combining marks removed, lower case, whitespace collapsed"
 _SPACE = re.compile(r"\s+")
 _WORD = re.compile(r"[\s,;:()\"'\[\]]+")
@@ -99,16 +104,17 @@ def build_search_index(records: Iterable[dict], searchable: Dict[str, List[str]]
         return manifest
     shards, length = _prefix_shards(entries, shard_bytes)
     manifest.update(mode="prefix", prefixLength=length, shards=[])
-    for key in sorted(shards):
-        # A bucket of a very common word (skewed data) is split into parts
-        # of bounded size; the client loads every part of the key it needs.
-        for part, chunk in enumerate(_parts(shards[key], shard_bytes)):
-            name = "p-" + key.encode("utf-8").hex() + (f"-{part}" if part else "") + ".json"
-            nbytes, digest = _write(os.path.join(out_dir, name), {"layers": layers, "entries": chunk})
-            item = {"key": key, "path": name, "records": len(chunk), "bytes": nbytes, "sha256": digest}
-            if part or len(chunk) != len(shards[key]):
-                item["part"] = part
-            manifest["shards"].append(item)
+    # Every shard in one file (shard_pack): a city's addresses made tens of
+    # thousands of shard files, slow to upload anywhere.
+    with ShardPack(os.path.join(out_dir, PACK_NAME)) as pack:
+        for key in sorted(shards):
+            # A bucket of a very common word (skewed data) is split into parts
+            # of bounded size; the client loads every part of the key it needs.
+            for part, chunk in enumerate(_parts(shards[key], shard_bytes)):
+                item = {"key": key, **pack.add({"layers": layers, "entries": chunk}), "records": len(chunk)}
+                if part or len(chunk) != len(shards[key]):
+                    item["part"] = part
+                manifest["shards"].append(item)
     return manifest
 
 
@@ -139,19 +145,33 @@ def _prefix_shards(entries: List[list], shard_bytes: int, max_length: int = 6) -
     """({prefix: entries having a token starting with it}, prefix length).
 
     The prefix length is the shortest (1..max_length) whose largest shard
-    fits ``shard_bytes`` (skewed data raise it). Tokens shorter than the
-    length are filed under the whole token. The client loads the shard of a
-    query word's first ``length`` characters, or every shard starting with
-    a shorter word."""
+    fits ``shard_bytes``; when none does (a word most records share, like a
+    city's "utca", keeps its shard large at any length; it is split into
+    parts), the one with the least to download: the manifest (a line per
+    shard) plus what a query word loads on average. Always taking the
+    longest made a city-size test index 47,703 shards (a manifest of
+    megabytes) instead of 1,145. Tokens shorter than the length are filed
+    under the whole token. The client loads the shard of a query word's
+    first ``length`` characters, or every shard starting with a shorter
+    word."""
     tokenized = [(entry, entry_tokens(entry)) for entry in entries]
-    buckets: Dict[str, List[list]] = {}
+    sizes = [len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
+             for entry, _ in tokenized]
+    best: Optional[Tuple[float, Dict[str, List[list]], int]] = None
     for length in range(1, max_length + 1):
-        buckets = {}
-        for entry, toks in tokenized:
+        buckets: Dict[str, List[list]] = {}
+        nbytes: Dict[str, int] = {}
+        for (entry, toks), size in zip(tokenized, sizes):
             for key in {t[:length] for t in toks}:
                 buckets.setdefault(key, []).append(entry)
-        biggest = max((len(json.dumps(b, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-                       for b in buckets.values()), default=0)
-        if biggest <= shard_bytes:
+                nbytes[key] = nbytes.get(key, 1) + size
+        if max(nbytes.values(), default=0) <= shard_bytes:
             return buckets, length
-    return buckets, max_length
+        manifest = _MANIFEST_LINE_BYTES * len(buckets)
+        if best is not None and manifest >= best[0]:
+            break  # longer prefixes only add shards
+        total = sum(nbytes.values())
+        cost = manifest + (sum(n * n for n in nbytes.values()) / total if total else 0)
+        if best is None or cost < best[0]:
+            best = (cost, buckets, length)
+    return (best[1], best[2]) if best else ({}, 1)

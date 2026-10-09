@@ -6,6 +6,7 @@
 // Everything goes into the DOM as text.
 import { t, formatNumber } from "./i18n.mjs";
 import { featureShardKey } from "./search_core.mjs";
+import { fetchShard, shardId } from "./shards.mjs";
 import { button, el, icon } from "./icons.mjs";
 import { formatValue } from "./identify.mjs";
 import { richText } from "./rich_text.mjs";
@@ -125,13 +126,9 @@ export class ParcelReport {
     const shardKey = featureShardKey(this.index.layerId, String(key), this.index.prefixLength);
     const shard = this.index.shards.find((s) => s.key === shardKey);
     if (!shard) return null;
-    if (!this.shards.has(shard.path)) {
-      this.shards.set(shard.path, fetch(new URL(shard.path, this.base)).then((r) => {
-        if (!r.ok) throw new Error(`${shard.path}: HTTP ${r.status}`);
-        return r.json();
-      }));
-    }
-    return (await this.shards.get(shard.path)).find((r) => r.k === String(key)) || null;
+    const id = shardId(shard);
+    if (!this.shards.has(id)) this.shards.set(id, fetchShard(this.base, shard));
+    return (await this.shards.get(id)).find((r) => r.k === String(key)) || null;
   }
 
   empty() {

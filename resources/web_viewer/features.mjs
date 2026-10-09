@@ -2,6 +2,7 @@
 // holds (layerId, key) from features/ — never the whole dataset, never
 // geometry. Independent of the search UI.
 import { featureShardKey } from "./search_core.mjs";
+import { fetchShard, shardId } from "./shards.mjs";
 
 export class FeatureLookup {
   constructor(manifest, manifestUrl) {
@@ -31,13 +32,9 @@ export class FeatureLookup {
     const shardKey = featureShardKey(layerId, String(key), index.prefixLength);
     const shard = index.shards.find((s) => s.key === shardKey);
     if (!shard) return null;
-    if (!this.shards.has(shard.path)) {
-      this.shards.set(shard.path, fetch(new URL(shard.path, this.base)).then((r) => {
-        if (!r.ok) throw new Error(`${shard.path}: HTTP ${r.status}`);
-        return r.json();
-      }));
-    }
-    const records = await this.shards.get(shard.path);
+    const id = shardId(shard);
+    if (!this.shards.has(id)) this.shards.set(id, fetchShard(this.base, shard));
+    const records = await this.shards.get(id);
     return records.find((r) => r.l === layerId && r.k === String(key)) || null;
   }
 }

@@ -13,6 +13,7 @@ import pytest
 from publishing.feature_index import build_feature_index, fnv1a, shard_key
 from publishing.identifiers import encode_compound, key_expression, validate_keys
 from publishing.search_index import build_search_index, normalize, words
+from publishing.shard_pack import read_shard
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CORE = os.path.join(ROOT, "resources", "web_viewer", "search_core.mjs")
@@ -79,8 +80,11 @@ def test_sharded_index_is_complete_and_searchable(tmp_path):
     assert manifest["mode"] == "prefix" and manifest["records"] == n
     assert manifest["prefixLength"] >= 2  # the skewed "a"/"arlo" prefix forced deeper shards
     found = set()
+    # Every shard in one pack (a city's addresses were tens of thousands of files).
+    assert sorted(os.listdir(tmp_path)) == ["index.pack"]
+    assert {shard["path"] for shard in manifest["shards"]} == {"index.pack"}
     for shard in manifest["shards"]:
-        data = json.load(open(tmp_path / shard["path"], encoding="utf-8"))
+        data = read_shard(str(tmp_path), shard)
         assert len(data["entries"]) == shard["records"]
         assert shard["bytes"] <= 256 * 1024 + 4096
         found.update((e[0], e[1]) for e in data["entries"])
@@ -91,13 +95,16 @@ def test_sharded_index_is_complete_and_searchable(tmp_path):
     result = node(f"""
       import {{ shardsForQuery, rank }} from {json.dumps('file://' + CORE)};
       import {{ readFileSync }} from 'node:fs';
+      import {{ gunzipSync }} from 'node:zlib';
       const dir = {json.dumps(str(tmp_path))};
+      const read = (s) => JSON.parse(gunzipSync(readFileSync(dir + '/' + s.path)
+        .subarray(s.offset, s.offset + s.length)).toString('utf8'));
       const manifest = JSON.parse(readFileSync(dir + '/manifest.json', 'utf8'));
       const out = {{}};
       for (const q of ['00042/0', 'ozd 1230', 'Ózd 119990', 'a']) {{
         const shards = shardsForQuery(manifest, q);
         if (shards === null) {{ out[q] = 'more'; continue; }}
-        const entries = shards.flatMap((s) => JSON.parse(readFileSync(dir + '/' + s.path, 'utf8')).entries);
+        const entries = shards.flatMap((s) => read(s).entries);
         const r = rank(entries, q, {{ allowSubstring: false, limit: 5 }});
         out[q] = r.results.map((x) => x.entry[1]);
       }}
@@ -115,8 +122,51 @@ def test_feature_index_shards(tmp_path):
     key = "00123/4"
     shard = next(s for s in manifest["shards"] if s["key"] == shard_key("lyr-b", "00123/4", 1)) \
         if shard_key("lyr-b", key, 1) else None
-    data = json.load(open(tmp_path / shard["path"], encoding="utf-8"))
+    assert sorted(os.listdir(tmp_path)) == ["features.pack"]
+    data = read_shard(str(tmp_path), shard)
     record = next(r for r in data if r["k"] == "00123/4" and r["l"] == "lyr-b")
     assert record["a"] == {}  # lyr-b exposes no popup fields
     assert "secret" not in json.dumps(data)
     assert set(record) == {"l", "k", "t", "a", "p", "b", "z"}  # no geometry
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_the_viewer_reads_packed_shards_by_range(tmp_path):
+    """A city's search index was tens of thousands of shard files; they are
+    one pack now. shards.mjs reads a shard with one range request, and from
+    the whole pack when a server ignores Range; the shards of one pack are
+    told apart (they share its path)."""
+    import functools  # pylint: disable=import-outside-toplevel
+    import http.server  # pylint: disable=import-outside-toplevel
+    import threading  # pylint: disable=import-outside-toplevel
+    from publishing.preview_server import PreviewServer  # pylint: disable=import-outside-toplevel
+    manifest = build_search_index(_records(20000), {"lyr-a": ["hrsz"], "lyr-b": ["hrsz"]}, str(tmp_path),
+                                  budget_records=5000, shard_bytes=64 * 1024)
+    assert manifest["mode"] == "prefix" and sorted(os.listdir(tmp_path)) == ["index.pack"]
+    shards = manifest["shards"][:3] + manifest["shards"][-2:]
+    expected = [read_shard(str(tmp_path), s)["entries"][0][1] for s in shards]
+    script = f"""
+      import {{ fetchShard, shardId }} from {json.dumps('file://' + os.path.join(ROOT, 'resources', 'web_viewer', 'shards.mjs'))};
+      const shards = {json.dumps(shards)};
+      const base = process.argv[1];
+      const ids = new Set(shards.map(shardId));
+      const first = [];
+      for (const s of shards) first.push((await fetchShard(base, s)).entries[0][1]);
+      console.log(JSON.stringify({{ ids: ids.size, first }}));"""
+
+    def run(base):
+        result = subprocess.run(["node", "--input-type=module", "-e", script, base],
+                                capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    with PreviewServer(str(tmp_path)) as server:  # byte ranges (206)
+        assert run(server.url("")) == {"ids": len(shards), "first": expected}
+    # A plain static server that ignores Range (200, the whole file).
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
+    plain = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=plain.serve_forever, daemon=True).start()
+    try:
+        assert run(f"http://127.0.0.1:{plain.server_address[1]}/")["first"] == expected
+    finally:
+        plain.shutdown()
