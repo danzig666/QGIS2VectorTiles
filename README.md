@@ -51,10 +51,12 @@ This README describes QWebMap **4.31.0**. Newest first:
   which stopped the whole web map from loading; a repeated style layer id is now always renamed
   and reported.
 - **Drawing order and fills:** overlapping lines and polygons of different categories or rules
-  keep QGIS's feature order (up to 5,000 re-ordered features per layer; beyond that the layer keeps
-  rule order and the fidelity report says so). Polygon outline bands in millimetres are on the
+  keep QGIS's feature order (up to 5,000 re-ordered features and 8 levels of overlap per layer, in
+  layers of up to 100,000 features; beyond that the layer keeps rule order and the fidelity report
+  says so; layers with inner shadow or inner glow lines keep rule order). Polygon outline bands in millimetres are on the
   correct side and are buffered rings like QGIS's (no dark wedges at corners). Shapeburst
-  distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %).
+  distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %;
+  big layers get one setting per half zoom or per zoom, within about 19 % or 41 %).
   Gradient fills of small features (a village green published from zoom 11) keep their outer
   colours instead of ending in one flat band.
 - **Labels:** the viewer measures each character's own width, so Free labels that fit in QGIS are
@@ -142,10 +144,13 @@ What carries over:
 
 - **Renderers:** single symbol, categorized, graduated and rule-based (nested rules, scale ranges,
   ELSE rules), merged features, inverted polygons, heatmap (drawn by the browser with QGIS's
-  radius and colours), point cluster and point displacement (grouped the way QGIS groups them at
-  each zoom); symbol levels and QGIS's feature order (*Control feature rendering order*).
+  radius and colours), point cluster and point displacement (grouped with QGIS's method per
+  eighth of a zoom; QGIS groups only the points in view, so some groups differ, reported); symbol
+  levels and QGIS's feature order (*Control feature rendering order*).
   Overlapping lines and polygons of different categories or rules also keep QGIS's order, up to
-  5,000 re-ordered features per layer (beyond that, rule order, reported). Point layers are drawn
+  5,000 re-ordered features and 8 levels of overlap per layer, in layers of up to 100,000 features
+  (beyond that, rule order, reported; layers with inner shadow or inner glow lines keep rule
+  order). Point layers are drawn
   rule by rule, and a symbol with several layers (a road casing and its fill) is drawn one layer
   at a time for all features, as with symbol levels.
 - **Fills:** solid fills and outlines (with their offsets), line-pattern hatches, point-pattern,
@@ -155,15 +160,16 @@ What carries over:
   conical, two colours or a colour ramp, pad, reflect or repeat) and shapeburst fills as fine
   colour bands; centroid (point-on-surface) markers; random marker fills (approximated).
   Clipping to the shape is exact for screen-unit patterns and for simple line, cross and closed
-  markers; other map-unit markers on the edge are drawn whole, and rotated map-unit patterns
-  unrotated (both reported).
+  markers; other map-unit markers on the edge are drawn whole and rotated map-unit point patterns
+  unrotated (both reported); in a rotated map-unit SVG fill each tile is turned but the grid is
+  not.
 - **Lines:** widths, offsets (QGIS's offset line where sharp corners need it), caps, joins and
   dash patterns (including map-unit custom dashes); marker lines with markers at the QGIS
-  positions (interval, vertices, centre point; with *Fast marker lines* on, screen-unit intervals
-  are placed by the browser instead); hash lines, arrows (the polygons QGIS builds), filled lines,
+  positions (interval, vertices, centre point; data-defined intervals, and screen-unit intervals
+  with *Fast marker lines* on, are placed by the browser instead); hash lines, arrows (the polygons QGIS builds), filled lines,
   lineburst, raster-image and interpolated lines, and geometry generators; outer glow and drop
-  shadow on simple lines, and inner shadow and inner glow on solid simple lines (no dashes, offset
-  or data-defined properties).
+  shadow on simple lines, and inner shadow and inner glow on solid simple lines with a width in
+  screen units (no dashes, offset or data-defined properties).
 - **Markers:** simple markers (native circles when possible), SVG markers (also data-defined
   variants), ellipse, filled and raster markers rendered by QGIS into sprites (pixel sizes kept
   on high-resolution screens); font markers as browser text in your font (static map-unit
@@ -189,9 +195,10 @@ the linear referencing line; these are reported as unsupported and left out.
 
 Not everything has a browser equivalent yet (for example the blur effect and other paint effects
 on fills, Qt brush styles other than solid, label shadows and masks, and blend modes on vector
-layers). **Every export writes a fidelity report** that lists each component that was
-approximated or left out, with its layer (and rule or symbol layer when known) and usually a
-suggested fix, and a *Strict* mode refuses to publish when the report has an error or a warning
+layers). **Every export writes a fidelity report** that lists the components that were
+approximated or left out, with their layer (and rule or symbol layer when known) and usually a
+suggested fix (label shadows and masks are not in it, and blend modes on vector layers only get
+a warning in the Publish window), and a *Strict* mode refuses to publish when the report has an error or a warning
 about an unsupported or approximated component. The generated table of each symbol layer type's
 strategy and constraints is in [`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
 
@@ -303,10 +310,11 @@ into a public, self-contained web map. The window title shows the plugin version
 - **Export locally** builds the release on this computer. **Preview** (after an export) serves it
   on `127.0.0.1` with byte ranges and opens your browser. Neither needs an account or an upload.
   They work offline unless the export reads OpenStreetMap data from the Protomaps build (the
-  basemap, or street-name and house-number search without a basemap), a published raster layer is
+  basemap, or, without a basemap, street-name search and house-number search without a street
+  field), a published raster layer is
   an online service, or the map uses web basemaps or Street View.
-- **Output** tab: the archive format (PMTiles, PMTiles plus an MBTiles copy, or MBTiles only), the
-  local output folder, an optional offline ZIP of the release and the legacy XYZ web package.
+- **Output** tab: PMTiles, or PMTiles plus an MBTiles copy next to the publication folder (the web
+  map itself always uses PMTiles; *MBTiles only* cannot be uploaded), the local output folder, an optional offline ZIP of the release and the legacy XYZ web package.
   *Polygon labels* places polygon labels on the whole polygon, on its part visible on screen, or
   as set in each layer.
 - **Publish** uploads an immutable release to **Cloudflare R2** or other S3-compatible storage
@@ -367,10 +375,10 @@ into a public, self-contained web map. The window title shows the plugin version
 On by default (each can be switched off on *Interaction → Viewer*):
 
 - **Layers** tab: QGIS groups, layers and their legend rules with QGIS swatches, a lock on layers
-  that are always shown, opacity sliders, one switch for all labels, and *Reset*. Without it,
-  visitors get the legend only.
-- **Search** in the approved fields of all layers; the chosen feature is zoomed to, marked and
-  its popup opened.
+  that are always shown, opacity sliders, a switch for all labels (always there with the tab),
+  and *Reset*. Without it, visitors get the legend, with an on/off switch for each layer.
+- **Search** in the approved fields of all layers (needs *Popups* on); the chosen feature is
+  zoomed to, marked and its popup opened.
 - **Filters** by value lists (with counts), number ranges or text.
 - **Popups** with the approved fields; a value naming a published document links to it; *Link to
   this feature* copies a link that reopens the map on that feature.
@@ -393,7 +401,8 @@ Always there:
 - **Desktop and phone:** a floating panel with tabs on desktop, a bottom sheet on phones; light
   and dark appearance (follows the system until the visitor chooses); your accent colour and logo.
 - The visitor's layer, label, opacity, filter and basemap choices are remembered in their
-  browser; a shared link overrides them.
+  browser. A shared link sets what the sender changed from the published map; the visitor's other
+  remembered choices stay (*Reset* clears them).
 - When the map cannot be shown (no WebGL, no Range support, a missing or damaged map file …), the
   viewer says why in plain words, with the technical detail. A basemap, terrain or symbol that
   fails to load gives a warning while the map still works.
@@ -461,8 +470,9 @@ Off by default (turn them on on *Interaction → Viewer*):
 
 *Processing Toolbox → QWebMap → Export vector tile package* still exports a static vector tile
 package: MBTiles by default (PMTiles or both with *Tile archive format*), a MapLibre style, a
-viewer and the fidelity report. Its options include *Fidelity Mode*, *Beyond Maximum Zoom*, a
-static XYZ web package and *Parallel export*.
+viewer and the fidelity report. Its options include *Fidelity Mode*, *Beyond Maximum Zoom* and a
+static XYZ web package. Big exports use the helper QGIS processes on their own; the *Parallel
+export* option is an older thread mode, off by default, that can crash QGIS.
 
 ## Documentation
 
