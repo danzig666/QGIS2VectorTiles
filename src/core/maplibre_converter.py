@@ -32,6 +32,7 @@ from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
 from .fidelity import expressions as ex
+from .fidelity import feature_order
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
@@ -1696,6 +1697,7 @@ class QgisMapLibreStyleExporter:
         effect_roles: Optional[Dict[str, str]] = None,
         inner_effects: Optional[Dict[str, dict]] = None,
         z_orders: Optional[Dict[str, str]] = None,
+        feature_filters: Optional[Dict[str, list]] = None,
     ):
         """Initialise the exporter.
 
@@ -1732,6 +1734,8 @@ class QgisMapLibreStyleExporter:
         self.inner_effects = inner_effects or {}
         # Style name -> symbol-z-order ("source": data order).
         self.z_orders = z_orders or {}
+        # Style name -> filter of its feature-order stratum (fidelity.feature_order).
+        self.feature_filters = feature_filters or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1894,6 +1898,19 @@ class QgisMapLibreStyleExporter:
             self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
         first = len(self.style["layers"])
+        feature_filter = getattr(self, "feature_filters", {}).get(style.styleName())
+        sources = self.__dict__.setdefault("_stratum_sources", {})
+        base = feature_order.copied_from(style.styleName())
+        if feature_filter and base in sources:
+            # A feature-order stratum copy (fidelity.feature_order): the style
+            # layers of its rule again (with the same images), drawn higher.
+            for layer_def in copy.deepcopy(sources[base]):
+                suffix = layer_def["id"][len(base):] if layer_def["id"].startswith(base) \
+                    else f"_{layer_def['id']}"
+                layer_def["id"] = style.styleName() + suffix
+                self.style["layers"].append(layer_def)
+            self._apply_feature_filter(self.style["layers"][first:], feature_filter)
+            return
         z_order = getattr(self, "z_orders", {}).get(style.styleName())
         # Pattern markers sit at fractional pixels, which QGIS draws
         # anti-aliased. MapLibre draws a 1:1 icon at the nearest pixel, which
@@ -1915,6 +1932,18 @@ class QgisMapLibreStyleExporter:
             for layer_def in self.style["layers"][first:]:
                 if layer_def.get("type") == "symbol":
                     layer_def.setdefault("layout", {})["symbol-z-order"] = z_order
+        if feature_filter:
+            if base is None:  # the rule's own style layers, kept for its copies
+                sources[style.styleName()] = copy.deepcopy(self.style["layers"][first:])
+            self._apply_feature_filter(self.style["layers"][first:], feature_filter)
+
+    @staticmethod
+    def _apply_feature_filter(layer_defs, feature_filter) -> None:
+        """Draw only the features of the style's feature-order stratum
+        (fidelity.feature_order), within any filter the layer has."""
+        for layer_def in layer_defs:
+            old = layer_def.get("filter")
+            layer_def["filter"] = ["all", old, feature_filter] if old else feature_filter
 
     PATTERN_MARKER_OVERSAMPLING = 2.0
 

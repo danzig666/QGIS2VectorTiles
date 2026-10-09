@@ -29,7 +29,8 @@ class FlattenedRule:
     # Geometry recipe for materialized components (exact marker positions,
     # map-unit hatches, ...); None exports the source geometry.
     recipe: Optional[Recipe] = None
-    # Draw order key assigned by the flattener (see fidelity.render_order).
+    # Draw order key assigned by the flattener: (-layer, pass, feature-order
+    # stratum, rule, symbol layer, ...); see TilesStyler.draw_order.
     order: tuple = ()
     # Geometry generator (line output) applied to the source features before
     # anything else: the rule is a sub-symbol layer drawn on generated lines.
@@ -62,6 +63,10 @@ class FlattenedRule:
     # "source": symbols drawn in data order (overlapping pattern markers
     # stacked as QGIS draws them), not sorted by screen position.
     z_order: Optional[str] = None
+    # MapLibre filter of a feature-order stratum (fidelity.feature_order):
+    # only the features lifted into it, or (stratum 0) all the others; None
+    # draws every feature.
+    feature_filter: Optional[list] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -70,7 +75,7 @@ class FlattenedRule:
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
-            self.z_order,
+            self.z_order, self.feature_filter,
         )
 
     @property

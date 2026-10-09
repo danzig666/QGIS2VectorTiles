@@ -1173,8 +1173,9 @@ class RulesFlattener:
             clone_symbol_layer = clone_symbol.symbolLayers()[0]
             self._fold_enabled_property(rule_clone, clone_symbol_layer)
             draw_pass = clone_symbol_layer.renderingPass() if self._honor_passes else 0
-            # Bottom first: lower layer tree position, pass, rule, symbol layer, part.
-            order = (-flat_rule.get_attr("l"), draw_pass, self._draw_seq, layer_idx)
+            # Bottom first: lower layer tree position, pass, feature-order
+            # stratum (0 here; fidelity.feature_order), rule, symbol layer, part.
+            order = (-flat_rule.get_attr("l"), draw_pass, 0, self._draw_seq, layer_idx)
             rule_clone.order = order + (0,)
             materialized = self.materializer.materialize(rule_clone, clone_symbol_layer)
             if materialized is not None:
@@ -1289,7 +1290,7 @@ class RulesFlattener:
             clone_layer = single.symbolLayers()[0]
             self._fold_enabled_property(rule_clone, clone_layer)
             draw_pass = generator.renderingPass() if self._honor_passes else 0
-            order = (-flat_rule.get_attr("l"), draw_pass, self._draw_seq, layer_idx, inner_idx)
+            order = (-flat_rule.get_attr("l"), draw_pass, 0, self._draw_seq, layer_idx, inner_idx)
             rule_clone.order = order + (0,)
             materialized = self.materializer.materialize(rule_clone, clone_layer)
             if materialized is not None:

@@ -12,12 +12,14 @@ import os
 import subprocess
 
 import pytest
-from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature,
+from qgis.core import (Qgis, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform, QgsFeature, QgsField,
                        QgsGeometry, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
-                       QgsProcessingFeedback, QgsProject, QgsRectangle,
+                       QgsProcessingFeedback, QgsProject, QgsRectangle, QgsRendererCategory,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
                        QgsSingleSymbolRenderer, QgsVectorLayer, QgsFillSymbol,
                        QgsLineSymbol)
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 
 import sys
@@ -523,3 +525,26 @@ def test_overlapping_pattern_markers_stack_like_qgis(tmp_path, clip, metric, lim
             "shape": Qgis.MarkerClipMode.Shape}[clip]
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_overlapping_squares(mode)])))
     assert _compare(tmp_path, layer, metric=metric) < limit
+
+
+def test_overlapping_features_of_different_rules_keep_qgis_order(tmp_path):
+    """Without symbol levels QGIS draws a categorized layer feature by
+    feature: forest B, drawn after conservation area C, covers it; forest
+    A, drawn before C, stays under it. The style drew every forest below
+    every conservation area (one style layer per category), so the overlap
+    of B and C was the wrong colour (10 % of the pixels)."""
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "landuse", "memory")
+    layer.dataProvider().addAttributes([QgsField("landuse", QVariant.String)])
+    layer.updateFields()
+    for use, low in (("forest", -130), ("conservation", -70), ("forest", -10)):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([use])
+        feature.setGeometry(QgsGeometry.fromRect(QgsRectangle(
+            CENTER[0] + low, CENTER[1] + low, CENTER[0] + low + 120, CENTER[1] + low + 120)))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "landuse.gpkg"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("landuse", [
+        QgsRendererCategory(value, QgsFillSymbol.createSimple(
+            {"color": color, "outline_style": "no"}), value)
+        for value, color in (("forest", "40,140,40"), ("conservation", "60,60,200"))]))
+    assert _compare(tmp_path, layer, metric="color") < 0.01
