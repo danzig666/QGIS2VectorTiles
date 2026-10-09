@@ -212,6 +212,9 @@ _SHAREABLE_ALGORITHMS = frozenset({
     "native:deletecolumn", "native:collect", "native:dissolve", "native:keepnbiggestparts",
     "native:mergevectorlayers"})
 _NONDETERMINISTIC = re.compile(r"\b(rand|randf|uuid|now|random)\s*\(", re.IGNORECASE)
+# The expression parameter of each expression-driven step.
+_EXPRESSION_PARAMETERS = {"fieldcalculator": "FORMULA", "extractbyexpression": "EXPRESSION",
+                          "geometrybyexpression": "EXPRESSION"}
 # "Label every feature" layers (publication): each polygon's roomiest point
 # (pole of inaccessibility), its free radius and the polygon's direction
 # (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
@@ -2637,6 +2640,19 @@ class RulesExporter:
         context = self._processing_context()
         feedback = QgsProcessingFeedback()
         full_name = f"{algorithm_type}:{algorithm}"
+        key = _EXPRESSION_PARAMETERS.get(algorithm) if algorithm_type == "native" else None
+        if key and isinstance(params.get(key), str) and params[key].strip():
+            # An expression that fails on one feature (text in a numeric
+            # field...): QGIS skips that value - the property keeps its
+            # default, the rule does not match, no label or generated
+            # geometry - while the algorithm would abort the whole step. (The
+            # line break keeps a trailing "--" comment from eating the ")".)
+            params[key] = f"try({params[key]}\n)"
+        if algorithm == "refactorfields" and algorithm_type == "native":
+            params["FIELDS_MAPPING"] = [
+                {**field, "expression": f"try({field['expression']}\n)"}
+                if str(field.get("expression") or "").strip() else field
+                for field in params.get("FIELDS_MAPPING") or []]
         if self._memory_active:
             return self._run_in_memory(full_name, params, context, feedback)
 
