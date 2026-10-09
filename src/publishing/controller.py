@@ -336,8 +336,9 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         layer_ids=vector_profile.included_layer_ids(), archive_format="mbtiles",
         add_result_layer=False, feature_keys=keys,
         extra_tile_fields=qgis_model.tile_fields(vector_profile), cache=cache,
-        scale_limits={c.layer_id: (c.min_scale, c.max_scale) for c in vector_profile.layers
-                      if c.included and (c.min_scale or c.max_scale)},
+        scale_limits={c.layer_id: (c.min_scale, c.max_scale, c.labels_min_scale)
+                      for c in vector_profile.layers
+                      if c.included and (c.min_scale or c.max_scale or c.labels_min_scale)},
         background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1",
         fast_markers=profile.output.fast_markers)
     progress.check()

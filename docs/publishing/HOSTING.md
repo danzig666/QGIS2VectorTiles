@@ -100,7 +100,11 @@ tab shows sizes, not a bill).
 * A layer drawn at every scale (no *scale-dependent visibility*), such as every parcel of a
   city, is in the tiles of every zoom level: zoomed out, one tile holds all of it (several MB).
   A scale range in QGIS (e.g. parcels from 1:25,000) makes the export faster and the web map
-  lighter, and the web map then matches QGIS at those scales too.
+  lighter, and the web map then matches QGIS at those scales too. Or, for the web map only:
+  *Map* tab → **Zoomed-out load…** estimates each layer's part of the heaviest tile and
+  suggests a zoom from which its features, or only its labels, are drawn (labels zoomed far
+  out are slow and mostly cannot be placed anyway); the checked suggestions go into the
+  *Scales* column with one click.
 
 ## Other S3-compatible storage
 

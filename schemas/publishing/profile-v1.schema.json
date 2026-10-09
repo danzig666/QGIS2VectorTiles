@@ -771,6 +771,10 @@
           "type": "number",
           "minimum": 0
         },
+        "labelsMinScale": {
+          "type": "number",
+          "minimum": 0
+        },
         "heightField": {
           "type": "string"
         }

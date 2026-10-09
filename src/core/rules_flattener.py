@@ -185,7 +185,7 @@ class RulesFlattener:
             self._legend_keys = self._legend_key_map(layer, rule_system, rule_type)
             self._rule_systems.append(rule_system)
             self._drop_missing_field_properties(rule_system, layer, rule_type)
-            root_rule = self._prepare_root_rule(rule_system, layer)
+            root_rule = self._prepare_root_rule(rule_system, layer, rule_type)
             if rule_type == 0:
                 self._draw_seq = 0
                 self._honor_passes = self._renderer_honors_passes(layer.renderer())
@@ -681,13 +681,17 @@ class RulesFlattener:
         root.appendChild(rule)
         return QgsRuleBasedLabeling(root)
 
-    def _prepare_root_rule(self, rule_system, layer: QgsVectorLayer):
-        """Set layer-level scale visibility on the root rule."""
+    def _prepare_root_rule(self, rule_system, layer: QgsVectorLayer, rule_type: int = 0):
+        """Set layer-level scale visibility on the root rule: the layer's own
+        range, the web-only limits (min scale, max scale) and, for its labels,
+        the web-only labels limit (a third value, zoomed-out edge)."""
         root_rule = rule_system.rootRule()
         low, high = (layer.minimumScale(), layer.maximumScale()) \
             if layer.hasScaleBasedVisibility() else (0.0, 0.0)
-        extra_low, extra_high = self.scale_limits.get(layer.id(), (0.0, 0.0))
-        low, high = combine_scale_ranges(low, high, extra_low or 0.0, extra_high or 0.0)
+        limits = tuple(self.scale_limits.get(layer.id(), ())) + (0.0, 0.0, 0.0)
+        low, high = combine_scale_ranges(low, high, limits[0] or 0.0, limits[1] or 0.0)
+        if rule_type == 1 and limits[2]:
+            low, high = combine_scale_ranges(low, high, limits[2], 0.0)
         if low or high:
             root_rule.setMinimumScale(low)
             root_rule.setMaximumScale(high)

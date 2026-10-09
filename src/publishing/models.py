@@ -98,6 +98,10 @@ class LayerConfig:
     # or zoomed in beyond 1:max_scale. Not tiled where hidden.
     min_scale: float = 0.0
     max_scale: float = 0.0
+    # Web map only: the layer's labels hidden when zoomed out beyond
+    # 1:labels_min_scale (0 = no limit); its features are still drawn there.
+    # Labels are not tiled where hidden.
+    labels_min_scale: float = 0.0
     # Raster layers only (rendered by QGIS into their own raster PMTiles archive):
     raster_format: str = "webp"        # RASTER_FORMATS; webp and png keep transparency
     raster_min_zoom: Optional[int] = None   # None = the publication's tile zooms
