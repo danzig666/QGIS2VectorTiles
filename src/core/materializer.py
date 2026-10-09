@@ -1412,6 +1412,11 @@ class SymbolMaterializer:
         exact_interval = self._exact_interval(layer)
         zoom_interval = not exact_interval and self._zoom_interval(layer)
         if not points and not exact_interval and not zoom_interval:
+            if "Interval" in placements and \
+                    layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyInterval):
+                self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                             "Data-defined interval: the browser spaces these markers along the lines, "
+                             "not at QGIS's positions.", flat_rule)
             return None  # interval driven by data: native repeated symbol
         if "CurvePoint" in points:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",

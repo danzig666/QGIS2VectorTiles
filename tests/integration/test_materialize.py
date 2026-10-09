@@ -526,6 +526,21 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
                and r.visibility.min_zoom == top + 1 for r in rules)
 
 
+def test_a_data_defined_interval_is_reported(plugin, tmp_path):
+    """An interval read from a field cannot be placed per zoom: MapLibre
+    spaces those markers itself. That used to happen without a report."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "dd.gpkg"))
+    stroke = QgsMarkerLineSymbolLayer(True, 4)
+    stroke.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+    stroke.setSubSymbol(_marker())
+    stroke.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval, QgsProperty.fromExpression('"id" + 3'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    assert any("Data-defined interval" in d.message for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+
+
 @pytest.mark.parametrize("ring_filter", [1, 2])
 @pytest.mark.parametrize("kind", ["line", "markers"])
 def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):

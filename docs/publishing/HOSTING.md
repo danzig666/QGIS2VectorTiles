@@ -114,7 +114,7 @@ public base URL. Only enable *conditional writes* when the service supports `If-
 
 ## Any static web server
 
-Copy the publication folder to the server (e.g. with *Destination: Local* into a web root).
+Copy the publication folder to the server (e.g. with *Destination: Local only (no upload)* into a web root).
 The server must answer `Range` requests with `206 Partial Content`, must not gzip
 `.pmtiles` and `.pack` responses, and must serve `.mjs` as `text/javascript`. nginx and Apache
 do this by default for static files (add `types { text/javascript mjs; }` to old nginx versions).

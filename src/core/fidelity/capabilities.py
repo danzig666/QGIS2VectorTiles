@@ -95,11 +95,12 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,
                "First/last/every vertex, inner vertices, central point, segment centres and "
-               "map-unit intervals (with offset along the line) are exported as point features "
-               "at the QGIS positions with the line azimuth; polygon outline offsets buffer "
-               "every ring like QGIS.",
-               ("Screen-unit intervals are a native repeated symbol: start position differs "
-                "and spacing is within about ±41 % between integer zooms.",
+               "intervals (with offset along the line; map units exactly, screen units per "
+               "eighth of a zoom) are exported as point features at the QGIS positions with the "
+               "line azimuth; polygon outline offsets buffer every ring like QGIS.",
+               ("Data-defined intervals, and screen-unit intervals with Fast marker lines on, "
+                "are a native repeated symbol: start position differs and spacing is within "
+                "about ±41 % between integer zooms (reported).",
                 "Map-unit intervals denser than 8 px on screen use the native symbol at "
                 "those zooms."),
                ("tests/integration/test_materialize.py",

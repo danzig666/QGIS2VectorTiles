@@ -947,7 +947,7 @@ class PublishDialog(QDialog):
                 ("labels_toggle", tr("Labels switch")), ("opacity_controls", tr("Opacity sliders")),
                 ("search", tr("Search")), ("filters", tr("Attribute filters")),
                 ("popups", tr("Popups")), ("permalinks", tr("Shareable links")),
-                ("coordinates", tr("Coordinates (WGS84 / EOV)")), ("measure", tr("Measurement")),
+                ("coordinates", tr("Coordinates (WGS 84 and the project CRS)")), ("measure", tr("Measurement")),
                 ("print", tr("Print")),
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
@@ -961,6 +961,9 @@ class PublishDialog(QDialog):
         self.i_google_key.setPlaceholderText(tr("Google Maps API key (needed for Street View)"))
         self.i_google_key.setEnabled(False)
         self.i_flags["street_view"].toggled.connect(self.i_google_key.setEnabled)
+        # The viewer's search opens the found feature's popup: no popups, no search.
+        self.i_flags["search"].setToolTip(tr("Search opens the found feature's popup, so it needs Popups."))
+        self.i_flags["popups"].toggled.connect(self.i_flags["search"].setEnabled)
         grid.addWidget(self.i_google_key, index // 3, index % 3 + 1, 1, 3 - index % 3 - 1 or 1)
         street_view_help = tr(
             "A Street View button on the map: tap a place to see it, the panorama looks toward the "
@@ -2045,6 +2048,7 @@ class PublishDialog(QDialog):
         self.b_overview_km.setValue(int(basemap.overview_km))
         for key, box in self.i_flags.items():
             box.setChecked(bool(getattr(profile.interaction, key)))
+        self.i_flags["search"].setEnabled(self.i_flags["popups"].isChecked())
         self.i_google_key.setText(profile.interaction.google_api_key)
         address_layer = self.project.mapLayer(profile.interaction.address_layer_id)
         self.i_address_layer.setLayer(address_layer)
