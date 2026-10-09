@@ -191,3 +191,41 @@ def test_switched_off_map_scale_property_does_not_split_per_zoom(flattener, acti
     kept = layer.renderer().symbol().symbolLayer(0).dataDefinedProperties().property(
         QgsSymbolLayer.Property.PropertyStrokeWidth)
     assert kept.expressionString() == width.expressionString() and kept.isActive() == active
+
+
+def test_labels_keep_the_zooms_of_a_renderer_rule_materialized_per_zoom(flattener, tmp_path):
+    """Flow arrows along a river (a screen-unit marker interval) are placed
+    per zoom: the renderer rule becomes one slice per zoom. Its labels keep
+    the rule's whole zoom range (they were matched to one slice and only
+    shown at the last zoom)."""
+    from qgis.core import (Qgis, QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
+                           QgsPalLayerSettings, QgsSimpleLineSymbolLayer, QgsSingleSymbolRenderer,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import to_geopackage
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "river", "memory")
+    memory.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    memory.updateFields()
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Koornlands"])
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(2119000 6019000, 2121000 6020500, 2123000 6020000)"))
+    memory.dataProvider().addFeatures([feature])
+    layer = to_geopackage(memory, str(tmp_path / "river.gpkg"))
+    arrows = QgsMarkerLineSymbolLayer(True, 22)
+    arrows.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    arrows.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "arrowhead", "size": "1.6"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([QgsSimpleLineSymbolLayer(), arrows])))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Curved
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(11, 17)
+    slices = [r for r in rules if r.get_attr("t") == 0 and r.get_attr("o") == r.get_attr("i")]
+    assert len({r.get_attr("o") for r in slices}) > 1   # the arrows are per zoom
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    assert labels and all((r.get_attr("o"), r.get_attr("i")) == (11, 17) for r in labels), \
+        [(r.output_dataset, r.get_attr("o"), r.get_attr("i")) for r in labels]
+    assert len({r.output_dataset for r in labels}) == len(labels)

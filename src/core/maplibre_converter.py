@@ -58,6 +58,17 @@ def _enum_int(value, default=None):
     return default
 
 
+def _label_enum(settings, name: str, default=None):
+    """An enum attribute of label settings as an int; ``default`` when PyQGIS
+    cannot read it: an old project's unset value (-1, saved as 4294967295,
+    e.g. ``multilineAlign``) is no member of the enum and reading the
+    attribute raises ValueError, though QGIS itself draws such labels."""
+    try:
+        return _enum_int(getattr(settings, name), default)
+    except ValueError:
+        return default
+
+
 def _argb_hex(value) -> str:
     """Generated colour fields store '#RRGGBBAA'; QGIS parses '#AARRGGBB'."""
     text = str(value or "")
@@ -1328,7 +1339,7 @@ class TextPropertyExtractor:
             3: "right",        4: "center",  5: "left",
             6: "top-right",    7: "top",     8: "top-left",
         }
-        return anchor_map.get(_enum_int(label_settings.quadOffset), "center")
+        return anchor_map.get(_label_enum(label_settings, "quadOffset"), "center")
 
     @staticmethod
     def line_side(label_settings: QgsPalLayerSettings) -> str:
@@ -1369,7 +1380,9 @@ class TextPropertyExtractor:
         not translated server-side.
         """
         try:
-            justification = _enum_int(label_settings.multilineAlign, 0)
+            # An unreadable (unset) alignment is drawn left aligned by QGIS:
+            # it is none of centre, right and justify.
+            justification = _label_enum(label_settings, "multilineAlign", 0)
         except AttributeError:
             try:
                 justification = label_settings.alignment
@@ -1502,9 +1515,23 @@ class TextPropertyExtractor:
         return 1.2
 
     @staticmethod
-    def get_text_letter_spacing() -> float:
-        """Return ``text-letter-spacing`` in ems (default 0)."""
-        return 0
+    def get_text_letter_spacing(text_format: QgsTextFormat = None) -> float:
+        """Return ``text-letter-spacing`` in ems (default 0).
+
+        QGIS keeps a text format's letter spacing as the font's absolute
+        spacing in the format's size units (QgsTextFormat::scaledFont), so
+        in ems it is spacing / size; a percentage spacing (100 % = none)
+        stretches every advance, about half an em per character."""
+        if text_format is None:
+            return 0
+        font = text_format.font()
+        spacing = font.letterSpacing()
+        if font.letterSpacingType() == QFont.SpacingType.PercentageSpacing:
+            em = (spacing - 100.0) / 100.0 * 0.5 if spacing else 0.0
+        else:
+            size = float(text_format.size() or 0)
+            em = spacing / size if size > 0 else 0.0
+        return round(em, 4) if abs(em) >= 1e-4 else 0
 
     @staticmethod
     def get_text_transform(label_settings: QgsPalLayerSettings = None) -> str:
@@ -3500,7 +3527,7 @@ class QgisMapLibreStyleExporter:
             "text-optional": TextPropertyExtractor.get_text_optional(),
             "text-padding": TextPropertyExtractor.get_text_padding(),
             "text-line-height": TextPropertyExtractor.get_text_line_height(),
-            "text-letter-spacing": TextPropertyExtractor.get_text_letter_spacing(),
+            "text-letter-spacing": TextPropertyExtractor.get_text_letter_spacing(text_format),
             "text-transform": TextPropertyExtractor.get_text_transform(label_settings),
             "text-max-width": TextPropertyExtractor.get_text_max_width(label_settings),
             "text-max-angle": TextPropertyExtractor.get_text_max_angle(label_settings),
