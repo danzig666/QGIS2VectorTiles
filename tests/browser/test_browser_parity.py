@@ -472,6 +472,21 @@ def test_viewport_aligned_patterns_start_at_the_view_corner(tmp_path, kind):
     assert _compare(tmp_path, layer, metric="shape") < 0.05
 
 
+@pytest.mark.parametrize("brush", ["diagonal_x", "horizontal", "dense4"])
+def test_qt_brush_patterns_are_drawn_like_qgis(tmp_path, brush):
+    """A simple fill with a Qt brush style (crossed diagonals, horizontal
+    lines, dense dots): QGIS fills with the brush, an 8 px pattern starting
+    at the corner of the view. It was drawn as a solid fill."""
+    layer = _polygon_layer(str(tmp_path / "brush.gpkg"), False)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "0,0,0", "style": brush, "outline_style": "no"})))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
+    from PIL import Image
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.1)
+
+
 def _feature_pattern(kind, tmp_path):
     """A screen-unit pattern of the given kind, feature-aligned (QGIS default)."""
     from qgis.core import (QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer,

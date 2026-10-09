@@ -2557,6 +2557,34 @@ class QgisMapLibreStyleExporter:
         self.pattern_images[name] = PatternImages(cell_1x, cell_2x)
         return name
 
+    def _register_brush_pattern(self, layer) -> Optional[str]:
+        """Texture of a Qt brush pattern (dense dots, hatching, crossing):
+        QGIS fills with the brush itself, an 8 px pattern (at any DPI, twice
+        that on a 2x screen) starting at the corner of the view. A
+        data-defined colour or style has no single texture (None)."""
+        from qgis.PyQt.QtGui import QBrush, QImage, QPainter  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        style = layer.brushStyle()
+        if _enum_int(style) not in range(2, 15):  # Dense1Pattern .. DiagCrossPattern
+            return None
+        props = layer.dataDefinedProperties()
+        for key in (QgsSymbolLayer.Property.PropertyFillColor,
+                    QgsSymbolLayer.Property.PropertyFillStyle):
+            prop = props.property(key)
+            if prop and prop.isActive():
+                return None
+        cells = []
+        for ratio in (1, 2):
+            image = QImage(16 * ratio, 16 * ratio, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            image.setDevicePixelRatio(ratio)
+            painter = QPainter(image)
+            painter.fillRect(0, 0, 16, 16, QBrush(layer.color(), style))
+            painter.end()
+            image.setDevicePixelRatio(1)
+            cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
+        return self._textures(cells[0], cells[1], 0.0, "Brush pattern")
+
     def _register_point_pattern(self, layer) -> Optional[str]:
         """Seamless texture for a point pattern spaced in screen units."""
         from .fidelity.patterns import (apply_pattern_positions, point_pattern_cell,  # pylint: disable=import-outside-toplevel
@@ -3518,11 +3546,12 @@ class QgisMapLibreStyleExporter:
 
         if isinstance(symbol_layer, QgsSimpleFillSymbolLayer):
             if symbol_layer.brushStyle() != Qt.BrushStyle.NoBrush:
-                if _enum_int(symbol_layer.brushStyle()) != 1:  # not Qt.SolidPattern
+                brush = self._register_brush_pattern(symbol_layer)
+                if brush is None and _enum_int(symbol_layer.brushStyle()) != 1:  # not Qt.SolidPattern
                     self.context.report(
                         "Q2VT_PATTERN_APPROXIMATE",
-                        "Qt brush patterns are drawn as a solid fill.",
-                        strategy=Strategy.APPROXIMATE.value)
+                        "Qt brush pattern with a data-defined colour or style is drawn as a "
+                        "solid fill.", strategy=Strategy.APPROXIMATE.value)
                 layer_def["paint"].update({
                     "fill-color": FillPropertyExtractor.get_fill_color(symbol_layer),
                     "fill-opacity": FillPropertyExtractor.get_fill_opacity(symbol_layer, symbol),
@@ -3538,6 +3567,14 @@ class QgisMapLibreStyleExporter:
                         PropertyExtractor.static_pixels(offset.x(), symbol_layer.offsetUnit()),
                         PropertyExtractor.static_pixels(offset.y(), symbol_layer.offsetUnit())]
                     layer_def["paint"]["fill-translate-anchor"] = "viewport"
+                if brush is not None:
+                    # The pattern image carries the colour; it starts at the
+                    # corner of the view, as QGIS's brush.
+                    del layer_def["paint"]["fill-color"]
+                    layer_def["paint"]["fill-pattern"] = brush
+                    metadata = layer_def.setdefault("metadata", {})
+                    metadata[self.SCREEN_PATTERN_FLAG] = True
+                    metadata[self.PATTERN_ANCHOR_FLAG] = "viewport"
                 color_prop = symbol_layer.dataDefinedProperties().property(
                     QgsSymbolLayer.Property.PropertyFillColor)
                 if color_prop and color_prop.isActive():

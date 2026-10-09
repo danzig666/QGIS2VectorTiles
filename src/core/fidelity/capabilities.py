@@ -49,9 +49,11 @@ class Capability:
 
 _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("SimpleFill", "fill", Strategy.NATIVE,
-               "Solid fill color and opacity; outline exported as a separate line layer.",
-               ("Qt brush styles other than solid/no-brush are drawn solid.",),
-               ("tests/integration/test_converter.py",)),
+               "Solid fill color and opacity; outline exported as a separate line layer. Qt "
+               "brush styles (dense dots, hatching, crossing) as their 8 px pattern texture, "
+               "started at the corner of the view as in QGIS.",
+               ("A Qt brush style with a data-defined colour or style is drawn solid.",),
+               ("tests/integration/test_converter.py", "tests/browser/test_browser_parity.py")),
     Capability("SimpleLine", "line", Strategy.NATIVE,
                "Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit "
                "custom dashes are exported as their dashes (Qt pattern restarted on every "
