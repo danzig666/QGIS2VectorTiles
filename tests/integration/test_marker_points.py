@@ -100,7 +100,54 @@ def test_direct_interval_markers_equal_the_expression(plugin):
         direct = marker_points.interval_points_layer(
             lines, recipe, "EPSG:3857", direct_context.expressionContext(),
             mat.interval_points_expression(recipe, "EPSG:3857"))
-        assert _rows(direct) == expected, (recipe, wkts)
+        assert _same_rows(_rows(direct), expected), (recipe, wkts)
+
+
+def _same_rows(rows, expected):
+    """Equal rows; the angles (the last attribute) within 1e-9 degrees: an
+    angle turned to Web Mercator north is computed with other float steps."""
+    if len(rows) != len(expected) or rows[0] != expected[0]:
+        return False
+    for row, other in zip(rows[1:], expected[1:]):
+        if row[:2] != other[:2] or row[2][:-1] != other[2][:-1]:
+            return False
+        if row[2][-1] != other[2][-1] and \
+                abs(float(row[2][-1]) - float(other[2][-1])) > 1e-9:
+            return False
+    return True
+
+
+def test_marker_angles_follow_the_line_in_web_mercator(plugin):
+    """Markers placed in a national grid (EOV): their angle is the line's
+    direction in Web Mercator, where the map is drawn. The grid's own
+    azimuth was kept, off by the meridian convergence (about 1.6 degrees in
+    eastern Hungary): long text markers broke away from the line."""
+    import math  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsCoordinateTransform  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    project = reset_project()
+    project.setCrs(QgsCoordinateReferenceSystem("EPSG:23700"))
+    to_mercator = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:23700"),
+                                         QgsCoordinateReferenceSystem("EPSG:3857"), project)
+    start, end = to_mercator.transform(830000, 220000), to_mercator.transform(830500, 220300)
+    lines = QgsVectorLayer(f"LineString?crs=EPSG:3857&field={mat.COUNT_FIELD}:integer", "l", "memory")
+    feature = QgsFeature(lines.fields())
+    feature.setAttributes([0])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({start.x()} {start.y()}, {end.x()} {end.y()})"))
+    lines.dataProvider().addFeatures([feature])
+    expected = math.degrees(math.atan2(end.x() - start.x(), end.y() - start.y())) % 360
+    recipe = mat.interval_points(100.0, 0.0, crs="EPSG:23700")
+    expression = mat.interval_points_expression(recipe, "EPSG:3857")
+    context = _context(project)  # expressionContext() is a reference into it
+    direct = marker_points.interval_points_layer(
+        lines, recipe, "EPSG:3857", context.expressionContext(), expression)
+    chain = _chain(mat, lines, recipe, _context(project))
+    for layer in (direct, chain):
+        angles = [f[mat.ANGLE_FIELD] for f in layer.getFeatures()]
+        assert len(angles) == 6
+        assert all(abs(angle - expected) < 0.01 for angle in angles), (angles, expected)
 
 
 @pytest.mark.parametrize("wkt, distance, expected", [

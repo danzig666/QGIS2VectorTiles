@@ -99,6 +99,19 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
         return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {half!r}')}, "
                 f"{at(f'@q2vt_d + {half!r}')})), line_interpolate_angle({line}, @q2vt_d))")
 
+    def turned(point, azimuth):
+        """The azimuth in the export CRS: a step along it from the point,
+        carried over too (an azimuth in a national grid is off by the
+        meridian convergence in Web Mercator)."""
+        if crs == export_crs:
+            return azimuth
+        step = interval * 1e-3
+        ahead = (f"make_point(x({point}) + {step!r} * sin(radians(@q2vt_a)), "
+                 f"y({point}) + {step!r} * cos(radians(@q2vt_a)))")
+        return (f"with_variable('q2vt_a', {azimuth}, @q2vt_a + (degrees(azimuth("
+                f"transform({point}, '{crs}', '{export_crs}'), "
+                f"transform({ahead}, '{crs}', '{export_crs}'))) - @q2vt_a + 540) % 360 - 180)")
+
     def body(line):
         return (
             f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
@@ -110,11 +123,11 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
             f"abs(@q2vt_off + @element * {interval!r} - @q2vt_len) < 1e-6)), "
             f"with_variable('q2vt_d', min(@q2vt_off + @element * {interval!r}, @q2vt_len), "
             f"with_variable('q2vt_p', line_interpolate_point({line}, @q2vt_d), "
-            f"make_point(x(@q2vt_p), y(@q2vt_p), {angle(line)}))))))))")
+            f"make_point(x(@q2vt_p), y(@q2vt_p), {turned('@q2vt_p', angle(line))}))))))))")
     if crs == export_crs:
         return body("@geometry")
-    # Positions and azimuths in the project CRS (QGIS draws in it); the small
-    # grid convergence to Web Mercator north is ignored.
+    # Positions and azimuths in the project CRS (QGIS draws in it), the
+    # azimuths turned to Web Mercator north.
     return (f"with_variable('q2vt_pts', transform(with_variable('q2vt_l', transform(@geometry, "
             f"'{export_crs}', '{crs}'), {body('@q2vt_l')}), '{crs}', '{export_crs}'), "
             f"@q2vt_pts)")
