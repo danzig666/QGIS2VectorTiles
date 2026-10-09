@@ -133,6 +133,43 @@ def test_visible_labels_follow_toggles_and_filters(site, tmp_path):
     assert results[4] == 0  # no orphan labels for a hidden layer
 
 
+@pytest.fixture(scope="module")
+def site_without_popups(tmp_path_factory):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_pipeline import CANARY, _parcels, _profile  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    base = tmp_path_factory.mktemp("nopopups")
+    parcels = _parcels(str(base / "parcels.gpkg"))
+    project = reset_project()
+    project.addMapLayer(parcels)
+    profile = _profile(parcels, base)
+    profile.layers[0].initially_visible = True
+    profile.interaction.popups = False
+    result = export_local(project, profile, EXTENT, canaries=[CANARY])
+    with PreviewServer(os.path.dirname(result.publication_dir)) as server:
+        yield {"url": server.url(f"{profile.slug}/index.html")}
+
+
+def test_search_works_without_popups(site_without_popups, tmp_path):
+    """With popups off the search box used to be left out (it opened the
+    found feature through the popup code). Now a found feature is zoomed to
+    and marked, without a popup."""
+    results = _run(site_without_popups["url"], [
+        {"eval": "q2vtViewer.map.jumpTo({ center: [0, 0], zoom: 3 }); return !!document.getElementById('q2vt-search');"},
+        {"type": ["#q2vt-search", "00123/5"]},
+        {"wait": 1200},
+        {"press": "ArrowDown"}, {"press": "Enter"},
+        {"wait": 2500},
+        {"eval": """const m = q2vtViewer.map, c = m.getCenter();
+                    return { zoom: m.getZoom(), lng: c.lng, popups: document.querySelectorAll('.q2vt-popup').length,
+                             marker: !!m.getLayer('q2vt_search_marker') };"""},
+    ], tmp_path)
+    assert results[0] is True
+    r = results[1]
+    assert r["zoom"] > 10 and abs(r["lng"] - 19.06) < 0.05 and r["popups"] == 0 and r["marker"], r
+
+
 def test_identify_one_record_per_feature_and_safe_popup(site, tmp_path):
     record = site["records"]["00123/4"]
     results = _run(site["url"], [

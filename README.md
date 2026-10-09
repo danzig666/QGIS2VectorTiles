@@ -377,8 +377,8 @@ On by default (each can be switched off on *Interaction → Viewer*):
 - **Layers** tab: QGIS groups, layers and their legend rules with QGIS swatches, a lock on layers
   that are always shown, opacity sliders, one switch for all labels (without it, labels are always
   on), and *Reset*. Without it, visitors get the legend, with an on/off switch for each layer.
-- **Search** in the approved fields of all layers (needs *Popups* on); the chosen feature is
-  zoomed to, marked and its popup opened.
+- **Search** in the approved fields of all layers; the chosen feature is zoomed to and marked,
+  and its popup opened when popups are on.
 - **Filters** by value lists (with counts), number ranges or text.
 - **Popups** with the approved fields; a value naming a published document links to it; *Link to
   this feature* copies a link that reopens the map on that feature.

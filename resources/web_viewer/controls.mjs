@@ -389,7 +389,8 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     }
   }
   if (panel.panes.share) shareBlock(panel.panes.share, permalink);
-  if (manifest.search && manifest.interaction?.search !== false && identify) {
+  // Without popups, a found feature is zoomed to and marked, without its popup.
+  if (manifest.search && manifest.interaction?.search !== false) {
     parts.search = new Search({ map, manifest, manifestUrl, assetsUrl, container: document.getElementById("q2vt-searchbox"), identify });
   }
   parts.themes = themeBar(manifest, state);

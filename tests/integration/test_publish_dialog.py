@@ -79,25 +79,6 @@ def _wait_task(dialog, timeout=120):
     assert dialog.task is None, "publishing task did not finish"
 
 
-def test_search_is_only_offered_with_popups(project, messages):
-    """The viewer mounts search only with popups (a found feature opens its
-    popup). Unticking Popups used to leave Search ticked and enabled, and the
-    search box then silently missed from the web map."""
-    project, _ = project
-    dialog = _dialog()
-    search, popups = dialog.i_flags["search"], dialog.i_flags["popups"]
-    assert popups.isChecked() and search.isEnabled()
-    popups.setChecked(False)
-    assert not search.isEnabled()
-    popups.setChecked(True)
-    assert search.isEnabled()
-    profile = dialog.profile
-    profile.interaction.popups = False
-    dialog._populate(profile)  # pylint: disable=protected-access
-    assert not popups.isChecked() and not search.isEnabled()
-    dialog.close()
-
-
 def test_defaults_follow_the_project(project, messages):
     project, parcels = project
     dialog = _dialog()
