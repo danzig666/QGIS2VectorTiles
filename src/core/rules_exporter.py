@@ -124,6 +124,7 @@ from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
 from .datasets import DatasetInfo, ExportedDataset, gpkg_info
+from . import label_lines
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity import feature_order as fo
@@ -1400,6 +1401,8 @@ class RulesExporter:
         every part, a centroid fill not on every part."""
         if grp.keep_biggest_part is not None:
             return grp.keep_biggest_part
+        if grp.recipe is not None and grp.recipe.kind == "label_windows":
+            return False  # every window is a label (_label_windows keeps the longest part)
         if grp.rule_type == 1 and not grp.visible_polygons:
             settings = grp.flat_rules[0].rule.settings()
             if settings and not settings.labelPerPart:
@@ -1678,6 +1681,10 @@ class RulesExporter:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "direction_runs":
             current_input = self._direction_runs(current_input, grp.recipe, grp.source_geometry)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "label_windows":
+            current_input = self._label_windows(current_input, grp)
             if current_input is None:
                 return None
 
@@ -2398,6 +2405,111 @@ class RulesExporter:
                     run.append(b)
                 if len(run) >= 2:
                     write(feature, run, bucket)
+                    written += 1
+        del writer
+        return out if written else None
+
+    def _label_windows(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
+        """Worker: repeated curved line labels laid out at the recipe's zoom
+        as QGIS lays them out (core/label_lines.py): one short line per
+        label, along its characters and inside one tile, with the feature's
+        fields; MapLibre centres the label on it ("line-center")."""
+        from qgis.core import NULL, QgsFeature, QgsFields, QgsLineString, QgsPoint  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QFont, QFontMetrics, QFontMetricsF  # pylint: disable=import-outside-toplevel
+        recipe = grp.recipe
+        text = next((expr for _, expr, name in grp.expression_fields
+                     if name == f"{_FIELD_PREFIX}_label"), None)
+        layer = self._open(source, "windows")
+        if not text or layer is None or not layer.isValid():
+            return None
+        expression = QgsExpression(text)
+        context = self._worker_expression_context()
+        context.appendScope(QgsExpressionContextUtils.layerScope(layer))
+        expression.prepare(context)
+        zoom, size = int(recipe.param("zoom")), float(recipe.param("size"))
+        fit, chop = float(recipe.param("fit", 1.0)), float(recipe.param("chop", 1.0))
+        # The advances MapLibre lays the label out with: the glyphs'
+        # (GlyphGenerator: whole pixels of a 24 px em) and the letter spacing
+        # between them.
+        font = QFont()
+        font.fromString(recipe.param("font"))
+        font.setPixelSize(24)
+        metrics = QFontMetrics(font)
+        spacing = float(recipe.param("spacing", 0.0)) * size
+        transform = recipe.param("transform", "none")
+        # pal's candidate step: a sixth of the text height, or the engine's
+        # line candidates per centimetre (at 96 dpi), whichever is longer.
+        per_cm = float(recipe.param("candidates_per_cm", 5.0)) or 5.0
+        step = max(QFontMetricsF(font).height() * size / 24 / 6, 10.0 * 96 / 25.4 / per_cm)
+        settings = dict(repeat=float(recipe.param("repeat")), step=step,
+                        max_in=float(recipe.param("max_in", 25.0)),
+                        max_out=float(recipe.param("max_out", -25.0)),
+                        max_angle=float(recipe.param("max_angle", 25.0)),
+                        angle_window=0.6 * size * fit, anchor=float(recipe.param("anchor", 0.5)),
+                        margin=max(2.0, 0.25 * size * fit))
+        widths: Dict[str, List[float]] = {}
+
+        def advances(label: str) -> List[float]:
+            if label not in widths:
+                shown = label.upper() if transform == "uppercase" else \
+                    label.lower() if transform == "lowercase" else label
+                drawn = [char for char in shown.strip() if metrics.inFontUcs4(ord(char))]
+                widths[label] = [metrics.horizontalAdvance(char) * size / 24
+                                 + (spacing if i < len(drawn) - 1 else 0.0)
+                                 for i, char in enumerate(drawn)]
+            return widths[label]
+
+        # QGIS labels only the longest part of a feature unless every part
+        # is labelled (the base layer has the parts as features).
+        orig = layer.fields().indexFromName(f"{_FIELD_PREFIX}_orig_id")
+        chosen = None
+        if not recipe.param("per_part") and orig >= 0:
+            longest: Dict[Any, Tuple[float, int]] = {}
+            for feature in layer.getFeatures():
+                length = feature.geometry().length() if feature.hasGeometry() else 0.0
+                key = feature.attribute(orig)
+                if key not in longest or length > longest[key][0]:
+                    longest[key] = (length, feature.id())
+            chosen = {fid for _, fid in longest.values()}
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        out = self._temp_path("windows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        world = 2 * math.pi * 6378137.0  # EPSG:3857 metres -> CSS px of the zoom
+        pixel, half = world / (512.0 * 2 ** zoom), world / 2
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            if (chosen is not None and feature.id() not in chosen) or not feature.hasGeometry():
+                continue
+            context.setFeature(feature)
+            value = expression.evaluate(context)
+            if expression.hasEvalError() or value is None or value == NULL:
+                continue
+            drawn = advances(str(value))
+            if not drawn:
+                continue
+            for part in feature.geometry().constParts():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                xs = [(line.xAt(i) + half) / pixel for i in range(line.numPoints())]
+                ys = [(half - line.yAt(i)) / pixel for i in range(line.numPoints())]
+                for window in label_lines.label_windows(
+                        xs, ys, [width * fit for width in drawn],
+                        chop_width=sum(drawn) * chop, **settings):
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        out_feature[field.name()] = feature[field.name()]
+                    out_feature.setGeometry(QgsGeometry(QgsLineString(
+                        [QgsPoint(x * pixel - half, half - y * pixel) for x, y in window])))
+                    writer.addFeature(out_feature)
                     written += 1
         del writer
         return out if written else None
@@ -3224,6 +3336,8 @@ class RulesExporter:
         flat_rule.line_label_midpoint = True
 
     def _get_labeling_transformation(self, flat_rule: FlattenedRule):
+        if flat_rule.recipe is not None and flat_rule.recipe.kind == "label_windows":
+            return [1, "@geometry"]  # windows built by _label_windows
         settings = flat_rule.rule.settings()
         target_geom = flat_rule.get_attr("g")
         transform_expr = "@geometry"

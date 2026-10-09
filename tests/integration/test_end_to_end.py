@@ -585,6 +585,106 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
+def _glyph_advances(path):
+    """{code point: advance} of a glyph PBF (24 px em)."""
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    advances = {}
+    for number, _, stack in mvt._fields(open(path, "rb").read()):  # pylint: disable=protected-access
+        if number != 1:
+            continue
+        for field, _, glyph in mvt._fields(stack):  # pylint: disable=protected-access
+            if field == 3:
+                values = {key: value for key, _, value in mvt._fields(glyph)}  # pylint: disable=protected-access
+                advances[values[1]] = values.get(7, 0)
+    return advances
+
+
+def test_curved_repeated_line_labels_are_placed_per_zoom(export, tmp_path):
+    """Swellendam rivers: a curved label repeated along a wiggly river (a
+    vertex every 60 m turning 30 degrees one way, then the other) is laid
+    out at export time per zoom, as QGIS lays it out: each label is a short
+    line inside one tile that MapLibre centres the label on ("line-center")
+    and accepts (its angle check, with the label's own glyph advances), one
+    per repeat part. MapLibre's line placement on the river itself found no
+    anchor at these zooms (the wiggles break its angle check)."""
+    import math  # pylint: disable=import-outside-toplevel
+    import sqlite3  # pylint: disable=import-outside-toplevel
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QFont  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "rivers", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    points = []  # a U: 3.4 km east, 1.5 km north, 3.4 km west
+    for (x0, y0), (x1, y1) in (((2119300, 6020000), (2122700, 6020000)),
+                               ((2122700, 6020000), (2122700, 6021500)),
+                               ((2122700, 6021500), (2119300, 6021500))):
+        direction = math.atan2(y1 - y0, x1 - x0)
+        x, y = x0, y0
+        for i in range(int(math.hypot(x1 - x0, y1 - y0) // 58)):
+            points.append(f"{x} {y}")
+            heading = direction + math.radians(15 if i % 2 else -15)
+            x, y = x + 60 * math.cos(heading), y + 60 * math.sin(heading)
+    points.append(f"{x} {y}")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Koornlands"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"LineString ({', '.join(points)})"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "rivers.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    font = fmt.font()
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+    fmt.setFont(font)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer, min_zoom=11, max_zoom=13)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert sorted(l["minzoom"] for l in labels) == [11, 12, 13]   # one layer per zoom
+    assert {l["layout"]["symbol-placement"] for l in labels} == {"line-center"}
+    assert labels[0]["layout"]["text-max-angle"] == 25
+
+    from q2vt_plugin.src.core import label_lines  # pylint: disable=import-error,import-outside-toplevel
+    layout = labels[0]["layout"]
+    glyphs = _glyph_advances(os.path.join(result, "style", "glyphs", layout["text-font"][0],
+                                          "0-255.pbf"))
+    size, spacing = layout["text-size"], layout["text-letter-spacing"]
+    label_px = sum(glyphs[ord(c)] for c in "Koornlands") * size / 24 + spacing * size * 9
+    placed = {}
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        for label in labels:
+            zoom = label["minzoom"]
+            for (data,) in conn.execute("SELECT tile_data FROM tiles WHERE zoom_level = ?", (zoom,)):
+                tile = mvt.decode(data, geometry=True).get(label["source-layer"])
+                for feature in (tile or {}).get("features", []):
+                    for line in mvt.lines(feature["geometry"]):
+                        scale = 8192 / tile["extent"]   # MapLibre's tile units
+                        line = [(px * scale, py * scale) for px, py in line]
+                        anchor = label_lines.center_anchor(line, label_px * 16, 0, 0)
+                        if not (0 <= anchor[0] < 8192 and 0 <= anchor[1] < 8192):
+                            continue  # a label of the next tile, in this one's buffer
+                        assert all(0 < px < 8192 and 0 < py < 8192 for px, py in line)
+                        assert label_lines.center_anchor(  # MapLibre draws the label
+                            line, label_px * 16, 0.6 * size * 16, math.radians(25)), line
+                        turns = label_lines.char_turns(line)  # QGIS's limit
+                        assert max(abs(t) for t in turns) <= math.radians(25.5), turns
+                        placed[zoom] = placed.get(zoom, 0) + 1
+    # 8.3 km of river, cut into parts of the repeat distance (70 mm as at
+    # zoom + 0.5: 187 px of the tile zoom): 224 px at zoom 11, 447 at 12,
+    # 895 at 13.
+    assert placed == {11: 1, 12: 2, 13: 4}
+
+
 def test_labels_avoid_each_other_and_overlap_only_if_required(export, tmp_path):
     """Every label avoids the others in MapLibre; those QGIS may overlap are
     marked for the viewer's fallback, and horizontal polygon labels can move
