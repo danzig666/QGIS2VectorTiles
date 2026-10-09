@@ -201,15 +201,24 @@ _IMAGE_MAGIC = {TileType.PNG: b"\x89PNG\r\n\x1a\n", TileType.JPEG: b"\xff\xd8\xf
                 TileType.WEBP: b"RIFF"}
 
 
+# Sampled tiles up to this size (compressed) are decoded feature by feature;
+# bigger ones (a zoomed-out tile holding a whole city: several MB, 40 s of
+# Python for a sample) get their layers checked (gzip + layer structure).
+_DECODE_FEATURES_BYTES = 512 * 1024
+
+
 def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: int = 64,
-                     progress: Optional[Progress] = None, kind: str = "mvt") -> dict:
+                     progress: Optional[Progress] = None, kind: str = "mvt",
+                     payload_checked_sha256: Optional[str] = None) -> dict:
     """Structural + payload validation; raises PublishingError, returns a summary.
 
     ``kind``: ``"mvt"`` (vector tiles, decoded as MVT; the map data) or
     ``"image"`` (PNG / JPEG / WebP tiles of a QGIS raster layer, checked by
     their signature). ``sample``: tile payloads checked (0 = every tile),
     chosen deterministically across zooms (first/last tiles and a
-    fixed-seed draw).
+    fixed-seed draw). ``payload_checked_sha256``: the archive's SHA-256 when
+    its payloads were checked already (built and validated): the same file
+    gets the structural checks only.
     """
     progress = progress or Progress()
     if kind == "image":
@@ -252,7 +261,9 @@ def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: in
         if zooms[0] != h["min_zoom"] or zooms[1] != h["max_zoom"]:
             raise PublishingError("Q2VT_PUB_PMTILES_INVALID",
                                   f"Header zooms {h['min_zoom']}-{h['max_zoom']} != tiles {zooms}.")
-        chosen = _sample_indices(entries, sample)
+        from .pmtiles_builder import sha256_file  # pylint: disable=import-outside-toplevel
+        same = payload_checked_sha256 is not None and sha256_file(path) == payload_checked_sha256
+        chosen = [] if same else _sample_indices(entries, sample)
         found_layers = set()
         for done, index in enumerate(chosen):
             tile_id, offset, length = entries[index]
@@ -261,7 +272,8 @@ def validate_pmtiles(path: str, expected_tiles: Optional[int] = None, sample: in
                 raise PublishingError("Q2VT_PUB_PMTILES_INVALID",
                                       f"Tile {tileid_to_zxy(tile_id)} is not gzip as declared.")
             try:
-                decoded = mvt.decode(data, properties=False)
+                decoded = mvt.decode(data, properties=False) if length <= _DECODE_FEATURES_BYTES \
+                    else mvt.layer_summary(data)
             except mvt.MvtDecodeError as error:
                 raise PublishingError("Q2VT_PUB_NOT_MVT",
                                       f"Tile {tileid_to_zxy(tile_id)}: {error}") from error

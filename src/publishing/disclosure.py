@@ -30,14 +30,20 @@ def tile_field_violations(pmtiles_path: str, approved: Dict[str, Set[str]],
     """Properties in the archive that are not generated or approved.
 
     ``approved``: {source layer: approved raw fields}. Every tile is checked
-    (keys only; features are not decoded)."""
+    (keys only; features are not decoded): read from the file, or, for the
+    very archive built in this session (same SHA-256), the keys of every
+    tile gathered as it was written."""
     if allow_all:
         return []
+    from .pmtiles_builder import built_layer_keys, sha256_file  # pylint: disable=import-outside-toplevel
     problems: List[str] = []
     seen: Set[str] = set()
+    known = built_layer_keys(sha256_file(pmtiles_path))
     with open_pmtiles(pmtiles_path) as archive:
-        for _, data in archive.tiles():
-            for layer, keys in mvt.layer_summary(data).items():
+        summaries = [known] if known is not None else \
+            (mvt.layer_summary(data) for _, data in archive.tiles())
+        for summary in summaries:
+            for layer, keys in summary.items():
                 allowed = approved.get(layer, set())
                 for key in keys:
                     if key.startswith(GENERATED_PREFIX) or key in allowed:

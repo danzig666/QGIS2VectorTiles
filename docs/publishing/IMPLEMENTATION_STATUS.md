@@ -1589,3 +1589,31 @@ parcels, 47,520 buildings, 38,880 house numbers, z0–16, 4 cores).
 | New tests | `test_switched_off_map_scale_property_does_not_split_per_zoom` (2), `test_tile_progress_follows_what_ogr2ogr_reports`, `test_a_failed_tile_job_runs_once_more`; slowest-layers log with pieces |
 | 88-layer plan, datasets compared with 4.28.0 | 2618 identical; 34 per-zoom datasets of two layers with switched-off `@map_scale` properties are 2 datasets now; 5 runs identical to each other |
 | Debrecen-size copy, tiles compared with 4.28.0 (per-zoom layers merged by name) | same 4640 tiles; every other layer identical; the fills identical at z16, simplified by 1 tile unit below |
+
+## 4.28.2: packaging checks without decoding the city twice
+
+Owner: "PMTiles: validating... took a pretty long time — is it needed?" On the Debrecen-size
+copy, BUILD_RELEASE took 107 s: packaging 50 s (of which 41 s validation) and "Validating the
+web release" 50 s (the same archive validated again, 41 s, and the field disclosure check
+reading every tile, ~15 s).
+
+- `validate_pmtiles`: the structural checks stay (header, sections, directories, sorted
+  unique ids, tile count = source, zoom range, offsets). Of the sampled tiles (64, all of
+  z0–z10 here) those up to 512 KB compressed are decoded feature by feature as before; bigger
+  ones (a zoomed-out tile holding the whole city, up to 4.6 MB) are checked by gzip + layer
+  structure (`mvt.layer_summary`, layer names against `vector_layers`). 41 → 7.8 s.
+- `payload_checked_sha256`: the release check of `data/map.pmtiles` skips the payload sample
+  when the staged file's SHA-256 equals the archive built and validated in this export
+  (`ArchiveDescriptor.payload_checked`). 41 → 0.2 s. Another file is checked in full.
+- Field disclosure (`tile_field_violations`): `build_pmtiles` already reads every tile's
+  layers and keys as it writes it; those keys are kept by the archive's SHA-256 (last 4
+  archives, `built_layer_keys`) and used for that very file; any other file is read tile by
+  tile. ~15 s → 0.3 s.
+- `mvt.payload`: a damaged gzip stream (`zlib.error`) is reported as an MVT error
+  (`Q2VT_PUB_NOT_MVT`) instead of escaping as a zlib exception.
+
+| Run | Result |
+|---|---|
+| Debrecen-size copy, BUILD_RELEASE | 107 s → 32 s (PMTiles 50 → 23 s, web release check 50 → 2.5 s) |
+| Publishing tests (17 `test_publishing_*` files + review fixes) | 192 passed, 5 skipped |
+| New tests | big tiles checked by their layers, a checked archive not decoded again, a damaged big tile still refused; field check from the keys gathered while writing, an archive built elsewhere read tile by tile |

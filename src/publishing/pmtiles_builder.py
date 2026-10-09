@@ -25,8 +25,9 @@ import sqlite3
 import tempfile
 import urllib.parse
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import mvt
 from .errors import Cancelled, PublishingError
@@ -66,6 +67,8 @@ class ArchiveDescriptor:
     vector_layers: List[str] = field(default_factory=list)
     zoom_counts: Dict[int, int] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    # The tiles were checked (validate_pmtiles) when the archive was built.
+    payload_checked: bool = False
 
     def public_dict(self) -> dict:
         """Path-free description for manifests."""
@@ -104,6 +107,19 @@ def connect_readonly(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA query_only = ON")
     return conn
+
+
+# The property keys of every tile of the archives built here, by the
+# archive's SHA-256: the field disclosure check of that very file uses them
+# instead of reading every tile again (a city: 20 s).
+_LAYER_KEYS: "OrderedDict[str, Dict[str, Set[str]]]" = OrderedDict()
+
+
+def built_layer_keys(sha256: str) -> Optional[Dict[str, Set[str]]]:
+    """{layer: property keys} of every tile of an archive built in this
+    session with this SHA-256 (None: not built here)."""
+    keys = _LAYER_KEYS.get(sha256)
+    return {name: set(found) for name, found in keys.items()} if keys is not None else None
 
 
 def sha256_file(path: str, chunk: int = 1 << 20) -> str:
@@ -385,8 +401,12 @@ def build_pmtiles(input_mbtiles: str, output_pmtiles: str,
             from .validation import validate_pmtiles  # pylint: disable=import-outside-toplevel
             validate_pmtiles(partial, expected_tiles=info.tile_count,
                              sample=options.sample_tiles, progress=progress.sub(0.9, 0.99))
+            descriptor.payload_checked = True
         descriptor.size_bytes = os.path.getsize(partial)
         descriptor.sha256 = sha256_file(partial)
+        _LAYER_KEYS[descriptor.sha256] = {name: set(entry["keys"]) for name, entry in seen_layers.items()}
+        while len(_LAYER_KEYS) > 4:
+            _LAYER_KEYS.popitem(last=False)
         if os.path.exists(output):  # options.overwrite
             os.remove(output)
         os.replace(partial, output)
