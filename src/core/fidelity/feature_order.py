@@ -17,8 +17,10 @@ Style layers drawn by (pass, stratum, rule, symbol layer) then put every
 feature above the overlapping features QGIS draws before it. A feature above
 stratum 0 is drawn by a copy of its rule's style layers filtered to the
 lifted features (RulesExporter._keep_feature_order, "_kNN" style names); the
-rule's own style layers leave them out. Touching neighbours (a partition) and
-overlaps narrower than the margin (data simplification) do not count.
+rule's own style layers leave them out. Touching polygons (a partition) and
+overlaps narrower than the margin (data simplification) do not count; lines
+that touch do (a stroke has a width: a street ending on a main road covers
+half of it), as do lines that meet within the margin.
 
 Geometries are QgsGeometry objects; QGIS is imported only when ``strata`` runs.
 """
@@ -29,7 +31,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 # Lifted (feature, rule) pairs and strata per layer. Each lifted feature id is
 # written twice into the style (the copy's filter and the rule's own); each
 # stratum is one more copy of every lifted rule's style layers. Beyond these
-# the layer keeps rule order and Q2VT_FEATURE_ORDER_ACROSS_RULES is reported.
+# the layer keeps rule order and Q2VT_FEATURE_ORDER_ACROSS_RULES is reported
+# (a line layer first tries without lines that only touch: crossings only).
 MAX_LIFTED = 5000
 MAX_STRATA = 8
 # Dataset rows of one layer read for the check (one spatial pass over them,
@@ -39,14 +42,17 @@ MAX_FEATURES = 100_000
 ID_FIELD = "q2vt_orig_id"
 
 
-def strata(items: Sequence[Tuple[int, int, object]],
-           margin: float = 0.0) -> Dict[Tuple[int, int], int]:
+def strata(items: Sequence[Tuple[int, int, object]], margin: float = 0.0,
+           touching_lines: bool = True) -> Dict[Tuple[int, int], int]:
     """{(feature id, rule): stratum} of the pairs above stratum 0.
 
     ``items``: (feature id, rule sequence, QgsGeometry) in QGIS's drawing
     order (by feature, then by rule). Polygons overlap only where their
     overlap is wider than twice ``margin``; a line must reach deeper than
-    ``margin`` into a polygon.
+    ``margin`` into a polygon; lines overlap where they meet (touching
+    included) or come within ``margin`` of each other. ``touching_lines``
+    False: lines overlap only where they cross or share a stretch (far fewer
+    strata on a network whose ways end at the junctions).
     """
     from qgis.core import QgsGeometry, QgsSpatialIndex  # pylint: disable=import-outside-toplevel
 
@@ -60,19 +66,28 @@ def strata(items: Sequence[Tuple[int, int, object]],
         engine.prepareGeometry()
         return engine
 
+    def polygon(n: int) -> bool:
+        geometry = items[n][2]
+        return int(getattr(geometry.type(), "value", geometry.type())) == 2
+
+    def strokes(n: int, other: int) -> bool:
+        """Two lines that overlap where they touch (a stroke has a width)."""
+        return touching_lines and not polygon(n) and not polygon(other)
+
     def core(n: int):
         """A polygon without its outer ``margin``; None: not shrunk (a line)."""
         if n not in cores:
-            geometry = items[n][2]
-            polygonal = int(getattr(geometry.type(), "value", geometry.type())) == 2
-            cores[n] = geometry.buffer(-margin, 2) if polygonal and margin > 0 else None
+            cores[n] = items[n][2].buffer(-margin, 2) if polygon(n) and margin > 0 else None
         return cores[n]
 
     for n, (fid, seq, geometry) in enumerate(items):
         # The feature's earlier rules: drawn below this one, as QGIS does.
         own = level[n - 1] if n and items[n - 1][0] == fid else 0
         candidates = []
-        for other in index.intersects(geometry.boundingBox()):
+        box = geometry.boundingBox()
+        if touching_lines and margin > 0 and not polygon(n):
+            box.grow(margin)  # a line ending within the margin of another
+        for other in index.intersects(box):
             ofid, oseq, _ = items[other]
             need = level[other] + (1 if oseq > seq else 0)
             if ofid != fid and need > own:
@@ -85,7 +100,11 @@ def strata(items: Sequence[Tuple[int, int, object]],
                 engine = prepared(geometry)
             other_geometry = items[other][2]
             if not engine.intersects(other_geometry.constGet()):
-                continue
+                # Lines that meet within the margin: a junction vertex moved
+                # by the data simplification.
+                if not strokes(n, other) or margin <= 0 or \
+                        engine.distance(other_geometry.constGet()) > margin:
+                    continue
             if core(n) is not None or core(other) is not None:
                 # A polygon: the overlap must reach beyond the margin (which
                 # also leaves out touching neighbours).
@@ -94,7 +113,7 @@ def strata(items: Sequence[Tuple[int, int, object]],
                 other_core = other_geometry if core(other) is None else core(other)
                 if not core_engine.intersects(other_core.constGet()):
                     continue
-            elif engine.touches(other_geometry.constGet()):
+            elif not strokes(n, other) and engine.touches(other_geometry.constGet()):
                 continue  # neighbours that only touch
             own = need  # the highest need left: the rest cannot raise it
         level.append(own)

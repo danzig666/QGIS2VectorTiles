@@ -5,9 +5,11 @@ import json
 import os
 
 from qgis.core import (QgsCategorizedSymbolRenderer, QgsFeature, QgsFeatureRequest, QgsField,
-                       QgsFillSymbol, QgsGeometry, QgsProcessingFeedback, QgsProject, QgsRectangle,
-                       QgsRendererCategory, QgsVectorLayer)
+                       QgsFillSymbol, QgsGeometry, QgsLineSymbol, QgsProcessingFeedback, QgsProject,
+                       QgsRectangle, QgsRendererCategory, QgsRuleBasedRenderer,
+                       QgsSimpleLineSymbolLayer, QgsVectorLayer)
 from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtGui import QColor
 
 from q2vt_fixtures import SQUARES, reset_project, to_geopackage, zoning_layer
 
@@ -74,6 +76,31 @@ def test_touching_or_same_rule_features_are_not_lifted(plugin):
     sliver = QgsGeometry.fromWkt("POLYGON((9.6 0, 20 0, 20 10, 9.6 10, 9.6 0))")
     assert fo.strata([(1, 1, _square(0, 0)), (2, 0, sliver)], margin=0.25) == {}
     assert fo.strata([(1, 1, _square(0, 0)), (2, 0, sliver)]) == {(2, 0): 1}
+
+
+def _line(*points):
+    return QgsGeometry.fromWkt("LINESTRING(" + ", ".join(f"{x} {y}" for x, y in points) + ")")
+
+
+def test_touching_lines_are_lifted(plugin):
+    """A stroke has a width: a street ending on a main road (a T-junction)
+    covers half of it, and lines meeting end to end overlap at their caps."""
+    from fidelity import feature_order as fo
+    street, main = _line((5, 0), (5, 10)), _line((0, 10), (10, 10))
+    # QGIS draws the street, then the main road (an earlier rule) above it.
+    assert fo.strata([(1, 2, street), (2, 0, main)]) == {(2, 0): 1}
+    assert fo.strata([(1, 2, _line((0, 0), (5, 0))), (2, 0, _line((5, 0), (9, 0)))]) == {(2, 0): 1}
+    # A junction vertex moved off the main road by the data simplification.
+    near = _line((5, 0), (5, 9.95))
+    assert fo.strata([(1, 2, near), (2, 0, main)], margin=0.1) == {(2, 0): 1}
+    assert fo.strata([(1, 2, near), (2, 0, main)], margin=0.01) == {}
+    # Touching polygons (a partition) still do not count.
+    assert fo.strata([(1, 1, _square(0, 0)), (2, 0, _square(10, 0))]) == {}
+    # Crossings only (the fallback beyond the limits).
+    assert fo.strata([(1, 2, street), (2, 0, main)], touching_lines=False) == {}
+    assert fo.strata([(1, 2, near), (2, 0, main)], margin=0.1, touching_lines=False) == {}
+    crossing = _line((5, 0), (5, 20))
+    assert fo.strata([(1, 2, crossing), (2, 0, main)], touching_lines=False) == {(2, 0): 1}
 
 
 # Drawing order A, C, B: conservation C overlaps the forests A and B, which
@@ -166,6 +193,67 @@ def test_simplified_neighbours_are_not_lifted(plugin, tmp_path):
     rules, diags, _ = _export_rules(tmp_path, _landuse(str(tmp_path / "t.gpkg"), features=features))
     assert _fills(rules) == [("#ff0000", None), ("#0000ff", None)]
     assert not diags.by_code("Q2VT_FEATURE_ORDER_ACROSS_RULES")
+
+
+# A street (fid 1) ending on a main road (fid 2): a T-junction.
+JUNCTION = [("street", ((500, 0), (500, 1000))), ("main", ((0, 1000), (1000, 1000)))]
+
+
+def _roads(path, features=JUNCTION):
+    """Rule-based roads with symbol levels: casings in pass 0, fills in pass 1."""
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "roads", "memory")
+    layer.dataProvider().addAttributes([QgsField("kind", QVariant.String)])
+    layer.updateFields()
+    for kind, points in features:
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([kind])
+        feature.setGeometry(_line(*((2120000 + x, 6020000 + y) for x, y in points)))
+        layer.dataProvider().addFeature(feature)
+    saved = to_geopackage(layer, path)
+    root = QgsRuleBasedRenderer.Rule(None)
+    for kind, casing, fill in (("main", "#804000", "#ffc040"), ("street", "#808080", "#ffffff")):
+        symbol = QgsLineSymbol()
+        symbol.deleteSymbolLayer(0)
+        for color, width, draw_pass in ((casing, 2.0, 0), (fill, 1.4, 1)):
+            line = QgsSimpleLineSymbolLayer(QColor(color), width)
+            line.setRenderingPass(draw_pass)
+            symbol.appendSymbolLayer(line)
+        root.appendChild(QgsRuleBasedRenderer.Rule(symbol, 0, 0, f"\"kind\" = '{kind}'", kind))
+    renderer = QgsRuleBasedRenderer(root)
+    renderer.setUsingSymbolLevels(True)
+    saved.setRenderer(renderer)
+    return saved
+
+
+def test_rule_based_symbol_levels_keep_feature_order_at_junctions(plugin, tmp_path):
+    """Within a pass QGIS draws feature by feature: the main road, drawn after
+    the street ending on it, stays unbroken although its rule comes first."""
+    rules, diags, utils = _export_rules(tmp_path, _roads(str(tmp_path / "roads.gpkg")))
+    [main_id] = _orig_ids(utils, rules[0].output_dataset)  # the main road's casing
+    without_main = ["match", ["get", "q2vt_orig_id"], [main_id], False, True]
+    only_main = ["match", ["get", "q2vt_orig_id"], [main_id], True, False]
+    for draw_pass, (main_color, street_color) in ((0, ("#804000", "#808080")),
+                                                  (1, ("#ffc040", "#ffffff"))):
+        lines = [(r.rule.symbol().color().name(), r.feature_filter) for r in rules
+                 if r.get_attr("c") == 1 and r.order[1] == draw_pass]
+        assert lines == [(main_color, without_main), (street_color, None), (main_color, only_main)]
+    assert not diags.by_code("Q2VT_FEATURE_ORDER_ACROSS_RULES")
+
+
+def test_line_layer_beyond_the_limits_keeps_the_crossings(plugin, tmp_path, monkeypatch):
+    """Too many lines lifted with the junctions: the crossings keep QGIS's
+    order, the junctions rule order (a note), instead of rule order everywhere."""
+    from fidelity import feature_order as fo
+    monkeypatch.setattr(fo, "MAX_LIFTED", 3)  # both main roads in both passes: 4
+    features = JUNCTION + [("street", ((2500, 0), (2500, 2000))),   # fid 3 crosses
+                           ("main", ((2000, 1000), (3000, 1000)))]  # main road 4
+    rules, diags, utils = _export_rules(tmp_path, _roads(str(tmp_path / "roads.gpkg"), features))
+    [diag] = diags.by_code("Q2VT_FEATURE_ORDER_ACROSS_RULES")
+    assert diag.severity.value == "info" and "(4 features in 1 strata" in diag.message
+    _, crossed = _orig_ids(utils, rules[0].output_dataset)  # the main roads 2 and 4
+    fills = [r.feature_filter for r in rules if r.get_attr("c") == 1 and r.order[1] == 1]
+    assert fills == [["match", ["get", "q2vt_orig_id"], [crossed], False, True], None,
+                     ["match", ["get", "q2vt_orig_id"], [crossed], True, False]]
 
 
 def test_feature_order_limit_reports_diagnostic(plugin, tmp_path, monkeypatch):

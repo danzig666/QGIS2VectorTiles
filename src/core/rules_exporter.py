@@ -2811,7 +2811,7 @@ class RulesExporter:
         # Overlaps narrower than about a tile unit at the last zoom: slivers
         # between neighbours simplified apart (or invisible).
         margin = self._simplification_tolerance() / _DATA_SIMPLIFICATION_TOLERANCE
-        result: Dict[int, Dict[Tuple[int, int], int]] = {}
+        drawn: Dict[int, list] = {}
         for draw_pass, names in footprints.items():
             parts: Dict[Tuple[int, int], list] = {}
             ranks: Dict[int, float] = {}
@@ -2825,14 +2825,35 @@ class RulesExporter:
             # QGIS's drawing order: feature by feature (request order), each
             # with its rules in order.
             keys = sorted(parts, key=lambda key: (ranks[key[0]], key))
-            items = [(fid, seq, parts[(fid, seq)][0] if len(parts[(fid, seq)]) == 1
-                      else QgsGeometry.collectGeometry(parts[(fid, seq)])) for fid, seq in keys]
-            lifted = fo.strata(items, margin)
-            if lifted:
-                result[draw_pass] = lifted
-        total = sum(len(lifted) for lifted in result.values())
-        top = max((s for lifted in result.values() for s in lifted.values()), default=0)
-        if total > fo.MAX_LIFTED or top > fo.MAX_STRATA:
+            drawn[draw_pass] = [(fid, seq, parts[(fid, seq)][0] if len(parts[(fid, seq)]) == 1
+                                 else QgsGeometry.collectGeometry(parts[(fid, seq)]))
+                                for fid, seq in keys]
+
+        def lift(touching_lines: bool):
+            result = {}
+            for draw_pass, items in drawn.items():
+                lifted = fo.strata(items, margin, touching_lines)
+                if lifted:
+                    result[draw_pass] = lifted
+            total = sum(len(lifted) for lifted in result.values())
+            top = max((s for lifted in result.values() for s in lifted.values()), default=0)
+            return result, total, top, total <= fo.MAX_LIFTED and top <= fo.MAX_STRATA
+
+        result, total, top, fits = lift(True)
+        if not fits and _enum_value(layer.geometryType()) == 1:
+            # Lines that only touch (ways ending at a junction) lift far more
+            # features than crossings: keep at least the crossings' order.
+            crossing, _, _, crossing_fits = lift(False)
+            if crossing_fits:
+                self.diagnostics.add(
+                    "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                    f"Layer '{layer.name()}': too many lines of different rules meet ({total} "
+                    f"features in {top} strata; the export keeps up to {fo.MAX_LIFTED} features "
+                    f"in {fo.MAX_STRATA} strata): lines that cross keep QGIS's drawing order, "
+                    "lines that only touch (at junctions) are drawn in rule order.",
+                    severity=Severity.INFO, layer_id=layer.id())
+                return crossing
+        if not fits:
             self.diagnostics.add(
                 "Q2VT_FEATURE_ORDER_ACROSS_RULES",
                 f"Layer '{layer.name()}': {total} feature(s) that QGIS draws above overlapping "
