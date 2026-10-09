@@ -2288,6 +2288,28 @@ class QgisMapLibreStyleExporter:
         return name
 
     @staticmethod
+    def _offset_ems(dx, dy, size, baseline: float):
+        """A font marker's offset in ems of its size, baseline added: [x, y],
+        or a zoom step of them when offset and size do not scale alike (a
+        map-unit scale limit on one of them). text-offset is laid out at the
+        tile's whole zoom only: each zoom takes the ratio of its middle
+        (exact there, within sqrt(2) at its ends)."""
+        if all(ex.is_number(v) for v in (dx, dy, size)):
+            return [ex.ratio(dx, size), ex.ratio(dy, size) + baseline]
+        pairs = []
+        for zoom in range(0, 25):
+            den = ex.evaluate_zoom_curve(size, zoom + 0.5)
+            pairs.append((zoom, [round(ex.evaluate_zoom_curve(dx, zoom + 0.5) / den, 4) if den else 0.0,
+                                 round(ex.evaluate_zoom_curve(dy, zoom + 0.5) / den + baseline, 4)
+                                 if den else baseline]))
+        if all(pair == pairs[0][1] for _, pair in pairs):
+            return pairs[0][1]
+        expression = ["step", ["zoom"], ["literal", pairs[0][1]]]
+        for zoom, pair in pairs[1:]:
+            expression += [zoom, ["literal", pair]]
+        return expression
+
+    @staticmethod
     def _font_marker_baseline_em(symbol_layer) -> float:
         """Half the ascent of the marker's font, in ems (``QgsFontMarkerSymbolLayer``
         draws the text with its baseline this far below the point)."""
@@ -2387,17 +2409,20 @@ class QgisMapLibreStyleExporter:
         if offset.x() or offset.y():
             static_size = size if not isinstance(size, list) or ex.is_zoom_curve(size) else \
                 PropertyExtractor.length(symbol_layer.size(), symbol_layer.sizeUnit())
-            dx = PropertyExtractor.length(offset.x(), symbol_layer.offsetUnit())
-            dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit())
-            ems = [ex.ratio(dx, static_size), ex.ratio(dy, static_size)]
-            if all(ex.is_number(v) for v in ems):
-                ems[1] += baseline
-            else:
+            scale = symbol_layer.offsetMapUnitScale()
+            dx = PropertyExtractor.length(offset.x(), symbol_layer.offsetUnit(), None, scale)
+            dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit(), None, scale)
+            try:
+                ems = self._offset_ems(dx, dy, static_size, baseline)
+            except (ex.ExpressionError, TypeError, IndexError):
                 self.context.report("Q2VT_MIXED_UNITS",
                                     "Font marker offset and size use different unit families.")
                 ems = [0.0, baseline]
-        if abs(ems[0]) > 1e-6 or abs(ems[1]) > 1e-6:
-            layout["text-offset"] = [round(ems[0], 4), round(ems[1], 4)]
+        if not ex.is_expression(ems):
+            if abs(ems[0]) > 1e-6 or abs(ems[1]) > 1e-6:
+                layout["text-offset"] = [round(ems[0], 4), round(ems[1], 4)]
+        else:
+            layout["text-offset"] = ems
         layer_def["layout"].update(layout)
         paint = {
             "text-color": PropertyExtractor.get_value_or_expression(

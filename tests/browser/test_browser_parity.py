@@ -277,6 +277,50 @@ def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
     assert _compare(tmp_path, layer, metric="shape") < 0.12
 
 
+@pytest.mark.parametrize("limited", ["both", "size"])
+def test_a_font_marker_offset_in_map_units_with_a_scale_limit(tmp_path, limited):
+    """A font marker on a line, sized and offset in map units with a minimum scale
+    (zoomed out past it, both keep their size at that scale): the offset was
+    read without its scale limit, did not divide evenly into the size and
+    was dropped (the text sat on its point). Limited on the size only, the
+    offset in ems changes with the zoom."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsMapUnitScale
+    from qgis.PyQt.QtCore import QPointF
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "lines", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 100} {CENTER[1]}, {CENTER[0] + 100} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    marker = QgsFontMarkerSymbolLayer("DejaVu Sans", "Vv", 20)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setOffset(QPointF(0, -30))
+    marker.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    limit = QgsMapUnitScale(2000, 0)  # the view (about 1:3200) is zoomed out past it
+    marker.setSizeMapUnitScale(limit)
+    if limited == "both":
+        marker.setOffsetMapUnitScale(limit)
+    marker_line = QgsMarkerLineSymbolLayer()
+    marker_line.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    marker_line.setRotateSymbols(False)
+    marker_line.setSubSymbol(QgsMarkerSymbol([marker]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([marker_line])))
+    _compare(tmp_path, layer, metric="shape")
+    (_, top, _, bottom), _ = _ink_boxes(tmp_path)
+    (_, btop, _, bbottom), _ = _ink_boxes(tmp_path, "browser")
+    assert abs((top + bottom) / 2 - (btop + bbottom) / 2) <= 3, ((top, bottom), (btop, bbottom))
+
+
+def _ink_boxes(tmp_path, name="qgis"):
+    """Bounding box of the dark ink of a capture, and its ink count."""
+    from PIL import Image
+    image = Image.open(str(tmp_path / f"v_{name}.png")).convert("L")
+    mask = image.point(lambda v: 255 if v < 128 else 0)
+    return mask.getbbox(), sum(1 for v in mask.getdata() if v)
+
+
 def test_thin_lines_get_the_ink_qgis_gives_them(tmp_path):
     """Qt inks a 0.3 px line with 0.3 px of ink; MapLibre's antialiasing
     alone gives it ~0.43 px (1.2 px lines agree): opacity compensates."""
