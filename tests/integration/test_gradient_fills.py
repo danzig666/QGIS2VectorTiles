@@ -232,3 +232,24 @@ def test_screen_unit_shapeburst_distance_follows_the_zoom(plugin, tmp_path):
     assert sorted(b.visibility.min_zoom for b in bands) == [14 + i / 4 for i in range(8)]
     assert not any("fixed at zoom" in d.message for d in diags.items)
 
+
+
+def test_fewer_shapeburst_steps_are_reported(plugin, tmp_path, monkeypatch):
+    """Over the output budget, a screen-unit shapeburst gets one band set per
+    half zoom or per zoom (width within about 19 % or 41 %): reported now."""
+    from qgis.core import QgsProcessingFeedback
+    from q2vt_plugin.src.core import materializer  # pylint: disable=import-error
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_fixtures import reset_project
+    monkeypatch.setattr(materializer.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 1)
+    fill = QgsShapeburstFillSymbolLayer(QColor("#5f9fd2"), QColor("#d3e9f7"))
+    fill.setUseWholeShape(False)
+    fill.setMaxDistance(2.2)
+    fill.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    assert any("per zoom" in d.message for d in diags.by_code("Q2VT_GRADIENT_APPROXIMATE"))

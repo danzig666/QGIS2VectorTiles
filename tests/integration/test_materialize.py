@@ -315,6 +315,22 @@ def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     assert mask_difference(reference, ours) < 0.15
 
 
+def test_a_rotated_map_unit_svg_fill_is_reported(plugin, tmp_path):
+    """Map-unit SVG fills are a grid of SVG markers: a rotated fill turns each
+    SVG but not the grid (QGIS turns the whole texture). Unreported before."""
+    from qgis.core import QgsSVGFillSymbolLayer
+    svg = tmp_path / "dot.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+                   '<rect x="2" y="4" width="6" height="2" fill="black"/></svg>')
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "rsvg.gpkg"))
+    fill = QgsSVGFillSymbolLayer(str(svg), 20, 30)
+    fill.setPatternWidthUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    _, _, diags = _export(plugin, layer, tmp_path)
+    assert any("Rotated SVG fill" in d.message for d in diags.by_code("Q2VT_PATTERN_APPROXIMATE"))
+
+
 def test_svg_fill_without_svg_draws_only_its_stroke(plugin, tmp_path):
     from qgis.core import QgsSVGFillSymbolLayer
     layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],

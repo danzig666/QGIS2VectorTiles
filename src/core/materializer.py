@@ -1234,6 +1234,10 @@ class SymbolMaterializer:
         self._report("Q2VT_PATTERN_APPROXIMATE",
                      "SVG fill tiles crossing the polygon edge are drawn whole when their "
                      "centre is inside (QGIS clips the texture).", flat_rule)
+        if abs(layer.angle() % 360.0) > 1e-9:
+            self._report("Q2VT_PATTERN_APPROXIMATE",
+                         "Rotated SVG fill in map units: each SVG is turned, but the grid is not "
+                         "(QGIS turns the whole texture).", flat_rule)
         recipe = mat.grid_recipe(width, height, 0.0, 0.0, width / 2.0, -height / 2.0,
                                  self.project_crs or flat_rule.layer.crs().authid(),
                                  self._anchor(layer, flat_rule))
@@ -1888,6 +1892,11 @@ class SymbolMaterializer:
         features = self._layer_totals(flat_rule.layer)[2]
         steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
                       if features * count * (high - low + 1) * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        if steps < self.SHAPEBURST_ZOOM_STEPS[0]:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst distance in screen units is set per {} to stay within the "
+                         "output size (width within about {} %).".format(
+                             "half zoom" if steps == 2 else "zoom", 19 if steps == 2 else 41), flat_rule)
         zoom_rules = self._per_zoom(flat_rule)
         rules = []
         for index, rule in enumerate(zoom_rules):

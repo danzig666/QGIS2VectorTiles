@@ -56,7 +56,7 @@ This README describes QWebMap **4.31.0**. Newest first:
   says so; layers with inner shadow or inner glow lines keep rule order). Polygon outline bands in millimetres are on the
   correct side and are buffered rings like QGIS's (no dark wedges at corners). Shapeburst
   distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %;
-  big layers get one setting per half zoom or per zoom, within about 19 % or 41 %).
+  big layers get one setting per half zoom or per zoom, within about 19 % or 41 %, reported).
   Gradient fills of small features (a village green published from zoom 11) keep their outer
   colours instead of ending in one flat band.
 - **Labels:** the viewer measures each character's own width, so Free labels that fit in QGIS are
@@ -162,7 +162,7 @@ What carries over:
   Clipping to the shape is exact for screen-unit patterns and for simple line, cross and closed
   markers; other map-unit markers on the edge are drawn whole and rotated map-unit point patterns
   unrotated (both reported); in a rotated map-unit SVG fill each tile is turned but the grid is
-  not.
+  not (reported).
 - **Lines:** widths, offsets (QGIS's offset line where sharp corners need it), caps, joins and
   dash patterns (including map-unit custom dashes); marker lines with markers at the QGIS
   positions (interval, vertices, centre point; data-defined intervals, and screen-unit intervals
