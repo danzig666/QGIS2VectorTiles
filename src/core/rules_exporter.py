@@ -120,7 +120,7 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
-from .datasets import ExportedDataset, gpkg_info
+from .datasets import DatasetInfo, ExportedDataset, gpkg_info
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
@@ -186,6 +186,10 @@ _MAX_WORKERS_HARD_CAP = 6
 _SERIAL_READ_PROVIDERS = frozenset(
     {"postgres", "mssql", "oracle", "wfs", "spatialite", "hana", "db2"}
 )
+# Providers a worker process reads itself (files); any other source (a
+# database, a web service, a virtual layer of project layers) is read by the
+# main process.
+_WORKER_READ_PROVIDERS = frozenset({"ogr", "delimitedtext", "gpx"})
 
 # Temp files prefered to be parquet but in linux which not support parquet they are became gpkg.
 _TEMP_LAYER_FORMAT = 'sqlite'
@@ -250,6 +254,11 @@ class _SourceSnapshot:
     def needs_serial_read(self) -> bool:
         return self.provider in _SERIAL_READ_PROVIDERS
 
+    @property
+    def read_in_main(self) -> bool:
+        """Read by the main process even when workers export (export_workers)."""
+        return self.provider not in _WORKER_READ_PROVIDERS
+
 
 @dataclass
 class _RuleGroupSnapshot:
@@ -298,6 +307,9 @@ class _RuleGroupSnapshot:
     # map CRS its anchor is measured in: each feature carries the anchor.
     pattern_anchor: str = ""
     anchor_crs: str = ""
+    # Only each feature's biggest part (from flat_rules; set for a worker
+    # process, which has no rules: RulesExporter._keep_biggest_part).
+    keep_biggest_part: Optional[bool] = None
 
 
 _RING_FIELD = f"{_FIELD_PREFIX}_ring_cw"
@@ -483,6 +495,10 @@ class RulesExporter:
 
         # Cancellation flag. Workers check this between processing.run calls.
         self._cancelled = threading.Event()
+        # Worker processes of this export (export_workers), when used.
+        self._pool = None
+        self._missing_variables: Optional[List[str]] = None
+        self._output_info: Dict[str, object] = {}  # a worker's gpkg_info of its outputs
 
     # -------------------------------------------------------------------
     # Public API
@@ -517,20 +533,29 @@ class RulesExporter:
             if self._is_cancelled():
                 return [], []
 
-            materialized = self._materialize_sources_serial(
-                {lid: src for lid, src in sources.items() if lid in needed})
+            # Worker processes start while the sources are read (they need
+            # a few seconds to start QGIS).
+            self._pool = self._start_workers(pending)
+            try:
+                needed_sources = {lid: src for lid, src in sources.items() if lid in needed}
+                if self._workers_ready():  # each worker reads a source and builds its base layer
+                    base_layers = self._sources_on_workers(needed_sources)
+                else:
+                    materialized = self._materialize_sources_serial(needed_sources)
 
-            # Phase 2 — parallel base-layer pipeline (file → file).
-            if self._is_cancelled():
-                return [], []
+                    # Phase 2 — parallel base-layer pipeline (file → file).
+                    if self._is_cancelled():
+                        return [], []
 
-            base_layers = self._build_base_layers_parallel(materialized)
+                    base_layers = self._build_base_layers_parallel(materialized)
 
-            # Phase 3 — parallel rule export (file → file).
-            if self._is_cancelled():
-                return [], []
-            
-            rule_outputs = self._export_rules_parallel(pending, base_layers)
+                # Phase 3 — parallel rule export (file → file).
+                if self._is_cancelled():
+                    return [], []
+
+                rule_outputs = self._export_rules_parallel(pending, base_layers)
+            finally:
+                self._stop_workers()
             self._store_cached(pending, rule_outputs)
             rule_outputs.update(cached_outputs)
             # Phase 4 — collect results on caller thread.
@@ -812,67 +837,71 @@ class RulesExporter:
             self._post("pushInfo", f"   Reading layer {number}/{len(sources)}: {src.name}")
             self._progress(0.0, 0.15, number - 1, len(sources))
             main_thread.keep_responsive()
-            out_path = join(self.utils_dir, f"materialized_{src.layer_id}.{_TEMP_LAYER_FORMAT}")
-            began = time.perf_counter()
-
-            if exists(out_path):
-                # Idempotent restart support.
+            out_path = self._materialize_one(src)
+            if out_path:
                 materialized[src.layer_id] = out_path
-                continue
+        return materialized
 
-            try:
-                # Open a FRESH layer in this thread. The original
-                # FlattenedRule.layer reference may have main-thread affinity;
-                # here we deliberately don't reuse it. The newly constructed
-                # layer is owned by this thread.
-                layer = QgsVectorLayer(src.source_uri, src.name, src.provider)
-                if layer.isValid() and src.crs_wkt:
-                    # Épületek (a shapefile without .prj, EPSG:23700 set in the
-                    # project) reopened without a CRS: the extent filter then
-                    # dropped all its features without a message.
-                    crs = QgsCoordinateReferenceSystem.fromWkt(src.crs_wkt)
-                    if crs.isValid() and crs != layer.crs():
-                        layer.setCrs(crs)
-                if not layer.isValid():
-                    self._post("pushWarning",
-                        f"Cannot open source '{src.name}' "
-                        f"(provider={src.provider}); skipping."
-                    )
-                    continue
+    def _materialize_one(self, src: _SourceSnapshot) -> Optional[str]:
+        """One source read into a local file (its path), None when it cannot be."""
+        out_path = join(self.utils_dir, f"materialized_{src.layer_id}.{_TEMP_LAYER_FORMAT}")
+        began = time.perf_counter()
+        if exists(out_path):
+            # Idempotent restart support.
+            return out_path
+        try:
+            # Open a FRESH layer in this thread. The original
+            # FlattenedRule.layer reference may have main-thread affinity;
+            # here we deliberately don't reuse it. The newly constructed
+            # layer is owned by this thread.
+            layer = QgsVectorLayer(src.source_uri, src.name, src.provider)
+            if layer.isValid() and src.crs_wkt:
+                # Épületek (a shapefile without .prj, EPSG:23700 set in the
+                # project) reopened without a CRS: the extent filter then
+                # dropped all its features without a message.
+                crs = QgsCoordinateReferenceSystem.fromWkt(src.crs_wkt)
+                if crs.isValid() and crs != layer.crs():
+                    layer.setCrs(crs)
+            if not layer.isValid():
+                self._post("pushWarning",
+                    f"Cannot open source '{src.name}' "
+                    f"(provider={src.provider}); skipping."
+                )
+                return None
 
-                # Materialise via fixgeometries(METHOD=0): does the first
-                # geometry-cleaning pass AND dumps provider data to Parquet
-                # in one shot. Published layers first get their stable
-                # feature key, computed on the source (provider FIDs and
-                # attributes as the project has them).
-                source = layer
-                if src.feature_key:
-                    source = self._run_alg_safe(
-                        "fieldcalculator", "native", INPUT=layer, FIELD_NAME=FEATURE_KEY_FIELD,
-                        FIELD_TYPE=2, FIELD_LENGTH=0, FORMULA=src.feature_key)
-                if src.needs_serial_read:
-                    with self._serial_read_lock:
-                        self._run_alg_safe(
-                            "fixgeometries", "native",
-                            INPUT=source, METHOD=0, OUTPUT=out_path,
-                        )
-                else:
+            # Materialise via fixgeometries(METHOD=0): does the first
+            # geometry-cleaning pass AND dumps provider data to Parquet
+            # in one shot. Published layers first get their stable
+            # feature key, computed on the source (provider FIDs and
+            # attributes as the project has them).
+            source = layer
+            if src.feature_key:
+                source = self._run_alg_safe(
+                    "fieldcalculator", "native", INPUT=layer, FIELD_NAME=FEATURE_KEY_FIELD,
+                    FIELD_TYPE=2, FIELD_LENGTH=0, FORMULA=src.feature_key)
+            if src.needs_serial_read:
+                with self._serial_read_lock:
                     self._run_alg_safe(
                         "fixgeometries", "native",
                         INPUT=source, METHOD=0, OUTPUT=out_path,
                     )
-                if src.order_by:
-                    self._add_order_field(out_path, src.order_by)
-                materialized[src.layer_id] = out_path
-                self._spent(src.layer_id, began)
-            except _Cancelled:
-                raise
-            except Exception:  # noqa: BLE001  (we want to swallow per-source)
-                self.feedback.reportError(
-                    f"Failed to export source '{src.name}':\n"
-                    f"{traceback.format_exc()}"
+            else:
+                self._run_alg_safe(
+                    "fixgeometries", "native",
+                    INPUT=source, METHOD=0, OUTPUT=out_path,
                 )
-        return materialized
+            if src.order_by:
+                self._add_order_field(out_path, src.order_by)
+            self._spent(src.layer_id, began)
+            return out_path
+        except _Cancelled:
+            raise
+        except Exception:  # noqa: BLE001  (we want to swallow per-source)
+            self.feedback.reportError(
+                f"Failed to export source '{src.name}':\n"
+                f"{traceback.format_exc()}"
+            )
+        return None
 
     # -------------------------------------------------------------------
     # Phase 2 — parallel base-layer pipeline (file → file)
@@ -1073,6 +1102,12 @@ class RulesExporter:
         outputs: Dict[str, Optional[str]] = {}
         if not rule_groups:
             return outputs
+        if self._workers_ready():
+            rule_groups = self._groups_on_workers(rule_groups, base_layers, outputs)
+            if not rule_groups or self._is_cancelled():
+                for grp in rule_groups:
+                    outputs.setdefault(grp.output_dataset, None)
+                return outputs
 
         max_workers = self._compute_pool_size(len(rule_groups))
 
@@ -1121,6 +1156,244 @@ class RulesExporter:
                         detail=traceback.format_exc(limit=-3))
                     outputs[grp.output_dataset] = None
         return outputs
+
+    # -------------------------------------------------------------------
+    # Worker processes (export_workers)
+    # -------------------------------------------------------------------
+    # From this many datasets to export on: below, starting QGIS in the
+    # workers takes longer than they save.
+    _MIN_GROUPS_FOR_WORKERS = 40
+
+    def _worker_count(self, pending: List[_RuleGroupSnapshot]) -> int:
+        """Worker processes for this export: Q2VT_WORKERS=n sets it (0: none)."""
+        forced = os.environ.get("Q2VT_WORKERS", "")
+        if forced.isdigit():
+            return int(forced) if pending else 0
+        if self.parallel or not self._memory_chains or len(pending) < self._MIN_GROUPS_FOR_WORKERS:
+            return 0
+        cpu = max(1, int((os.cpu_count() or 1) * self.cpu_percent / 100))
+        return min(cpu, _MAX_WORKERS_HARD_CAP) if cpu > 1 else 0
+
+    def _start_workers(self, pending: List[_RuleGroupSnapshot]):
+        count = self._worker_count(pending)
+        if count <= 0:
+            return None
+        from . import export_workers  # pylint: disable=import-outside-toplevel
+        try:
+            state = export_workers.worker_state(self)
+            pool = export_workers.WorkerPool(count, state, self.utils_dir)
+        except Exception as error:  # noqa: BLE001 - the export goes on in this process
+            crash_log.note(f"Worker processes not started: {error}")
+            return None
+        pool.ready_workers = None  # known once they answer (_workers_ready)
+        self._missing_variables = state["missing_variables"]
+        return pool
+
+    def _workers_ready(self) -> bool:
+        """Whether worker processes take part (waiting for them to start)."""
+        pool = getattr(self, "_pool", None)
+        if pool is None:
+            return False
+        if pool.ready_workers is None:
+            from qgis.core import Qgis as _Qgis  # pylint: disable=import-outside-toplevel
+            pool.ready_workers = pool.wait_ready(_Qgis.version(), self._is_cancelled) \
+                if pool.workers else []
+            if pool.ready_workers:
+                self._post("pushInfo", f"   {len(pool.ready_workers)} worker processes export the datasets")
+            else:
+                crash_log.note(f"Worker processes unavailable ({pool.error}): this process exports")
+                self._stop_workers()
+                return False
+        return bool(pool.ready_workers) and any(pool.alive[n] for n in pool.ready_workers)
+
+    def _stop_workers(self) -> None:
+        pool = getattr(self, "_pool", None)
+        self._pool = None
+        if pool is not None:
+            pool.close(kill=self._is_cancelled())
+
+    def _run_on_workers(self, tasks: list, handle) -> list:
+        """Hand ``tasks`` ((task message, items)) to the idle workers;
+        ``handle(message)`` takes each result and tells whether it finished
+        the worker's task. The items of the tasks no worker finished (a
+        worker stopped) are returned, to be done in this process."""
+        pool = self._pool
+        idle = [n for n in pool.ready_workers if pool.alive[n]]
+        waiting, running, leftovers = list(tasks), {}, []
+        while waiting or running:
+            while waiting and idle:
+                number = idle.pop(0)
+                task = waiting.pop(0)
+                if pool.submit(number, task[0]):
+                    running[number] = task
+                else:
+                    waiting.insert(0, task)
+            if not running:
+                break  # every worker stopped
+            try:
+                number, message = pool.results.get(timeout=0.2)
+            except queue.Empty:
+                message = None
+            self._flush_messages()
+            main_thread.keep_responsive()
+            if self._is_cancelled():
+                return []
+            if message is None:
+                continue
+            if message[0] == "exit":
+                pool.alive[number] = False
+                task = running.pop(number, None)
+                if task is not None:
+                    leftovers.extend(task[1])
+                crash_log.note(f"Worker {number} stopped (exit code {message[1]})")
+                continue
+            for kind, text in (message[-1] if message[0] in ("base-done", "group-done") else []):
+                self._post(kind, text)
+            if handle(message, running.get(number)):
+                running.pop(number, None)
+                idle.append(number)
+        return leftovers + [item for task in waiting for item in task[1]]
+
+    def _sources_on_workers(self, sources: Dict[str, _SourceSnapshot]) -> Dict[str, str]:
+        """The sources read and their base layers built by the workers (a
+        database, web service or virtual layer read here first, as before);
+        what a worker could not do is done here. {layer id: base layer}."""
+        self._layer_names = {src.layer_id: src.name for src in sources.values()}
+        targets = {lid: join(self.utils_dir, f"map_layer_{lid}.{_TEMP_LAYER_FORMAT}") for lid in sources}
+        keep = self._vertex_sensitive_layers()
+        anchored = {rule.layer.id() for rule in self.flattened_rules or []
+                    if self._pattern_anchor(rule, 2) == "feature"}
+        read_here = [src for src in sources.values() if src.read_in_main]
+        materialized = {}
+        for number, src in enumerate(read_here, 1):
+            self._check_cancel()
+            self._post("pushInfo", f"   Reading layer {number}/{len(read_here)}: {src.name}")
+            path = self._materialize_one(src)
+            if path:
+                materialized[src.layer_id] = path
+        tasks = []
+        for lid, src in sources.items():
+            if exists(targets[lid]) or (src.read_in_main and lid not in materialized):
+                continue
+            tasks.append((("source", lid, None if src.read_in_main else src, materialized.get(lid),
+                           targets[lid], lid in keep, lid in anchored), [lid]))
+        done, left = [0], {}
+
+        def handle(message, task):
+            _, lid, error, seconds, _ = message
+            done[0] += 1
+            self._progress(0.0, 0.3, done[0], len(tasks))
+            self._post("pushInfo", f"   Prepared layer {done[0]}/{len(tasks)}: {self._layer_names.get(lid, lid)}")
+            with self._timing_lock:
+                self.layer_seconds[lid] = self.layer_seconds.get(lid, 0.0) + seconds
+            if error:  # done again here (the same steps, this QGIS)
+                crash_log.note(f"Layer {lid} failed in a worker:\n{error}")
+                left[lid] = sources[lid]
+                read = join(self.utils_dir, f"materialized_{lid}.{_TEMP_LAYER_FORMAT}")
+                for path in [targets[lid]] + ([read] if lid not in materialized else []):
+                    if exists(path):
+                        os.remove(path)
+            return True
+        for lid in self._run_on_workers(tasks, handle):
+            left[lid] = sources[lid]
+        if left and not self._is_cancelled():
+            read = {lid: materialized[lid] for lid in left if lid in materialized}
+            read.update(self._materialize_sources_serial(
+                {lid: src for lid, src in left.items() if lid not in materialized}))
+            self._layer_names = {src.layer_id: src.name for src in sources.values()}
+            self._build_base_layers_parallel(read)
+        return targets
+
+    def _groups_on_workers(self, rule_groups: List[_RuleGroupSnapshot], base_layers: Dict[str, str],
+                           outputs: Dict[str, Optional[str]]) -> List[_RuleGroupSnapshot]:
+        """Rule groups exported by the workers, a layer's groups together (they
+        share steps), the biggest layers first; the groups left to this
+        process (they need its project, or a worker could not do them)."""
+        from . import export_workers  # pylint: disable=import-outside-toplevel
+        here, by_layer = [], {}
+        for grp in rule_groups:
+            source = base_layers.get(grp.layer_id)
+            if not source or not exists(source):
+                outputs[grp.output_dataset] = None
+                self._failed_groups.add(grp.output_dataset)  # source unreadable: not "empty"
+            elif export_workers.needs_main_process(grp, self._missing_variables):
+                here.append(grp)
+            else:
+                by_layer.setdefault(grp.layer_id, []).append(grp)
+        workers = sum(1 for n in self._pool.ready_workers if self._pool.alive[n])
+        total_groups = sum(len(groups) for groups in by_layer.values())
+        chunk = max(8, total_groups // max(1, 4 * workers))
+        tasks = []
+        for lid, groups in by_layer.items():
+            weight = os.path.getsize(base_layers[lid]) if exists(base_layers[lid]) else 0
+            for start in range(0, len(groups), chunk):
+                part = groups[start:start + chunk]
+                items = [(dataclasses.replace(g, flat_rules=[], keep_biggest_part=self._keep_biggest_part(g)),
+                          base_layers[lid]) for g in part]
+                tasks.append(((("groups", items)), part, weight * len(part)))
+        tasks.sort(key=lambda task: -task[2])
+        by_name = {grp.output_dataset: grp for grp in rule_groups}
+        total, done, last = total_groups + len(here), [0], [time.monotonic()]
+        before = len(self.diagnostics.items)
+
+        def handle(message, task):
+            if message[0] == "task-done":
+                return True
+            grp = by_name[message[1]]
+            if message[0] == "group-main":  # a function only this QGIS knows
+                here.append(grp)
+                return False
+            _, name, output, error, diagnostics, seconds, info, _ = message
+            with self._timing_lock:
+                self.layer_seconds[grp.layer_id] = self.layer_seconds.get(grp.layer_id, 0.0) + seconds
+            if error:  # done again here: the same steps, this QGIS
+                crash_log.note(f"Rule group {name} failed in a worker:\n{error}")
+                path = join(self.utils_dir, f"{name}.{_TEMP_RULE_FORMAT}")
+                if exists(path):
+                    os.remove(path)
+                here.append(grp)
+                return False
+            restored = DiagnosticCollector()
+            export_cache.replay_diagnostics(restored, diagnostics, name, name)
+            self._group_diagnostics[name] = restored.items
+            self.diagnostics.extend(restored.items)
+            outputs[name] = output
+            if info is not None:
+                self._output_info[name] = DatasetInfo(*info)
+            done[0] += 1
+            self._progress(0.3, 1.0, done[0], total)
+            if time.monotonic() - last[0] > 5 or done[0] == total_groups:
+                last[0] = time.monotonic()
+                self._post("pushInfo", f"   Exported {done[0]}/{total} datasets "
+                                       f"(last: {grp.layer_name or grp.layer_id})")
+            return False
+        left = self._run_on_workers([(task[0], task[1]) for task in tasks], handle)
+        reported = set(outputs)
+        here += [grp for grp in left if grp.output_dataset not in reported and grp not in here]
+        self._order_diagnostics(before, rule_groups)
+        order = {grp.output_dataset: index for index, grp in enumerate(rule_groups)}
+        return sorted(here, key=lambda grp: order[grp.output_dataset])
+
+    def _order_diagnostics(self, before: int, rule_groups: List[_RuleGroupSnapshot]) -> None:
+        """The workers' diagnostics in the order of the groups (as one process
+        adds them), not in the order they finished."""
+        order = {grp.output_dataset: index for index, grp in enumerate(rule_groups)}
+        self.diagnostics.sort_from(before, lambda d: order.get(getattr(d, "component", None), len(order)))
+
+    def _keep_biggest_part(self, grp: _RuleGroupSnapshot) -> bool:
+        """Only the biggest part of each feature: a label not placed on
+        every part, a centroid fill not on every part."""
+        if grp.keep_biggest_part is not None:
+            return grp.keep_biggest_part
+        if grp.rule_type == 1 and not grp.visible_polygons:
+            settings = grp.flat_rules[0].rule.settings()
+            if settings and not settings.labelPerPart:
+                return True
+        if grp.rule_type == 0:
+            symbol_layer = grp.flat_rules[0].rule.symbol().symbolLayers()[0]
+            if symbol_layer.layerType() == 'CentroidFill' and not symbol_layer.pointOnAllParts():
+                return True
+        return False
 
     def _spent(self, layer_id: str, began: float) -> None:
         with self._timing_lock:
@@ -1407,15 +1680,7 @@ class RulesExporter:
         # Geometry transformation.
         self._check_cancel()
         transbase = refactored
-        keep_biggest_part = False
-        if grp.rule_type == 1 and not grp.visible_polygons:
-            settings = grp.flat_rules[0].rule.settings()
-            if settings and not settings.labelPerPart:
-                keep_biggest_part = True
-        if grp.rule_type == 0:
-            symbol_layer = grp.flat_rules[0].rule.symbol().symbolLayers()[0]
-            if symbol_layer.layerType() == 'CentroidFill' and not symbol_layer.pointOnAllParts():
-                keep_biggest_part = True
+        keep_biggest_part = self._keep_biggest_part(grp)
         if keep_biggest_part and grp.source_geometry != 2:
             # Lines and points: regroup the parts of each feature (split in the
             # base layer) without dissolving. Dissolve nodes a self-crossing
@@ -2326,7 +2591,8 @@ class RulesExporter:
                     if rule in self.flattened_rules:
                         self.flattened_rules.remove(rule)
                 continue
-            info = gpkg_info(on_disk) if self.light_results else None
+            info = (self._output_info.get(grp.output_dataset) or gpkg_info(on_disk)) \
+                if self.light_results else None
             if info is not None:
                 layer = ExportedDataset(
                     on_disk, grp.output_dataset, info.count,

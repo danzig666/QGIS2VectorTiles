@@ -180,7 +180,32 @@ def apply_pattern_positions(dx: float, dy: float, disp_x: float = 0.0, disp_y: f
     return int(width), int(height), positions
 
 
+_TILED: "OrderedDict" = None  # (marker, cell, positions) -> cell image (tile_markers)
+_TILED_MAX = 48
+
+
 def tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
+    """``_tile_markers``, remembered: the same pattern cell is asked for at
+    several zoom levels and by several styles (96 calls, 19 cells in a big
+    project), each a few thousand markers composited one by one."""
+    global _TILED  # pylint: disable=global-statement
+    import hashlib  # pylint: disable=import-outside-toplevel
+    from collections import OrderedDict  # pylint: disable=import-outside-toplevel
+    if _TILED is None:
+        _TILED = OrderedDict()
+    key = (hashlib.sha1(marker.tobytes()).hexdigest(), marker.mode, marker.size, int(cell_w), int(cell_h),
+           tuple((float(x), float(y)) for x, y in positions), bool(wrap))
+    cell = _TILED.get(key)
+    if cell is None:
+        cell = _TILED[key] = _tile_markers(marker, cell_w, cell_h, positions, wrap)
+        while len(_TILED) > _TILED_MAX:
+            _TILED.popitem(last=False)
+    else:
+        _TILED.move_to_end(key)
+    return cell.copy()
+
+
+def _tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
     """Paint ``marker`` (RGBA, centred on its origin) at ``positions`` in a
     ``cell_w × cell_h`` repeat cell, wrapping across edges so the cell tiles
     seamlessly (``wrap``; otherwise markers are clipped at the cell edge).

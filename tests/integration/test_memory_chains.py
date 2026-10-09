@@ -60,6 +60,7 @@ def _outlined(parcels):
 
 
 def _export(tmp_path, name, monkeypatch, file_chains, stats=None):
+    monkeypatch.setenv("Q2VT_WORKERS", "0")  # the chains of this process (workers: test_export_workers)
     if file_chains:
         monkeypatch.setenv("Q2VT_FILE_CHAINS", "1")
     else:

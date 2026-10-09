@@ -63,6 +63,10 @@ class DataDefinedPropertiesFetcher:
     # The safe getter names of each class (dir() and the name checks were most
     # of the walk's time, every rule of every zoom walking the same classes).
     _safe_attrs: dict = {}
+    # (class, getter) found to give no QGIS object (an image, a number, a
+    # dict...): its value is never walked, so it is not called again (the
+    # symbol preview images were a fifth of the walk).
+    _no_objects: set = set()
 
     def __init__(self, qgis_object, min_scale, suffix=0, diagnostics=None, context=None):
         self._root = qgis_object
@@ -118,7 +122,11 @@ class DataDefinedPropertiesFetcher:
         return names
 
     def _walk_attributes(self, obj):
+        kind = type(obj)
+        no_objects = self._no_objects
         for attr in self._attributes(obj):
+            if (kind, attr) in no_objects:
+                continue
             try:
                 getter = getattr(obj, attr)
                 if not callable(getter):
@@ -130,6 +138,9 @@ class DataDefinedPropertiesFetcher:
                     continue
 
                 first = children[0]
+                if first is not None and "qgis." not in str(type(first)):
+                    no_objects.add((kind, attr))
+                    continue
                 if (
                     isinstance(first, type(obj))
                     or "qgis." not in str(type(first))
