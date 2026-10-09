@@ -639,6 +639,30 @@ def _glyph_advances(path):
     return advances
 
 
+def test_upper_case_labels_have_their_glyphs(export, tmp_path):
+    """A label shown in capitals (QGIS "All uppercase", MapLibre
+    text-transform) of text stored in lower case: the glyphs of the capitals
+    are generated. Only the stored letters were, and MapLibre silently left
+    out every capital it had no glyph for."""
+    layer = zoning_layer(path=str(tmp_path / "caps.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "lower(zone) || ' ry'"
+    settings.isExpression = True
+    text_format = settings.format()
+    text_format.setCapitalization(Qgis.Capitalization.AllUppercase)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    layout = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]["layout"]
+    assert layout["text-transform"] == "uppercase"
+    glyphs = _glyph_advances(os.path.join(result, "style", "glyphs", layout["text-font"][0],
+                                           "0-255.pbf"))
+    assert {ord(c) for c in "KLRY"} <= set(glyphs)
+
+
 def test_curved_repeated_line_labels_are_placed_per_zoom(export, tmp_path):
     """Swellendam rivers: a curved label repeated along a wiggly river (a
     vertex every 60 m turning 30 degrees one way, then the other) is laid

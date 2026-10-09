@@ -207,6 +207,10 @@ class GlyphGenerator:
                 by_field.setdefault(self.field_name, []).append(entry)
         for field, paths in by_field.items():
             chars |= self._extract_unique_chars(sorted(set(paths)), field)
+        # Labels may be drawn in upper or lower case (text-transform: the
+        # label's capitalization), from text stored as typed.
+        for char in list(chars):
+            chars.update(char.upper() + char.lower())
         return chars
 
     @staticmethod
