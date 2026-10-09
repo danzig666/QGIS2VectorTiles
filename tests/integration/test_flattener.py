@@ -229,3 +229,26 @@ def test_labels_keep_the_zooms_of_a_renderer_rule_materialized_per_zoom(flattene
     assert labels and all((r.get_attr("o"), r.get_attr("i")) == (11, 17) for r in labels), \
         [(r.output_dataset, r.get_attr("o"), r.get_attr("i")) for r in labels]
     assert len({r.output_dataset for r in labels}) == len(labels)
+
+
+def test_nested_rules_get_unique_ids(flattener):
+    """Children of different parents (a nested rule-based renderer: land use
+    with quality classes 1-8 under each use) had the same rule number at
+    their depth: one id and one dataset for several rules, and duplicate
+    style layer ids that stopped the web map from loading."""
+    from qgis.core import QgsFillSymbol, QgsRuleBasedRenderer, QgsSymbol
+    root = QgsRuleBasedRenderer.Rule(None)
+    for zone, colour in (("K1", "255,0,0"), ("K2", "0,255,0")):
+        parent = QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": colour}),
+                                           filterExp=f"\"zone\" = '{zone}'")
+        for width in (0.2, 0.4):
+            parent.appendChild(QgsRuleBasedRenderer.Rule(
+                QgsFillSymbol.createSimple({"color": colour, "outline_width": str(width)}),
+                filterExp=f"\"width\" = {width}"))
+        root.appendChild(parent)
+    layer = zoning_layer()
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    reset_project(layer)
+    rules, _ = flattener()
+    names = [r.output_dataset for r in rules]
+    assert len(rules) == 12 and len(set(names)) == len(names), names

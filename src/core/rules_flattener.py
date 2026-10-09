@@ -104,9 +104,9 @@ class RulesFlattener:
         self._rule_systems: list = []
         self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom,
                                                fast_markers=fast_markers, min_zoom=min_zoom)
-        # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
-        # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
-        self._unique_counter = 0
+        # Depth -> first rule number of the next parent's children: rule
+        # numbers ("r") are unique per depth within a (layer, rule type) pass.
+        self._child_base = {}
         # Draw order: rule sequence within a layer (QGIS draws a feature's
         # rules in tree pre-order, later rules on top) and whether the layer's
         # renderer honours symbol-layer rendering passes.
@@ -190,9 +190,7 @@ class RulesFlattener:
                 self._draw_seq = 0
                 self._honor_passes = self._renderer_honors_passes(layer.renderer())
             if root_rule:
-                # Reset per (layer, rule_type) pass; values must stay < 100
-                # because FlattenedRule.set_attr formats as 2 digits.
-                self._unique_counter = 0
+                self._child_base = {}  # reset per (layer, rule_type) pass
                 before = len(self.flattened_rules)
                 self._flatten_rule(layer, layer_idx, root_rule, rule_type, 0, 0)
                 mode = self._merge_mode(layer.renderer()) if rule_type == 0 else ""
@@ -764,6 +762,11 @@ class RulesFlattener:
             if inheritance_source is not None:
                 parent_for_children = inheritance_source
         child_ancestors = tuple(ancestors) + ((origin or rule,) if rule_level > 0 else ())
+        # Rule numbers are unique per depth: the children of two parents (a
+        # nested rule-based renderer) would otherwise share an id and a
+        # dataset - and the style its duplicate layer ids (no map at all).
+        base = self._child_base.get(rule_level + 1, 0)
+        self._child_base[rule_level + 1] = base + len(rule.children())
         for child_idx, child in enumerate(rule.children()):
             if not child.active():
                 continue
@@ -772,7 +775,7 @@ class RulesFlattener:
                 variants = self._split_else_rule(child, rule, layer)
             for variant in variants:
                 self._flatten_rule(
-                    layer, layer_idx, variant, rule_type, rule_level + 1, child_idx,
+                    layer, layer_idx, variant, rule_type, rule_level + 1, base + child_idx,
                     parent_for_children, origin=child if variant is not child else None,
                     ancestors=child_ancestors,
                 )
