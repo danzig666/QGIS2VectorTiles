@@ -20,7 +20,9 @@ window.q2vt = { mapErrors: [], missingImages: [] };
 const map = new maplibregl.Map({
   container: "map", style: "http://localhost:${port}/style/style.json",
   center: [${lon}, ${lat}], zoom: ${zoom}, fadeDuration: 0, attributionControl: false,
-  pixelRatio: 1, canvasContextAttributes: { preserveDrawingBuffer: true } });
+  pixelRatio: 1, canvasContextAttributes: { preserveDrawingBuffer: true },
+  // The export's style points at the plugin's preview port (9000).
+  transformRequest: (url) => ({ url: url.replace("://localhost:9000/", "://localhost:${port}/") }) });
 map.on("error", (e) => window.q2vt.mapErrors.push(String(e.error && e.error.message || e)));
 map.on("styleimagemissing", (e) => window.q2vt.missingImages.push(e.id));
 map.once("idle", () => {

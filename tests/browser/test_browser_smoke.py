@@ -21,7 +21,7 @@ from q2vt_fixtures import reset_project
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS = os.path.join(HERE, "artifacts")
-PORT = 9000  # the style's URLs use the plugin's configured port (_PORT)
+PORT = 9000  # the port the style's URLs name (the plugin's _PORT); pages rewrite it
 EXTENT = QgsRectangle(2119000, 6019000, 2123000, 6023000)
 
 pytestmark = pytest.mark.browser
@@ -39,12 +39,23 @@ def _export(tmp_path, layer):
 
 
 def _serve(export_dir):
+    """This export's tile server on a free port (``proc.port``): runs side by
+    side (other test processes, other worktrees) each get their own. On the
+    shared port 9000 a run could capture another run's export. The pages
+    rewrite the style's localhost:9000 URLs to this port."""
+    import socket  # pylint: disable=import-outside-toplevel
+    with socket.socket() as probe:
+        probe.bind(("localhost", 0))
+        port = probe.getsockname()[1]
     proc = subprocess.Popen([sys.executable, os.path.join(export_dir, "utils", "tiles_server.py"),
-                             "--port", str(PORT)], stdout=subprocess.DEVNULL,
+                             "--port", str(port)], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
+    proc.port = port
     for _ in range(50):
+        if proc.poll() is not None:
+            break  # could not bind
         try:
-            urllib.request.urlopen(f"http://localhost:{PORT}/style/style.json", timeout=1)
+            urllib.request.urlopen(f"http://localhost:{port}/style/style.json", timeout=1)
             return proc
         except OSError:
             time.sleep(0.1)
@@ -73,7 +84,7 @@ def test_exported_package_renders_in_browser(tmp_path):
         # 13: inside the archive; 15.5: overzoom above the archive's max zoom 14.
         for zoom in ("13", "15.5"):
             shot = os.path.join(ARTIFACTS, f"smoke_z{zoom}.png")
-            run = subprocess.run(["node", os.path.join(HERE, "smoke.mjs"), export_dir, str(PORT),
+            run = subprocess.run(["node", os.path.join(HERE, "smoke.mjs"), export_dir, str(server.port),
                                   str(center.x()), str(center.y()), zoom, shot],
                                  capture_output=True, text=True, cwd=HERE, timeout=120)
             assert run.returncode == 0, run.stderr

@@ -27,7 +27,7 @@ import sys
 from q2vt_fixtures import reset_project, to_geopackage
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_browser_smoke import HERE, PORT, _serve  # noqa: E402 pylint: disable=wrong-import-position
+from test_browser_smoke import HERE, _serve  # noqa: E402 pylint: disable=wrong-import-position
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 CENTER = (2120500.0, 6020500.0)
@@ -75,7 +75,7 @@ def _compare(tmp_path, layer, metric="near", center=CENTER):
     server = _serve(export_dir)
     try:
         run = subprocess.run(["node", os.path.join(HERE, "gallery_capture.mjs"), export_dir,
-                              str(PORT), str(views), str(tmp_path)],
+                              str(server.port), str(views), str(tmp_path)],
                              capture_output=True, text=True, cwd=HERE, timeout=120)
         assert run.returncode == 0, run.stderr
     finally:
