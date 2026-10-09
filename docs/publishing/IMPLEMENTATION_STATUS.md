@@ -1545,3 +1545,47 @@ with 4.26/4.27: identical (label layers as sets of features); fidelity diagnosti
 | New: `test_marker_points.py`, `test_export_workers.py`, `test_export_speed.py` | 19 passed (direct markers = the expression on random lines; workers = one process, also when one stops; SQLite dataset reading/pruning; network folder; slowest-layers log; streaming merge; zoom bands = one run; fast marker lines) |
 | 88-layer plan, every tile compared with 4.26/4.27 | identical (labels as sets of features), diagnostics identical; one process too |
 | 11-layer published set, compared with 4.26 | identical |
+
+## 4.28.1: Debrecen export log (switched-off scale expressions, tile progress)
+
+From the owner's Debrecen log (7 layers, 32 datasets, network output folder): datasets
+4.5 min, tiles 6.6 min with the bar at 45% for four minutes, "43 layers left" for 7 layers,
+and "foldreszletek_egyben … tiles 3336 s" for a stage of 6.6 minutes. Reproduced on a
+Debrecen-size copy of the same seven layers (kiscsecs cadastre scaled and repeated: 85,320
+parcels, 47,520 buildings, 38,880 house numbers, z0–16, 4 cores).
+
+- `RulesFlattener._has_scale_dependencies` searched the saved rule for `@map_scale`, including
+  data-defined properties that are switched off (QGIS keeps their expressions): the parcel fill
+  (an unused outline width `CASE WHEN @map_scale < 1000 …`) and the buildings
+  (`if(@map_scale < 1000, 0, 0.15)`) became one dataset per zoom, each with every feature
+  (17 × 6 s for the parcels). `_drop_inactive_properties` removes switched-off properties
+  from the saved copy first. The fill is one dataset now: the same features at z16; below
+  it the writer's 1-unit simplification (1/16 px) applies as to any fill spanning several
+  zooms (sub-pixel specks dropped at low zooms); three "source layer has no tiles" warnings
+  for empty per-zoom building datasets are gone.
+- Tile progress: `ogr2ogr -progress` read by a thread per job (`_OutputReader`; stderr is
+  drained the same way, so a job writing many warnings can no longer block on a full pipe).
+  `TileProgress(reporting=True)` takes a job's share of features written (85% of the job;
+  the remaining share for assembling the tiles, eased in time); unreported jobs count 0.
+  "N of M layers left" counts layers, not zoom-band pieces. The slowest-layers log adds
+  "in N parallel pieces" (the seconds of a layer's pieces run side by side add up beyond the
+  stage's wall time: Debrecen 3336 s within 6.6 min).
+- Zoom bands checked: the parcels in one ogr2ogr 316 s, in bands 312 s (sum) — no overhead;
+  the stage 5.4 → 2.8 min. Debrecen's 3336 s is ~14 pieces at once on its computer.
+- A failed ogr2ogr job runs once more before the export fails (in one of nine runs of the
+  88-layer plan, ogr2ogr stopped with GEOS "orientationIndex encountered NaN/Inf numbers" on a
+  dataset that was identical, byte for byte in its rows, in every other run; not reproduced).
+
+| Debrecen-size copy, 4 cores | 4.22.2 | 4.28.0 | 4.28.1 |
+|---|---|---|---|
+| Datasets | 4.2 min | 3.5 min | 1.6 min |
+| Tiles | 8.4 min (after the datasets) | 3.0 min (in the background) | 2.8 min (in the background) |
+| Whole publication (PMTiles, release) | 14.5 min | 8.3 min | 6.1 min |
+| Map archive | 125.9 MB | 125.9 MB | 121.2 MB |
+
+| Run | Result |
+|---|---|
+| Related suites (export cache, speed, workers, flattener, materialize, memory chains, publishing, scaling, tile progress, marker points …) | 200 passed, in 6.6 min (20 test files) |
+| New tests | `test_switched_off_map_scale_property_does_not_split_per_zoom` (2), `test_tile_progress_follows_what_ogr2ogr_reports`, `test_a_failed_tile_job_runs_once_more`; slowest-layers log with pieces |
+| 88-layer plan, datasets compared with 4.28.0 | 2618 identical; 34 per-zoom datasets of two layers with switched-off `@map_scale` properties are 2 datasets now; 5 runs identical to each other |
+| Debrecen-size copy, tiles compared with 4.28.0 (per-zoom layers merged by name) | same 4640 tiles; every other layer identical; the fills identical at z16, simplified by 1 tile unit below |
