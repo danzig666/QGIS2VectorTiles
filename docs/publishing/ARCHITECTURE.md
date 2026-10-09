@@ -9,7 +9,8 @@ publishing.controller.export_local            (QGIS main thread, NoThreading kep
   EXPORT_MVT  existing compiler: QGIS2VectorTiles(layer_ids, feature_keys, extra_tile_fields,
               background without raster, add_result_layer=False, cache) -> tiles.mbtiles + style
               (export cache: datasets and per-layer tile sets of unchanged layers reused,
-              per-layer tiles merged; core/export_cache.py)
+              per-layer tiles merged; core/export_cache.py; 4.28: worker processes export the
+              datasets, core/export_workers.py; ogr2ogr runs start in the background)
   RECORDS     qgis_model.collect_records: published features (extent x exported rule filters),
               keys validated, label/terms/anchor/bounds/approved attributes (private JSONL)
   LEGEND      QGIS-rendered swatches of the original legend items; logical model
@@ -21,6 +22,7 @@ publishing.controller.export_local            (QGIS main thread, NoThreading kep
               (raster_tiles.py; vector layers never go here)
   BASEMAP     optional OpenStreetMap extract (Protomaps schema) by HTTP ranges or from a
               file, flavor styles, glyphs for its labels (basemap.py)
+  TILES       waits for the background tiles (validation, fidelity report)
   BUILD       web_builder.build_release -> releases/<id>/ (staging, validation, rename),
               pmtiles_builder (same MVT payloads), search/feature indexes, disclosure check,
               current.json atomically

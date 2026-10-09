@@ -61,7 +61,7 @@ class RulesFlattener:
 
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
                  diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
-                 scale_limits=None, extent=None):
+                 scale_limits=None, extent=None, fast_markers: bool = False):
         self.min_zoom = min_zoom
         self.extent = extent  # export extent (EPSG:3857), for renderer statistics
         # {layer id: (min scale, max scale)}: extra scale range of a layer
@@ -81,7 +81,8 @@ class RulesFlattener:
         # assigned to the project layers: exporting must never modify the
         # user's project (renderer, labeling, ELSE rules, scale visibility).
         self._rule_systems: list = []
-        self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom)
+        self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom,
+                                               fast_markers=fast_markers)
         # Tree-unique counter; reset per (layer, rule_type) pass. Used only to
         # disambiguate output_dataset when sibling subtrees share (l,t,d,r,...).
         self._unique_counter = 0

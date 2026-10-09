@@ -60,6 +60,7 @@ def _outlined(parcels):
 
 
 def _export(tmp_path, name, monkeypatch, file_chains, stats=None):
+    monkeypatch.setenv("Q2VT_WORKERS", "0")  # the chains of this process (workers: test_export_workers)
     if file_chains:
         monkeypatch.setenv("Q2VT_FILE_CHAINS", "1")
     else:
@@ -114,6 +115,7 @@ def test_memory_chains_give_the_same_tiles_and_share_steps(plugin, tmp_path, mon
     memory = _export(tmp_path, "memory", monkeypatch, False, stats)
     _same(files, memory)
     assert stats["run"] > 0 and stats["shared"] > 0, stats  # the same filter / outline at other zooms
+    assert stats["direct"] > 0, stats  # 4.28: interval markers computed in Python (same tiles)
     marker_layers = {name for tile in memory.values() for name in tile if "t00" in name}
     assert len(marker_layers) > 3  # fills, roads and per-zoom marker datasets were exported
 

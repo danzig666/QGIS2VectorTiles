@@ -258,6 +258,11 @@ class DiagnosticCollector:
         with self._lock:
             return list(self._items)
 
+    def sort_from(self, start: int, key) -> None:
+        """Sort the diagnostics added since ``start`` (stable)."""
+        with self._lock:
+            self._items[start:] = sorted(self._items[start:], key=key)
+
     def by_code(self, code: str) -> List[Diagnostic]:
         return [d for d in self.items if d.code == code]
 

@@ -1713,6 +1713,13 @@ class PublishDialog(QDialog):
         self.o_labels.addItem(tr("Visible polygon"), 1)
         self.o_labels.addItem(tr("As set in each layer's labels"), 2)
         self.o_all_fields = QCheckBox(tr("Publish ALL attribute fields in the tiles (not recommended)"))
+        self.o_fast_markers = QCheckBox(tr("Fast marker lines: let the browser place screen-size line markers"))
+        self.o_fast_markers.setToolTip(tr(
+            "Marker lines whose spacing is set in screen units (points, millimetres, pixels) keep that "
+            "spacing on screen at every zoom, so their markers are normally computed for every zoom level: "
+            "most of a big export. With this option the browser places them along the lines instead: a "
+            "much faster export, but the markers are not at QGIS's positions (spacing within about 0.7-1.4x, "
+            "markers may be missing at tile edges). Off: exact positions."))
         cache_row = QHBoxLayout()
         self.o_reuse = QCheckBox(tr("Reuse unchanged layers from earlier exports (faster)"))
         self.o_reuse.setToolTip(tr("Layers whose data files, style and export settings did not change "
@@ -1731,6 +1738,7 @@ class PublishDialog(QDialog):
         form.addRow(tr("Beyond the maximum zoom"), self.o_overzoom)
         form.addRow(tr("Polygon labels"), self.o_labels)
         form.addRow("", self.o_all_fields)
+        form.addRow("", self.o_fast_markers)
         form.addRow("", cache_row)
         form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
                                   "PMTiles archive, never as images. Only QGIS raster layers become image "
@@ -1971,6 +1979,7 @@ class PublishDialog(QDialog):
         self.o_overzoom.setCurrentIndex(max(0, self.o_overzoom.findData(profile.output.overzoom)))
         self.o_labels.setCurrentIndex(max(0, self.o_labels.findData(profile.output.polygon_labels_base)))
         self.o_all_fields.setChecked(profile.output.include_all_fields)
+        self.o_fast_markers.setChecked(profile.output.fast_markers)
         self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
@@ -2230,6 +2239,7 @@ class PublishDialog(QDialog):
         out.overzoom = self.o_overzoom.currentData()
         out.polygon_labels_base = self.o_labels.currentData()
         out.include_all_fields = self.o_all_fields.isChecked()
+        out.fast_markers = self.o_fast_markers.isChecked()
         out.reuse_unchanged = self.o_reuse.isChecked()
         dest = profile.destination
         dest.kind = self.d_kind.currentData()
