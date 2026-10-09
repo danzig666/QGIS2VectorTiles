@@ -11,6 +11,7 @@ from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsVectorLayer
 
 from publishing.basemap import STREETS_LAYER
 from publishing.controller import export_local
+from publishing.shard_pack import read_shard
 from publishing_fixtures import protomaps_planet
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +36,7 @@ def _search(result):
     manifest = json.load(open(os.path.join(folder, "manifest.json"), encoding="utf-8"))
     entries = []
     for shard in manifest["shards"]:
-        data = json.load(open(os.path.join(folder, shard["path"]), encoding="utf-8"))
+        data = read_shard(folder, shard)
         entries += [dict(zip(("layer", "key", "label", "terms", "anchor", "bounds", "zoom"), e),
                          layer=data["layers"][e[0]]) for e in data["entries"]]
     return manifest, entries

@@ -243,3 +243,50 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
     assert "overview map, 3D view" in review
     assert "terulet" in review
     dialog.close()
+
+
+def test_the_extent_is_drawn_on_the_map(project, messages):
+    """The published area drawn as a rectangle on the QGIS map: the window
+    steps aside while it is dragged; Esc or another map tool cancels; the
+    tool used before comes back."""
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+    from qgis.gui import QgsMapCanvas, QgsMapToolPan
+    from qgis.PyQt.QtCore import QEvent
+    from qgis.PyQt.QtGui import QKeyEvent
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error
+    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error
+    canvas = QgsMapCanvas()
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    canvas.resize(400, 300)
+    canvas.setExtent(QgsRectangle(2100000, 6000000, 2140000, 6030000))
+    pan = QgsMapToolPan(canvas)
+    canvas.setMapTool(pan)
+    bar = []
+
+    class Bar:
+        def pushMessage(self, *args): bar.append(args)
+
+    class Iface:
+        def mapCanvas(self): return canvas
+        def messageBar(self): return Bar()
+        def mainWindow(self): return None
+
+    dialog = PublishDialog(iface=Iface())
+    dialog.show()
+    dialog._draw_extent()  # pylint: disable=protected-access
+    assert isinstance(canvas.mapTool(), ExtentTool) and not dialog.isVisible() and bar
+    canvas.mapTool().extentChanged.emit(QgsRectangle(2110000, 6010000, 2110000, 6010000))  # a click
+    assert isinstance(canvas.mapTool(), ExtentTool)  # still drawing
+    canvas.mapTool().extentChanged.emit(QgsRectangle(2110000, 6010000, 2120000, 6016000))
+    assert canvas.mapTool() is pan and dialog.isVisible()
+    assert [round(v) for v in dialog.profile.view.extent] == [2110000, 6010000, 2120000, 6016000]
+    assert dialog.profile.view.extent_layer == "" and "Fixed extent" in dialog.extent_label.text()
+    dialog._draw_extent()  # pylint: disable=protected-access
+    canvas.mapTool().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                             Qt.KeyboardModifier.NoModifier))
+    assert canvas.mapTool() is pan and dialog.isVisible()
+    assert [round(v) for v in dialog.profile.view.extent] == [2110000, 6010000, 2120000, 6016000]
+    dialog._draw_extent()  # pylint: disable=protected-access
+    canvas.setMapTool(pan)  # another tool chosen
+    assert dialog.isVisible()
+    dialog.close()

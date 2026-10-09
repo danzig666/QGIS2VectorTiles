@@ -1,19 +1,16 @@
 // Search Web Worker: loads the publication-wide search index lazily (the
 // map never waits for it) and answers queries off the UI thread.
 import { rank, shardsForQuery } from "./search_core.mjs";
+import { fetchShard, shardId } from "./shards.mjs";
 
 let manifest = null;
 let base = null;
-const shards = new Map(); // path -> Promise<entries>
+const shards = new Map(); // shard id -> Promise<entries>
 
 async function loadShard(shard) {
-  if (!shards.has(shard.path)) {
-    shards.set(shard.path, fetch(new URL(shard.path, base)).then((r) => {
-      if (!r.ok) throw new Error(`${shard.path}: HTTP ${r.status}`);
-      return r.json();
-    }).then((data) => data.entries));
-  }
-  return shards.get(shard.path);
+  const id = shardId(shard);
+  if (!shards.has(id)) shards.set(id, fetchShard(base, shard).then((data) => data.entries));
+  return shards.get(id);
 }
 
 self.onmessage = async (event) => {

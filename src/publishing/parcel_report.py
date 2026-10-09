@@ -39,6 +39,7 @@ from .identifiers import key_expression
 from .models import ParcelInfoConfig, PublicationProfile
 from .progress import Progress
 from .provenance import layer_logical_id
+from .shard_pack import ShardPack
 
 TARGET_SHARD_RECORDS = 300
 EDGE_TOLERANCE = 0.1        # m: a cut line counts along a part boundary within this distance
@@ -622,13 +623,11 @@ def _write_shards(records: Dict[str, dict], layer_id: str, out_dir: str) -> dict
     manifest = {"schemaVersion": 1, "kind": "parcels", "layerId": layer_id, "prefixLength": length,
                 "records": count, "hash": "fnv1a32(layerId + U+0000 + key)", "catalog": "catalog.json",
                 "shards": []}
-    for skey in sorted(shards):
-        name = f"p-{skey or 'all'}.json"
-        data = json.dumps(shards[skey], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        with open(os.path.join(out_dir, name), "wb") as handle:
-            handle.write(data)
-        manifest["shards"].append({"key": skey, "path": name, "records": len(shards[skey]),
-                                   "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    # Every shard in one file, read by range (shard_pack): one file to upload.
+    with ShardPack(os.path.join(out_dir, "parcels.pack")) as pack:
+        for skey in sorted(shards):
+            manifest["shards"].append({"key": skey, **pack.add(shards[skey]),
+                                       "records": len(shards[skey])})
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, separators=(",", ":"))
     return manifest

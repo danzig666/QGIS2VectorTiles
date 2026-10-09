@@ -29,13 +29,21 @@ SMOKE = textwrap.dedent("""
     Processing.initialize()
     calls = []
 
+    from qgis.PyQt.QtWidgets import QMenu
+
+    class WebMenu(QMenu):
+        def addAction(self, action): calls.append(("menu", action.text())); return super().addAction(action)
+        def removeAction(self, action): calls.append(("unmenu",)); return super().removeAction(action)
+
     class Iface:
         window = QMainWindow()
+        web_menu = WebMenu("Web")
         def mainWindow(self): return self.window
         def addWebToolBarIcon(self, action): calls.append(("toolbar", action.text()))
-        def addPluginToWebMenu(self, menu, action): calls.append(("menu", menu))
+        def webMenu(self): return self.web_menu
+        def addPluginToWebMenu(self, menu, action): calls.append(("submenu", menu))
         def removeWebToolBarIcon(self, action): calls.append(("untoolbar",))
-        def removePluginWebMenu(self, menu, action): calls.append(("unmenu",))
+        def removePluginWebMenu(self, menu, action): calls.append(("unsubmenu",))
         canvas = QgsMapCanvas()
         def mapCanvas(self): return self.canvas
         def messageBar(self): return Bar()
@@ -113,8 +121,9 @@ def test_release_zip_installs_and_loads(tmp_path):
                             capture_output=True, text=True, timeout=300,
                             cwd=str(tmp_path), env={**os.environ, "PYTHONPATH": ""})
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
-    assert "('toolbar', 'Publish Web Map…')" in result.stdout
-    assert "('menu', 'QWebMap')" in result.stdout
+    assert "('toolbar', 'QWebMap: Publish Web Map…')" in result.stdout
+    # Right in the Web menu, no QWebMap submenu.
+    assert "('menu', 'QWebMap: Publish Web Map…')" in result.stdout and "submenu" not in result.stdout
     # the pre-rename copy is reported
     assert "('message', 'QWebMap', 'QGIS2VectorTiles (fork) is the old name " in result.stdout
     assert "('untoolbar',)" in result.stdout and "('unmenu',)" in result.stdout

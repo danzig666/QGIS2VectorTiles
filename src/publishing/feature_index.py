@@ -4,17 +4,19 @@ Exact feature lookup by (layer id, feature key) for deep links and popups
 works on a cold page even when search is disabled.
 
 Records: key, label, approved popup attributes, anchor and bounds — never
-geometry. Shards: ``features/f-<prefix>.json`` keyed by the first hex digits
-of FNV-1a-32 over ``layerId + "\\u0000" + key`` (UTF-8); the JavaScript
-twin is ``fnv1a`` in resources/web_viewer/search_core.mjs.
+geometry. Shards keyed by the first hex digits of FNV-1a-32 over
+``layerId + "\\u0000" + key`` (UTF-8), all in ``features/features.pack``
+(shard_pack); the JavaScript twin is ``fnv1a`` in
+resources/web_viewer/search_core.mjs.
 """
 
-import hashlib
-import json
 import os
 from typing import Dict, Iterable, Optional
 
+from .shard_pack import ShardPack
+
 TARGET_SHARD_RECORDS = 2000
+PACK_NAME = "features.pack"  # every shard, one after another (shard_pack)
 
 
 def fnv1a(text: str) -> str:
@@ -58,11 +60,7 @@ def build_feature_index(records: Iterable[dict], layers: Dict[str, dict], out_di
                 "coverage": {lid: {"records": sum(1 for (l, _) in items if l == lid),
                                    "fields": list(info["popup"])} for lid, info in layers.items()},
                 "shards": []}
-    for key in sorted(shards):
-        name = f"f-{key or 'all'}.json"
-        data = json.dumps(shards[key], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        with open(os.path.join(out_dir, name), "wb") as handle:
-            handle.write(data)
-        manifest["shards"].append({"key": key, "path": name, "records": len(shards[key]),
-                                   "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    with ShardPack(os.path.join(out_dir, PACK_NAME)) as pack:
+        for key in sorted(shards):
+            manifest["shards"].append({"key": key, **pack.add(shards[key]), "records": len(shards[key])})
     return manifest

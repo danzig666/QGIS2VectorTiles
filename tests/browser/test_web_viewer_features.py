@@ -15,6 +15,7 @@ from qgis.core import QgsRectangle
 from publishing.controller import export_local
 from publishing.preview_server import PreviewServer
 from publishing.provenance import layer_logical_id
+from publishing.shard_pack import read_shard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXTENT = QgsRectangle(2119000, 6019000, 2123000, 6023000)
@@ -51,7 +52,7 @@ def site(tmp_path_factory):
     features = json.load(open(os.path.join(rel, "features", "manifest.json"), encoding="utf-8"))
     records = []
     for shard in features["shards"]:
-        records += json.load(open(os.path.join(rel, "features", shard["path"]), encoding="utf-8"))
+        records += read_shard(os.path.join(rel, "features"), shard)
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),
                "lid": layer_logical_id(parcels.id()),

@@ -56,12 +56,13 @@ class QGIS2VectorTiles:
         from qgis.PyQt.QtGui import QIcon  # pylint: disable=import-outside-toplevel
         from qgis.PyQt.QtWidgets import QAction  # pylint: disable=import-outside-toplevel
         self.publish_action = QAction(QIcon(join(dirname(__file__), "icon.png")),
-                                      "Publish Web Map…", self.iface.mainWindow())
+                                      f"{PLUGIN_NAME}: Publish Web Map…", self.iface.mainWindow())
         self.publish_action.setObjectName("q2vtPublishWebMap")
         self.publish_action.setToolTip(f"{PLUGIN_NAME}: publish the project as a web map")
         self.publish_action.triggered.connect(self.show_publish_dialog)
         self.iface.addWebToolBarIcon(self.publish_action)
-        self.iface.addPluginToWebMenu(PLUGIN_NAME, self.publish_action)
+        # Right in the Web menu, not in a submenu of its own.
+        self.iface.webMenu().addAction(self.publish_action)
         self.dialog = None
         self._warn_old_plugin()
 
@@ -101,7 +102,7 @@ class QGIS2VectorTiles:
         action = getattr(self, "publish_action", None)
         if action is not None and self.iface is not None:
             self.iface.removeWebToolBarIcon(action)
-            self.iface.removePluginWebMenu(PLUGIN_NAME, action)
+            self.iface.webMenu().removeAction(action)
             action.deleteLater()
         if getattr(self, "dialog", None) is not None:
             self.dialog.close()

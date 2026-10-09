@@ -219,11 +219,12 @@ class PublishDialog(QDialog):
                 profile.layers.append(LayerConfig(layer.id(), included=False, initially_visible=False))
         return profile
 
-    def _canvas_extent_3857(self):
+    def _canvas_extent_3857(self, rect=None):
+        """The map canvas extent (or ``rect``, in the canvas CRS) in EPSG:3857."""
         canvas = self.iface.mapCanvas()
         transform = QgsCoordinateTransform(canvas.mapSettings().destinationCrs(),
                                            QgsCoordinateReferenceSystem("EPSG:3857"), self.project)
-        box = transform.transformBoundingBox(canvas.extent())
+        box = transform.transformBoundingBox(canvas.extent() if rect is None else rect)
         return [box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()]
 
     # ------------------------------------------------------------------ UI
@@ -358,11 +359,17 @@ class PublishDialog(QDialog):
         self.e_extent_layer.layerChanged.connect(self._extent_layer_changed)
         extent_button = QPushButton(tr("Map canvas"))
         extent_button.setToolTip(tr("Fix the published area to what the QGIS map canvas shows now."))
-        extent_button.clicked.connect(self._use_canvas_extent)
+        extent_button.clicked.connect(lambda: self._use_canvas_extent())
         extent_button.setEnabled(self.iface is not None)
+        draw_button = QPushButton(tr("Draw…"))
+        draw_button.setToolTip(tr("Draw the published area on the QGIS map: drag a rectangle "
+                                  "(Esc cancels)."))
+        draw_button.clicked.connect(self._draw_extent)
+        draw_button.setEnabled(self.iface is not None)
         self.e_extent_layer.setMinimumContentsLength(12)
         extent_row.addWidget(self.e_extent_layer, 1)
         extent_row.addWidget(extent_button)
+        extent_row.addWidget(draw_button)
         extent_box.addLayout(extent_row)
         # Short lines, not wrapped: the form reserves their full height.
         self.extent_label = QLabel()
@@ -660,13 +667,33 @@ class PublishDialog(QDialog):
         if path:
             self.e_logo.setText(path)
 
-    def _use_canvas_extent(self):
-        self.profile.view.extent = self._canvas_extent_3857()
+    def _use_canvas_extent(self, rect=None):
+        self.profile.view.extent = self._canvas_extent_3857(rect)
         self.profile.view.extent_layer = ""
         self.e_extent_layer.blockSignals(True)
         self.e_extent_layer.setLayer(None)
         self.e_extent_layer.blockSignals(False)
         self._show_extent()
+
+    def _draw_extent(self):
+        """The published area drawn on the map: this window steps aside
+        while the rectangle is dragged."""
+        from .extent_tool import ExtentTool  # pylint: disable=import-outside-toplevel
+        canvas = self.iface.mapCanvas()
+        self._extent_tool = ExtentTool(canvas, self._extent_drawn)
+        canvas.setMapTool(self._extent_tool)
+        self.hide()
+        self.iface.messageBar().pushMessage(
+            tr("Web map"), tr("Drag a rectangle on the map: the published area. Esc cancels."),
+            Qgis.MessageLevel.Info, 8)
+
+    def _extent_drawn(self, rect):
+        self._extent_tool = None
+        if rect is not None:
+            self._use_canvas_extent(rect)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _extent_layer_changed(self, layer):
         self.profile.view.extent_layer = layer.id() if layer is not None else ""

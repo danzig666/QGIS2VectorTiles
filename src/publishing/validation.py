@@ -453,9 +453,17 @@ def scan_bundle(root: str, files: Iterable[str], secrets: Iterable[str] = (),
     for relative in files:
         path = os.path.join(root, *relative.split("/"))
         ext = os.path.splitext(relative)[1].lower()
+        text = None
         if ext in TEXT_EXTENSIONS:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
+        elif ext == ".pack":  # index shards, each gzip-compressed (shard_pack)
+            from .shard_pack import pack_text  # pylint: disable=import-outside-toplevel
+            text = pack_text(path)
+            if text is None:
+                problems.append(f"{relative}: unreadable shard pack")
+                continue
+        if text is not None:
             scan = scan_text_for_leaks(text, secrets)
             # Third-party bundles and the documents the user publishes (a decree
             # in .txt may quote a path): secret values only.
