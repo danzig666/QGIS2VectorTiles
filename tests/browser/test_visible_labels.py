@@ -570,3 +570,51 @@ def test_free_angle_follows_qgis(size):
     for (box_angle, expected), angle in zip(_QGIS_FREE[size].items(), got):
         expected = -90 if expected == 90 else expected
         assert min(abs(angle - expected), abs(abs(angle - expected) - 180)) < 1, (box_angle, angle, expected)
+
+
+def test_label_boxes_read_plain_array_layout_values():
+    """The exporter writes text-offset and icon-text-fit-padding as plain
+    arrays, not expressions: they used to evaluate to nothing (a framed
+    label's box lost its padding)."""
+    assert _js("m.evaluate([0, -0.75], 15)") == [0, -0.75]
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': [3, 4, 3, 4]}, 15, 1, 0.5)({t: 'abcd'});"
+            " return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert box == pytest.approx([16, 11]) and text == pytest.approx([10, 6])
+
+
+def test_rendered_label_boxes_follow_text_offset():
+    """A town name drawn 0.75 em above its dot: its box is where the text is."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 20,
+                                                          'text-offset': [0, -0.75]}};
+      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+        {layer: town, properties: {t: 'ABCD'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001);
+    })()"""
+    (box,) = _js(expr)
+    assert (box[1] + box[3]) / 2 == pytest.approx(0.485) and (box[0] + box[2]) / 2 == pytest.approx(0.5)
+
+
+def test_around_point_labels_keep_clear_of_maplibre_labels():
+    """Around-point labels avoid the point labels MapLibre draws itself (a
+    town name), like line labels; plain polygon labels only the viewer's."""
+    expr = """(() => {
+      let asked = 0; const others = () => { asked++; return [[9, 9, 10, 10]]; };
+      const a = m.avoidFor({around: {anchors: ['top']}}, [], others);
+      const b = m.avoidFor({kind: 'line'}, [], others);
+      const c = m.avoidFor({}, [[1, 1, 2, 2]], others);
+      return [a, b, c, asked];
+    })()"""
+    around, line, plain, asked = _js(expr)
+    assert around == [[9, 9, 10, 10]] and line == [[9, 9, 10, 10]] and plain == [[1, 1, 2, 2]] and asked == 2
+    qgis_order = {"anchors": ["bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right",
+                              "top-right"], "distance": 0.03}
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072))]   # centroid (0.5, 0.5)
+    box = [0.08, 0.02]
+    first = _points(squares, [0, 0, 1, 1], {"box": box, "around": qgis_order})[1]
+    town = [first[0] - box[0], first[1] - box[1], first[0] + box[0], first[1] + box[1]]
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": qgis_order, "avoid": [town]})[1]
+    assert not _overlaps([x - box[0], y - box[1], x + box[0], y + box[1]], town)

@@ -33,7 +33,8 @@
 // that stretch and on the screen (sliding along the line, or to a shorter
 // visible stretch, to fit and to keep clear of other labels), as QGIS places
 // line labels inside the extent; clear also of the point labels MapLibre
-// draws itself (building numbers, names). No clear spot: no label.
+// draws itself (building numbers, names), as "around point" labels are. No
+// clear spot: no label.
 // While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
@@ -208,7 +209,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
         labelBox: labelBoxes(map, group, zoom, perPx, fonts),
-        avoid: group.kind === "line" ? placed.concat(others()) : placed.slice(),
+        // Line and "around point" labels keep clear of the point labels
+        // MapLibre draws itself (a town name): drawn with text-overlap
+        // "always", they would otherwise sit on top of them.
+        avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -1151,6 +1155,9 @@ function rectDistance(x, y, [x0, y0, x1, y1]) {
 // forms give undefined.
 export function evaluate(expression, zoom, properties = {}) {
   if (!Array.isArray(expression)) return expression;
+  // A plain array value (text-offset [0, -1], icon-text-fit-padding
+  // [t, r, b, l]) is not an expression: expressions start with an operator.
+  if (typeof expression[0] !== "string") return expression;
   const [op, ...args] = expression;
   const ev = (value) => evaluate(value, zoom, properties);
   switch (op) {
@@ -1280,10 +1287,16 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
   };
 }
 
+// The boxes a group's labels keep clear of: those placed before them and,
+// for line and "around point" labels, the point labels MapLibre draws.
+export function avoidFor(group, placed, others) {
+  return group.kind === "line" || group.around ? placed.concat(others()) : placed.slice();
+}
+
 // World boxes of the point labels MapLibre draws from the other symbol
-// layers (estimated from text and size at the anchor; rotation, offsets and
-// icons ignored).
-function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) {
+// layers (estimated from text and size at the anchor, moved by text-offset;
+// rotation, variable anchors and icons ignored).
+export function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) {
   const ours = new Set();
   for (const group of groups.values()) {
     for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
@@ -1303,7 +1316,13 @@ function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) {
     const half = sizes.get(f.layer.id)(f.properties);
     if (!half) continue;
     const p = maplibregl.MercatorCoordinate.fromLngLat(f.geometry.coordinates);
-    boxes.push([p.x - half[0], p.y - half[1], p.x + half[0], p.y + half[1]]);
+    // text-offset (ems of the text size): the label is drawn off its point
+    // (a town name 4 mm above its dot).
+    const layout = f.layer.layout || {};
+    const offset = layout["text-variable-anchor"] ? null : evaluate(layout["text-offset"], zoom, f.properties);
+    const em = Number(evaluate(layout["text-size"] ?? 16, zoom, f.properties)) || 16;
+    const [dx, dy] = Array.isArray(offset) ? offset.map((v) => (Number(v) || 0) * em * perPx) : [0, 0];
+    boxes.push([p.x + dx - half[0], p.y + dy - half[1], p.x + dx + half[0], p.y + dy + half[1]]);
   }
   return boxes;
 }
