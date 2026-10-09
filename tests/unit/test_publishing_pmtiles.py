@@ -227,3 +227,69 @@ def test_network_share_paths(tmp_path, monkeypatch):
     conn.close()
     archive = build_pmtiles(source, str(tmp_path / "out.pmtiles"))
     compare_archives(source, archive.path)
+
+
+def test_validation_reads_big_tiles_by_their_layers_and_trusts_a_checked_archive(tmp_path):
+    """Debrecen: "PMTiles: validating..." decoded every feature of the
+    zoomed-out tiles (a whole city each, several MB) in Python, and the web
+    release validated the same archive again. Big sampled tiles are checked
+    by their layers; the archive checked when it was built is not decoded
+    again (same SHA-256); another file still is."""
+    import random  # pylint: disable=import-outside-toplevel
+    from publishing import validation  # pylint: disable=import-outside-toplevel
+    from publishing.pmtiles_builder import sha256_file  # pylint: disable=import-outside-toplevel
+    rng = random.Random(5)
+    tiles = pyramid(1)
+    big = [("point", [rng.randrange(4096), rng.randrange(4096)],
+            {"t": "".join(rng.choice("abcdefghij") for _ in range(40))}, None) for _ in range(30000)]
+    tiles[(0, 0, 0)] = encode_tile({"points": big})
+    archive = build_pmtiles(make_mbtiles(str(tmp_path / "b.mbtiles"), tiles), str(tmp_path / "b.pmtiles"))
+    assert archive.payload_checked
+    with open_pmtiles(archive.path) as handle:
+        assert max(length for _, _, length in handle.entries()) > validation._DECODE_FEATURES_BYTES  # pylint: disable=protected-access
+    decoded = []
+    original = mvt.decode
+    try:
+        mvt.decode = lambda data, **kw: decoded.append(len(data)) or original(data, **kw)
+        summary = validate_pmtiles(archive.path, sample=0)
+        assert summary["layersSeen"] == ["lines", "points", "polygons"] and len(decoded) == 4
+        decoded.clear()
+        summary = validate_pmtiles(archive.path, payload_checked_sha256=sha256_file(archive.path))
+        assert summary["decoded"] == 0 and not decoded  # structure only
+    finally:
+        mvt.decode = original
+    data = bytearray(open(archive.path, "rb").read())
+    with open_pmtiles(archive.path) as handle:
+        offset, length = max(((o, l) for _, o, l in handle.entries()), key=lambda e: e[1])
+        start = handle.header["tile_data_offset"] + offset
+    data[start + length // 2] ^= 0xFF  # inside the big tile's gzip stream
+    tampered = tmp_path / "t.pmtiles"
+    tampered.write_bytes(bytes(data))
+    with pytest.raises(PublishingError) as error:  # another file: its tiles are read
+        validate_pmtiles(str(tampered), payload_checked_sha256=archive.sha256)
+    assert error.value.code == "Q2VT_PUB_NOT_MVT"
+
+
+def test_field_check_of_a_built_archive_uses_the_keys_gathered_while_writing(tmp_path):
+    """The web release checked the fields of every tile of the archive just
+    built (a city: 20 s); the keys of every tile are gathered as it is
+    written, so the same file is not read again. An unapproved field is
+    still found; a changed file is read tile by tile."""
+    from publishing import disclosure, pmtiles_builder  # pylint: disable=import-outside-toplevel
+    tiles = pyramid(2)
+    tiles[(2, 1, 1)] = encode_tile({"points": [("point", [10, 10], {"secret_owner": "x"}, None)]})
+    archive = build_pmtiles(make_mbtiles(str(tmp_path / "d.mbtiles"), tiles), str(tmp_path / "d.pmtiles"))
+    approved = {"points": {"zxy", "name", "parcel", "n"}, "lines": {"zxy", "name", "parcel", "n"},
+                "polygons": {"zxy", "name", "parcel", "n"}}
+    read = []
+    original = mvt.layer_summary
+    try:
+        mvt.layer_summary = lambda data: read.append(1) or original(data)
+        assert disclosure.tile_field_violations(archive.path, approved) == ["points.secret_owner"]
+        assert not read  # the keys gathered when the archive was written
+        pmtiles_builder._LAYER_KEYS.clear()  # pylint: disable=protected-access
+        # an archive not built in this session: every tile read
+        assert disclosure.tile_field_violations(archive.path, approved) == ["points.secret_owner"]
+        assert len(read) == archive.addressed_tiles
+    finally:
+        mvt.layer_summary = original

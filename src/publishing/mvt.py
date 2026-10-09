@@ -10,6 +10,7 @@ Independent of the fidelity package's tile reader.
 
 import gzip
 import struct
+import zlib
 from typing import Dict, Iterator, List, Tuple
 
 GEOMETRY_TYPES = {0: "Unknown", 1: "Point", 2: "LineString", 3: "Polygon"}
@@ -99,7 +100,7 @@ def payload(data: bytes) -> bytes:
     if data[:2] == b"\x1f\x8b":
         try:
             return gzip.decompress(data)
-        except (OSError, EOFError) as error:
+        except (OSError, EOFError, zlib.error) as error:  # a damaged stream: zlib.error
             raise MvtDecodeError(f"bad gzip: {error}") from error
     return data
 

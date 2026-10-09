@@ -336,11 +336,14 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
 def validate_release_dir(staging: str, style: dict, archive_layers: Optional[Iterable[str]],
                          secrets: Iterable[str] = (), canaries: Iterable[str] = (),
                          pmtiles_sample: int = 64,
-                         raster_sources: Optional[Dict[str, str]] = None) -> List[str]:
+                         raster_sources: Optional[Dict[str, str]] = None,
+                         map_sha256: Optional[str] = None) -> List[str]:
     """Raise PublishingError for an invalid release folder; return warnings.
 
     ``raster_sources``: {source id: release path} of the QGIS raster
-    layers' image archives (the only raster sources a style may have)."""
+    layers' image archives (the only raster sources a style may have).
+    ``map_sha256``: of ``data/map.pmtiles`` as built and validated (its
+    tiles checked then): the same file is not decoded again."""
     warnings = []
     files = walk_files(staging)
     for rel in files:
@@ -394,7 +397,8 @@ def validate_release_dir(staging: str, style: dict, archive_layers: Optional[Ite
         if required not in files:
             raise PublishingError("Q2VT_PUB_BUNDLE_INVALID", f"{required} missing")
     if "data/map.pmtiles" in files:
-        validate_pmtiles(os.path.join(staging, "data", "map.pmtiles"), sample=pmtiles_sample)
+        validate_pmtiles(os.path.join(staging, "data", "map.pmtiles"), sample=pmtiles_sample,
+                         payload_checked_sha256=map_sha256)
     problems = scan_bundle(staging, files, secrets, canaries)
     if problems:
         raise PublishingError("Q2VT_PUB_SECRET_LEAK", "; ".join(problems[:5]))
@@ -439,7 +443,9 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
             warnings = validate_release_dir(
                 staging, style, archive.vector_layers if archive else None, secrets, canaries,
                 raster_sources={s["id"]: s["href"] for s in manifest["sources"]
-                                if s.get("role") == "raster"})
+                                if s.get("role") == "raster"},
+                map_sha256=archive.sha256 if transport == "pmtiles" and archive is not None
+                and archive.payload_checked else None)
             for validator in extra_validators or []:  # e.g. field disclosure
                 validator(staging, manifest)
             files = [rel for rel in walk_files(staging)]
