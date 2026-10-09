@@ -1650,3 +1650,46 @@ feature-lookup shards.
 |---|---|
 | City-size test index (2,012 streets, 37,838 addresses, 110,000 parcels searchable; parcel records) | 47,959 files / 45.8 MB → 2 files / 4.8 MB |
 | Tests | 244 passed, 5 skipped (publishing unit and integration tests, indexes, browser: feature lookup, parcel report, texts, extras, smoke; plugin package, Publish window, review fixes, export cache) |
+
+## 4.30.0: zoomed-out load analysis, labels-only scale limit
+
+Owner: "which layers slow the map down when zoomed far out, and roughly how much; offer a
+zoom per layer from which they are no longer shown, accepted with one click. Especially
+layers with labels, which are slow and cannot be seen small anyway; better still, offer to
+switch off only the labels zoomed out while the features stay."
+
+- `publishing/zoom_load.py`: per published vector layer, the feature ids in the extent
+  (no geometry) and a random sample of 2,000 features (bounding box in EPSG:3857, vertex
+  count, label text length). Per zoom of the publication, the busiest tile is estimated from
+  the sample's tile grid (scaled to the layer's count; the mean of the occupied tiles when
+  the sample is thin there), its bytes from a per-feature size (vertices capped by the
+  feature's pixel size, as the MVT simplification does), and the labels that fit from the
+  label box (font size, mean text length) against the tile area.
+  - Features: suggested from the first zoom where the typical (median) feature is at least
+    2 px across, or points thinner than one per 6×6 px, when the layer's part of the busiest
+    tile is heavy (400 KB or 15,000 features) where it starts now.
+  - Labels: suggested from the first zoom where at least half the busiest tile's labels fit
+    (polygon labels also: the typical polygon at least 0.6 × the label's width), when fewer
+    than half of them fit where they start now (a few labels are no load).
+  - The zoom becomes a scale with `scale_for_zoom` (QGIS map scale of zoom 0 for this
+    project, as the export converts it), rounded down to two significant digits so the tiles
+    start at that zoom.
+- `LayerConfig.labels_min_scale` (profile `labelsMinScale`): the layer's labels hidden when
+  zoomed out beyond it. Passed with the other web-only limits (`scale_limits` value is now
+  `(min, max, labels min)`); `RulesFlattener._prepare_root_rule` applies it to the labeling
+  root rule only, so the label rules carry the range: their style layers start there and
+  their datasets are not tiled below it, while the feature rules are unchanged.
+- Publish window: *Zoomed-out load…* next to *Publish the visible layers*
+  (`gui/zoom_load_dialog.py`). A table per layer (features in the extent, the busiest tile
+  where it starts now, the suggested feature zoom, labels and how many fit, the suggested
+  labels zoom); each suggestion has a checkbox and a zoom spin box showing its scale; the
+  summary gives the heaviest tile of all layers together now and with the checked limits.
+  *Apply the checked limits* writes them into the *Scales* column (a zoomed-in limit and an
+  unchecked limit stay). The *Visible scales…* dialog has a third option, *Hide only the
+  labels when zoomed out beyond*; the column shows it as "labels 1:10 000 –".
+
+| Run | Result |
+|---|---|
+| Synthetic city project (7 layers: 85,320 parcels, 47,520 buildings, 38,880 house numbers, sub-parcel names and lines) | analysed in about 10 s; heaviest tile ~5.0 MB → ~1 MB with the suggestions: parcels and sub-parcel lines from z11 (1:96 000), buildings from z15, sub-parcel names and house numbers labels-only from z13 |
+| Tests | 84 passed (profile, flattener, plugin package, Publish window, publishing pipeline, scale limits: labels-only export, analysis, dialog) |
+

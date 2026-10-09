@@ -127,6 +127,9 @@ window that turns the project into a public, self-contained web map:
 - **Fast re-exports**: unchanged layers (raster layers too) are reused from earlier exports,
   raster tiles are rendered on all CPU cores, and unchanged files are copied inside the bucket
   instead of uploaded again (a 3-minute plan re-exports in ~15 s).
+- **Zoomed-out load**: one button estimates which layers make the web map slow when zoomed
+  out and suggests, per layer, a zoom from which its features, or only its labels, are drawn;
+  one click applies them (web map only, the project is not changed).
 
 The Processing algorithm is unchanged; it gained an optional *Tile archive format*
 (MBTiles, PMTiles or both).
