@@ -361,6 +361,31 @@ def test_line_labels_take_the_side_qgis_takes(tmp_path, placement, flags, repeat
         assert abs(qgis - browser) <= 4, (qgis, browser)
 
 
+def test_overlapping_markers_stack_in_feature_order(tmp_path):
+    """Two markers of one rule that overlap: QGIS draws the later feature on
+    top. MapLibre stacked them by their height on the screen (the lower one
+    on top) - here the later marker is the upper one."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=c:string", "pts", "memory")
+    for colour, dx, dy in (("255,0,0", 10, -10), ("0,0,255", -10, 10)):  # the second is higher
+        feature = QgsFeature(memory.fields())
+        feature.setAttributes([colour])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0] + dx} {CENTER[1] + dy})"))
+        memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "pts.gpkg"))
+    symbol = QgsMarkerSymbol.createSimple({"name": "square", "size": "12", "outline_style": "no"})
+    symbol.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                                 QgsProperty.fromExpression('"c"'))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _compare(tmp_path, layer, metric="shape")
+    from PIL import Image
+    middle = SIZE // 2
+    colours = [Image.open(str(tmp_path / f"v_{n}.png")).convert("RGB").getpixel((middle, middle))
+               for n in ("qgis", "browser")]
+    assert colours[0][2] > 200 and colours[1][2] > 200, colours  # blue (the later one) on top
+
+
 def _black_box(tmp_path, name):
     """Bounding box of the black (text) ink of a capture, red left out."""
     from PIL import Image

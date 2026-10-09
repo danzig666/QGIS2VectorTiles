@@ -1169,6 +1169,11 @@ class IconPropertyExtractor:
         """Return ``symbol-z-order`` (default ``"auto"``)."""
         return "auto"
 
+    # Map markers: QGIS draws them in feature order, a later one on top. The
+    # tiles keep that order; "auto" (with a constant sort key) stacks
+    # overlapping icons by their height on the screen instead.
+    MARKER_Z_ORDER = "source"
+
 
 class TextPropertyExtractor:
     """Extract text paint and layout properties from QGIS label settings."""
@@ -2408,6 +2413,7 @@ class QgisMapLibreStyleExporter:
             "text-pitch-alignment": "viewport",
             "text-rotate": IconPropertyExtractor.get_icon_rotate(symbol_layer=symbol_layer),
             "symbol-placement": "point",
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         }
         # QGIS puts the baseline half the font's ascent below the point;
@@ -3247,7 +3253,7 @@ class QgisMapLibreStyleExporter:
             "symbol-spacing": IconPropertyExtractor.get_symbol_spacing(),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
-            "symbol-z-order": IconPropertyExtractor.get_symbol_z_order(),
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         })
         layer_def["paint"].update({
@@ -3352,7 +3358,7 @@ class QgisMapLibreStyleExporter:
             "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(symbol_layer),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
-            "symbol-z-order": IconPropertyExtractor.get_symbol_z_order(),
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         })
         if offset_px:
