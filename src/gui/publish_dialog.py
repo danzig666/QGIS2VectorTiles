@@ -27,9 +27,9 @@ from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCo
                        QgsTask, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
-from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                                 QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-                                 QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from qgis.PyQt.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+                                 QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+                                 QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                  QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                  QRadioButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
                                  QTableWidgetItem, QTabWidget, QTextBrowser, QToolButton, QTreeWidget,
@@ -48,7 +48,7 @@ UNCHECKED = Qt.CheckState.Unchecked
 PARTIAL = Qt.CheckState.PartiallyChecked
 LAYER_ROLE = Qt.ItemDataRole.UserRole
 GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
-SCALES_ROLE = Qt.ItemDataRole.UserRole + 2  # [min scale, max scale], web only
+SCALES_ROLE = Qt.ItemDataRole.UserRole + 2  # [min scale, max scale, labels min scale], web only
 COL_PUBLISH, COL_VISIBLE, COL_TOGGLE, COL_LEGEND, COL_SCALES = 1, 2, 3, 4, 5
 
 
@@ -414,6 +414,12 @@ class PublishDialog(QDialog):
                                       "(also visible at start); the hidden ones are no longer published"))
         publish_visible.clicked.connect(self.publish_visible_layers)
         bulk_row.addWidget(publish_visible)
+        zoom_load_button = QPushButton(tr("Zoomed-out load…"))
+        zoom_load_button.setToolTip(tr(
+            "Which layers make the web map slow when zoomed out, and from which zoom their features, "
+            "or only their labels, are worth drawing; the suggestions can be applied with one click"))
+        zoom_load_button.clicked.connect(lambda: self.analyse_zoom_load())
+        bulk_row.addWidget(zoom_load_button)
         layers_layout.addLayout(bulk_row)
         self.tree = QTreeWidget()
         # Short headers (the layer names need the room); the meaning in tooltips.
@@ -488,19 +494,21 @@ class PublishDialog(QDialog):
 
     def edit_scales(self, values=None) -> bool:
         """Set the web-only visible scale range of the selected layers
-        (``values``: (min scale, max scale) instead of asking)."""
+        (``values``: (min scale, max scale[, labels min scale]) instead of
+        asking; without the third value the labels limit stays)."""
         from .scale_range import ScaleRangeDialog, range_text  # pylint: disable=import-outside-toplevel
         items = self._selected_layer_items()
         if not items:
             self.status.setText(tr("Select layers (or groups) in the list first."))
             return False
         if values is None:
-            low, high = items[0].data(COL_SCALES, SCALES_ROLE) or (0.0, 0.0)
+            low, high, labels_low = self._item_scales(items[0])
             layer = self.project.mapLayer(items[0].data(0, LAYER_ROLE))
             own = range_text(layer.minimumScale(), layer.maximumScale()) \
                 if layer is not None and layer.hasScaleBasedVisibility() else ""
             dialog = ScaleRangeDialog(self, low, high, len(items), own if len(items) == 1 else "",
-                                      self.iface.mapCanvas() if self.iface is not None else None)
+                                      self.iface.mapCanvas() if self.iface is not None else None,
+                                      labels_low)
             if not dialog.exec():
                 return False
             values = dialog.values()
@@ -508,13 +516,70 @@ class PublishDialog(QDialog):
             self._set_item_scales(item, *values)
         return True
 
-    def _set_item_scales(self, item, low, high):
-        from .scale_range import range_text  # pylint: disable=import-outside-toplevel
-        item.setData(COL_SCALES, SCALES_ROLE, [float(low or 0), float(high or 0)])
+    @staticmethod
+    def _item_scales(item):
+        """(min scale, max scale, labels min scale) of a layer row; 0 = none."""
+        values = list(item.data(COL_SCALES, SCALES_ROLE) or ()) + [0.0, 0.0, 0.0]
+        return float(values[0] or 0), float(values[1] or 0), float(values[2] or 0)
+
+    def analyse_zoom_load(self, accept=None) -> bool:
+        """Estimate the zoomed-out load of the published vector layers and
+        offer per-layer limits (``accept``: a callable given the dialog,
+        returning whether it was accepted; for tests)."""
+        from ..publishing import zoom_load  # pylint: disable=import-outside-toplevel
+        from .zoom_load_dialog import ZoomLoadDialog  # pylint: disable=import-outside-toplevel
+        try:
+            extent = self._extent()
+        except PublishingError as error:
+            self.status.setText(str(error))
+            return False
+        profile = self.collect()
+        self.status.setText(tr("Estimating the zoomed-out load…"))
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            loads, factor = zoom_load.analyse(self.project, profile, extent)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not loads:
+            self.status.setText(tr("No published vector layer has features in the extent."))
+            return False
+        self.status.setText("")
+        dialog = ZoomLoadDialog(self, loads, factor, (profile.view.min_zoom, profile.view.max_zoom))
+        if not (accept(dialog) if accept is not None else dialog.exec()):
+            return False
+        self.apply_zoom_limits(dialog.chosen())
+        return True
+
+    def apply_zoom_limits(self, chosen) -> int:
+        """Set {layer id: (min scale or None, labels min scale or None)} in
+        the Scales column (None: that limit stays); returns the rows changed."""
+        changed = 0
+        for item in self._tree_items():
+            limits = chosen.get(item.data(0, LAYER_ROLE))
+            if not limits:
+                continue
+            low, high, labels_low = self._item_scales(item)
+            new_low, new_labels = limits
+            if new_low and not (high and high >= new_low):
+                low = new_low
+            if new_labels:
+                labels_low = new_labels
+            self._set_item_scales(item, low, high, labels_low)
+            changed += 1
+        if changed:
+            self.status.setText(tr("Zoomed-out limits set for {} layer(s) (Scales column).").format(changed))
+        return changed
+
+    def _set_item_scales(self, item, low, high, labels_low=None):
+        """``labels_low`` None: the row's labels limit stays."""
+        from .scale_range import labels_text, range_text  # pylint: disable=import-outside-toplevel
+        if labels_low is None:
+            labels_low = self._item_scales(item)[2]
+        item.setData(COL_SCALES, SCALES_ROLE, [float(low or 0), float(high or 0), float(labels_low or 0)])
         layer = self.project.mapLayer(item.data(0, LAYER_ROLE))
         own = range_text(layer.minimumScale(), layer.maximumScale()) \
             if layer is not None and layer.hasScaleBasedVisibility() else ""
-        text = range_text(low, high)
+        text = " · ".join(part for part in (range_text(low, high), labels_text(labels_low)) if part)
         item.setText(COL_SCALES, text or (tr("(QGIS {})").format(own) if own else ""))
         item.setForeground(COL_SCALES, self.palette().text() if text else self.palette().placeholderText())
         item.setToolTip(COL_SCALES, (tr("Web map: {}").format(text) if text else tr("No web limit"))
@@ -782,7 +847,8 @@ class PublishDialog(QDialog):
                     item.setCheckState(COL_VISIBLE, _check(config.initially_visible))
                     item.setCheckState(COL_TOGGLE, _check(config.toggleable))
                     item.setCheckState(COL_LEGEND, _check(config.legend))
-                    self._set_item_scales(item, config.min_scale, config.max_scale)
+                    self._set_item_scales(item, config.min_scale, config.max_scale,
+                                          config.labels_min_scale)
         add(self.project.layerTreeRoot(), self.tree.invisibleRootItem(), ())
         self._sync_group_publish(self.tree.invisibleRootItem())
         self.tree.blockSignals(False)
@@ -2214,7 +2280,7 @@ class PublishDialog(QDialog):
             config.toggleable = not config.included or item.checkState(COL_TOGGLE) == CHECKED
             if config.included and not config.toggleable:
                 config.initially_visible = True
-            config.min_scale, config.max_scale = item.data(COL_SCALES, SCALES_ROLE) or (0.0, 0.0)
+            config.min_scale, config.max_scale, config.labels_min_scale = self._item_scales(item)
             config.legend = item.checkState(COL_LEGEND) == CHECKED
             layers.append(config)
         profile.layers = layers
