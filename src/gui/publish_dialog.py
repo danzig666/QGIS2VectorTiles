@@ -12,8 +12,10 @@ kept in the QGIS authentication database or only for this session.
   opens it in the web browser (no Node, no tile server).
 * Publish — uploads the validated release in a background task (files and
   network only), verifies it through the public URL and only then
-  activates it. The first publication and every change of what becomes
-  public need an explicit approval on the Review tab.
+  activates it. An SSH / SFTP server gets the site straight into one
+  folder instead (not versioned, folder_publish.py). The first publication
+  and every change of what becomes public need an explicit approval on the
+  Review tab.
 """
 
 import datetime as _dt
@@ -127,8 +129,9 @@ class DialogFeedback(QgsProcessingFeedback):
 
 
 class UploadTask(QgsTask):
-    """Upload, verify and activate a validated local release (no QGIS
-    project access: files and network only)."""
+    """Upload, verify and activate a validated local release, or write it
+    into an SSH server's folder (no QGIS project access: files and network
+    only)."""
 
     message = pyqtSignal(str)
 
@@ -149,6 +152,11 @@ class UploadTask(QgsTask):
             if text:
                 self.message.emit(text)
         try:
+            if self.provider.kind == "ssh":  # one folder, not versioned
+                from ..publishing.folder_publish import publish_folder  # pylint: disable=import-outside-toplevel
+                self.result = publish_folder(self.release, self.profile, self.provider, self.work_dir,
+                                             Progress(feedback, cancel=self.isCanceled), secrets=self.secrets)
+                return True
             self.result = publish(self.release, self.profile, self.provider, self.work_dir,
                                   Progress(feedback, cancel=self.isCanceled), secrets=self.secrets,
                                   activate_release=self.activate_release)
@@ -1949,6 +1957,7 @@ class PublishDialog(QDialog):
         self.d_kind.addItem(tr("Local only (no upload)"), "local")
         self.d_kind.addItem(tr("Cloudflare R2"), "r2")
         self.d_kind.addItem(tr("Other S3-compatible storage"), "s3")
+        self.d_kind.addItem(tr("SSH / SFTP server (one folder, not versioned)"), "ssh")
         self.d_account = QLineEdit()
         self.d_account.setPlaceholderText(tr("32 characters – or paste the S3 API URL / dashboard address"))
         self.d_endpoint = QLineEdit()
@@ -1962,6 +1971,50 @@ class PublishDialog(QDialog):
         for field, key in ((self.d_account, "account"), (self.d_endpoint, "endpoint"),
                            (self.d_bucket, "bucket"), (self.d_prefix, "prefix"), (self.d_public, "public")):
             field.setToolTip(tr(FIELD_HELP[key]))
+        # SSH / SFTP server: the site goes straight into one folder (no versions).
+        self.d_ssh_host = QLineEdit()
+        self.d_ssh_host.setPlaceholderText(tr("server name or address – or paste user@server:/folder"))
+        self.d_ssh_host.setToolTip(tr("The SSH server, e.g. www.example.com. Pasting user@server:/folder or "
+                                      "sftp://user@server:port/folder fills the user, port and folder too."))
+        self.d_ssh_host.editingFinished.connect(self._parse_ssh_target)
+        self.d_ssh_port = QSpinBox()
+        self.d_ssh_port.setRange(1, 65535)
+        self.d_ssh_port.setValue(22)
+        self.d_ssh_user = QLineEdit()
+        self.d_ssh_user.setPlaceholderText(tr("login name"))
+        self.d_ssh_user.setToolTip(tr("The SSH login. Empty: the user of the saved credentials below, "
+                                      "else your ssh settings' default."))
+        self.d_ssh_dir = QLineEdit()
+        self.d_ssh_dir.setPlaceholderText(tr("e.g. /var/www/html/map, or public_html/map in your home folder"))
+        self.d_ssh_dir.setToolTip(tr("The map's files go straight into this folder (created if missing) "
+                                     "and replace the previous map there; no versions are kept. Absolute, "
+                                     "or relative to the login's home folder. Only files QWebMap uploaded "
+                                     "before are ever deleted; your other files in the folder stay."))
+        self.d_ssh_key = QLineEdit()
+        self.d_ssh_key.setPlaceholderText(tr("optional – empty: ssh-agent or your default keys (~/.ssh)"))
+        self.d_ssh_key.setToolTip(tr("A private key file (OpenSSH format) on this computer. A key with a "
+                                     "passphrase: enter the passphrase as the password below."))
+        self.d_ssh_key_row = QWidget()
+        key_row = QHBoxLayout(self.d_ssh_key_row)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_browse = QPushButton(tr("Browse…"))
+        key_browse.clicked.connect(self._choose_ssh_key)
+        key_row.addWidget(self.d_ssh_key, 1)
+        key_row.addWidget(key_browse)
+        self.d_ssh_password = QLineEdit()
+        self.d_ssh_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.d_ssh_password.setPlaceholderText(tr("Password or key passphrase"))
+        self.d_ssh_password.setToolTip(tr("Used only while this window is open (not saved anywhere). Empty "
+                                          "with a key that needs no passphrase, or with ssh-agent."))
+        self.d_ssh_password_row = QWidget()
+        password_row = QHBoxLayout(self.d_ssh_password_row)
+        password_row.setContentsMargins(0, 0, 0, 0)
+        save_password = QPushButton(tr("Save in QGIS…"))
+        save_password.setToolTip(tr("Store the user and this password encrypted in QGIS and select "
+                                    "them above"))
+        save_password.clicked.connect(self.save_ssh_password)
+        password_row.addWidget(self.d_ssh_password, 1)
+        password_row.addWidget(save_password)
         # Pasted Cloudflare addresses: take the account id (and bucket) from them.
         self.d_account.editingFinished.connect(lambda: self._parse_pasted(self.d_account))
         self.d_endpoint.editingFinished.connect(lambda: self._parse_pasted(self.d_endpoint))
@@ -1987,6 +2040,7 @@ class PublishDialog(QDialog):
         guide = QPushButton(tr("Step-by-step: set up Cloudflare R2…"))
         guide.setToolTip(tr("Where to find each value in the Cloudflare dashboard"))
         guide.clicked.connect(self.show_r2_guide)
+        self.d_guide = guide
         help_row.addWidget(guide)
         help_row.addStretch(1)
         self.d_help_row = form.rowCount()
@@ -1999,11 +2053,19 @@ class PublishDialog(QDialog):
         self.d_rows["endpoint"] = self.d_endpoint
         form.addRow(tr("Bucket"), self.d_bucket)
         form.addRow(tr("Prefix in the bucket"), self.d_prefix)
+        form.addRow(tr("SSH server"), self.d_ssh_host)
+        form.addRow(tr("Port"), self.d_ssh_port)
+        form.addRow(tr("User"), self.d_ssh_user)
+        form.addRow(tr("Folder on the server"), self.d_ssh_dir)
+        form.addRow(tr("Private key file"), self.d_ssh_key_row)
         form.addRow(tr("Public base URL (custom domain)"), self.d_public)
         form.addRow(tr("Map address"), self.d_address)
         form.addRow(tr("Saved credentials (QGIS authentication: user = access key id, "
                        "password = secret)"), auth_row)
-        session = QHBoxLayout()
+        self.d_auth_label = form.labelForField(auth_row)
+        self.d_session_row = QWidget()
+        session = QHBoxLayout(self.d_session_row)
+        session.setContentsMargins(0, 0, 0, 0)
         self.d_session_key = QLineEdit()
         self.d_session_key.setPlaceholderText(tr("Access Key ID"))
         self.d_session_key.setToolTip(tr(FIELD_HELP["session"]))
@@ -2017,7 +2079,8 @@ class PublishDialog(QDialog):
         session.addWidget(self.d_session_key)
         session.addWidget(self.d_session_secret)
         session.addWidget(save_keys)
-        form.addRow(tr("Or keys for this session only"), session)
+        form.addRow(tr("Or keys for this session only"), self.d_session_row)
+        form.addRow(tr("Or a password for this session only"), self.d_ssh_password_row)
         form.addRow(tr("Releases to keep"), self.d_retention)
         form.addRow("", self.d_conditional)
         self.d_kind.currentIndexChanged.connect(self._destination_kind_changed)
@@ -2028,15 +2091,14 @@ class PublishDialog(QDialog):
         cors.clicked.connect(self.show_cors)
         history = QPushButton(tr("Releases and rollback…"))
         history.clicked.connect(self.show_history)
+        self.d_cors, self.d_history = cors, history
         buttons.addWidget(test)
         buttons.addWidget(cors)
         buttons.addWidget(history)
         buttons.addStretch(1)
         form.addRow("", buttons)
-        form.addRow("", _note(tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
-                                  "address: connect a custom domain to the bucket (r2.dev is rate "
-                                  "limited and meant for development). Nothing is created, made "
-                                  "public or deleted in your account automatically.")))
+        self.d_note = _note("")
+        form.addRow("", self.d_note)
         return widget
 
     def _review_tab(self):
@@ -2159,6 +2221,11 @@ class PublishDialog(QDialog):
         self.d_public.setText(dest.public_base_url)
         self.d_retention.setValue(dest.retention)
         self.d_conditional.setChecked(dest.conditional_writes)
+        self.d_ssh_host.setText(dest.host)
+        self.d_ssh_port.setValue(dest.port if 1 <= dest.port <= 65535 else 22)
+        self.d_ssh_user.setText(dest.user)
+        self.d_ssh_dir.setText(dest.remote_dir)
+        self.d_ssh_key.setText(dest.identity_file)
         if self.d_auth is not None and dest.credential_ref:
             self.d_auth.setConfigId(dest.credential_ref)
         self._destination_kind_changed()
@@ -2419,6 +2486,11 @@ class PublishDialog(QDialog):
         dest.public_base_url = self.d_public.text().strip().rstrip("/")
         dest.retention = self.d_retention.value()
         dest.conditional_writes = self.d_conditional.isChecked()
+        dest.host = self.d_ssh_host.text().strip()
+        dest.port = self.d_ssh_port.value()
+        dest.user = self.d_ssh_user.text().strip()
+        dest.remote_dir = self.d_ssh_dir.text().strip()
+        dest.identity_file = self.d_ssh_key.text().strip()
         dest.credential_ref = self.d_auth.configId() if self.d_auth is not None else ""
         return profile
 
@@ -2484,7 +2556,7 @@ class PublishDialog(QDialog):
     def _exportable_credentials(self, profile):
         """The destination's keys for the settings file (the owner wants them
         there): the pasted session keys, else the saved QGIS configuration."""
-        if profile.destination.kind == "local":
+        if profile.destination.kind in ("local", "ssh"):  # an SSH password never goes into a file
             return None
         from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
         key, secret = self.d_session_key.text().strip(), self.d_session_secret.text()
@@ -2662,6 +2734,12 @@ class PublishDialog(QDialog):
     def _credentials(self):
         from ..publishing.credentials import from_auth_config  # pylint: disable=import-outside-toplevel
         from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
+        if self.profile.destination.kind == "ssh":  # optional: keys and ssh-agent need none
+            if self.d_ssh_password.text():
+                return Credentials(self.d_ssh_user.text().strip(), self.d_ssh_password.text())
+            if self.profile.destination.credential_ref:
+                return from_auth_config(self.profile.destination.credential_ref)
+            return None
         if self.d_session_key.text().strip() and self.d_session_secret.text():
             return Credentials(self.d_session_key.text().strip(), self.d_session_secret.text())
         return from_auth_config(self.profile.destination.credential_ref)
@@ -2707,19 +2785,94 @@ class PublishDialog(QDialog):
             self.d_bucket.clear()
 
     def _destination_kind_changed(self, *_):
+        from .r2_guide import FIELD_HELP  # pylint: disable=import-outside-toplevel
         kind = self.d_kind.currentData()
-        for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, kind != "local")):
+        ssh, storage = kind == "ssh", kind in ("r2", "s3")
+        for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, storage),
+                              (self.d_bucket, not ssh), (self.d_prefix, not ssh),
+                              (self.d_session_row, not ssh), (self.d_retention, not ssh),
+                              (self.d_conditional, not ssh), (self.d_ssh_host, ssh), (self.d_ssh_port, ssh),
+                              (self.d_ssh_user, ssh), (self.d_ssh_dir, ssh), (self.d_ssh_key_row, ssh),
+                              (self.d_ssh_password_row, ssh)):
             widget.setVisible(shown)
             label = self.d_form.labelForField(widget)
             if label is not None:
                 label.setVisible(shown)
+        for widget in (self.d_guide, self.d_cors, self.d_history):  # releases, CORS: object storage only
+            widget.setVisible(not ssh)
         label = self.d_form.labelForField(self.d_endpoint)
         if label is not None:
             label.setText(tr("S3 API endpoint (optional)") if kind == "r2" else tr("S3 API endpoint"))
+        label = self.d_form.labelForField(self.d_public)
+        if label is not None:
+            label.setText(tr("Public URL of the folder (optional)") if ssh else tr("Public base URL (custom domain)"))
+        self.d_public.setPlaceholderText("https://www.example.com/map" if ssh else "https://maps.example.com")
+        self.d_public.setToolTip(tr("The address of the folder on the web, e.g. https://www.example.com/map. "
+                                    "Used for Open map / Copy link and to check that the new map is served "
+                                    "there. Empty: nothing is checked.") if ssh else tr(FIELD_HELP["public"]))
+        if self.d_auth_label is not None:
+            self.d_auth_label.setText(
+                tr("Saved password (QGIS authentication: user = SSH user, password = password or "
+                   "passphrase)") if ssh else
+                tr("Saved credentials (QGIS authentication: user = access key id, password = secret)"))
+        self.d_note.setText(
+            tr("The map's files go straight into the folder and replace the previous map there: no "
+               "versions, no rollback. Unchanged files are not uploaded again, index.html is replaced "
+               "last, and only files QWebMap uploaded before are ever deleted (listed in .q2vt-files.json "
+               "in the folder). Uses the OpenSSH client (sftp) of this computer. A new server's host key "
+               "is accepted on first use; a changed one stops the upload.") if ssh else
+            tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
+               "address: connect a custom domain to the bucket (r2.dev is rate "
+               "limited and meant for development). Nothing is created, made "
+               "public or deleted in your account automatically."))
         self._update_address()
+
+    def _parse_ssh_target(self):
+        """``user@server:/folder`` (or an sftp:// address) pasted into the
+        server field: the user, port and folder taken from it."""
+        from ..publishing.providers.ssh import parse_target  # pylint: disable=import-outside-toplevel
+        found = parse_target(self.d_ssh_host.text())
+        if not found:
+            return
+        self.d_ssh_host.setText(str(found["host"]))
+        if found.get("user"):
+            self.d_ssh_user.setText(str(found["user"]))
+        if found.get("port"):
+            self.d_ssh_port.setValue(int(found["port"]))
+        if found.get("remote_dir"):
+            self.d_ssh_dir.setText(str(found["remote_dir"]))
+
+    def _choose_ssh_key(self):
+        start = self.d_ssh_key.text().strip() or os.path.join(os.path.expanduser("~"), ".ssh")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Private key file"), start)
+        if path:
+            self.d_ssh_key.setText(path)
+
+    def save_ssh_password(self):
+        """The SSH user and password, stored encrypted in the QGIS
+        authentication database (Basic configuration), then selected."""
+        from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
+        user, password = self.d_ssh_user.text().strip(), self.d_ssh_password.text()
+        if not user or not password:
+            QMessageBox.information(self, tr("Password"), tr("Enter the user and the password (or the key's "
+                                                             "passphrase) first."))
+            return
+        name = f"SSH {user}@{self.d_ssh_host.text().strip() or 'server'} (QWebMap)"
+        try:
+            config_id = store_auth_config(name, user, password)
+        except PublishingError as error:
+            self._fail(error.code, error.message, error.detail)
+            return
+        if self.d_auth is not None:
+            self.d_auth.setConfigId(config_id)
+        self.d_ssh_password.clear()
+        self.status.setText(tr("Password saved encrypted in QGIS as “{}” and selected.").format(name))
 
     def _update_address(self, *_):
         public = self.d_public.text().strip().rstrip("/")
+        if self.d_kind.currentData() == "ssh":
+            self.d_address.setText(f"{public}/" if public else tr("— (optional: enter the folder's public URL)"))
+            return
         if self.d_kind.currentData() == "local" or not public:
             self.d_address.setText(tr("— (enter the public base URL)") if self.d_kind.currentData() != "local"
                                    else tr("— (local only)"))
@@ -2787,7 +2940,12 @@ class PublishDialog(QDialog):
 
     def refresh_review(self):
         profile = self.collect()
-        lines = [tr("Target: ") + (self._target_url(profile) or tr("local folder only")), ""]
+        dest = profile.destination
+        server = f"{dest.user}@{dest.host}" if dest.user else dest.host
+        target = self._target_url(profile) or (
+            tr("{} (port {}), folder {}").format(server, dest.port, dest.remote_dir) if dest.kind == "ssh"
+            else tr("local folder only"))
+        lines = [tr("Target: ") + target, ""]
         for config in profile.layers:
             if not config.included:
                 continue
@@ -2893,6 +3051,8 @@ class PublishDialog(QDialog):
         if profile.destination.kind == "local" or not profile.destination.public_base_url:
             return ""
         from ..publishing.public_verify import join_url  # pylint: disable=import-outside-toplevel
+        if profile.destination.kind == "ssh":  # the folder itself
+            return join_url(profile.destination.public_base_url, "index.html")
         return join_url(profile.destination.public_base_url, publication_prefix(profile), "index.html")
 
     def publish(self):
@@ -2924,7 +3084,7 @@ class PublishDialog(QDialog):
         from ..publishing.controller import publication_dirs  # pylint: disable=import-outside-toplevel
         _, work_dir = publication_dirs(profile)
         self.task = UploadTask(self.local_result.release, profile, provider, work_dir,
-                               credentials.secrets())
+                               credentials.secrets() if credentials is not None else [])
         self.task.progressChanged.connect(lambda value: self.progress.setValue(int(value)))
         self.task.message.connect(self.log)
         self.task.taskCompleted.connect(self._published)
@@ -2947,10 +3107,13 @@ class PublishDialog(QDialog):
         if result.state == ReleaseState.PUBLISHED:
             self.public_url = result.stable_url
             store.save_profile(self.project, self.profile)
-            self.btn_open.setEnabled(True)
-            self.btn_copy.setEnabled(True)
-            self.status.setText(tr("Published: {}\nThis version: {}").format(result.stable_url,
-                                                                             result.versioned_url))
+            self.btn_open.setEnabled(bool(self.public_url))
+            self.btn_copy.setEnabled(bool(self.public_url))
+            if result.versioned_url:
+                self.status.setText(tr("Published: {}\nThis version: {}").format(result.stable_url,
+                                                                                 result.versioned_url))
+            else:  # one folder on an SSH server: no versions
+                self.status.setText(tr("Published: {}").format(result.stable_url or result.message))
             for warning in result.warnings:
                 self.log(f"⚠ {warning}")
         else:

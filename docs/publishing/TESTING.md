@@ -12,6 +12,8 @@ All tests run with `pytest` from the repository root (see also `docs/fidelity/TE
 | `tests/unit/test_publishing_indexes.py` | pure + Node | keys, Hungarian normalization (Python = JS), 120k-record sharded search, lookup shards |
 | `tests/unit/test_publishing_providers.py` | pure | upload/verify/activate protocol on a fake S3 client with failure injection |
 | `tests/unit/test_publishing_s3_moto.py` | opt-in | real vendored boto3 against a moto S3 server |
+| `tests/unit/test_publishing_ssh.py` | pure + local sshd | SSH / SFTP destination: batch quoting, askpass, state-file plan, batch order, errors; end to end against a throwaway OpenSSH server (`tests/publishing_sshd.py`, skipped without `/usr/sbin/sshd` and the client): two publishes into a folder with other files, passphrase via askpass, host key change, cancel midway, public URL check |
+| `tests/integration/test_publish_dialog_ssh.py` | PyQGIS (offscreen) + local sshd | SSH fields per kind, pasted target, settings without the password, Test connection and a publication through the window |
 | `tests/integration/test_publishing_export.py` | PyQGIS | layer selection incl. hidden layers, PMTiles/Both, Processing outputs |
 | `tests/integration/test_publishing_pipeline.py` | PyQGIS | logical model, keys in tiles, disclosure canary, indexes, identity errors |
 | `tests/integration/test_publish_dialog.py` | PyQGIS (offscreen) | the Publish window end to end |

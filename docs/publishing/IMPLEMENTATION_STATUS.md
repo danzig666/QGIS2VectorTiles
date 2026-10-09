@@ -1762,3 +1762,46 @@ and in the browser view by view.
 | Showcase project, QGIS vs browser | shapeburst water and river labels now match |
 | Tests (full suite, each file in its own process) | 707 passed, 5 skipped |
 
+
+## Unreleased: SSH / SFTP server destination (one folder, not versioned)
+
+Owner request: an ssh/scp uploader for publishing that does not upload versioned, but always
+into the folder the user gives.
+
+- `DestinationConfig` kind `ssh` with `host`, `port` (22), `user`, `remoteDir`, `identityFile`
+  (a path, never a key); `publicBaseUrl` is the folder's optional address. Validated in
+  `profile.ssh_problems` (nothing can become an ssh option; not the server's root; PMTiles
+  required), part of the review fingerprint, in the profile JSON Schema.
+- `providers/ssh.py`: the system OpenSSH client (`sftp -b`, one process per session; on Windows
+  also `%SystemRoot%\System32\OpenSSH`), batch arguments quoted for sftp's own parser (spaces,
+  quotes, backslashes, glob characters, non-ASCII), `BatchMode=yes` for keys / ssh-agent, a
+  password or passphrase only through a temporary askpass helper reading the sftp process's
+  environment (`SSH_ASKPASS_REQUIRE=force`; `BatchMode=no` given before `-b`, as ssh keeps the
+  first value), `StrictHostKeyChecking=accept-new`, progress from sftp's echo of each batch line
+  weighted by bytes, cancel stops the process group, errors classified (client missing, login
+  refused, unknown / unreachable host, host key changed, folder not creatable, permission
+  denied, connection lost).
+- `folder_publish.py`: the release folder's content (as in the offline ZIP) written straight
+  into the folder. One session reads `.q2vt-files.json` (path → SHA-256, size of what QWebMap
+  uploaded), creates the folder and checks write access and posix-rename; a second writes the
+  state with the changing files marked unknown, uploads new / changed files to temporary names,
+  renames them over their targets (`index.html` last; without posix-rename a delete first),
+  deletes only files the previous state lists, removes folders left empty, writes the final
+  state. Another publication's folder is refused. With a public URL the folder is verified like
+  an R2 release (`verify_release`); problems there are warnings, as the files are already live.
+- Publish window: *SSH / SFTP server* in *Destination* with its own rows (server, port, user,
+  folder, key file, session password + *Save in QGIS…*); bucket, prefix, keys, retention,
+  conditional writes, CORS and *Releases and rollback…* hidden for it; a pasted
+  `user@server:/folder` or `sftp://` address fills the rows; *Test connection* creates the folder
+  and writes / deletes a test file; the SSH password never goes into the settings file.
+- The Publish window has no Qt translation files (its strings go through `tr()` only), so there
+  is no Hungarian text to add for the new rows.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1) | 23 passed |
+| `pytest tests/integration/test_publish_dialog_ssh.py` | 2 passed |
+| `test_publishing_profile`, `test_publishing_providers`, `test_publish_dialog`, `test_publish_dialog_r2` | 30, 16, 7, 3 passed |
+
+Not verified here: Windows (askpass `.cmd` helper, `System32\OpenSSH` lookup) and non-OpenSSH
+SFTP servers (the non-atomic replace path is covered by unit tests of the batch only).

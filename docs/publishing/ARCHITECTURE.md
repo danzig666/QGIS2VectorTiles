@@ -42,6 +42,7 @@ publishing.deployments.publish                (QgsTask: files + network only)
 | `src/publishing/provenance.py`, `identifiers.py`, `disclosure.py`, `qgis_model.py` | Logical model, stable keys, public-field contract, QGIS-side records and legend. |
 | `src/publishing/search_index.py`, `feature_index.py` | Publication-wide search shards and exact lookup shards. |
 | `src/publishing/providers/`, `public_verify.py`, `deployments.py`, `credentials.py` | Hosting providers, public checks, activation protocol, QGIS auth adapter. |
+| `src/publishing/providers/ssh.py`, `folder_publish.py` | SSH / SFTP server through the system OpenSSH client (one `sftp -b` session per batch, askpass for passwords); unversioned one-folder publication driven by the folder's `.q2vt-files.json` state file. |
 | `src/publishing/preview_server.py` | Loopback HTTP server with byte ranges. |
 | `src/publishing/raster_tiles.py` | QGIS raster layers → PNG/JPEG/WebP tiles in their own PMTiles archive. |
 | `src/publishing/parcel_report.py` | Parcel report (telekinformáció) computed at export time. |

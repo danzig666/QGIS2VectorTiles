@@ -253,8 +253,9 @@ into a public, self-contained web map. The window title shows the plugin version
 1. *Map* tab: choose the extent and the layers (*Publish*, *At start*, *Switchable*).
 2. *Interaction* tab: tick the fields that may appear in popups, search and filters.
 3. *Export locally*, then *Preview* to see the web map in your browser.
-4. *Destination* tab: set up Cloudflare R2 or other S3-compatible storage, or keep *Local only
-   (no upload)* and copy the folder to a web server that supports Range requests.
+4. *Destination* tab: set up Cloudflare R2, other S3-compatible storage or an SSH / SFTP server,
+   or keep *Local only (no upload)* and copy the folder to a web server that supports Range
+   requests.
 5. *Review* tab: check what becomes public and tick the approval, then *Publish*.
 
 ### Choosing what to publish
@@ -342,6 +343,12 @@ into a public, self-contained web map. The window title shows the plugin version
 - **Rollback** (*Destination → Releases and rollback…*): make an earlier release current again,
   delete old releases or abort interrupted uploads; *Releases to keep* sets how many releases
   *Delete old releases…* keeps (nothing is deleted automatically).
+- **SSH / SFTP server** (*Destination* tab): the map goes straight into one folder on your web
+  server that you choose, replacing the previous map there (not versioned: no releases, no
+  rollback). Only new and changed files are uploaded, `index.html` last, and only files QWebMap
+  uploaded there before are ever deleted, so your other files in the folder stay. Uses the
+  computer's OpenSSH client (key, ssh-agent or a password); see
+  [HOSTING.md](docs/publishing/HOSTING.md#ssh--sftp-server-one-folder-not-versioned).
 - **Sharing:** *Open map*, *Copy link* and **Copy embed code**, a ready `<iframe>` for another web
   page. The embedded map is compact, has an *Open the full map* link, zooms with the scroll wheel
   only while Ctrl/⌘ is held, and on touch screens moves only with two fingers, so page scrolling
@@ -368,9 +375,10 @@ into a public, self-contained web map. The window title shows the plugin version
   fields, missing document files and house-number fields are reported in the first seconds of an
   export, with where to fix them.
 - **Settings** are saved in the project (*Save settings*, then save the project file). Object
-  storage keys are not: they stay encrypted in the QGIS authentication database (*Save keys in
-  QGIS…*) or are typed for this session only. *Settings file…* exports the settings to a file
-  (with the storage keys, secret included, when the destination has them: keep it private) and
+  storage keys and SSH passwords are not: they stay encrypted in the QGIS authentication database
+  (*Save keys in QGIS…*, *Save in QGIS…*) or are typed for this session only. *Settings file…*
+  exports the settings to a file (with the storage keys, secret included, when the destination
+  has them: keep it private; never an SSH password) and
   imports them into another project, matching layers by name. The Google Street View key is a
   project setting and is visible in the published page, so restrict it in Google Cloud.
 - When the settings come from another project file, the window asks whether to keep updating the
@@ -490,7 +498,7 @@ export* option is an older thread mode, off by default, that can crash QGIS.
 ## Documentation
 
 Documentation: [`docs/publishing/`](docs/publishing/), covering
-[hosting and R2 setup](docs/publishing/HOSTING.md),
+[hosting: R2, SSH / SFTP and other servers](docs/publishing/HOSTING.md),
 [security](docs/publishing/SECURITY.md),
 [architecture](docs/publishing/ARCHITECTURE.md),
 [tests](docs/publishing/TESTING.md) and

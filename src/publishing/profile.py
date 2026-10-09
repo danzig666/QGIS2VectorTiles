@@ -319,6 +319,10 @@ def validate(profile: PublicationProfile) -> List[str]:
                               "(plain http only for local test servers on this computer)")
         if not dest.public_base_url:
             errors.append("destination.publicBaseUrl: required (the public custom domain)")
+    if dest.kind == "ssh":
+        if profile.output.archive == "mbtiles":
+            errors.append("output.archive: web hosting needs PMTiles (choose PMTiles or Both)")
+        errors.extend(ssh_problems(dest))
     if dest.prefix:
         try:
             normalize_prefix(dest.prefix)
@@ -327,6 +331,49 @@ def validate(profile: PublicationProfile) -> List[str]:
     if not 1 <= int(dest.retention) <= 100:
         errors.append("destination.retention: 1-100")
     return errors
+
+
+_SSH_HOST = re.compile(r"^(?!-)[A-Za-z0-9._%:-]+$|^\[[0-9A-Fa-f:.%]+\]$")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def ssh_problems(dest) -> List[str]:
+    """Problems of an SSH / SFTP destination (nothing here may become an ssh option)."""
+    errors = []
+    if not dest.host:
+        errors.append("destination.host: required (the SSH server's name or address)")
+    elif not _SSH_HOST.match(dest.host):
+        errors.append("destination.host: a host name or IP address (no spaces, user@ or path)")
+    if not isinstance(dest.port, int) or isinstance(dest.port, bool) or not 1 <= dest.port <= 65535:
+        errors.append("destination.port: 1-65535")
+    user = dest.user or ""
+    if user and (user.startswith("-") or re.search(r"[\s\x00-\x1f\x7f]", user)):
+        errors.append("destination.user: a login name without spaces")
+    folder = normalize_remote_dir(dest.remote_dir)
+    if not folder:
+        errors.append("destination.remoteDir: required (the folder on the server the map goes into)")
+    elif _CONTROL.search(folder):
+        errors.append("destination.remoteDir: no control characters")
+    elif folder == "/":
+        errors.append("destination.remoteDir: a folder, not the server's root")
+    if dest.identity_file and _CONTROL.search(dest.identity_file):
+        errors.append("destination.identityFile: no control characters")
+    value = dest.public_base_url
+    if value and urlparse(value).scheme not in ("http", "https"):
+        errors.append("destination.publicBaseUrl: the folder's http:// or https:// address")
+    return errors
+
+
+def normalize_remote_dir(path: str) -> str:
+    """The remote folder as sftp gets it: ``~/x`` and ``~`` are relative to
+    the login's home (sftp starts there), trailing slashes dropped."""
+    path = (path or "").strip()
+    if path in ("~", "~/"):
+        return "."
+    if path.startswith("~/"):
+        path = path[2:]
+    stripped = path.rstrip("/")
+    return stripped or ("/" if path.startswith("/") else "")
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -387,7 +434,10 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
                       profile.interaction.address_street_field] if profile.interaction.address_layer_id else None,
         "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,
         "destination": [profile.destination.kind, profile.destination.public_base_url,
-                        profile.destination.bucket, publication_prefix(profile)],
+                        profile.destination.bucket, publication_prefix(profile)] + (
+            [profile.destination.host, profile.destination.port, profile.destination.user,
+             normalize_remote_dir(profile.destination.remote_dir)]
+            if profile.destination.kind == "ssh" else []),
         "extra": extra or {},
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
