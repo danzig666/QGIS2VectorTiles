@@ -1471,12 +1471,13 @@ class TextPropertyExtractor:
     @staticmethod
     def get_text_radial_offset(label_settings: QgsPalLayerSettings,
                                text_size_px: Union[float, List] = 16.0) -> float:
-        """Return ``text-radial-offset`` in ems for "around point" placement.
-
-        0.7 em is the historical empirical clearance around the point symbol;
-        the QGIS label distance is added on top of it.
+        """Return ``text-radial-offset`` in ems for "around point" placement:
+        the QGIS label distance. Measured from the point ("From point"), the
+        label touches it at distance 0; measured from the symbol's bounds,
+        0.7 em stands for the symbol (its size is not known here).
         """
-        base = 0.7
+        from_symbol = _enum_int(getattr(label_settings, "offsetType", 0), 0) == 1
+        base = 0.7 if from_symbol else 0.0
         try:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):

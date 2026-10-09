@@ -538,6 +538,32 @@ def test_a_wide_map_unit_line_crossing_a_tile_edge_has_straight_sides(tmp_path):
     assert differ < 400, differ
 
 
+def test_around_point_labels_touch_their_point_at_distance_zero(tmp_path):
+    """"Around point" labels measured from the point at distance 0: QGIS puts
+    the label's corner on the point (above right first). The web kept an
+    extra 0.7 em clearance."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    layer = QgsVectorLayer("Point?crs=EPSG:3857&field=name:string", "places", "memory")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Marketplace"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "places.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple(
+        {"name": "circle", "size": "1", "color": "255,255,255,0", "outline_style": "no"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.AroundPoint
+    settings.dist = 0
+    text_format = QgsTextFormat()
+    text_format.setSize(24)
+    text_format.setSizeUnit(Qgis.RenderUnit.Pixels)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    assert _compare(tmp_path, layer, metric="near") > 0.9
+
+
 def _feature_pattern(kind, tmp_path):
     """A screen-unit pattern of the given kind, feature-aligned (QGIS default)."""
     from qgis.core import (QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer,
