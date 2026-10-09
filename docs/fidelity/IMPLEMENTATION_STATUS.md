@@ -109,6 +109,10 @@ overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`
 * ELSE rules now follow the scale ranges of their siblings as QGIS does.
 * Horizontal/free polygon labels are centred instead of using variable anchors; only
   "around point" placements use variable anchors.
+* Horizontal/free polygon labels placed by the web viewer also keep clear of the point
+  labels MapLibre draws itself (place names, building numbers), as line and "around
+  point" labels do: QGIS places all labels together, so a park's name no longer runs into
+  a place name inside the park. Each of those labels is measured with its own text.
 * Unsupported fills (gradient, shapeburst, …) are omitted and reported instead of being
   drawn black; failed sprites are omitted and reported instead of being transparent.
 * Data-defined widths, sizes and opacities are converted to the browser's units.

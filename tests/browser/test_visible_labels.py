@@ -630,3 +630,82 @@ def test_around_point_labels_keep_clear_of_maplibre_labels():
     town = [first[0] - box[0], first[1] - box[1], first[0] + box[0], first[1] + box[1]]
     x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": qgis_order, "avoid": [town]})[1]
     assert not _overlaps([x - box[0], y - box[1], x + box[0], y + box[1]], town)
+
+
+def test_pole_labels_keep_clear_of_maplibre_labels():
+    """Horizontal / Free polygon labels ("pole") avoid the point labels
+    MapLibre draws itself too: QGIS places all labels together."""
+    expr = """(() => {
+      const others = () => [[9, 9, 10, 10]];
+      return [m.avoidFor({anchor: 'pole'}, [[1, 1, 2, 2]], others), m.avoidFor({}, [[1, 1, 2, 2]], others)];
+    })()"""
+    pole, plain = _js(expr)
+    assert pole == [[1, 1, 2, 2], [9, 9, 10, 10]] and plain == [[1, 1, 2, 2]]
+
+
+def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
+    """End to end on a stub map: a place name MapLibre draws (one em above its
+    dot) on the middle of a square park. The park's name (pole) used to go to
+    the middle anyway, drawn over the place name (text-overlap "always")."""
+    expr = """(() => {
+      const park = {id: 'park', type: 'symbol', source: 't', 'source-layer': 'parks',
+        layout: {'text-field': ['get', 'name'], 'text-size': 16},
+        metadata: {'q2vt:visible-polygons': 'parks', 'q2vt:label-anchor': 'pole'}};
+      const place = {id: 'place', type: 'symbol', source: 't', 'source-layer': 'places',
+        layout: {'text-field': ['get', 'name'], 'text-size': 16, 'text-offset': [0, -1]}};
+      const layers = [park, place], sources = {t: {type: 'vector', minzoom: 0, maxzoom: 14}}, out = {};
+      const ring = [[400, 400], [3696, 400], [3696, 3696], [400, 3696], [400, 400]].map(([x, y]) => ({x, y}));
+      const parkName = 'Greenfield Nature Reserve', placeName = 'Greenfield Visitor Centre and Shop';
+      const map = {
+        getStyle: () => ({sources, layers: layers.slice()}), getLayer: (id) => layers.find((l) => l.id === id),
+        addLayer: (l, before) => {
+          const i = layers.findIndex((x) => x.id === before);
+          if (i < 0) layers.push(l); else layers.splice(i, 0, l);
+        },
+        removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
+        addSource: (id, spec) => { sources[id] = spec; }, getSource: (id) => ({setData: (d) => { out[id] = d; }}),
+        getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},
+        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0,
+        getContainer: () => ({clientWidth: 1000}),
+        getBounds: () => ({getSouthWest: () => ({lng: 0, lat: 1}), getNorthEast: () => ({lng: 1, lat: 0})}),
+        querySourceFeatures: (s, {sourceLayer}) => sourceLayer !== 'parks' ? [] : [{_x: 0, _y: 0, _z: 0,
+          properties: {q2vt_orig_id: 1, name: parkName},
+          _vectorTileFeature: {extent: 4096, loadGeometry: () => [ring]}}],
+        queryRenderedFeatures: ({layers: wanted}) => !wanted.includes('place') ? [] : [{layer: place,
+          properties: {name: placeName}, geometry: {type: 'Point', coordinates: [0.5, 0.516]}}],
+      };
+      const maplibregl = {MercatorCoordinate: class {
+        constructor(x, y) { this.x = x; this.y = y; }
+        static fromLngLat(ll) { return Array.isArray(ll) ? new this(ll[0], ll[1]) : new this(ll.lng, ll.lat); }
+        toLngLat() { return {lng: this.x, lat: this.y}; } }};
+      m.enableVisibleLabels(map, maplibregl, 't');
+      const box = (layout, name, [x, y]) => {
+        const [w, h] = m.layoutBoxes(layout, 0, 0.001)({name});
+        return [x - w, y - h, x + w, y + h];
+      };
+      const at = out['q2vt_visible_parks'].features[0].geometry.coordinates;
+      return [box(park.layout, parkName, at), box(place.layout, placeName, [0.5, 0.516 - 0.016])];
+    })()"""
+    park, place = _js(expr)
+    assert not _overlaps(park, place)
+    # Still inside the park (0.098 .. 0.902 in both directions).
+    assert 0.098 < park[0] and park[2] < 0.902 and 0.098 < park[1] and park[3] < 0.902
+
+
+def test_rendered_label_boxes_measure_each_label_with_its_own_text():
+    """A rendered feature's ``layer.layout`` holds that feature's own
+    evaluated values (text-field: a Formatted of its text): each label is
+    measured with its own text, not every label of the layer with the first."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 10}};
+      const evaluated = (t) => ({...town, layout: {...town.layout,
+        'text-field': {sections: [{text: t}], toString() { return t; }}}});
+      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+        {layer: evaluated('ABCDEFGHIJ'), properties: {t: 'ABCDEFGHIJ'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
+        {layer: evaluated('AB'), properties: {t: 'AB'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001).map((b) => b[2] - b[0]);
+    })()"""
+    long_width, short_width = _js(expr)
+    assert long_width == pytest.approx((10 * 0.6 * 10 + 4) * 0.001)
+    assert short_width == pytest.approx((2 * 0.6 * 10 + 4) * 0.001)
