@@ -1693,3 +1693,35 @@ switch off only the labels zoomed out while the features stay."
 | Synthetic city project (7 layers: 85,320 parcels, 47,520 buildings, 38,880 house numbers, sub-parcel names and lines) | analysed in about 10 s; heaviest tile ~5.0 MB → ~1 MB with the suggestions: parcels and sub-parcel lines from z11 (1:96 000), buildings from z15, sub-parcel names and house numbers labels-only from z13 |
 | Tests | 84 passed (profile, flattener, plugin package, Publish window, publishing pipeline, scale limits: labels-only export, analysis, dialog) |
 
+## 4.30.1: export crash on old labels, shapeburst distance, labels of per-zoom symbols, letter spacing
+
+Found by a user's export (Püspökladány, 64 layers) and by comparing a showcase project in QGIS
+and in the browser view by view.
+
+- Labels from older QGIS versions can store `multilineAlign="4294967295"` (-1, unset). PyQGIS
+  cannot read that attribute (*ValueError: -1 is not a valid Qgis.LabelMultiLineAlignment*), and
+  the style export stopped. `maplibre_converter._label_enum` reads label enums with a default;
+  an unset alignment is left aligned, as QGIS draws it (it is none of centre, right, justify).
+  Checked on every label setting of the user's project (149, 44 with the unset value) and with
+  a full export of its 64 published layers on stand-in data.
+- `SymbolMaterializer` knew only the export's last zoom: a rule without a scale limit starts at
+  zoom 0 when it is materialized (the flattener clamps rule zoom ranges afterwards). A shapeburst
+  distance in screen units was converted at the middle of zoom 0 and the last zoom (8.5 for
+  zooms 11-17), so its bands spread over ~45x the distance and the fill showed its first colour
+  only. The materializer now gets the export's first zoom and clamps every rule zoom range to the
+  exported zooms (`_zoom_range`); per-zoom splits no longer make rules for zooms that are dropped
+  later, and a single exported zoom still gets its own rule (`_per_zoom`).
+- Label rules are split by the renderer rules they match. A renderer rule materialized per zoom
+  (marker positions, effects, `@map_scale` splits) is many one-zoom slices of one rule, and the
+  label was matched to the first slice only: a river with flow arrows had its labels at the last
+  zoom only, roads with one-way arrows had extra label layers there. `_renderer_runs` matches a
+  label to each contiguous run of a rule's slices.
+- Label letter spacing (absolute, in the text size's units in QGIS) is `text-letter-spacing` in
+  ems (spacing / size; a percentage spacing about half an em per character); it was always 0.
+
+| Run | Result |
+|---|---|
+| User's project (styles only, data replaced by stand-in features) | 149 label settings converted; full export of the 64 published layers and the viewer without errors |
+| Showcase project, QGIS vs browser | shapeburst water and river labels now match |
+| Tests (full suite, each file in its own process) | 707 passed, 5 skipped |
+
