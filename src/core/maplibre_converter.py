@@ -1947,6 +1947,16 @@ class QgisMapLibreStyleExporter:
 
     PATTERN_MARKER_OVERSAMPLING = 2.0
 
+    @staticmethod
+    def _cached_marker_image(marker) -> bool:
+        """QGIS draws every layer of ``marker`` from its cached image at
+        whole pixels: simple markers without data-defined properties
+        (QgsSimpleMarkerSymbolLayer::startRender / renderPoint)."""
+        layers = [marker.symbolLayer(i) for i in range(marker.symbolLayerCount())]
+        return bool(layers) and all(layer.layerType() == "SimpleMarker"
+                                    and not layer.dataDefinedProperties().hasActiveProperties()
+                                    for layer in layers)
+
     _TRANSLATE = {"fill": "fill", "line": "line", "circle": "circle", "symbol": "icon"}
 
     def _apply_translate(self, layer_defs, translate) -> None:
@@ -2561,11 +2571,12 @@ class QgisMapLibreStyleExporter:
                                                       layer.displacementXUnit(), 2 * dx),
                               self._pattern_offset_px(layer.displacementY(),
                                                       layer.displacementYUnit(), 2 * dy))
+            snap = self._cached_marker_image(marker)
             for ratio, image in ((1, one), (2, two)):
                 width, height, positions = apply_pattern_positions(
                     dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio,
                     off_x * ratio, off_y * ratio)
-                cells.append(tile_markers(image, width, height, positions, wrap=False))
+                cells.append(tile_markers(image, width, height, positions, wrap=False, snap=snap))
             return self._textures(cells[0], cells[1], 0.0, "Point pattern")
         for ratio, image in ((1, one), (2, two)):
             width, height, positions, _ = point_pattern_cell(

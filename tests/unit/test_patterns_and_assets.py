@@ -168,3 +168,21 @@ def test_apply_pattern_positions_follow_qgis():
     assert cell.size == (37, 37)
     # The marker at x = 37.8 is cut at the right edge, not wrapped to x = 0.8.
     assert cell.getpixel((36, 18))[3] > 0 and cell.getpixel((2, 18))[3] == 0
+
+
+def test_snapped_markers_sit_on_whole_pixels_like_qgis_draw_image():
+    """QGIS draws a simple marker from its cached image with
+    QPainter::drawImage, on whole pixels: the dots of a point pattern stay
+    crisp. Supersampled placement smeared them over a pixel."""
+    from PIL import Image
+    from fidelity.patterns import apply_pattern_positions, tile_markers
+    marker = Image.new("RGBA", (5, 5), (0, 0, 0, 0))
+    for x in range(1, 5):
+        for y in range(1, 5):
+            marker.putpixel((x, y), (120, 60, 160, 255))
+    width, height, positions = apply_pattern_positions(9.0709, 9.0709)
+    snapped = tile_markers(marker, width, height, positions, wrap=False, snap=True)
+    alphas = {a for *_rgb, a in snapped.getdata()}
+    assert alphas <= {0, 255}, alphas
+    smooth = tile_markers(marker, width, height, positions, wrap=False)
+    assert {a for *_rgb, a in smooth.getdata()} - {0, 255}  # the default still supersamples

@@ -29,9 +29,11 @@ from typing import Dict, List, Optional, TypeAlias, Union
 
 
 from PIL import Image
-from qgis.core import (Qgis, QgsExpressionContext, QgsExpressionContextScope,
+from qgis.core import (Qgis, QgsEllipseSymbolLayer, QgsExpressionContext, QgsExpressionContextScope,
                        QgsExpressionContextUtils, QgsFeature, QgsFields, QgsField,
-                       QgsMapToPixel, QgsMarkerSymbol, QgsRenderContext, QgsSymbol)
+                       QgsMapToPixel, QgsMarkerSymbol, QgsRenderContext, QgsSimpleFillSymbolLayer,
+                       QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer, QgsSymbol,
+                       QgsSymbolLayer)
 from qgis.PyQt.QtCore import qVersion
 
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
@@ -125,6 +127,32 @@ def _pixels_to_millimeters(symbol: QgsSymbol) -> None:
                 getattr(layer, unit_setter)(Qgis.RenderUnit.Millimeters)
             except (TypeError, AttributeError, RuntimeError):
                 continue
+
+
+# Symbol layers whose zero stroke width QGIS draws with a cosmetic pen (one
+# device pixel). A font marker's zero stroke is no stroke and an SVG's goes
+# into the SVG: those are left alone.
+_HAIRLINE_WIDTHS = ((QgsSimpleMarkerSymbolLayer, "strokeWidth"), (QgsEllipseSymbolLayer, "strokeWidth"),
+                    (QgsSimpleFillSymbolLayer, "strokeWidth"), (QgsSimpleLineSymbolLayer, "width"))
+
+
+def _hairlines_to_one_pixel(symbol: QgsSymbol) -> None:
+    """Zero stroke widths as one CSS pixel (1/96 in), sub-symbols included:
+    QGIS draws them one device pixel wide whatever the render context's
+    scale, so a sprite oversampled 3x showed them a third of a pixel wide
+    (the black outline of a flow arrow faded to grey). Lines: hairline() in
+    maplibre_converter."""
+    for layer in symbol.symbolLayers():
+        getter = next((name for cls, name in _HAIRLINE_WIDTHS if isinstance(layer, cls)), None)
+        props = layer.dataDefinedProperties()
+        if getter and getattr(layer, getter)() == 0 and not (
+                props is not None and props.isActive(QgsSymbolLayer.Property.PropertyStrokeWidth)):
+            setter = f"set{getter[:1].upper()}{getter[1:]}"
+            getattr(layer, setter)(1.0 / _PX_PER_MM)
+            getattr(layer, f"{setter}Unit")(Qgis.RenderUnit.Millimeters)
+        sub = layer.subSymbol()
+        if sub is not None:
+            _hairlines_to_one_pixel(sub)
 
 
 @dataclass
@@ -258,6 +286,8 @@ class SymbolImage:
         symbol = self._independent_copy(self.symbol)
         if not self.bake_rotation and isinstance(symbol, QgsMarkerSymbol):
             symbol.setAngle(0)
+        if self.scale_factor > 1 and isinstance(symbol, QgsMarkerSymbol):
+            _hairlines_to_one_pixel(symbol)
         if self.scale_factor != 1 and isinstance(symbol, QgsMarkerSymbol):
             _pixels_to_millimeters(symbol)
         canvas = int(_BASE_CANVAS_PX * max(1.0, self.scale_factor / 3.0))
