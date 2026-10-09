@@ -3935,12 +3935,20 @@ class QgisMapLibreStyleExporter:
         return out
 
     def _map_unit_frame(self, background, zoom: int) -> Optional[str]:
-        """Frame image with the map-unit stroke of ``zoom``: drawn at
-        icon-size 0.5 -> 1 over the zoom, so the image stroke is doubled."""
+        """Frame image with the map-unit stroke for [zoom, zoom + 1).
+
+        A text-fitted rectangle's border lies in the image's fixed (not
+        stretched) margin, which MapLibre draws in image pixels whatever the
+        icon-size: the border cannot grow within the zoom, so it is drawn at
+        the stroke of zoom + 0.5, within sqrt(2) of QGIS's at either end (a
+        doubled stroke was twice QGIS's at the whole zoom). An ellipse is
+        scaled whole with the icon (icon-size 0.5 -> 1): its stroke stays
+        doubled."""
+        ellipse = _enum_int(background.type(), 0) in (2, 3)
         stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
                                                  background.strokeWidthUnit(),
-                                                 reference_zoom=zoom)
-        return self._background_image(background, stroke_px=2.0 * stroke)
+                                                 reference_zoom=zoom if ellipse else zoom + 0.5)
+        return self._background_image(background, stroke_px=2.0 * stroke if ellipse else stroke)
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:

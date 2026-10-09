@@ -320,6 +320,65 @@ def _red_and_blue_boxes(path):
     return boxes
 
 
+@pytest.mark.parametrize("zoom", [16.0, 16.5, 16.95])
+def test_a_map_unit_frame_border_is_as_thick_as_qgis(tmp_path, monkeypatch, zoom):
+    """A frame bordered in map units: the border lies in the frame image's
+    fixed margin, which MapLibre does not scale with icon-size, so a border
+    made twice as thick (for icon-size 0.5) stayed twice QGIS's at the
+    whole zoom. Drawn at the stroke of the zoom's middle, it stays within
+    sqrt(2) of QGIS's over the zoom."""
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from PIL import Image
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["1"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(12, 4))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(2)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+
+    def border(name):
+        """Red ink across the frame's top and bottom edges, per column, over
+        the columns left of the text (px of full red)."""
+        image = Image.open(str(tmp_path / f"v_{name}.png")).convert("RGB")
+        (x0, y0, x1, y1), (tx0, _, _, _) = _red_and_blue_boxes(str(tmp_path / f"v_{name}.png"))
+        columns = range(x0 + 4, tx0 - 2)
+        ink = sum(max(0, image.getpixel((x, y))[0] - image.getpixel((x, y))[1]) / 255
+                  for x in columns for y in range(image.height))
+        return ink / len(columns) / 2
+
+    qgis, browser = border("qgis"), border("browser")
+    assert 0.6 <= browser / qgis <= 1.55, (qgis, browser)
+
+
 @pytest.mark.parametrize("zoom", [16.0, 16.5])
 def test_label_frames_follow_map_unit_text_between_zooms(tmp_path, monkeypatch, zoom):
     """A frame fitted to map-unit text: MapLibre reads a size curve only at
