@@ -1648,15 +1648,26 @@ feature-lookup shards.
   the canvas CRS in between; press-drag-release still works), with the canvas snapping
   (`QgsMapMouseEvent.snapPoint`, snap indicator), step hints in the QGIS status bar, and right
   click as another way to cancel. Click or drag is decided on the unsnapped screen position:
-  a release less than `QApplication.startDragDistance()` (10 px by default) from where the
-  first corner was clicked is a click on it and is ignored, and so is a rectangle under 4
-  pixels wide or high. The tool goes only once every mouse button is up (right click or Esc
-  while dragging cancels at the release; the canvas gives keys to its `keyPressed` signal only
-  while a button is down), and a short-lived event filter on the canvas viewport eats the rest
-  of a double click on the last corner, so the tool that comes back (Pan: zoom in, re-centre)
-  gets none of the gesture. The window gives the map canvas the keyboard focus (Esc before
-  the first click), takes its message bar notice back when the drawing ends, and opening the
-  window again (Web menu) while drawing cancels the drawing. Tests:
+  the press on the first corner is a drag only when it is released at least 20 px (across
+  plus down; more than `QApplication.startDragDistance()`; QGIS's zoom tool uses 20 too)
+  from where it went down, otherwise it is a click whose release slipped; a later click less
+  than `startDragDistance()` (10 px by default) from the first corner is ignored, and so is
+  a rectangle under 4 px wide or high, measured in map units (`mapUnitsPerPixel()`), so a
+  rotated canvas is measured right too. The tool goes only once the left and right buttons
+  are up: right click or Esc while a button is down cancels at the release, and Esc then
+  does not take back a rectangle drawn already. (While a button is down the canvas gives keys
+  only to its `keyPressed` signal, not to the map tool's `keyPressEvent`, so the tool listens
+  to both.) A short-lived event filter on the canvas viewport eats the rest of a double click
+  on the last corner, so the tool that comes back (Pan: zoom in, re-centre) gets none of the
+  gesture. Done, the tool deletes itself (`deleteLater`; the canvas is its parent and would
+  keep one per drawing, which a right click in a transient map tool could bring back). The
+  window gives the map canvas the keyboard focus (Esc before the first click), takes its
+  message bar notice back when the drawing ends, clears the status bar only if it still shows
+  the tool's hint (the hint is shown again on mouse moves after a QGIS status tip replaced
+  it), and comes back `QApplication.doubleClickInterval()` after the drawing, so the rest of a
+  double click on the last corner cannot click a button in it. Opening the window again (Web
+  menu) or closing it (also when the plugin is unloaded) while drawing gives the drawing up
+  and brings the previous map tool back. Tests:
   `tests/integration/test_publish_dialog_extent.py` (synthetic `QgsMapMouseEvent`s, and mouse
   and key events sent through the canvas viewport, on an offscreen canvas),
   `test_publish_dialog.py`.

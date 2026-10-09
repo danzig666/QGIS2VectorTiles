@@ -263,18 +263,18 @@ def test_info_documents_terrain_addresses_round_trip(project, messages, tmp_path
     dialog.close()
 
 
-def test_the_extent_is_drawn_on_the_map(project, messages):
-    """The published area drawn on the QGIS map by clicking two opposite
-    corners: the window steps aside meanwhile, the map gets the keyboard (Esc)
-    and the status bar says which corner comes next; right click, Esc,
-    another map tool or opening the window again cancels; the tool used
-    before comes back and the message bar notice goes."""
-    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
-    from qgis.gui import QgsMapCanvas, QgsMapMouseEvent, QgsMapToolPan
-    from qgis.PyQt.QtCore import QEvent, QPoint
-    from qgis.PyQt.QtGui import QKeyEvent
-    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error
-    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error
+def _window_on_a_canvas():
+    """A Publish window whose QGIS is an offscreen map canvas with the Pan
+    tool, a message bar and a status bar noting what they get; mouse and key
+    helpers for the map tool of the moment."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle  # pylint: disable=import-outside-toplevel
+    from qgis.gui import QgsMapCanvas, QgsMapMouseEvent, QgsMapToolPan  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QEvent, QPoint  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QKeyEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtTest import QTest  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtWidgets import QApplication  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error,import-outside-toplevel
     canvas = QgsMapCanvas()
     canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
     canvas.resize(400, 300)
@@ -282,14 +282,16 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
     pan = QgsMapToolPan(canvas)
     canvas.setMapTool(pan)
     bar, popped, status = [], [], []
+    shown = [""]  # what the status bar shows now
 
     class Bar:
         def pushItem(self, item): bar.append(item)
         def popWidget(self, item): popped.append(item)
 
     class StatusBar:
-        def showMessage(self, text, timeout=0): status.append(text)
-        def clearMessage(self): status.append("")
+        def showMessage(self, text, timeout=0): status.append(text); shown[0] = text  # noqa: E702
+        def clearMessage(self): status.append(""); shown[0] = ""  # noqa: E702
+        def currentMessage(self): return shown[0]
 
     class Iface:
         def mapCanvas(self): return canvas
@@ -297,54 +299,139 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
         def statusBarIface(self): return StatusBar()
         def mainWindow(self): return None
 
-    def click(x, y, button=Qt.MouseButton.LeftButton):
+    def mouse(kind, x, y, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton):
         tool = canvas.mapTool()
-        tool.canvasPressEvent(QgsMapMouseEvent(canvas, QEvent.Type.MouseButtonPress, QPoint(x, y), button,
-                                               button, Qt.KeyboardModifier.NoModifier))
-        tool.canvasReleaseEvent(QgsMapMouseEvent(canvas, QEvent.Type.MouseButtonRelease, QPoint(x, y), button,
-                                                 Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        handler = {QEvent.Type.MouseButtonPress: tool.canvasPressEvent, QEvent.Type.MouseMove: tool.canvasMoveEvent,
+                   QEvent.Type.MouseButtonRelease: tool.canvasReleaseEvent}[kind]
+        handler(QgsMapMouseEvent(canvas, kind, QPoint(x, y), button, buttons, Qt.KeyboardModifier.NoModifier))
+
+    def click(x, y, button=Qt.MouseButton.LeftButton):
+        mouse(QEvent.Type.MouseButtonPress, x, y, button, button)
+        mouse(QEvent.Type.MouseButtonRelease, x, y, button, Qt.MouseButton.NoButton)
+
+    def esc():
+        canvas.mapTool().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                                 Qt.KeyboardModifier.NoModifier))
+
+    def wait():
+        QTest.qWait(QApplication.doubleClickInterval() + 100)
 
     dialog = PublishDialog(iface=Iface())
+
+    def back():
+        """The window is not back at once, but a double-click interval later."""
+        assert not dialog.isVisible()
+        wait()
+        assert dialog.isVisible()
+
+    def map_extent(x0, y0, x1, y1):
+        """The rectangle between two pixels, rounded, as the profile keeps it (EPSG:3857)."""
+        to_map = canvas.getCoordinateTransform()
+        drawn = QgsRectangle(to_map.toMapCoordinates(x0, y0), to_map.toMapCoordinates(x1, y1))
+        return [round(drawn.xMinimum()), round(drawn.yMinimum()), round(drawn.xMaximum()), round(drawn.yMaximum())]
+
+    return SimpleNamespace(dialog=dialog, canvas=canvas, pan=pan, bar=bar, popped=popped, status=status,
+                           shown=shown, mouse=mouse, click=click, esc=esc, wait=wait, back=back,
+                           map_extent=map_extent)
+
+
+def test_the_extent_is_drawn_on_the_map(project, messages):
+    """The published area drawn on the QGIS map by clicking two opposite
+    corners: the window steps aside meanwhile, the map gets the keyboard (Esc)
+    and the status bar says which corner comes next; right click, Esc,
+    another map tool or opening the window again cancels; the tool used
+    before comes back and the message bar notice goes. The window comes back
+    a double-click interval later: the rest of a double click on the last
+    corner must not click whatever is under the mouse in it."""
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error
+    w = _window_on_a_canvas()
+    dialog, canvas, pan, bar, popped, status = w.dialog, w.canvas, w.pan, w.bar, w.popped, w.status
     dialog.show()
     assert canvas.focusWidget() is None
     dialog._draw_extent()  # pylint: disable=protected-access
     assert isinstance(canvas.mapTool(), ExtentTool) and not dialog.isVisible() and bar
     assert "two opposite corners" in bar[-1].text() and "first corner" in status[-1]
     assert canvas.focusWidget() is canvas  # Esc goes to the map tool
-    click(100, 50)
+    w.click(100, 50)
     assert isinstance(canvas.mapTool(), ExtentTool) and "opposite corner" in status[-1]  # still drawing
     assert popped == []
-    click(200, 110)
-    assert canvas.mapTool() is pan and dialog.isVisible() and status[-1] == ""
+    w.click(200, 110)
+    assert canvas.mapTool() is pan and status[-1] == ""
     assert popped == [bar[-1]]  # the notice goes with the drawing
-    to_map = canvas.getCoordinateTransform()
-    drawn = QgsRectangle(to_map.toMapCoordinates(100, 50), to_map.toMapCoordinates(200, 110))
-    expected = [round(drawn.xMinimum()), round(drawn.yMinimum()), round(drawn.xMaximum()), round(drawn.yMaximum())]
+    w.back()
+    expected = w.map_extent(100, 50, 200, 110)
     assert [round(v) for v in dialog.profile.view.extent] == expected
     assert dialog.profile.view.extent_layer == "" and "Fixed extent" in dialog.extent_label.text()
     dialog._draw_extent()  # pylint: disable=protected-access
-    click(150, 80)
-    canvas.mapTool().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
-                                             Qt.KeyboardModifier.NoModifier))
-    assert canvas.mapTool() is pan and dialog.isVisible() and status[-1] == ""
+    w.click(150, 80)
+    w.esc()
+    assert canvas.mapTool() is pan and status[-1] == ""
+    w.back()
     assert [round(v) for v in dialog.profile.view.extent] == expected
     dialog._draw_extent()  # pylint: disable=protected-access
-    click(150, 80)
-    click(300, 200, Qt.MouseButton.RightButton)
-    assert canvas.mapTool() is pan and dialog.isVisible()
+    w.click(150, 80)
+    w.click(300, 200, Qt.MouseButton.RightButton)
+    assert canvas.mapTool() is pan
+    w.back()
     assert [round(v) for v in dialog.profile.view.extent] == expected
     dialog._draw_extent()  # pylint: disable=protected-access
     canvas.setMapTool(pan)  # another tool chosen
-    assert dialog.isVisible() and status[-1] == "" and popped[-1] is bar[-1]
+    assert status[-1] == "" and popped[-1] is bar[-1]
+    w.back()
     # The window opened again from the Web menu while drawing: drawing given
     # up; drawing again starts from the tool used before.
     dialog._draw_extent()  # pylint: disable=protected-access
-    click(150, 80)
+    w.click(150, 80)
     dialog.show()
     assert canvas.mapTool() is pan and status[-1] == "" and popped[-1] is bar[-1]
     assert [round(v) for v in dialog.profile.view.extent] == expected
     dialog._draw_extent()  # pylint: disable=protected-access
-    canvas.mapTool().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
-                                             Qt.KeyboardModifier.NoModifier))
-    assert canvas.mapTool() is pan and dialog.isVisible()
+    w.esc()
+    assert canvas.mapTool() is pan
+    w.back()
     dialog.close()
+
+
+def test_the_extent_hint_in_the_status_bar(project, messages):
+    """The hint comes back after a QGIS status tip replaced it (hovering a
+    toolbar), and only the hint is cleared when the drawing ends."""
+    from qgis.PyQt.QtCore import QEvent  # pylint: disable=import-outside-toplevel
+    w = _window_on_a_canvas()
+    w.dialog.show()
+    w.dialog._draw_extent()  # pylint: disable=protected-access
+    w.shown[0] = "Zoom In"
+    w.mouse(QEvent.Type.MouseMove, 120, 90)
+    assert "first corner" in w.shown[0]
+    w.shown[0] = "Another plugin's message"
+    w.esc()
+    assert w.shown[0] == "Another plugin's message"
+    w.wait()
+    w.dialog.close()
+
+
+def test_closing_the_window_gives_the_drawing_up(project, messages):
+    """Closed while the extent is being drawn (the plugin unloaded or
+    reloaded): the drawing is given up, the previous map tool comes back
+    and the window is not shown again, also when it is closed while it was
+    about to come back."""
+    w = _window_on_a_canvas()
+    dialog, canvas = w.dialog, w.canvas
+    dialog.show()
+    before = list(dialog.profile.view.extent)
+    dialog._draw_extent()  # pylint: disable=protected-access
+    w.click(150, 80)
+    dialog.close()
+    assert canvas.mapTool() is w.pan and w.status[-1] == "" and w.popped[-1] is w.bar[-1]
+    w.wait()
+    assert not dialog.isVisible() and canvas.mapTool() is w.pan
+    assert dialog.profile.view.extent == before
+    w.click(160, 90)  # the Pan tool's
+    assert not dialog.isVisible()
+    # Closed after the drawing, before the window came back.
+    dialog.show()
+    dialog._draw_extent()  # pylint: disable=protected-access
+    w.click(100, 50)
+    w.click(200, 110)
+    dialog.close()
+    w.wait()
+    assert not dialog.isVisible() and canvas.mapTool() is w.pan

@@ -5,9 +5,9 @@ The published area drawn on the QGIS map canvas like QGIS's "Rectangle from
 2 points": click one corner, a rectangle follows the mouse, click the
 opposite corner (pressing, dragging and releasing works too). Corners snap
 when QGIS's snapping is on. Right click, Esc or choosing another map tool
-cancels. The tool that was active before comes back either way, once every
-mouse button is up, and the rest of a double click on the last corner does
-not reach it.
+cancels. The tool that was active before comes back either way, once the
+mouse buttons are up, and the rest of a double click on the last corner does
+not reach it. The tool deletes itself when it is done.
 """
 
 from typing import Callable, Optional
@@ -22,6 +22,16 @@ from qgis.PyQt.QtWidgets import QApplication
 # A rectangle narrower or lower than this on screen (pixels) is a slip of the
 # mouse along a side, not an area: the drawing goes on.
 MIN_SIDE_PIXELS = 4
+
+# The press on the first corner released less than this far from where it
+# went down (pixels across plus down) is a click whose release slipped
+# (touchpads, pen tablets), not a drag. QGIS's zoom tool takes a drag under
+# 20 pixels for a click, too. Always more than QApplication.startDragDistance().
+MIN_DRAG_PIXELS = 20
+
+# The buttons whose release reaches the map tool (the canvas keeps the middle
+# one for panning).
+TOOL_BUTTONS = Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton
 
 MOUSE_EVENTS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
                 QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease)
@@ -73,8 +83,9 @@ class _DoubleClickRest(QObject):
 
 class ExtentTool(QgsMapTool):
     """Calls ``done`` once: with the drawn rectangle (map canvas CRS), or
-    with None when cancelled. ``hint`` gets what to do next while drawing,
-    and "" once the tool is done."""
+    with None when cancelled. ``hint`` gets what to do next while drawing
+    (again on mouse moves), and "" once the tool is done. The tool deletes
+    itself afterwards."""
 
     # A rectangle from two corners (as QgsMapToolExtent's), emitted when it
     # is accepted.
@@ -89,8 +100,11 @@ class ExtentTool(QgsMapTool):
         self._start = None      # the first corner (snapped), map canvas CRS
         self._clicked = None    # where it was clicked (not snapped), map canvas CRS
         self._pressed = False   # the left button went down on this tool and is still down
+        self._opening = False   # ... and that press set the first corner
+        self._held = Qt.MouseButton.NoButton  # left and right buttons down, as last seen
         self._ending = False    # drawn or cancelled: the tool goes once the buttons are up
         self._result = None
+        self._told = ""         # the hint of the moment
         self._band = None
         self._snap = QgsSnapIndicator(canvas)
         self.setCursor(QgsApplication.getThemeCursor(QgsApplication.Cursor.CapturePoint))
@@ -103,16 +117,23 @@ class ExtentTool(QgsMapTool):
         self._tell(tr("Click the first corner of the published area. Right click or Esc cancels."))
 
     def cancel(self) -> None:
-        """Stop drawing (``done`` gets None) and bring the previous tool back."""
-        if self._done is not None:
+        """Stop drawing (``done`` gets None, or the rectangle if it was drawn
+        already) and bring the previous tool back: once the mouse buttons
+        are up, or their release would go to that tool."""
+        if self._done is None:
+            return
+        if not self._ending:
             self._end(None)
+        if not self._held:
             self._finish()
 
     def canvasPressEvent(self, event):  # noqa: N802 - Qt override
+        self._held = event.buttons() & TOOL_BUTTONS
         if event.button() != Qt.MouseButton.LeftButton or self._ending:
             return
         self._pressed = True
-        if self._start is not None:
+        self._opening = self._start is None
+        if not self._opening:
             return
         # (originalMapPoint() is the snapped point too once snapPoint() ran.)
         self._clicked = self.toMapCoordinates(event.originalPixelPoint())
@@ -129,38 +150,49 @@ class ExtentTool(QgsMapTool):
         self.canvasPressEvent(event)
 
     def canvasMoveEvent(self, event):  # noqa: N802 - Qt override
+        self._held = event.buttons() & TOOL_BUTTONS
         if self._ending:
             return
+        if self._told:  # again: a QGIS status tip may have replaced it
+            self._tell(self._told)
         point = event.snapPoint()
         self._snap.setMatch(event.mapPointMatch())
         if self._band is not None:
             self._band.setToGeometry(QgsGeometry.fromRect(QgsRectangle(self._start, point)))
 
     def canvasReleaseEvent(self, event):  # noqa: N802 - Qt override
+        self._held = event.buttons() & TOOL_BUTTONS
         if event.button() == Qt.MouseButton.RightButton:
             if not self._ending:
                 self._end(None)
         elif event.button() == Qt.MouseButton.LeftButton and self._pressed:
             self._pressed = False
+            opening, self._opening = self._opening, False
             if not self._ending:
-                self._corner(event)
+                self._corner(event, opening)
         # Not while a button is still down: its release would go to the
         # previous tool (the Pan tool would re-centre the map).
-        if self._ending and event.buttons() == Qt.MouseButton.NoButton:
+        if self._ending and not self._held:
             self._finish(after_click=True)
 
-    def _corner(self, event) -> None:
-        """The release of a press: the opposite corner, or not yet."""
+    def _corner(self, event, opening: bool) -> None:
+        """The release of a press (``opening``: of the press on the first
+        corner): the opposite corner, or not yet."""
         point = event.snapPoint()
         # Decided where the mouse really was (not where it snapped), on
         # screen now: the map may have been panned or zoomed since.
-        moved = event.originalPixelPoint() - self.toCanvasCoordinates(self._clicked)
-        if moved.manhattanLength() < QApplication.startDragDistance():
-            return  # the first click itself, or a click on it: wait for the opposite corner
-        one, other = self.toCanvasCoordinates(self._start), self.toCanvasCoordinates(point)
-        if min(abs(one.x() - other.x()), abs(one.y() - other.y())) < MIN_SIDE_PIXELS:
-            return  # no area to speak of: keep drawing
+        moved = (event.originalPixelPoint() - self.toCanvasCoordinates(self._clicked)).manhattanLength()
+        slip = QApplication.startDragDistance()
+        if opening:  # a drag from the first corner, or a click on it whose release slipped
+            slip = max(MIN_DRAG_PIXELS, slip + 1)
+        if moved < slip:
+            return  # a click on the first corner: wait for the opposite one
         rect = QgsRectangle(self._start, point)
+        # Measured in map units, so that it holds on a rotated map too (the
+        # sides are not along the screen's there).
+        least = MIN_SIDE_PIXELS * self.canvas().mapUnitsPerPixel()
+        if rect.isEmpty() or min(rect.width(), rect.height()) < least:
+            return  # no area to speak of: keep drawing
         self._end(rect)
         self.extentChanged.emit(QgsRectangle(rect))
 
@@ -172,8 +204,8 @@ class ExtentTool(QgsMapTool):
         super().keyPressEvent(event)
 
     def _key_while_pressed(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape and self._pressed and not self._ending:
-            self._end(None)  # the tool goes at the release
+        if event.key() == Qt.Key.Key_Escape and self._held:
+            self.cancel()  # the tool goes at the release
 
     def deactivate(self):
         try:
@@ -186,8 +218,10 @@ class ExtentTool(QgsMapTool):
             self._tell("")
             done, self._done = self._done, None
             done(None)
+            self._forget()
 
     def _tell(self, text: str) -> None:
+        self._told = text
         if self._hint is not None:
             self._hint(text)
 
@@ -222,3 +256,13 @@ class ExtentTool(QgsMapTool):
         if after_click:
             _DoubleClickRest(canvas.viewport())
         done(self._result)
+        self._forget()
+
+    def _forget(self) -> None:
+        """Done: the tool keeps nothing alive (the window behind ``hint``,
+        the previous tool) and goes, or the canvas (its parent) would keep
+        one per drawing, and a right click in a transient map tool chosen
+        while drawing could bring it back."""
+        self._hint = None
+        self._previous = None
+        self.deleteLater()

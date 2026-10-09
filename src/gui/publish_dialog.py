@@ -25,7 +25,7 @@ from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCo
                        QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
                        QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
                        QgsTask, QgsVectorLayer, QgsWkbTypes)
-from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                  QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
@@ -179,6 +179,11 @@ class PublishDialog(QDialog):
         self.feedback = None
         self._extent_tool = None   # drawing the extent on the map canvas
         self._draw_notice = None   # its message bar notice
+        self._draw_hint = ""       # its status bar text shown last
+        # Brings the window back after the drawing (see _extent_drawn).
+        self._back_timer = QTimer(self)
+        self._back_timer.setSingleShot(True)
+        self._back_timer.timeout.connect(self._back_from_drawing)
         self.profile = self._load_profile()
         self._build()
         self._populate(self.profile)
@@ -749,6 +754,7 @@ class PublishDialog(QDialog):
         from qgis.gui import QgsMessageBarItem  # pylint: disable=import-outside-toplevel
         from .extent_tool import ExtentTool  # pylint: disable=import-outside-toplevel
         canvas = self.iface.mapCanvas()
+        self._back_timer.stop()  # (it would cancel this drawing)
         self._extent_tool = ExtentTool(canvas, self._extent_drawn, self._extent_hint)
         canvas.setMapTool(self._extent_tool)
         self.hide()
@@ -763,23 +769,51 @@ class PublishDialog(QDialog):
     def _extent_hint(self, text):
         bar = self.iface.statusBarIface()
         if text:
-            bar.showMessage(text)
-        else:
+            if bar.currentMessage() != text:  # (again after a QGIS status tip replaced it)
+                bar.showMessage(text)
+        elif self._draw_hint and bar.currentMessage() == self._draw_hint:  # only our own
             bar.clearMessage()
+        self._draw_hint = text
 
     def _extent_drawn(self, rect):
+        if self._extent_tool is None:  # given up by this window (shown again, closed)
+            return
         self._extent_tool = None
+        self._drop_draw_notice()
+        if rect is not None:
+            self._use_canvas_extent(rect)
+        # Not at once: the window comes back over the map, and the rest of a
+        # double click on the last corner would click whatever is under the
+        # mouse there (Draw… again, Publish, a checkbox).
+        self._back_timer.start(QApplication.doubleClickInterval())
+
+    def _back_from_drawing(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _drop_draw_notice(self):
         notice, self._draw_notice = self._draw_notice, None
         if notice is not None:
             try:
                 self.iface.messageBar().popWidget(notice)
             except RuntimeError:  # gone by itself already
                 pass
-        if rect is not None:
-            self._use_canvas_extent(rect)
-        self.show()
-        self.raise_()
-        self.activateWindow()
+
+    def _give_up_drawing(self):
+        """The window shown again (Web menu) or closed (also when the plugin
+        is unloaded) while the extent is being drawn: the drawing is given
+        up and the previous map tool comes back; the window is not brought
+        back by the drawing any more."""
+        self._back_timer.stop()
+        tool, self._extent_tool = self._extent_tool, None
+        if tool is None:
+            return
+        try:
+            tool.cancel()
+        except RuntimeError:  # the map canvas, and the tool with it, are gone
+            pass
+        self._drop_draw_notice()
 
     def _extent_layer_changed(self, layer):
         self.profile.view.extent_layer = layer.id() if layer is not None else ""
@@ -2942,16 +2976,14 @@ class PublishDialog(QDialog):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        # Opened again (Web menu) while the extent is being drawn: the
-        # drawing is given up, the previous map tool comes back.
-        if self._extent_tool is not None:
-            self._extent_tool.cancel()
+        self._give_up_drawing()  # opened again (Web menu) while drawing
 
     def done(self, result):  # Escape / reject() close without a closeEvent
         self._save_geometry()
         super().done(result)
 
     def closeEvent(self, event):  # noqa: N802
+        self._give_up_drawing()  # closed (plugin unloaded) while drawing
         self._save_geometry()
         if self.task is not None:
             QMessageBox.information(self, tr("Web map"), tr("Publishing is still running in the "
