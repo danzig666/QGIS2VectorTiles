@@ -88,6 +88,24 @@ def test_defaults_follow_the_project(project, messages):
     dialog.close()
 
 
+def test_a_closed_window_is_freed_with_its_layer_lists(project, messages):
+    """The layer lists follow the project's layers. A closed window that was
+    never freed kept them reacting to every project change (and crashed
+    QGIS's Python once that window was half collected)."""
+    import gc
+    import weakref
+    from qgis.PyQt import sip
+    dialog = _dialog()
+    lists = [dialog.p_layer, dialog.p_zoning, dialog.p_regulation, dialog.t_layer]
+    alive = weakref.ref(dialog)
+    dialog.close()
+    del dialog
+    gc.collect()
+    assert alive() is None
+    assert all(sip.isdeleted(layer_list) for layer_list in lists)
+    project[0].clear()
+
+
 def test_settings_are_saved_in_the_project_file(project, messages, tmp_path):
     project, parcels = project
     dialog = _dialog()

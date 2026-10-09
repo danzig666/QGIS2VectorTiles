@@ -1296,11 +1296,8 @@ class PublishDialog(QDialog):
         self.t_exaggeration.setRange(1.0, 5.0)
         self.t_exaggeration.setSingleStep(0.5)
         self.t_exaggeration.setSuffix(" ×")
-        def terrain_chosen(layer):
-            self.t_hillshade.setEnabled(layer is not None)
-            self.t_exaggeration.setEnabled(layer is not None)
-        self.t_layer.layerChanged.connect(terrain_chosen)
-        terrain_chosen(self.t_layer.currentLayer())
+        self.t_layer.layerChanged.connect(self._terrain_chosen)
+        self._terrain_chosen(self.t_layer.currentLayer())
         relief_form.addRow(tr("Elevation layer (DEM)"), self.t_layer)
         relief_form.addRow("", self.t_hillshade)
         relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
@@ -1497,6 +1494,23 @@ class PublishDialog(QDialog):
         table.setMinimumHeight(110)
         return table
 
+
+    # Layer combo boxes follow the project's layers and fire when it is
+    # cleared, also for a closed window; bound methods (not closures over
+    # self) let a closed window be freed with its combo boxes.
+    def _terrain_chosen(self, layer):
+        self.t_hillshade.setEnabled(layer is not None)
+        self.t_exaggeration.setEnabled(layer is not None)
+
+    def _parcel_layer_changed(self, layer):
+        self._fill_fields_table(self.p_fields, layer, [])
+
+    def _zoning_layer_changed(self, layer):
+        self._fill_fields_table(self.p_zone_fields, layer, [])
+
+    def _regulation_layer_changed(self, layer):
+        self._fill_fields_table(self.p_regulation_fields, layer, [])
+
     @staticmethod
     def _fill_fields_table(table, layer, chosen):
         chosen = {p.field: p for p in chosen}
@@ -1537,7 +1551,7 @@ class PublishDialog(QDialog):
         self.p_layer = self._layer_combo("polygon")
         self.p_key = self._field_combo(self.p_layer)
         self.p_fields = self._fields_table()
-        self.p_layer.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_fields, layer, []))
+        self.p_layer.layerChanged.connect(self._parcel_layer_changed)
         form.addRow(tr("Parcel layer"), self.p_layer)
         form.addRow(tr("Parcel id (unique, e.g. hrsz)"), self.p_key)
         form.addRow(tr("Parcel data shown"), self.p_fields)
@@ -1547,7 +1561,7 @@ class PublishDialog(QDialog):
         self.p_zoning = self._layer_combo("polygon")
         self.p_code = self._field_combo(self.p_zoning)
         self.p_zone_fields = self._fields_table()
-        self.p_zoning.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_zone_fields, layer, []))
+        self.p_zoning.layerChanged.connect(self._zoning_layer_changed)
         self.p_zoning.layerChanged.connect(self._guess_zone_code)
         self.p_cuts = QListWidget()
         self.p_cuts.setMaximumHeight(90)
@@ -1580,8 +1594,7 @@ class PublishDialog(QDialog):
         self.p_regulation = self._layer_combo(None, allow_empty=True)
         self.p_regulation_code = self._field_combo(self.p_regulation, allow_empty=True)
         self.p_regulation_fields = self._fields_table()
-        self.p_regulation.layerChanged.connect(
-            lambda layer: self._fill_fields_table(self.p_regulation_fields, layer, []))
+        self.p_regulation.layerChanged.connect(self._regulation_layer_changed)
         self.p_regulation.layerChanged.connect(self._guess_regulation_code)
         form.addRow(tr("Table"), self.p_regulation)
         form.addRow(tr("Zone code field"), self.p_regulation_code)
