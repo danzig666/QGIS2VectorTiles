@@ -265,3 +265,90 @@ def test_a_repeated_style_layer_id_is_renamed_and_reported(plugin):
     exporter._unique_layer_ids()  # pylint: disable=protected-access
     assert [l["id"] for l in exporter.style["layers"]] == ["a", "b", "a_2", "a_3", "a_2_2"]
     assert len(exporter.diagnostics.by_code("Q2VT_STYLE_DUPLICATE_ID")) == 3
+
+
+def _curved_river(tmp_path, name="river", **options):
+    """A river layer with a curved label repeated every 70 mm (9 pt)."""
+    from qgis.core import (Qgis, QgsFeature, QgsField, QgsGeometry, QgsLineSymbol,
+                           QgsPalLayerSettings, QgsProperty, QgsSingleSymbolRenderer,
+                           QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import to_geopackage
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", name, "memory")
+    memory.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    memory.updateFields()
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Koornlands"])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "LINESTRING(2119000 6019000, 2121000 6020500, 2123000 6020000)"))
+    memory.dataProvider().addFeatures([feature])
+    layer = to_geopackage(memory, str(tmp_path / f"{name}.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = options.get("placement", Qgis.LabelPlacement.Curved)
+    settings.repeatDistance = options.get("repeat", 70)
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(options.get("size", 9))
+    fmt.setSizeUnit(options.get("unit", Qgis.RenderUnit.Points))
+    settings.setFormat(fmt)
+    if options.get("dd_size"):
+        settings.dataDefinedProperties().setProperty(
+            QgsPalLayerSettings.Property.Size, QgsProperty.fromExpression('length("name")'))
+    if options.get("merge"):
+        line = settings.lineSettings()
+        line.setMergeLines(True)
+        settings.setLineSettings(line)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return layer
+
+
+def test_repeated_curved_line_labels_are_laid_out_per_zoom(flattener, tmp_path):
+    """Swellendam rivers: a curved label repeated along its line becomes one
+    rule per zoom that lays its labels out at export time (MapLibre's line
+    placement dropped them on wiggly rivers); the last zoom keeps its
+    overzoom. The recipe holds the zoom's pixels: the text size, and QGIS's
+    repeat distance as at zoom + 0.5 in the tile zoom's pixels. Labels the
+    export cannot lay out as QGIS does (once per line, parallel,
+    data-defined size, merged lines) stay one rule on MapLibre's placement."""
+    import math
+    from qgis.core import Qgis
+    others = {"once": {"repeat": 0}, "parallel": {"placement": Qgis.LabelPlacement.Line},
+              "sized": {"dd_size": True}, "merged": {"merge": True}}
+    reset_project(_curved_river(tmp_path), *(_curved_river(tmp_path, name, **options)
+                                             for name, options in others.items()))
+    rules, _ = flattener(11, 14)
+    labels = {}
+    for rule in rules:
+        if rule.get_attr("t") == 1:
+            labels.setdefault(rule.layer.name(), []).append(rule)
+    for name in others:
+        assert [(r.recipe, r.get_attr("o"), r.get_attr("i")) for r in labels[name]] == \
+            [(None, 11, 14)], name
+    river = sorted(labels["river"], key=lambda r: r.get_attr("o"))
+    assert [(r.get_attr("o"), r.get_attr("i")) for r in river] == [(z, z) for z in range(11, 15)]
+    assert [r.visibility.max_zoom for r in river] == [12, 13, 14, None]
+    assert len({r.output_dataset for r in river}) == 4
+    recipe = river[0].recipe
+    assert recipe.kind == "label_windows" and recipe.param("zoom") == 11
+    assert recipe.param("size") == pytest.approx(12.0)                 # 9 pt
+    assert recipe.param("repeat") == pytest.approx(70 * 96 / 25.4 / math.sqrt(2))
+    assert recipe.param("chop") == pytest.approx(1 / math.sqrt(2))
+    assert recipe.param("fit") == 1.0
+    assert (recipe.param("max_in"), recipe.param("max_out"), recipe.param("max_angle")) == \
+        (25.0, -25.0, 25.0)
+
+
+def test_map_unit_curved_labels_fit_maplibre_line_check(flattener, tmp_path):
+    """Map-unit text: the recipe's size is the tile zoom's; MapLibre checks
+    the fit of zoom 17's labels with their zoom-18 size (twice as long)."""
+    from qgis.core import Qgis
+    reset_project(_curved_river(tmp_path, size=20, unit=Qgis.RenderUnit.MapUnits))
+    rules, _ = flattener(16, 17)
+    labels = {r.get_attr("o"): r.recipe for r in rules if r.get_attr("t") == 1}
+    assert labels[16].param("size") == pytest.approx(20 * 512 * 2 ** 16 / 40075016.68557849)
+    assert labels[17].param("size") == pytest.approx(2 * labels[16].param("size"))
+    assert labels[16].param("fit") == 1.0 and labels[17].param("fit") == pytest.approx(2.0)
+    assert labels[16].param("chop") == pytest.approx(1.0)               # grows with the map

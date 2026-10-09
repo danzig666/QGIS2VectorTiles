@@ -29,8 +29,10 @@ from qgis.core import (
     QgsFillSymbol,
     QgsSymbolLayer,
     QgsSimpleFillSymbolLayer,
-    QgsProperty
+    QgsProperty,
+    QgsFontUtils
     )
+from qgis.PyQt.QtGui import QFont
 
 from ..utils.config import Qt
 from ..utils.config import QDomDocument
@@ -38,7 +40,9 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ZoomInterval
+from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
+from .fidelity.units import LengthConverter
 from .fidelity.qgis_expr import (and_filters, enabled_condition, substitute_geometry,
                                  with_map_scale)
 from .fidelity.materialize import coerce_to_symbol_type
@@ -82,8 +86,12 @@ class RulesFlattener:
 
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
                  diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
-                 scale_limits=None, extent=None, fast_markers: bool = False):
+                 scale_limits=None, extent=None, fast_markers: bool = False,
+                 lengths: Optional[LengthConverter] = None):
         self.min_zoom = min_zoom
+        # Unit converter of the style (map-unit context of the project): the
+        # pixel sizes of labels laid out at export time.
+        self.lengths = lengths or LengthConverter()
         self.extent = extent  # export extent (EPSG:3857), for renderer statistics
         # {layer id: (min scale, max scale)}: extra scale range of a layer
         # (publishing, web only), on top of its own; 0 = no limit.
@@ -952,7 +960,8 @@ class RulesFlattener:
         # Components split by zoom (e.g. dense patterns) may fall outside the export.
         split_rules = [r for r in split_rules if r.get_attr("o") <= r.get_attr("i")]
         for split_rule in split_rules:
-            self.flattened_rules.extend(self._split_by_scale_expressions(split_rule))
+            for zoom_rule in self._split_by_scale_expressions(split_rule):
+                self.flattened_rules.extend(self._split_line_label_windows(zoom_rule))
         return inheritance_source
 
     def _sync_labeling_scale_range(self, rule):
@@ -1426,6 +1435,134 @@ class RulesFlattener:
         leader.set_attr("c", 1)
         leader.set_attr("s", 0)
         return leader
+
+    # Data-defined label properties that change a curved label's size, shape,
+    # repeat or anchor per feature: such labels keep MapLibre's placement.
+    _WINDOW_DDP = ("Size", "Bold", "Italic", "Family", "FontStyle", "FontSizeUnit", "FontCase",
+                   "FontLetterSpacing", "FontWordSpacing", "FontStretchFactor", "RepeatDistance",
+                   "RepeatDistanceUnit", "CurvedCharAngleInOut", "LabelAllParts",
+                   "MultiLineWrapChar", "LineAnchorPercent", "LineAnchorType",
+                   "LineAnchorTextPoint", "OverrunDistance")
+
+    def _split_line_label_windows(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
+        """A repeated curved line label as one rule per zoom whose labels are
+        laid out at export time, as QGIS lays them out (core/label_lines.py,
+        RulesExporter._label_windows). MapLibre's own line placement tries
+        a few fixed anchors and dropped the labels of wiggly rivers at low
+        zooms. Labels these windows cannot reproduce (data-defined size,
+        font or repeat, generated or pinned positions, merged lines, ...)
+        keep MapLibre's placement."""
+        if label_rule.get_attr("t") != 1 or not self._lays_out_windows(label_rule):
+            return [label_rule]
+        low, high = label_rule.get_attr("o"), label_rule.get_attr("i")
+        rules = []
+        for zoom in range(low, high + 1):
+            recipe = self._label_window_recipe(label_rule, zoom)
+            if recipe is None:
+                return [label_rule]
+            rule = label_rule.derive()
+            rule.set_attr("o", zoom)
+            rule.set_attr("i", zoom)
+            if label_rule.visibility is not None:  # the last zoom keeps its overzoom
+                rule.visibility = label_rule.visibility.intersect(
+                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+                if rule.visibility.is_empty:
+                    continue
+            rule.recipe = recipe
+            rules.append(rule)
+        return rules or [label_rule]
+
+    def _lays_out_windows(self, label_rule: FlattenedRule) -> bool:
+        from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+        settings = label_rule.rule.settings()
+        if settings is None or label_rule.get_attr("g") != 1 or label_rule.get_attr("c") != 1 \
+                or label_rule.recipe is not None or label_rule.pre_generator:
+            return False
+        if TextPropertyExtractor.placement_name(settings) != "Curved" or \
+                float(settings.repeatDistance or 0) <= 0 or settings.geometryGeneratorEnabled:
+            return False
+        line_settings = settings.lineSettings()
+        if line_settings.mergeLines() or int(getattr(line_settings.anchorType(), "value",
+                                                     line_settings.anchorType())) != 0:
+            return False  # merged lines, a strict anchor
+        if settings.wrapChar or settings.format().allowHtmlFormatting():
+            return False
+        P = QgsPalLayerSettings.Property
+        props = settings.dataDefinedProperties()
+        x_prop, y_prop = props.property(P.PositionX), props.property(P.PositionY)
+        if x_prop and y_prop and x_prop.isActive() and y_prop.isActive():
+            return False
+        for name in self._WINDOW_DDP:
+            key = getattr(P, name, None)
+            prop = props.property(key) if key is not None else None
+            if prop is not None and prop.isActive():
+                return False
+        # The windows replace the line: anything read from the geometry
+        # (the text, a colour by length) would be read from a window.
+        expressions = [prop.asExpression() for prop in
+                       (props.property(key) for key in props.propertyKeys())
+                       if prop is not None and prop.isActive()]
+        if settings.isExpression:
+            expressions.append(settings.fieldName)
+        return not any(QgsExpression(text).needsGeometry() for text in expressions if text)
+
+    def _label_window_recipe(self, label_rule: FlattenedRule, zoom: int):
+        """Recipe("label_windows") of one zoom: CSS px of that tile zoom.
+
+        ``size``: the text size MapLibre draws at the tile zoom; ``fit``: the
+        size its line check measures the label with (map-unit text: the
+        zoom-18 size, QgisMapLibreStyleExporter._line_label_zoom_split), over
+        ``size``. QGIS cuts the line at the repeat distance at every scale;
+        one cut serves a whole zoom, so it is made as at zoom + 0.5 (on screen
+        the parts are then within 1/sqrt(2) to sqrt(2) of QGIS's): ``repeat``
+        is that zoom's repeat distance in the tile zoom's px and ``chop`` the
+        label width the cut is made with, over the drawn width."""
+        from .fidelity.materialize import Recipe  # pylint: disable=import-outside-toplevel
+        from .maplibre_converter import (PropertyExtractor, QgisMapLibreStyleExporter,  # pylint: disable=import-outside-toplevel
+                                         TextPropertyExtractor)
+        settings = label_rule.rule.settings()
+        text_format = settings.format()
+
+        def pixels(value, unit, scale, at):
+            result = self.lengths.static(value, unit, PropertyExtractor.map_unit_scale(scale))
+            return float(result if ex.is_number(result) else ex.evaluate_zoom_curve(result, at))
+        try:
+            size = pixels(text_format.size(), text_format.sizeUnit(),
+                          text_format.sizeMapUnitScale(), zoom)
+            fit_zoom = QgisMapLibreStyleExporter.LINE_LABEL_FIT_ZOOM
+            fit = pixels(text_format.size(), text_format.sizeUnit(), text_format.sizeMapUnitScale(),
+                         fit_zoom if zoom + 1 >= fit_zoom else zoom)
+            middle = pixels(text_format.size(), text_format.sizeUnit(),
+                            text_format.sizeMapUnitScale(), zoom + 0.5)
+            repeat = pixels(settings.repeatDistance, settings.repeatDistanceUnit,
+                            settings.repeatDistanceMapUnitScale, zoom + 0.5) / math.sqrt(2.0)
+        except (ValueError, ex.ExpressionError):  # a unit without pixels (percentage)
+            return None
+        if size <= 0 or repeat <= 0:
+            return None
+        named = QgsTextFormat(text_format)
+        if text_format.namedStyle():
+            font = QFont(text_format.font())
+            QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
+            named.setFont(font)
+        font = TextPropertyExtractor.drawn_font(named)  # the face the glyphs are made from
+        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0)
+        font.setWordSpacing(0.0)
+        font.setCapitalization(QFont.Capitalization.MixedCase)
+        engine = QgsProject.instance().labelingEngineSettings()
+        return Recipe("label_windows", params=(
+            ("zoom", int(zoom)), ("size", size), ("fit", max(1.0, fit / size)),
+            ("repeat", repeat), ("chop", middle / size / math.sqrt(2.0)),
+            ("font", font.toString()),
+            ("spacing", float(TextPropertyExtractor.get_text_letter_spacing(text_format))),
+            ("transform", TextPropertyExtractor.get_text_transform(settings)),
+            ("max_in", float(settings.maxCurvedCharAngleIn)),
+            ("max_out", -abs(float(settings.maxCurvedCharAngleOut))),
+            ("max_angle", float(TextPropertyExtractor.get_text_max_angle(settings))),
+            ("anchor", float(settings.lineSettings().lineAnchorPercent())),
+            ("per_part", bool(settings.labelPerPart)),
+            ("candidates_per_cm", float(engine.maximumLineCandidatesPerCm())),
+        ))
 
     def _split_by_matching_renderers(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
         """Split a label rule by matching renderer rules with overlapping scale ranges."""

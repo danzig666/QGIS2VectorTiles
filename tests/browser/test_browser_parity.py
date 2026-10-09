@@ -209,6 +209,42 @@ def test_map_unit_line_labels_are_drawn(tmp_path, placement, gallery_cell):
     assert ink_browser > line_only and ink_browser == pytest.approx(ink_qgis, rel=0.35)
 
 
+def test_repeated_curved_labels_of_a_wiggly_river_are_drawn(tmp_path):
+    """Swellendam rivers: a curved label repeated along a river whose
+    vertices turn 30 degrees every 5 px. MapLibre's own line placement
+    found no anchor on it (its angle check adds up the wiggles); the export
+    lays the label out as QGIS does and MapLibre draws it. (The river lies
+    in the view: QGIS cuts the visible part at the repeat distance.)"""
+    import math
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=name:string", "rivers", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttribute("name", "Koornlands")
+    x, y, points = CENTER[0] - 114.0, CENTER[1] - 20.0, []
+    for i in range(49):  # 5 m segments heading 10 +- 15 degrees: 240 m
+        points.append(f"{x} {y}")
+        heading = math.radians(10 + (15 if i % 2 else -15))
+        x, y = x + 5 * math.cos(heading), y + 5 * math.sin(heading)
+    feature.setGeometry(QgsGeometry.fromWkt(f"LINESTRING({', '.join(points)})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "rivers.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"line_style": "no"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink")
+    assert ink_qgis > 100  # QGIS draws the label (the river itself is not drawn)
+    assert ink_browser == pytest.approx(ink_qgis, rel=0.35)
+
+
 @pytest.mark.parametrize("font", ["DejaVu Serif", "DejaVu Sans"])
 def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
     """QGIS draws a font marker with its baseline half the font's ascent

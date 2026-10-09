@@ -1698,6 +1698,7 @@ class QgisMapLibreStyleExporter:
         inner_effects: Optional[Dict[str, dict]] = None,
         z_orders: Optional[Dict[str, str]] = None,
         feature_filters: Optional[Dict[str, list]] = None,
+        label_windows: Optional[set] = None,
     ):
         """Initialise the exporter.
 
@@ -1736,6 +1737,9 @@ class QgisMapLibreStyleExporter:
         self.z_orders = z_orders or {}
         # Style name -> filter of its feature-order stratum (fidelity.feature_order).
         self.feature_filters = feature_filters or {}
+        # Style names of repeated curved line labels laid out at export time:
+        # one short line per label (RulesExporter._label_windows).
+        self.label_windows = label_windows or set()
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -3664,6 +3668,12 @@ class QgisMapLibreStyleExporter:
             offset = TextPropertyExtractor.get_line_text_offset(label_settings, em_size)
             if offset != [0, 0]:
                 layer_def["layout"]["text-offset"] = offset
+        if style_name in self.label_windows and not pinned:
+            # Each feature is the window of one label, laid out as QGIS lays
+            # it out: the label is centred on it ("line" would place its own
+            # anchors along it, half a label + 2 em from its start).
+            layer_def["layout"]["symbol-placement"] = "line-center"
+            layer_def["layout"].pop("symbol-spacing", None)
 
         layer_def["paint"].update({
             "text-color": TextPropertyExtractor.get_text_color(text_format, label_settings),
