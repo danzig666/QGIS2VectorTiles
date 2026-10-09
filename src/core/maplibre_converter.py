@@ -479,15 +479,35 @@ class LinePropertyExtractor:
             }.get(_enum_int(symbol_layer.penStyle()))
             if pattern is None:
                 return None
+        if len(pattern) % 2:
+            pattern = pattern + pattern
+        pattern = LinePropertyExtractor._without_empty_dashes(pattern)
         # Qt draws square and round caps on every dash (one line width longer,
         # gaps one width shorter); MapLibre does so for round caps only
         # (measured), so square-capped dashes are lengthened here.
         if _enum_int(symbol_layer.penCapStyle()) == 0x10:  # Qt::SquareCap
-            pattern = [value + 1.0 if i % 2 == 0 else max(0.0, value - 1.0)
+            pattern = [value + 1.0 if i % 2 == 0 and value > 0 else
+                       value if i % 2 == 0 else max(0.0, value - 1.0)
                        for i, value in enumerate(pattern)]
-        if len(pattern) % 2:
-            pattern = pattern + pattern
         return [round(v, 4) for v in pattern]
+
+    @staticmethod
+    def _without_empty_dashes(pattern: List[float]) -> List[float]:
+        """A dash of length 0 draws nothing in QGIS, cap or not: it is left
+        out and the gaps around it join (MapLibre drew it as a dot, with the
+        cap added). Dash-gap pairs; the last gap wraps to the first."""
+        pairs = [[pattern[i], pattern[i + 1]] for i in range(0, len(pattern), 2)]
+        if all(dash <= 0 for dash, _ in pairs):
+            return [0.0, sum(gap for _, gap in pairs)]
+        while pairs[0][0] <= 0:  # start on a dash: the leading gap goes last
+            pairs = pairs[1:] + pairs[:1]
+        kept = []
+        for dash, gap in pairs:
+            if dash <= 0:
+                kept[-1][1] += gap
+            else:
+                kept.append([dash, gap])
+        return [value for pair in kept for value in pair]
 
     @staticmethod
     def get_line_offset(symbol_layer: QgsSimpleLineSymbolLayer) -> Union[float, List]:

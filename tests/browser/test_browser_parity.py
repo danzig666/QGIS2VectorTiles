@@ -152,8 +152,10 @@ def test_polygon_outline_screen_offsets_follow_qgis(tmp_path, clockwise, offset)
 
 
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])
-@pytest.mark.parametrize("pattern", ["custom", "dash", "dashdot"])
+@pytest.mark.parametrize("pattern", ["custom", "custom_empty_dash", "dash", "dashdot"])
 def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
+    """Dash lengths and caps. A dash of length 0 draws nothing in QGIS, whatever
+    the cap (it was drawn as a dot)."""
     from qgis.PyQt.QtCore import Qt
     layer = _polygon_layer(str(tmp_path / "rings.gpkg"), False)
     line = QgsSimpleLineSymbolLayer(QColor("black"), 3.0)
@@ -162,6 +164,12 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
         line.setUseCustomDashPattern(True)
         line.setCustomDashVector([6.0, 10.0])
         line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    elif pattern == "custom_empty_dash":  # screen units: a native dash array
+        line.setWidth(4.0)
+        line.setWidthUnit(Qgis.RenderUnit.Pixels)
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector([12.0, 8.0, 0.0, 12.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Pixels)
     else:
         line.setPenStyle({"dash": Qt.PenStyle.DashLine,
                           "dashdot": Qt.PenStyle.DashDotLine}[pattern])
@@ -170,6 +178,11 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
     # Pixel-level: dash lengths and caps (a 1-width error per dash fails).
     assert _compare(tmp_path, layer, metric="shape") < 0.08
+    if pattern == "custom_empty_dash":  # no dot: as much ink as QGIS
+        from PIL import Image
+        qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+                         for n in ("qgis", "browser"))
+        assert browser == pytest.approx(qgis, rel=0.1)
 
 
 @pytest.mark.parametrize("placement,gallery_cell", [
