@@ -79,3 +79,12 @@ def test_leak_scan(tmp_path):
     (tmp_path / "ok.json").write_text('{"t": "fine"}', encoding="utf-8")
     problems = scan_bundle(str(tmp_path), ["manifest.json", "ok.json"], canaries=["CANARY-777"])
     assert problems == ["manifest.json: canary value"]
+
+
+def test_binary_files_are_scanned_for_secrets_like_text(tmp_path):
+    """A short password (e.g. for SSH) matches random bytes of an archive or
+    image: secrets shorter than 6 characters are not looked for, as in text."""
+    (tmp_path / "map.pmtiles").write_bytes(b"\x00\x13pw1\x7f..." + b"sEcReT-value-1234" + b"\x00")
+    assert scan_bundle(str(tmp_path), ["map.pmtiles"], ["pw1"]) == []
+    assert scan_bundle(str(tmp_path), ["map.pmtiles"], ["sEcReT-value-1234"]) == \
+        ["map.pmtiles: secret/canary bytes"]

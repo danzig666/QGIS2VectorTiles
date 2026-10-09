@@ -483,7 +483,8 @@ def scan_bundle(root: str, files: Iterable[str], secrets: Iterable[str] = (),
         elif secrets or canaries:
             with open(path, "rb") as handle:
                 blob = handle.read()
-            for value in (*secrets, *canaries):
+            # Secrets as in text files (6+ characters): a short password matches random bytes.
+            for value in (*[s for s in secrets if len(s) >= 6], *canaries):
                 if value.encode("utf-8") in blob:
                     problems.append(f"{relative}: secret/canary bytes")
                     break

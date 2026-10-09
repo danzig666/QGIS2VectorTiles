@@ -27,12 +27,23 @@ def _manager():
     return manager
 
 
-def from_auth_config(authcfg: str) -> Credentials:
-    """Credentials of a saved configuration (may ask for the master password)."""
+def from_auth_config(authcfg: str, ssh: bool = False) -> Credentials:
+    """Credentials of a saved configuration (may ask for the master password).
+    ``ssh``: an SSH login (user name optional, password = password or key
+    passphrase), for the messages and checks."""
     if not authcfg:
         raise PublishingError("Q2VT_PUB_CREDENTIALS", "No saved credentials are selected.")
     from qgis.core import QgsAuthMethodConfig  # pylint: disable=import-outside-toplevel
     manager = _manager()
+    try:
+        known = authcfg in manager.configIds()
+    except (AttributeError, TypeError):
+        known = True
+    if not known:  # e.g. settings imported from another computer
+        raise PublishingError("Q2VT_PUB_CREDENTIALS",
+                              f"The saved credentials of these settings (QGIS authentication configuration "
+                              f"{authcfg}) do not exist in this QGIS, e.g. settings from another computer: "
+                              "select or save them again, or enter them for this session.")
     config = QgsAuthMethodConfig()
     ok = manager.loadAuthenticationConfig(authcfg, config, True)
     if isinstance(ok, tuple):  # some bindings return (bool, config)
@@ -43,6 +54,11 @@ def from_auth_config(authcfg: str) -> Credentials:
     access = config.config("username") or config.config("access_key")
     secret = config.config("password") or config.config("secret_key")
     token = config.config("session_token") or config.config("token") or ""
+    if ssh:
+        if not secret:
+            raise PublishingError("Q2VT_PUB_CREDENTIALS", "The saved SSH configuration has no password "
+                                  "(the password or the key's passphrase).")
+        return Credentials(access or "", secret)
     if not access or not secret:
         raise PublishingError("Q2VT_PUB_CREDENTIALS",
                               "The saved credentials need an access key id (user name) and a secret "

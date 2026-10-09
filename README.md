@@ -346,14 +346,16 @@ into a public, self-contained web map. The window title shows the plugin version
 - **SSH / SFTP server** (*Destination* tab): the map goes straight into one folder on your web
   server that you choose, replacing the previous map there (not versioned: no releases, no
   rollback). Only new and changed files are uploaded, `index.html` last, and only files QWebMap
-  uploaded there before are ever deleted, so your other files in the folder stay. Uses the
-  computer's OpenSSH client (key, ssh-agent or a password); see
+  uploaded there before are ever deleted, so your other files in the folder stay (files with the
+  same name as the map's are replaced). Uses the computer's OpenSSH client (key, ssh-agent or a
+  password); see
   [HOSTING.md](docs/publishing/HOSTING.md#ssh--sftp-server-one-folder-not-versioned).
 - **Sharing:** *Open map*, *Copy link* and **Copy embed code**, a ready `<iframe>` for another web
   page. The embedded map is compact, has an *Open the full map* link, zooms with the scroll wheel
   only while Ctrl/⌘ is held, and on touch screens moves only with two fingers, so page scrolling
   is not captured.
-- **Any static web server** works: choose *Local only (no upload)* and copy the publication folder.
+- **Any static web server** works: choose *SSH / SFTP server* to upload the map into a folder of
+  it, or *Local only (no upload)* and copy the publication folder yourself.
   The map data is one **PMTiles** archive (raster layers, terrain and the basemap in their own
   archives; the search index, feature records and parcel report records in one file each), read
   with HTTP byte ranges, so no tile server, database or Docker is needed. **The web server must

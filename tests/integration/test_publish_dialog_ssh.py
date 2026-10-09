@@ -1,6 +1,8 @@
 """Publish window, SSH / SFTP destination: its fields (and only its fields)
-for that kind, a pasted user@server:/folder, settings saved in the project
-without the password, the review target, and Test connection plus a
+for that kind, a pasted user@server:/folder (and a typed host:port or IPv6
+address that must stay as typed), settings saved in the project without the
+password, the review target, saved logins and public URLs never shared with
+R2 / S3, closing with unfinished settings, and Test connection plus a
 publication through the window into a local OpenSSH server's folder
 (skipped without sshd / the OpenSSH client)."""
 
@@ -101,6 +103,98 @@ def test_ssh_fields_paste_saved_settings_and_review(project, messages):
     dialog.close()
 
 
+class _AuthSelection:
+    """Stands in for the QGIS authentication selector (no auth database)."""
+
+    def __init__(self, dialog, monkeypatch):
+        self.selected = ""
+        if dialog.d_auth is None:
+            pytest.skip("no QgsAuthConfigSelect")
+        monkeypatch.setattr(dialog.d_auth, "setConfigId", self.select)
+        monkeypatch.setattr(dialog.d_auth, "configId", lambda: self.selected)
+
+    def select(self, value):
+        self.selected = value
+
+
+def test_ssh_never_uses_the_saved_keys_or_address_of_r2(project, messages, monkeypatch):
+    """Switching R2 → SSH must not hand the R2 keys to ssh (as user and
+    password), nor keep the R2 domain as the folder's public URL; switching
+    back brings the R2 values back."""
+    dialog = _dialog()
+    auth = _AuthSelection(dialog, monkeypatch)
+    import q2vt_plugin.src.publishing.credentials as credentials  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.providers.base import Credentials  # pylint: disable=import-error
+    loaded = []
+
+    def fake_load(ref, ssh=False):
+        loaded.append((ref, ssh))
+        return Credentials("R2ACCESSKEYID", "R2-SECRET-ACCESS-KEY") if ref == "r2keys1" else \
+            Credentials("", "ssh-saved-password")
+    monkeypatch.setattr(credentials, "from_auth_config", fake_load)
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("r2"))
+    dialog.d_account.setText("0123456789abcdef0123456789abcdef")
+    dialog.d_bucket.setText("maps")
+    dialog.d_prefix.setText("Not A Prefix!")  # invalid, and hidden for SSH
+    dialog.d_public.setText("https://maps.example.com")
+    dialog.d_auth.setConfigId("r2keys1")
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))
+    assert dialog.d_auth.configId() == "" and dialog.d_public.text() == ""
+    assert "SSH user" in dialog.d_auth.toolTip() and "R2" not in dialog.d_auth.toolTip()
+    dialog.d_ssh_host.setText("www.example.com")
+    dialog.d_ssh_dir.setText("/srv/map")
+    dialog.collect()
+    provider = dialog._provider()  # pylint: disable=protected-access
+    assert (provider.user, provider.password) == ("", "") and not loaded  # keys / ssh-agent only
+    assert dialog.save_settings(), messages  # the hidden R2 prefix does not block SSH
+    dialog.d_auth.setConfigId("sshpw1")  # a password saved for SSH
+    dialog.collect()
+    assert dialog._provider().password == "ssh-saved-password"  # pylint: disable=protected-access
+    assert loaded == [("sshpw1", True)]
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("r2"))
+    assert dialog.d_auth.configId() == "r2keys1" and dialog.d_public.text() == "https://maps.example.com"
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("s3"))  # object storage: the same keys
+    assert dialog.d_auth.configId() == "r2keys1"
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))
+    assert dialog.d_auth.configId() == "sshpw1" and dialog.d_public.text() == ""
+    assert auth.selected == "sshpw1"
+    dialog.close()
+
+
+def test_typed_server_address_stays_as_typed(project, messages):
+    dialog = _dialog()
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))
+    dialog.d_ssh_dir.setText("/var/www/html/map")
+    for typed, host, port in (("www.example.com:2222", "www.example.com", 2222),  # host:port → the port
+                              ("2001:db8::10", "2001:db8::10", 2222), ("192.0.2.7", "192.0.2.7", 2222)):
+        dialog.d_ssh_host.setText(typed)
+        dialog.d_ssh_host.editingFinished.emit()
+        assert (dialog.d_ssh_host.text(), dialog.d_ssh_port.value()) == (host, port), typed
+        assert dialog.d_ssh_dir.text() == "/var/www/html/map", typed  # never rewritten by a host
+    dialog.d_ssh_host.setText("deploy@www.example.com:/srv/other")  # an explicit folder: taken, and said
+    dialog.d_ssh_host.editingFinished.emit()
+    assert dialog.d_ssh_dir.text() == "/srv/other" and "folder /srv/other" in dialog.status.text()
+    dialog.close()
+
+
+def test_closing_with_unfinished_settings_keeps_the_saved_ones(project, messages):
+    project, _ = project
+    from q2vt_plugin.src.gui import publication_profiles as store  # pylint: disable=import-error
+    dialog = _dialog()
+    dialog.e_title.setText("Town map")
+    assert dialog.save_settings(), messages
+    saved = store.active_profile(project)[0]
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))  # no server, no folder yet
+    assert "embed code needs the map's web address" in (dialog.copy_embed_code() or dialog.status.text())
+    dialog.close()
+    again = store.active_profile(project)[0]  # still loadable: the last valid settings
+    assert (again.title, again.publication_id, again.destination.kind) == \
+        ("Town map", saved.publication_id, saved.destination.kind)
+    reopened = _dialog()
+    assert reopened.e_title.text() == "Town map"
+    reopened.close()
+
+
 def _wait_task(dialog, timeout=120):
     end = time.time() + timeout
     while dialog.task is not None and time.time() < end:
@@ -145,7 +239,7 @@ def test_test_connection_and_publish_through_the_window(project, messages, tmp_p
         dialog.approve.setChecked(True)
         dialog.publish()
         _wait_task(dialog)
-        assert "Published" in dialog.status.text(), (dialog.status.text(), messages)
+        assert dialog.status.text().startswith("Published into "), (dialog.status.text(), messages)
         release_dir = dialog.local_result.release.release_dir
         with open(os.path.join(release_dir, "release.json"), encoding="utf-8") as handle:
             listed = {item["path"] for item in json.load(handle)["files"]}

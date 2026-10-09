@@ -1787,8 +1787,8 @@ into the folder the user gives.
   state with the changing files marked unknown, uploads new / changed files to temporary names,
   renames them over their targets (`index.html` last; without posix-rename a delete first),
   deletes only files the previous state lists, removes folders left empty, writes the final
-  state. Another publication's folder is refused. With a public URL the folder is verified like
-  an R2 release (`verify_release`); problems there are warnings, as the files are already live.
+  state. With a public URL the folder is verified like an R2 release (`verify_release`);
+  problems there are warnings, as the files are already live.
 - Publish window: *SSH / SFTP server* in *Destination* with its own rows (server, port, user,
   folder, key file, session password + *Save in QGIS…*); bucket, prefix, keys, retention,
   conditional writes, CORS and *Releases and rollback…* hidden for it; a pasted
@@ -1797,11 +1797,45 @@ into the folder the user gives.
 - The Publish window has no Qt translation files (its strings go through `tr()` only), so there
   is no Hungarian text to add for the new rows.
 
+Review fixes (same feature, before release):
+
+- The saved login and the public URL are kept per destination family in the window (SSH vs
+  R2 / S3): switching kinds never hands R2 keys to ssh (as user and password) or the SSH
+  password to S3 signing, and never keeps the R2 domain as the folder's URL. The hidden bucket
+  prefix no longer blocks SSH settings; the fingerprint of an SSH destination leaves bucket and
+  prefix out.
+- The first session also lists the folder and the site's subfolders (`ls -lan`, one session):
+  listed files that are missing or have another size there are uploaded again; existing files
+  QWebMap had not uploaded are replaced (one log line counts them, as the owner wants; while
+  pending they are marked `foreign` and never deleted); folders QWebMap creates get mode 755
+  (the remote folder and its parents in a short second session), existing ones keep theirs.
+- Another publication's folder is taken over (one log line) instead of refused. A deletion that
+  fails is warned about and stays listed (a third short session rewrites the state). Without
+  posix-rename, a lone temporary state file is read when the state file itself is missing.
+- `./` before batch arguments starting with `-`; key and known_hosts paths as quoted `-o`
+  values with `%` doubled (`-i` looks for the unexpanded path), `${` refused; `/.` and `/x/..`
+  refused like `/` (`normalize_remote_dir` resolves `.` and `..`); a host with `:` must be an
+  IPv6 address; `ControlMaster=no`, `ControlPath=none`.
+- Pasted targets: only `user@host[:path]`, `host:/path`, `host:<port>` and `sftp://` are
+  parsed; a plain host or an IPv6 address stays as typed, and the window says what it filled.
+- Errors: no SFTP subsystem, a PuTTY key, a key readable by others, a non-executable askpass
+  helper; Test connection names the stage and shows ssh's own last lines for less clear
+  failures. On Windows a password with OpenSSH before 8.4 (`ssh -V`) is refused with an
+  explanation; the `.cmd` helper switches to UTF-8 (`chcp 65001`).
+- Closing the window saves the settings only when they are valid (an invalid profile would not
+  load next time, and the window would start from defaults). A selected QGIS authentication
+  configuration that does not exist (settings from another computer) is named as such. The
+  binary leak scan ignores secrets shorter than 6 characters, as the text scan does.
+- Not changed: the viewer does not version its requests (`?v=`): ES module imports and
+  MapLibre's own requests cannot carry it, so HOSTING.md recommends `Cache-Control: no-cache`
+  for the folder instead.
+
 | Run | Result |
 |---|---|
-| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1) | 23 passed |
-| `pytest tests/integration/test_publish_dialog_ssh.py` | 2 passed |
-| `test_publishing_profile`, `test_publishing_providers`, `test_publish_dialog`, `test_publish_dialog_r2` | 30, 16, 7, 3 passed |
+| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1 with SFTP umask 027) | 37 passed |
+| `pytest tests/integration/test_publish_dialog_ssh.py` | 5 passed |
+| `test_publishing_profile`, `test_publishing_providers`, `test_publishing_validation`, `test_publish_dialog`, `test_publish_dialog_r2`, `test_publish_dialog_extent`, `test_publish_dialog_layers` | 30, 16, 28, 7, 3, 8, 6 passed |
 
-Not verified here: Windows (askpass `.cmd` helper, `System32\OpenSSH` lookup) and non-OpenSSH
+Not verified here: Windows (askpass `.cmd` helper and its UTF-8 output, the `ssh -V` check,
+`System32\OpenSSH` lookup, the listing of non-ASCII names by Win32-OpenSSH) and non-OpenSSH
 SFTP servers (the non-atomic replace path is covered by unit tests of the batch only).

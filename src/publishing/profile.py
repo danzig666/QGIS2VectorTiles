@@ -6,8 +6,10 @@ secrets; any key that looks like one is rejected instead of being stored.
 """
 
 import hashlib
+import ipaddress
 import json
 import os
+import posixpath
 import re
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -319,11 +321,18 @@ def validate(profile: PublicationProfile) -> List[str]:
                               "(plain http only for local test servers on this computer)")
         if not dest.public_base_url:
             errors.append("destination.publicBaseUrl: required (the public custom domain)")
+    # The SSH settings are kept for every kind: their types are checked for every kind.
+    typed = [f"destination.{key}: text expected" for key in ("host", "user", "remote_dir", "identity_file")
+             if not isinstance(getattr(dest, key), str)]
+    if not isinstance(dest.port, int) or isinstance(dest.port, bool):
+        typed.append("destination.port: a number expected")
+    errors.extend(typed)
     if dest.kind == "ssh":
         if profile.output.archive == "mbtiles":
             errors.append("output.archive: web hosting needs PMTiles (choose PMTiles or Both)")
-        errors.extend(ssh_problems(dest))
-    if dest.prefix:
+        if not typed:
+            errors.extend(ssh_problems(dest))
+    elif dest.prefix:  # the prefix is a bucket setting (hidden for SSH)
         try:
             normalize_prefix(dest.prefix)
         except PublishingError as error:
@@ -344,6 +353,8 @@ def ssh_problems(dest) -> List[str]:
         errors.append("destination.host: required (the SSH server's name or address)")
     elif not _SSH_HOST.match(dest.host):
         errors.append("destination.host: a host name or IP address (no spaces, user@ or path)")
+    elif ":" in dest.host and not _ipv6(dest.host.strip("[]")):
+        errors.append("destination.host: a host name or IP address (the port goes into the Port field)")
     if not isinstance(dest.port, int) or isinstance(dest.port, bool) or not 1 <= dest.port <= 65535:
         errors.append("destination.port: 1-65535")
     user = dest.user or ""
@@ -354,26 +365,33 @@ def ssh_problems(dest) -> List[str]:
         errors.append("destination.remoteDir: required (the folder on the server the map goes into)")
     elif _CONTROL.search(folder):
         errors.append("destination.remoteDir: no control characters")
-    elif folder == "/":
+    elif folder in ("/", "//"):  # also "/." or "/srv/.." (normalized)
         errors.append("destination.remoteDir: a folder, not the server's root")
     if dest.identity_file and _CONTROL.search(dest.identity_file):
         errors.append("destination.identityFile: no control characters")
+    elif dest.identity_file and "${" in dest.identity_file:  # ssh expands ${VAR} in key paths, no escape
+        errors.append("destination.identityFile: a path without \"${\" (ssh would read a variable)")
     value = dest.public_base_url
     if value and urlparse(value).scheme not in ("http", "https"):
         errors.append("destination.publicBaseUrl: the folder's http:// or https:// address")
     return errors
 
 
+def _ipv6(host: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(host.split("%", 1)[0]), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
 def normalize_remote_dir(path: str) -> str:
     """The remote folder as sftp gets it: ``~/x`` and ``~`` are relative to
-    the login's home (sftp starts there), trailing slashes dropped."""
+    the login's home (sftp starts there), ``.`` / ``..`` resolved and
+    trailing slashes dropped (``/srv/x/../map`` → ``/srv/map``)."""
     path = (path or "").strip()
-    if path in ("~", "~/"):
-        return "."
-    if path.startswith("~/"):
-        path = path[2:]
-    stripped = path.rstrip("/")
-    return stripped or ("/" if path.startswith("/") else "")
+    if path.startswith("~/") or path == "~":
+        path = path[2:] or "."
+    return posixpath.normpath(path) if path else ""
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -433,11 +451,10 @@ def disclosure_fingerprint(profile: PublicationProfile, extra: Optional[dict] = 
         "addresses": [profile.interaction.address_layer_id, profile.interaction.address_number_field,
                       profile.interaction.address_street_field] if profile.interaction.address_layer_id else None,
         "parcelInfo": profile.to_dict()["parcelInfo"] if profile.parcel_info.enabled else None,
-        "destination": [profile.destination.kind, profile.destination.public_base_url,
-                        profile.destination.bucket, publication_prefix(profile)] + (
+        "destination": [profile.destination.kind, profile.destination.public_base_url] + (
             [profile.destination.host, profile.destination.port, profile.destination.user,
-             normalize_remote_dir(profile.destination.remote_dir)]
-            if profile.destination.kind == "ssh" else []),
+             normalize_remote_dir(profile.destination.remote_dir)] if profile.destination.kind == "ssh" else
+            [profile.destination.bucket, publication_prefix(profile)]),
         "extra": extra or {},
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()

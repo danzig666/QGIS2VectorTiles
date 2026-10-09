@@ -1958,6 +1958,7 @@ class PublishDialog(QDialog):
         self.d_kind.addItem(tr("Cloudflare R2"), "r2")
         self.d_kind.addItem(tr("Other S3-compatible storage"), "s3")
         self.d_kind.addItem(tr("SSH / SFTP server (one folder, not versioned)"), "ssh")
+        self._dest_family, self._dest_other = None, {}  # see _destination_kind_changed
         self.d_account = QLineEdit()
         self.d_account.setPlaceholderText(tr("32 characters – or paste the S3 API URL / dashboard address"))
         self.d_endpoint = QLineEdit()
@@ -1982,14 +1983,15 @@ class PublishDialog(QDialog):
         self.d_ssh_port.setValue(22)
         self.d_ssh_user = QLineEdit()
         self.d_ssh_user.setPlaceholderText(tr("login name"))
-        self.d_ssh_user.setToolTip(tr("The SSH login. Empty: the user of the saved credentials below, "
+        self.d_ssh_user.setToolTip(tr("The SSH login. Empty: the user of the saved password below, "
                                       "else your ssh settings' default."))
         self.d_ssh_dir = QLineEdit()
         self.d_ssh_dir.setPlaceholderText(tr("e.g. /var/www/html/map, or public_html/map in your home folder"))
         self.d_ssh_dir.setToolTip(tr("The map's files go straight into this folder (created if missing) "
                                      "and replace the previous map there; no versions are kept. Absolute, "
-                                     "or relative to the login's home folder. Only files QWebMap uploaded "
-                                     "before are ever deleted; your other files in the folder stay."))
+                                     "or relative to the login's home folder. A file with the same name as "
+                                     "one of the map's (e.g. index.html) is replaced; only files QWebMap "
+                                     "uploaded before are ever deleted, your other files stay."))
         self.d_ssh_key = QLineEdit()
         self.d_ssh_key.setPlaceholderText(tr("optional – empty: ssh-agent or your default keys (~/.ssh)"))
         self.d_ssh_key.setToolTip(tr("A private key file (OpenSSH format) on this computer. A key with a "
@@ -2213,6 +2215,7 @@ class PublishDialog(QDialog):
         self.o_fast_markers.setChecked(profile.output.fast_markers)
         self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
+        self._dest_family, self._dest_other = None, {}  # the profile's own values, no swap
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
         self.d_account.setText(dest.account_id)
         self.d_endpoint.setText(dest.endpoint)
@@ -2226,7 +2229,7 @@ class PublishDialog(QDialog):
         self.d_ssh_user.setText(dest.user)
         self.d_ssh_dir.setText(dest.remote_dir)
         self.d_ssh_key.setText(dest.identity_file)
-        if self.d_auth is not None and dest.credential_ref:
+        if self.d_auth is not None:
             self.d_auth.setConfigId(dest.credential_ref)
         self._destination_kind_changed()
         self._update_address()
@@ -2521,11 +2524,15 @@ class PublishDialog(QDialog):
             pass
 
     def save_settings(self, quiet=False) -> bool:
+        """``quiet`` (closing the window): no message, and settings with
+        problems are not saved, so the last valid ones stay (an invalid
+        profile would not load next time)."""
         profile = self.collect()
         self._save_xyz_connections()
         problems = validate(profile)
-        if problems and not quiet:
-            QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
+        if problems:
+            if not quiet:
+                QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
             return False
         store.save_profile(self.project, profile)
         self.status.setText(tr("Settings saved in the project (save the project file to keep them)."))
@@ -2723,8 +2730,11 @@ class PublishDialog(QDialog):
         url = self.public_url if self.public_url.startswith(("http://", "https://")) else \
             self._target_url(self.collect())
         if not url:
-            self.status.setText(tr("Publish the map online first (Destination tab): a local copy "
-                                   "cannot be shown in another web page."))
+            self.status.setText(
+                tr("Enter the public URL of the server folder (Destination tab): the embed code needs "
+                   "the map's web address.") if self.d_kind.currentData() == "ssh" else
+                tr("Publish the map online first (Destination tab): a local copy "
+                   "cannot be shown in another web page."))
             return ""
         code = embed_code(url, self.e_title.text().strip() or self.profile.title)
         QGuiApplication.clipboard().setText(code)
@@ -2737,8 +2747,9 @@ class PublishDialog(QDialog):
         if self.profile.destination.kind == "ssh":  # optional: keys and ssh-agent need none
             if self.d_ssh_password.text():
                 return Credentials(self.d_ssh_user.text().strip(), self.d_ssh_password.text())
+            # Only a configuration selected while SSH was chosen (_destination_kind_changed).
             if self.profile.destination.credential_ref:
-                return from_auth_config(self.profile.destination.credential_ref)
+                return from_auth_config(self.profile.destination.credential_ref, ssh=True)
             return None
         if self.d_session_key.text().strip() and self.d_session_secret.text():
             return Credentials(self.d_session_key.text().strip(), self.d_session_secret.text())
@@ -2747,18 +2758,22 @@ class PublishDialog(QDialog):
     def _provider(self):
         from ..publishing.providers import provider_for  # pylint: disable=import-outside-toplevel
         profile = self.profile
-        return provider_for(profile.destination, self._credentials(), publication_prefix(profile))
+        prefix = "" if profile.destination.kind == "ssh" else publication_prefix(profile)  # SSH: one folder
+        return provider_for(profile.destination, self._credentials(), prefix)
 
     def test_connection(self):
         profile = self.collect()
         if profile.destination.kind == "local":
             QMessageBox.information(self, tr("Destination"), tr("Local only: nothing to test."))
             return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # an SSH login can take seconds
         try:
             checks = self._provider().inspect()
         except PublishingError as error:
             self._fail(error.code, error.message, error.detail)
             return
+        finally:
+            QApplication.restoreOverrideCursor()
         text = "\n".join(f"{'✔' if ok else '✖'} {name}: {detail}" for name, ok, detail in checks)
         QMessageBox.information(self, tr("Connection"), text)
 
@@ -2788,6 +2803,17 @@ class PublishDialog(QDialog):
         from .r2_guide import FIELD_HELP  # pylint: disable=import-outside-toplevel
         kind = self.d_kind.currentData()
         ssh, storage = kind == "ssh", kind in ("r2", "s3")
+        # SSH and object storage never share the saved login or the public URL: switching
+        # between them puts the other's values aside and brings back this one's (or none).
+        family = "ssh" if ssh else "storage"
+        if self._dest_family not in (None, family):
+            self._dest_other[self._dest_family] = (
+                self.d_public.text(), self.d_auth.configId() if self.d_auth is not None else "")
+            public, ref = self._dest_other.pop(family, ("", ""))
+            self.d_public.setText(public)
+            if self.d_auth is not None:
+                self.d_auth.setConfigId(ref)
+        self._dest_family = family
         for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, storage),
                               (self.d_bucket, not ssh), (self.d_prefix, not ssh),
                               (self.d_session_row, not ssh), (self.d_retention, not ssh),
@@ -2815,12 +2841,18 @@ class PublishDialog(QDialog):
                 tr("Saved password (QGIS authentication: user = SSH user, password = password or "
                    "passphrase)") if ssh else
                 tr("Saved credentials (QGIS authentication: user = access key id, password = secret)"))
+        if self.d_auth is not None:
+            self.d_auth.setToolTip(
+                tr("A password (or key passphrase) saved encrypted in QGIS (protected by the QGIS master "
+                   "password): a Basic configuration with user name = SSH user and password. “Save in "
+                   "QGIS…” below makes one.") if ssh else tr(FIELD_HELP["auth"]))
         self.d_note.setText(
-            tr("The map's files go straight into the folder and replace the previous map there: no "
-               "versions, no rollback. Unchanged files are not uploaded again, index.html is replaced "
-               "last, and only files QWebMap uploaded before are ever deleted (listed in .q2vt-files.json "
-               "in the folder). Uses the OpenSSH client (sftp) of this computer. A new server's host key "
-               "is accepted on first use; a changed one stops the upload.") if ssh else
+            tr("The map's files go straight into the folder and replace the previous map there (and any "
+               "file with the same name): no versions, no rollback. Unchanged files are not uploaded "
+               "again, index.html is replaced last, and only files QWebMap uploaded before are ever "
+               "deleted (listed in .q2vt-files.json in the folder). Uses the OpenSSH client (sftp) of this "
+               "computer. A new server's host key is accepted on first use; a changed one stops the "
+               "upload.") if ssh else
             tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
                "address: connect a custom domain to the bucket (r2.dev is rate "
                "limited and meant for development). Nothing is created, made "
@@ -2832,15 +2864,20 @@ class PublishDialog(QDialog):
         server field: the user, port and folder taken from it."""
         from ..publishing.providers.ssh import parse_target  # pylint: disable=import-outside-toplevel
         found = parse_target(self.d_ssh_host.text())
-        if not found:
+        if not found:  # a plain host name or address stays as typed
             return
         self.d_ssh_host.setText(str(found["host"]))
-        if found.get("user"):
-            self.d_ssh_user.setText(str(found["user"]))
-        if found.get("port"):
+        filled = []
+        for key, field, label in (("user", self.d_ssh_user, tr("user")),
+                                  ("remote_dir", self.d_ssh_dir, tr("folder"))):
+            if found.get(key) and field.text().strip() != found[key]:
+                field.setText(str(found[key]))
+                filled.append(f"{label} {found[key]}")
+        if found.get("port") and self.d_ssh_port.value() != found["port"]:
             self.d_ssh_port.setValue(int(found["port"]))
-        if found.get("remote_dir"):
-            self.d_ssh_dir.setText(str(found["remote_dir"]))
+            filled.append(tr("port {}").format(found["port"]))
+        if filled:
+            self.status.setText(tr("Taken from the server address: {}.").format(", ".join(filled)))
 
     def _choose_ssh_key(self):
         start = self.d_ssh_key.text().strip() or os.path.join(os.path.expanduser("~"), ".ssh")
@@ -3112,8 +3149,10 @@ class PublishDialog(QDialog):
             if result.versioned_url:
                 self.status.setText(tr("Published: {}\nThis version: {}").format(result.stable_url,
                                                                                  result.versioned_url))
-            else:  # one folder on an SSH server: no versions
-                self.status.setText(tr("Published: {}").format(result.stable_url or result.message))
+            elif result.stable_url:  # one folder on an SSH server: no versions
+                self.status.setText(tr("Published: {}").format(result.stable_url))
+            else:
+                self.status.setText(result.message)
             for warning in result.warnings:
                 self.log(f"⚠ {warning}")
         else:

@@ -33,8 +33,9 @@ def keygen(path: str, passphrase: str = "") -> None:
 
 
 class SshServer:
-    def __init__(self, folder: str):
+    def __init__(self, folder: str, sftp_umask: str = ""):
         self.folder = folder
+        self.sftp_umask = sftp_umask  # e.g. "027": a hardened server's umask for SFTP uploads
         self.process = None
         self.port = 0
         self.user = getpass.getuser()
@@ -66,7 +67,7 @@ class SshServer:
                 f"PidFile {os.path.join(self.folder, 'sshd.pid')}", f"AuthorizedKeysFile {authorized}",
                 "UsePAM no", "StrictModes no", "PermitRootLogin prohibit-password",
                 "PasswordAuthentication no", "KbdInteractiveAuthentication no",
-                "Subsystem sftp internal-sftp", ""]))
+                "Subsystem sftp internal-sftp" + (f" -u {self.sftp_umask}" if self.sftp_umask else ""), ""]))
         with open(self.log, "w", encoding="utf-8") as log:
             self.process = subprocess.Popen(  # pylint: disable=consider-using-with
                 [SSHD, "-D", "-e", "-f", config], stdin=subprocess.DEVNULL, stdout=log, stderr=log)

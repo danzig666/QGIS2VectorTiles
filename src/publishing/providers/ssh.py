@@ -14,12 +14,16 @@ no rollback; see ``folder_publish.py`` for the protocol).
   log; the helper's temporary folder is removed afterwards.
 * Host keys: a new server's key is accepted on first use
   (``StrictHostKeyChecking=accept-new``); a changed key stops the
-  connection with an explanation.
+  connection with an explanation. No connection sharing (``ControlMaster``)
+  is used, so no long-lived ssh process keeps the password.
 * Paths go into the batch file quoted for sftp's own argument parser:
-  spaces, quotes, backslashes, glob characters and non-ASCII names work.
+  spaces, quotes, backslashes, glob characters and non-ASCII names work; a
+  relative name starting with ``-`` gets ``./`` (sftp would read a flag).
 """
 
+import functools
 import os
+import posixpath
 import queue
 import re
 import shutil
@@ -27,7 +31,8 @@ import signal
 import subprocess
 import tempfile
 import threading
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from ..errors import Cancelled, PublishingError
@@ -42,9 +47,11 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ECHO = b"sftp> "
 
 MISSING_CLIENT = (
-    "The OpenSSH client (sftp, ssh) was not found on this computer. Windows: Settings → System → "
-    "Optional features → add \"OpenSSH Client\"; Linux: install the openssh-client package; "
-    "macOS has it built in. Then restart QGIS.")
+    "The OpenSSH client (sftp, ssh) was not found on this computer. Windows: Settings → Apps → "
+    "Optional features (Windows 10) or Settings → System → Optional features (Windows 11) → add "
+    "\"OpenSSH Client\"; Linux: install the openssh-client package; macOS has it built in. Then "
+    "restart QGIS.")
+ASKPASS_MIN = (8, 4)                # SSH_ASKPASS_REQUIRE=force (older Windows clients ask the console)
 
 
 def find_client(name: str) -> Optional[str]:
@@ -71,10 +78,16 @@ def sftp_quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def batch_arg(path: str) -> str:
+    """A path as a batch argument: ``./-x`` for ``-x`` (sftp parses a leading
+    ``-`` as a flag, even in quotes)."""
+    return "./" + path if path.startswith("-") else path
+
+
 def batch_line(command: str, *paths: str, ignore_errors: bool = False) -> str:
     """``command "path" ...``; ``ignore_errors``: a failure does not stop the
     batch (sftp's ``-`` prefix)."""
-    line = ("-" if ignore_errors else "") + " ".join([command] + [sftp_quote(p) for p in paths])
+    line = ("-" if ignore_errors else "") + " ".join([command] + [sftp_quote(batch_arg(p)) for p in paths])
     if len(line.encode("utf-8")) > MAX_LINE:
         raise PublishingError("Q2VT_PUB_PATH_UNSAFE", "A path is too long for SFTP (over "
                               f"{MAX_LINE} bytes): {line[:120]}…")
@@ -100,8 +113,9 @@ def ancestors(folder: str) -> List[str]:
 
 
 def parse_target(text: str) -> Dict[str, object]:
-    """Settings from a pasted ``user@host:/folder``, ``host:folder`` or
-    ``sftp://user@host:2222/folder`` (``{}`` for a plain host name)."""
+    """Settings from a pasted ``user@host:/folder``, ``host:/folder``,
+    ``host:2222`` or ``sftp://user@host:2222/folder``; ``{}`` for anything
+    else (a plain host name, an IPv6 address), which stays as typed."""
     value = (text or "").strip()
     if re.match(r"^(sftp|ssh|scp)://", value, re.I):
         parsed = urlparse(value)
@@ -123,15 +137,20 @@ def parse_target(text: str) -> Dict[str, object]:
         if path and path != "/":
             found["remote_dir"] = path
         return found
-    match = re.match(r"^(?:([^@\s]+)@)?(\[[0-9A-Fa-f:.%]+\]|[^:/\s\[\]@]+)(?::(.*))?$", value)
-    if not match or ("@" not in value and ":" not in value):
+    match = re.match(r"^(?:([^@\s/:]+)@)?(\[[0-9A-Fa-f:.%a-z]+\]|[^:/\s\[\]@]+)(?::(.*))?$", value)
+    if not match:
         return {}
-    user, host, path = match.groups()
+    user, host, rest = match.groups()
     found = {"host": host.strip("[]")}
     if user:
         found["user"] = user
-    if path and path.strip():
-        found["remote_dir"] = path.strip()
+    rest = (rest or "").strip()
+    if rest.isdigit() and 1 <= int(rest) <= 65535:     # host:2222
+        found["port"] = int(rest)
+    elif rest.startswith(("/", "~")) or (user and rest and ":" not in rest):  # scp style
+        found["remote_dir"] = rest
+    elif rest or not user:  # a plain host, an IPv6 address (2001:db8::1) or something else
+        return {}
     return found
 
 
@@ -140,8 +159,10 @@ def write_askpass(folder: str) -> str:
     when it needs a password or a key's passphrase). It holds no secret."""
     if os.name == "nt":
         path = os.path.join(folder, "q2vt-askpass.cmd")
-        # Delayed expansion prints the value as is (no re-parsing of & | < > ^).
-        text = f"@echo off\r\nsetlocal EnableDelayedExpansion\r\necho(!{SECRET_ENV}!\r\n"
+        # UTF-8 output (cmd writes to a pipe in the console code page); delayed
+        # expansion prints the value as is (no re-parsing of & | < > ^).
+        text = (f"@echo off\r\nchcp 65001 >nul\r\nsetlocal EnableDelayedExpansion\r\n"
+                f"echo(!{SECRET_ENV}!\r\n")
     else:
         path = os.path.join(folder, "q2vt-askpass.sh")
         text = f"#!/bin/sh\nprintf '%s\\n' \"${SECRET_ENV}\"\n"
@@ -161,6 +182,72 @@ def askpass_env(password: str, helper: str, base: Optional[dict] = None) -> dict
     env.update({"SSH_ASKPASS": helper, "SSH_ASKPASS_REQUIRE": "force", SECRET_ENV: password})
     env.setdefault("DISPLAY", ":0")  # OpenSSH before 8.4 uses askpass only with a display
     return env
+
+
+def option_path(path: str) -> str:
+    """A file path as the value of an ``ssh -o`` option: quoted, and ``%``
+    doubled (ssh expands ``%d``, ``%h``… in key and known_hosts paths)."""
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+@functools.lru_cache(maxsize=8)
+def client_version(ssh: str) -> Optional[Tuple[int, int]]:
+    """(major, minor) of an OpenSSH client from ``ssh -V``; None if unknown."""
+    try:
+        done = subprocess.run([ssh, "-V"], stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+                              check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"OpenSSH\w*?_(\d+)\.(\d+)", (done.stderr + done.stdout).decode("utf-8", "replace"))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+# One entry of "ls -lan": type, size, date (month day time-or-year), name relative to the folder.
+_LS = re.compile(r"^([-dlbcps])\S{9}.*?\s(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}) (.+)$")
+
+
+def parse_listing(stdout: str) -> Optional[Dict[str, Tuple[str, int]]]:
+    """``{relative path: (type, size)}`` from the output of ``ls -lan`` batch
+    lines (type ``-`` file, ``d`` folder, ``l`` link…); None when the folder
+    itself was not listed (its ``.`` entry is missing)."""
+    found: Dict[str, Tuple[str, int]] = {}
+    listed = listing = False
+    for line in stdout.splitlines():
+        if line.startswith("sftp> "):
+            listing = re.match(r"sftp> -?ls\b", line) is not None
+            continue
+        match = _LS.match(line) if listing else None
+        if not match:
+            continue
+        kind, size, name = match.group(1), int(match.group(2)), match.group(3)
+        if "\\" in name:  # a client in a non-UTF-8 locale prints bytes as \ooo
+            name = re.sub(rb"\\([0-3][0-7]{2})", lambda m: bytes([int(m.group(1), 8)]),
+                          name.encode("utf-8")).decode("utf-8", "replace")
+        if name == ".":
+            listed = True
+        if name.rsplit("/", 1)[-1] in (".", ".."):
+            continue
+        found[posixpath.normpath(name)] = (kind, size)
+    return found if listed else None
+
+
+def ssh_said(stderr: str) -> List[str]:
+    """The meaningful lines of sftp's / ssh's error output (without the
+    "added to known hosts" notice and the final "Connection closed")."""
+    return [line.strip() for line in stderr.splitlines()
+            if line.strip() and not line.startswith("Warning: Permanently added")
+            and line.strip() != "Connection closed" and not set(line.strip()) <= {"@"}]
+
+
+@dataclass
+class RemoteFolder:
+    """What the first session of a publish found out about the folder."""
+
+    state: Optional[bytes] = None       # the state file (None: none there)
+    atomic: bool = True                 # a rename replaces a file (posix-rename)
+    cwd: str = ""                       # the folder's absolute path on the server
+    listing: Optional[Dict[str, Tuple[str, int]]] = None  # see parse_listing (None: unknown)
+    created: List[str] = field(default_factory=list)      # folders this session created
 
 
 class SshProvider:
@@ -216,14 +303,25 @@ class SshProvider:
         ssh = sibling if os.path.isfile(sibling) else find_client("ssh")  # the same installation's ssh
         if ssh:
             args += ["-S", ssh]
+        if self.password and os.name == "nt":  # older clients would wait at an invisible console prompt
+            version = client_version(ssh or sftp)
+            if version is not None and version < ASKPASS_MIN:
+                raise PublishingError(
+                    "Q2VT_PUB_DEPENDENCY",
+                    f"The OpenSSH client of this computer (version {version[0]}.{version[1]}) cannot take a "
+                    "password or passphrase from QWebMap (OpenSSH 8.4 or newer is needed). Use a key "
+                    "without a passphrase or one loaded in ssh-agent, or install a newer OpenSSH "
+                    "(Win32-OpenSSH) and restart QGIS.")
         if self.config_file:
             args += ["-F", self.config_file]
         args += ["-o", "StrictHostKeyChecking=accept-new", "-o", f"ConnectTimeout={self.connect_timeout}",
-                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
+                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+                 # No shared connection: a master process would outlive the upload with the password.
+                 "-o", "ControlMaster=no", "-o", "ControlPath=none"]
         if self.known_hosts:
-            args += ["-o", f'UserKnownHostsFile="{self.known_hosts}"']
-        if self.identity_file:
-            args += ["-i", self.identity_file, "-o", "IdentitiesOnly=yes"]
+            args += ["-o", f"UserKnownHostsFile={option_path(self.known_hosts)}"]
+        if self.identity_file:  # -o, not -i: "-i" looks for the unexpanded path (with %% in it)
+            args += ["-o", f"IdentityFile={option_path(self.identity_file)}", "-o", "IdentitiesOnly=yes"]
         if self.user:
             args += ["-o", f"User={self.user}"]
         host = f"[{self.host}]" if ":" in self.host else self.host
@@ -318,93 +416,142 @@ class SshProvider:
             process.wait(timeout=10)
 
     def classify(self, stderr: str, code: int, failed: str = "") -> ProviderError:
-        """A user-facing error from sftp's output (``failed``: the batch line it stopped at)."""
+        """A user-facing error from sftp's output (``failed``: the batch line
+        it stopped at). ``where`` on the error names the stage for Test
+        connection: client, login, connection, folder or transfer."""
         lower = stderr.lower()
-        last = next((line.strip() for line in reversed(stderr.splitlines()) if line.strip()), "")
+        said = ssh_said(stderr)
+        last = said[-1] if said else ""
         detail = f"exit {code}; {failed}\n{stderr.strip()}"[-4000:]
         host = f"[{self.host}]:{self.port}" if self.port != 22 else self.host
+        key = self.identity_file or "the key file"
+
+        def error(where, code_, message, retryable=False, plain=True):
+            found = ProviderError(code_, message, retryable=retryable, detail=detail)
+            found.where = where
+            found.said = [] if plain else said  # Test connection shows these lines (the real cause)
+            return found
+
         if "remote host identification has changed" in lower or "host key verification failed" in lower:
-            return ProviderError(
-                "Q2VT_PUB_DESTINATION",
-                f"The host key of {self.host} has changed since the last connection: the server was "
-                "reinstalled, or someone may be intercepting the connection. Nothing was uploaded. If "
-                f"the change is expected (ask the server's administrator), remove the old key with "
-                f"\"ssh-keygen -R {host}\" and try again.", detail=detail)
+            return error("connection", "Q2VT_PUB_DESTINATION",
+                         f"The host key of {self.host} has changed since the last connection: the server was "
+                         "reinstalled, or someone may be intercepting the connection. Nothing was uploaded. "
+                         "If the change is expected (ask the server's administrator), remove the old key "
+                         f"with \"ssh-keygen -R {host}\" and try again.")
+        if "ssh_askpass: exec" in lower:
+            return error("login", "Q2VT_PUB_CREDENTIALS",
+                         "ssh could not run QWebMap's password helper from the temporary folder (a temporary "
+                         "folder that does not allow running programs, e.g. mounted noexec?). Use a key "
+                         "without a passphrase or ssh-agent, or point TMPDIR to another folder.")
+        if "unprotected private key file" in lower or re.search(r"load key [^\n]*: bad permissions", lower):
+            return error("login", "Q2VT_PUB_CREDENTIALS",
+                         f"ssh ignored the private key file {key} because other users can read it. Restrict "
+                         "it to your user: on Linux/macOS \"chmod 600\" the file; on Windows, file "
+                         "Properties → Security → Advanced: disable inheritance and leave only your user.")
+        if re.search(r"load key [^\n]*: (invalid format|error in libcrypto)", lower):
+            return error("login", "Q2VT_PUB_CREDENTIALS",
+                         f"The private key file {key} is not an OpenSSH key (a PuTTY .ppk key?). Convert it "
+                         "in PuTTYgen (Load, then Conversions → Export OpenSSH key) and choose the exported "
+                         "file.")
         if re.search(r"permission denied \(|permission denied, please try again|too many authentication "
                      r"failures|no supported authentication methods", lower):
             who = f"user \"{self.user}\"" if self.user else "your default user name"
             hint = "the password or passphrase" if self.password else \
                 "the key file, or enter a password (also a key's passphrase)"
-            return ProviderError("Q2VT_PUB_CREDENTIALS", f"The server {self.host} refused the login "
-                                 f"({who}): check the user name and {hint}.", detail=detail)
+            return error("login", "Q2VT_PUB_CREDENTIALS", f"The server {self.host} refused the login "
+                         f"({who}): check the user name and {hint}.", plain=False)
         if re.search(r"could not resolve hostname|name or service not known|nodename nor servname", lower):
-            return ProviderError("Q2VT_PUB_DESTINATION", f"The server name {self.host} is not known "
-                                 "(typo, or no network / DNS).", detail=detail)
-        if re.search(r"connection refused|connection timed out|operation timed out|no route to host|"
-                     r"network is unreachable|connection reset|kex_exchange_identification", lower):
-            return ProviderError("Q2VT_PUB_DESTINATION", f"The server {self.host} cannot be reached on "
-                                 f"port {self.port} ({last}). Check the address, the port and the "
-                                 "network or firewall.", retryable=True, detail=detail)
+            return error("connection", "Q2VT_PUB_DESTINATION", f"The server name {self.host} is not known "
+                         "(typo, or no network / DNS).")
+        unreachable = re.compile(r"connection refused|connection timed out|operation timed out|no route to "
+                                 r"host|network is unreachable|connection reset|kex_exchange_identification")
+        if unreachable.search(lower):
+            why = next((line for line in said if unreachable.search(line.lower())), last)
+            return error("connection", "Q2VT_PUB_DESTINATION", f"The server {self.host} cannot be reached on "
+                         f"port {self.port} ({why}). Check the address, the port and the network or "
+                         "firewall.", retryable=True)
+        if "subsystem request failed" in lower:
+            return error("connection", "Q2VT_PUB_DESTINATION",
+                         f"The server {self.host} accepted the login but offers no SFTP, which uploading "
+                         "needs (scp-only accounts and some NAS or router systems lack it). Ask the "
+                         "server's administrator to enable the SFTP subsystem.")
         if code == 255 or "connection closed" in lower or "broken pipe" in lower:
-            return ProviderError("Q2VT_PUB_UPLOAD", f"The SSH connection to {self.host} failed or was "
-                                 f"lost ({last or 'no message'}). Publish again to complete the folder.",
-                                 retryable=True, detail=detail)
+            return error("connection", "Q2VT_PUB_UPLOAD", f"The SSH connection to {self.host} failed or was "
+                         f"lost ({last or 'no message'}).", retryable=True, plain=False)
         if failed.startswith("cd "):
             denied = " (permission denied)" if "permission denied" in lower else ""
-            return ProviderError("Q2VT_PUB_DESTINATION", f"The folder {self.remote_dir} does not exist on "
-                                 f"the server and could not be created{denied}: {last}", detail=detail)
+            return error("folder", "Q2VT_PUB_DESTINATION", f"The folder {self.remote_dir} does not exist on "
+                         f"the server and could not be created{denied}: {last}", plain=False)
         if "permission denied" in lower:
-            return ProviderError("Q2VT_PUB_DESTINATION", f"Permission denied: {self.user or 'the user'} "
-                                 f"cannot write into {self.remote_dir} on {self.host} ({last}).",
-                                 detail=detail)
-        return ProviderError("Q2VT_PUB_UPLOAD", f"The SFTP transfer stopped: {last or failed}",
-                             detail=detail)
+            return error("folder", "Q2VT_PUB_DESTINATION", f"Permission denied: {self.user or 'the user'} "
+                         f"cannot write into {self.remote_dir} on {self.host} ({last}).", plain=False)
+        return error("transfer", "Q2VT_PUB_UPLOAD", f"The SFTP transfer stopped: {last or failed}", plain=False)
 
     # -- operations ----------------------------------------------------------------------
-    def prepare(self, local_dir: str, read_state: bool = True, progress=None) -> Tuple[Optional[bytes], bool]:
-        """One session: create the folder if needed, read the state file, and
-        write a test file twice to see whether a rename replaces a file
-        (OpenSSH's posix-rename: atomic). Returns (state bytes or None,
-        atomic replace?)."""
+    def prepare(self, local_dir: str, folders: Optional[Iterable[str]] = None, progress=None) -> RemoteFolder:
+        """One session: create the folder if needed, and write a test file
+        twice to see whether a rename replaces a file (OpenSSH's
+        posix-rename: atomic). With ``folders`` (a publish) it also reads the
+        state file and lists the folder and those subfolders. Folders it
+        created get mode 755 (readable by the web server whatever the
+        server's umask), in a second short session."""
         probe = os.path.join(local_dir, "probe.txt")
         with open(probe, "w", encoding="utf-8") as handle:
             handle.write("QWebMap write test; deleted at once.\n")
-        state = os.path.join(local_dir, "remote-state.json")
-        if os.path.exists(state):
-            os.remove(state)
-        lines = [batch_line("mkdir", folder, ignore_errors=True) for folder in ancestors(self.remote_dir)]
-        lines += [batch_line("cd", self.remote_dir), batch_line("lcd", local_path(local_dir))]
-        if read_state:
-            lines.append(batch_line("get", STATE_NAME, "remote-state.json", ignore_errors=True))
+        states = [os.path.join(local_dir, name) for name in ("remote-state.json", "remote-state-tmp.json")]
+        for path in states:
+            if os.path.exists(path):
+                os.remove(path)
+        parents = ancestors(self.remote_dir)
+        lines = [batch_line("mkdir", folder, ignore_errors=True) for folder in parents]
+        lines += [batch_line("cd", self.remote_dir), "pwd", batch_line("lcd", local_path(local_dir))]
+        if folders is not None:
+            # The temporary state too: without posix-rename it is all there is between rm and rename.
+            lines += [batch_line("get", STATE_NAME, "remote-state.json", ignore_errors=True),
+                      batch_line("get", STATE_NAME + TMP_SUFFIX, "remote-state-tmp.json", ignore_errors=True),
+                      "-ls -lan"]
+            lines += [batch_line("ls -lan", folder, ignore_errors=True) for folder in sorted(folders)]
         first, second = PROBE_NAMES
         lines += [batch_line("put", "probe.txt", first), batch_line("put", "probe.txt", second),
                   batch_line("rename", first, second, ignore_errors=True),
                   batch_line("rm", first, ignore_errors=True), batch_line("rm", second)]
-        _, stderr = self.run(lines, progress)
-        atomic = not re.search(r"(remote rename|couldn't rename)[^\n]*" + re.escape(first), stderr,
-                               re.IGNORECASE)
-        data = None
-        if os.path.exists(state):
-            with open(state, "rb") as handle:
-                data = handle.read()
-        return data, atomic
+        stdout, stderr = self.run(lines, progress)
+        found = RemoteFolder()
+        found.atomic = not re.search(r"(remote rename|couldn't rename)[^\n]*" + re.escape(first), stderr,
+                                     re.IGNORECASE)
+        cwd = re.search(r"^Remote working directory: (.+)$", stdout, re.MULTILINE)
+        found.cwd = cwd.group(1).rstrip("\r") if cwd else ""
+        if folders is not None:
+            found.listing = parse_listing(stdout)
+        for path in states:
+            if found.state is None and os.path.exists(path):
+                with open(path, "rb") as handle:
+                    found.state = handle.read()
+        # The existing ones are the first ancestors: each failed mkdir is one of them.
+        existing = len(re.findall(r"^(remote mkdir |couldn't create directory)", stderr,
+                                  re.MULTILINE | re.IGNORECASE))
+        found.created = parents[existing:]
+        if found.created:
+            self.run([batch_line("chmod 755", folder, ignore_errors=True) for folder in found.created])
+        return found
 
     def inspect(self) -> List[Tuple[str, bool, str]]:
         """Test connection: log in, create the folder if needed, write and
         delete a test file."""
         local = tempfile.mkdtemp(prefix="q2vt-sftp-test-")
         try:
-            _, atomic = self.prepare(local, read_state=False)
-        except PublishingError as error:
-            name = "client" if error.code == "Q2VT_PUB_DEPENDENCY" else \
-                "login" if error.code == "Q2VT_PUB_CREDENTIALS" else "connection"
-            return [(name, False, error.message)]
+            found = self.prepare(local)
+        except PublishingError as error:  # where: client (missing, too old) unless classify() says
+            said = getattr(error, "said", [])
+            return [(getattr(error, "where", "client"), False,
+                     error.message + ("\nssh said: " + " / ".join(said[-3:]) if said else ""))]
         finally:
             shutil.rmtree(local, ignore_errors=True)
         who = f" as {self.user}" if self.user else ""
+        folder = self.remote_dir + (f" ({found.cwd})" if found.cwd and found.cwd != self.remote_dir else "")
         return [("connection", True, f"Logged in to {self.host} (port {self.port}){who}."),
-                ("folder", True, f"{self.remote_dir}: exists (created if it was missing); a test file "
-                                 "was written and deleted."),
-                ("replace", atomic, "Files are replaced atomically (rename over the old file)." if atomic else
-                 "The server cannot rename over an existing file: each changed file is briefly missing "
-                 "while it is replaced (visitors may get an error for a moment).")]
+                ("folder", True, f"{folder}: " + ("created" if self.remote_dir in found.created else "exists")
+                 + "; a test file was written and deleted."),
+                ("replace", found.atomic, "Files are replaced atomically (rename over the old file)."
+                 if found.atomic else "The server cannot rename over an existing file: each changed file is "
+                 "briefly missing while it is replaced (visitors may get an error for a moment).")]
