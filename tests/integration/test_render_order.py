@@ -249,7 +249,7 @@ def test_line_layer_beyond_the_limits_keeps_the_crossings(plugin, tmp_path, monk
                            ("main", ((2000, 1000), (3000, 1000)))]  # main road 4
     rules, diags, utils = _export_rules(tmp_path, _roads(str(tmp_path / "roads.gpkg"), features))
     [diag] = diags.by_code("Q2VT_FEATURE_ORDER_ACROSS_RULES")
-    assert diag.severity.value == "info" and "(4 features in 1 strata" in diag.message
+    assert diag.severity.value == "info" and "(4 feature(s) in 1 strata" in diag.message
     _, crossed = _orig_ids(utils, rules[0].output_dataset)  # the main roads 2 and 4
     fills = [r.feature_filter for r in rules if r.get_attr("c") == 1 and r.order[1] == 1]
     assert fills == [["match", ["get", "q2vt_orig_id"], [crossed], False, True], None,

@@ -2840,7 +2840,9 @@ class RulesExporter:
             return result, total, top, total <= fo.MAX_LIFTED and top <= fo.MAX_STRATA
 
         result, total, top, fits = lift(True)
-        if not fits and _enum_value(layer.geometryType()) == 1:
+        lines = any(_enum_value(geometry.type()) == 1
+                    for items in drawn.values() for _, _, geometry in items)
+        if not fits and lines:
             # Lines that only touch (ways ending at a junction) lift far more
             # features than crossings: keep at least the crossings' order.
             crossing, _, _, crossing_fits = lift(False)
@@ -2848,7 +2850,7 @@ class RulesExporter:
                 self.diagnostics.add(
                     "Q2VT_FEATURE_ORDER_ACROSS_RULES",
                     f"Layer '{layer.name()}': too many lines of different rules meet ({total} "
-                    f"features in {top} strata; the export keeps up to {fo.MAX_LIFTED} features "
+                    f"feature(s) in {top} strata; the export keeps up to {fo.MAX_LIFTED} features "
                     f"in {fo.MAX_STRATA} strata): lines that cross keep QGIS's drawing order, "
                     "lines that only touch (at junctions) are drawn in rule order.",
                     severity=Severity.INFO, layer_id=layer.id())

@@ -74,6 +74,20 @@ def strata(items: Sequence[Tuple[int, int, object]], margin: float = 0.0,
         """Two lines that overlap where they touch (a stroke has a width)."""
         return touching_lines and not polygon(n) and not polygon(other)
 
+    ends: Dict[int, object] = {}
+
+    def endpoints(n: int):
+        """The first and last points of a line's parts (a multipoint)."""
+        if n not in ends:
+            from qgis.core import QgsMultiPoint  # pylint: disable=import-outside-toplevel
+            points = QgsMultiPoint()
+            for part in items[n][2].constParts():
+                if part.nCoordinates():
+                    points.addGeometry(part.startPoint().clone())
+                    points.addGeometry(part.endPoint().clone())
+            ends[n] = QgsGeometry(points)
+        return ends[n]
+
     def core(n: int):
         """A polygon without its outer ``margin``; None: not shrunk (a line)."""
         if n not in cores:
@@ -101,9 +115,12 @@ def strata(items: Sequence[Tuple[int, int, object]], margin: float = 0.0,
             other_geometry = items[other][2]
             if not engine.intersects(other_geometry.constGet()):
                 # Lines that meet within the margin: a junction vertex moved
-                # by the data simplification.
-                if not strokes(n, other) or margin <= 0 or \
-                        engine.distance(other_geometry.constGet()) > margin:
+                # by the data simplification (an end of one line near the
+                # other; a full line-to-line distance cost minutes on dense
+                # contours that never meet).
+                if not strokes(n, other) or margin <= 0 or (
+                        engine.distance(endpoints(other).constGet()) > margin and
+                        endpoints(n).distance(other_geometry) > margin):
                     continue
             if core(n) is not None or core(other) is not None:
                 # A polygon: the overlap must reach beyond the margin (which
