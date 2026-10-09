@@ -1779,37 +1779,50 @@ class SymbolMaterializer:
                 0.5 if opaque and not overlap else 0.0)
         return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
 
+    # Shapeburst distances in screen units: band sets per quarter of a zoom
+    # (within +-9 % of QGIS's width), fewer when over the output budget.
+    SHAPEBURST_ZOOM_STEPS = (4, 2, 1)
+
     def _shapeburst(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
-        """A shapeburst fill as inset bands from the edge (colour 1) inwards."""
+        """A shapeburst fill as inset bands from the edge (colour 1) inwards.
+        A distance in screen units keeps its width on screen at every scale
+        in QGIS: one band set per zoom step, the distance in map units at the
+        middle of the step (96 dpi CSS pixels, the project CRS's units)."""
         whole = layer.useWholeShape()
-        distance = 0.0
-        if not whole:
-            distance = layer.maxDistance()
-            mm = _to_mm(distance, layer.distanceUnit())
-            if mm is not None:
-                # Screen units: the map distance at the middle of the rule's
-                # zoom range within the export's zooms (Web Mercator metres;
-                # 96 dpi CSS pixels). A rule without a scale limit starts at
-                # zoom 0: its middle was far below the exported zooms, the
-                # bands spread over a far larger distance than QGIS's.
-                if flat_rule.get_attr("o") is not None and flat_rule.get_attr("i") is not None:
-                    low, high = self._zoom_range(flat_rule)
-                    zoom = (min(float(low), float(high)) + float(high)) / 2
-                else:
-                    zoom = 16.0
-                distance = mm * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** zoom)
-                self._report("Q2VT_GRADIENT_APPROXIMATE",
-                             f"Shapeburst distance in screen units is fixed at zoom {zoom:g}.", flat_rule)
-            if not distance or distance <= 0:
-                return []
         if layer.blurRadius():
             self._report("Q2VT_GRADIENT_APPROXIMATE",
                          "Shapeburst blur is not applied (bands are already smooth steps).", flat_rule)
         crs = self.project_crs or flat_rule.layer.crs().authid()
+        ramp = self._ramp_of(layer)
 
-        def recipe(band, bands, _overlap):
-            return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, bands, crs)
-        return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
+        def bands(rule, distance):
+            def recipe(band, count, _overlap):
+                return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, count, crs)
+            return self._band_rules(rule, layer, ramp, recipe)
+
+        if whole:
+            return bands(flat_rule, 0.0)
+        distance = layer.maxDistance()
+        mm = _to_mm(distance, layer.distanceUnit())
+        if mm is None:  # map units: one band set
+            return bands(flat_rule, distance) if distance and distance > 0 else []
+        if mm <= 0:
+            return []
+        if flat_rule.get_attr("o") is None or flat_rule.get_attr("i") is None:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst distance in screen units is fixed at zoom 16.", flat_rule)
+            return bands(flat_rule, mm * self._map_units_per_mm(flat_rule, 16.0))
+        low, high = self._zoom_range(flat_rule)
+        count = self._band_count([ramp.color(i / 64) for i in range(65)])
+        features = self._layer_totals(flat_rule.layer)[2]
+        steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
+                      if features * count * (high - low + 1) * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        zoom_rules = self._per_zoom(flat_rule)
+        rules = []
+        for index, rule in enumerate(zoom_rules):
+            for band_rule, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
+                rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
+        return rules
 
     def _hatch(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         sub = layer.subSymbol()

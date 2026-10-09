@@ -194,7 +194,7 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "set distance, rings ignored when set).",
                ("Smooth colour change becomes steps of about one level (up to 1024 bands); blur is "
                 "not applied.",
-                "A distance in screen units is fixed at the middle of the visible zooms.")),
+                "A distance in screen units is set per quarter zoom (within about 9 %).")),
     Capability("InterpolatedLine", "line", Strategy.MATERIALIZED,
                "Colour and width interpolated along each line between the per-feature start "
                "and end values: exported as short pieces (about 64 over the value range) with "

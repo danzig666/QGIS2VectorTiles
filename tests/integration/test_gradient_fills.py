@@ -185,11 +185,12 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     assert all(r.translate is None for r in rules if r not in shadow_rules)
 
 
-def test_screen_unit_shapeburst_distance_is_taken_at_the_exported_zooms(plugin, tmp_path):
-    """A shapeburst distance in millimetres is converted to map units at the
-    middle of the exported zooms (14-15 here), also for a rule without a
-    scale limit (it used the middle of zoom 0 and the last zoom: bands spread
-    over a far larger distance, the fill one colour)."""
+def test_screen_unit_shapeburst_distance_follows_the_zoom(plugin, tmp_path):
+    """A shapeburst distance in millimetres keeps its width on screen in
+    QGIS: one band set per quarter zoom of the exported zooms (14-15 here),
+    each converted at its middle zoom (one distance for every zoom made the
+    ramp twice as wide one zoom further in; a rule without a scale limit
+    once took zoom 0's middle - the fill one colour)."""
     from qgis.core import QgsProcessingFeedback
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
     from fidelity.diagnostics import DiagnosticCollector
@@ -204,9 +205,12 @@ def test_screen_unit_shapeburst_distance_is_taken_at_the_exported_zooms(plugin, 
     diags = DiagnosticCollector()
     rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     bands = [r for r in rules if r.recipe is not None and r.recipe.kind == "color_bands"]
-    assert len(bands) == 1
-    distance = dict(dict(bands[0].recipe.params)["bands"][1].params)["distance"]
-    expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** 14.5)
-    assert distance == pytest.approx(expected, rel=1e-6)
-    assert any("fixed at zoom 14.5" in d.message for d in diags.items)
+    assert len(bands) == 8
+    for band in bands:
+        middle = band.visibility.min_zoom + 0.125
+        distance = dict(dict(band.recipe.params)["bands"][1].params)["distance"]
+        expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** middle)
+        assert distance == pytest.approx(expected, rel=1e-3), middle
+    assert sorted(b.visibility.min_zoom for b in bands) == [14 + i / 4 for i in range(8)]
+    assert not any("fixed at zoom" in d.message for d in diags.items)
 
