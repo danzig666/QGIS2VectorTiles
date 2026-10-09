@@ -281,6 +281,9 @@ def validate(profile: PublicationProfile) -> List[str]:
             errors.append("Parcel report → Zone regulations table: choose the table's zone code field "
                           "(the field with the same zone codes as the zone layer, e.g. szab_ov), or set "
                           "Table to empty if you do not use a regulations table (it is optional)")
+        if info.text_layer_id and not (info.text_code_field and info.text_field):
+            errors.append("Parcel report → Regulation texts: choose the zone code field and the text field, "
+                          "or set Table to empty (it is optional)")
     if not re.match(r"^#[0-9a-fA-F]{6}$", profile.accent_color or ""):
         errors.append("accentColor: #rrggbb")
     view = profile.view

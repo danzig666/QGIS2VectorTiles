@@ -196,6 +196,11 @@ class ParcelInfoConfig:
     regulation_layer_id: str = ""      # optional table joined by zone code (e.g. HÉSZ)
     regulation_code_field: str = ""
     regulation_fields: List[PopupField] = field(default_factory=list)
+    # Optional table of the full regulation texts per zone (simple HTML, e.g.
+    # every HÉSZ provision that applies in the zone): shown on request.
+    text_layer_id: str = ""
+    text_code_field: str = ""
+    text_field: str = ""
     min_area: float = 1.0              # m²: smaller slivers are ignored
     min_share: float = 0.5             # %: smaller restriction overlaps are ignored
     disclaimer: str = ""               # "" = the viewer's own notice in its language

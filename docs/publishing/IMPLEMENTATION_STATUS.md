@@ -1445,3 +1445,22 @@ italic Liberation Sans) that was horizontal on the web.
 | New regression tests (`tests/integration/test_review_fixes.py`) | 10 passed; all 10 fail on the 4.24.1 code |
 | Viewer tests (`tests/browser/test_web_viewer_extras.py`) | 11 passed (a linked drawing is drawn at once, Enter in the text box, 3D fill choice, zone code keys) |
 | Full test suite before the fixes (4.24.1) | 651 passed, 5 skipped |
+
+## 4.26.0: full regulation texts per zone
+
+- `ParcelInfoConfig.text_layer_id / text_code_field / text_field`: an optional table of one
+  simple-HTML text per zone code (e.g. every HÉSZ provision applying in the zone). Export:
+  `parcel_report._regulation_texts` (keys by `zone_key`) cleans each text with `rich_text.clean_html`
+  (h3–h6, p, ul/ol/li, strong/em/b/i/u, br, sup/sub, table rows and cells, blockquote, hr; no
+  attributes except a cell's numeric colspan/rowspan; scripts and embedded content dropped whole)
+  and writes `parcels/text-<n>.json`; `catalog.texts` maps code → file.
+- Viewer: `rich_text.mjs` rebuilds the text from an inert `DOMParser` document with the same
+  rules; `ParcelReport.regulationBlock(code)` (a closed `<details>`, loaded when opened) under each
+  zone of the parcel report; variant add-ons use it in popups (the Hungarian edition does).
+- Publish window: Parcel report tab → *Full texts table*, its zone code and text field (guessed
+  from the names), Review line; the parcel report cache key includes the table and `rich_text.py`.
+
+| Run | Result |
+|---|---|
+| Full test suite (`pytest`: unit, PyQGIS, browser; QGIS 3.34, Chromium) | 667 passed, 5 skipped |
+| New: `tests/unit/test_rich_text.py`, `tests/browser/test_parcel_texts.py`, `test_regulation_texts_table_round_trip` | 5 passed (scripts, links, images and attributes removed at export and in the browser; one file per zone, loaded when opened; the window keeps the table) |
