@@ -585,6 +585,46 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
+def test_perimeter_labels_follow_the_polygon_outline(export, tmp_path):
+    """Polygon labels "Using perimeter (curved)" follow the outline. They
+    were exported at the polygon's centroid, a point MapLibre's line
+    placement has no line to put the label on: no label was drawn. Once per
+    feature, the label sits at the middle of the outline, along it (and the
+    viewer gets the outlines); repeated, the outlines are exported as lines."""
+    from osgeo import gdal, ogr  # pylint: disable=import-outside-toplevel
+
+    def labels_for(repeat, name):
+        layer = zoning_layer(path=str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "zone"
+        settings.placement = Qgis.LabelPlacement.PerimeterCurved
+        settings.repeatDistance = repeat
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        _, result = export(layer)
+        style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+        tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), gdal.OF_VECTOR,
+                            open_options=["ZOOM_LEVEL=14"])
+        kinds = {}
+        for i in range(tiles.GetLayerCount()):
+            for feature in tiles.GetLayer(i):
+                kinds.setdefault(tiles.GetLayer(i).GetName(), set()).add(
+                    ogr.GT_Flatten(feature.GetGeometryRef().GetGeometryType()))
+        return [l for l in style["layers"] if "text-field" in l.get("layout", {})], kinds
+
+    once, kinds = labels_for(0, "once")
+    assert once and once[0]["layout"]["symbol-placement"] == "point"
+    assert "labelrotation" in json.dumps(once[0]["layout"]["text-rotate"])
+    assert once[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert kinds[once[0]["source-layer"]] <= {ogr.wkbPoint, ogr.wkbMultiPoint}
+    assert kinds[once[0]["metadata"]["q2vt:visible-polygons"]] <= {ogr.wkbLineString,
+                                                                     ogr.wkbMultiLineString}
+    repeated, kinds = labels_for(20, "repeated")
+    assert repeated and repeated[0]["layout"]["symbol-placement"] == "line"
+    assert kinds[repeated[0]["source-layer"]] <= {ogr.wkbLineString, ogr.wkbMultiLineString}
+
+
 def _glyph_advances(path):
     """{code point: advance} of a glyph PBF (24 px em)."""
     from publishing import mvt  # pylint: disable=import-outside-toplevel

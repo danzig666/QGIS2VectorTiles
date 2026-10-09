@@ -3313,12 +3313,10 @@ class RulesExporter:
         (kept upright), above/below/on the point as the placement flags say.
         """
         settings = flat_rule.rule.settings()
-        if settings is None or flat_rule.get_attr("g") != 1 or \
+        if settings is None or flat_rule.get_attr("g") not in (1, 2) or \
                 settings.geometryGeneratorEnabled or self._pinned_position(settings):
             return
-        placement = getattr(settings.placement, "value", settings.placement)
-        if int(placement) not in (int(Qgis.LabelPlacement.Line),
-                                  int(Qgis.LabelPlacement.Curved)):
+        if not self._labels_along_line(flat_rule):
             return
         if float(settings.repeatDistance or 0) > 0:
             return
@@ -3331,7 +3329,7 @@ class RulesExporter:
                     "above": Qgis.LabelQuadrantPosition.Above,
                     "below": Qgis.LabelQuadrantPosition.Below}[side]
         rotation = (
-            f"with_variable('q2vt_l', {self._LONGEST_PART}, with_variable('q2vt_a', "
+            f"with_variable('q2vt_l', {self._label_line(flat_rule)}, with_variable('q2vt_a', "
             f"line_interpolate_angle(@q2vt_l, length(@q2vt_l) / 2) - 90, "
             f"if(@q2vt_a > 90, @q2vt_a - 180, if(@q2vt_a <= -90, @q2vt_a + 180, @q2vt_a))))")
         settings.placement = Qgis.LabelPlacement.OverPoint
@@ -3343,6 +3341,38 @@ class RulesExporter:
             QgsPalLayerSettings.Property.LabelRotation, QgsProperty.fromExpression(rotation))
         flat_rule.line_label_midpoint = True
 
+    # Exterior ring of the largest part of a (multi)polygon: the outline a
+    # QGIS perimeter label follows (pal labels the largest part).
+    _LARGEST_RING = (
+        "exterior_ring(if(is_multipart(@geometry), geometry_n(@geometry, "
+        "array_find(array_foreach(generate_series(1, num_geometries(@geometry)), "
+        "area(geometry_n(@geometry, @element))), array_max(array_foreach("
+        "generate_series(1, num_geometries(@geometry)), area(geometry_n(@geometry, "
+        "@element))))) + 1), @geometry))")
+    # Exterior rings of every part ("Label every part of multi-part features").
+    _EXTERIOR_RINGS = (
+        "if(is_multipart(@geometry), collect_geometries(array_foreach(generate_series(1, "
+        "num_geometries(@geometry)), exterior_ring(geometry_n(@geometry, @element)))), "
+        "exterior_ring(@geometry))")
+
+    @staticmethod
+    def _labels_along_line(flat_rule: FlattenedRule) -> bool:
+        """A label that follows its line: line and curved line labels, and
+        polygon labels "Using perimeter" (Line) or "Using perimeter (curved)"."""
+        settings = flat_rule.rule.settings()
+        if settings is None:
+            return False
+        placement = int(getattr(settings.placement, "value", settings.placement))
+        if flat_rule.get_attr("g") == 2:
+            return placement in (int(Qgis.LabelPlacement.Line),
+                                 int(Qgis.LabelPlacement.PerimeterCurved))
+        return placement in (int(Qgis.LabelPlacement.Line), int(Qgis.LabelPlacement.Curved))
+
+    def _label_line(self, flat_rule: FlattenedRule) -> str:
+        """The line a label drawn once per feature is placed on: the longest
+        part of a line, the outline of a polygon's largest part."""
+        return self._LARGEST_RING if flat_rule.get_attr("g") == 2 else self._LONGEST_PART
+
     def _get_labeling_transformation(self, flat_rule: FlattenedRule):
         if flat_rule.recipe is not None and flat_rule.recipe.kind == "label_windows":
             return [1, "@geometry"]  # windows built by _label_windows
@@ -3351,7 +3381,7 @@ class RulesExporter:
         transform_expr = "@geometry"
         if getattr(flat_rule, "line_label_midpoint", False):
             flat_rule.set_attr("c", 0)
-            return [0, f"with_variable('q2vt_l', {self._LONGEST_PART}, "
+            return [0, f"with_variable('q2vt_l', {self._label_line(flat_rule)}, "
                        f"line_interpolate_point(@q2vt_l, length(@q2vt_l) / 2))"]
         pinned = self._pinned_position(settings)
         if pinned is not None:
@@ -3366,6 +3396,12 @@ class RulesExporter:
                 settings.geometryGenerator, flat_rule)
             settings.geometryGeneratorEnabled = False
             flat_rule.set_attr("c", target_geom)
+        elif target_geom == 2 and self._labels_along_line(flat_rule):
+            # A perimeter label repeated along the outline: the rings, as
+            # lines (a centroid has no line for MapLibre's line placement).
+            flat_rule.set_attr("c", 1)
+            target_geom = 1
+            transform_expr = self._EXTERIOR_RINGS if settings.labelPerPart else self._LARGEST_RING
         elif target_geom == 2:
             # A label on the visible part: the static point (for clients
             # without the viewer's visible-polygon labels) lies in the part
@@ -3533,9 +3569,10 @@ class RulesExporter:
             rule.visible_polygons = name
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
             rule.visible_kind = "line"
+        lines = self._EXTERIOR_RINGS if flat_rule.get_attr("g") == 2 else "@geometry"
         return dataclasses.replace(
             label, output_dataset=name, geometry_target=1,
-            geometry_expression=self._clip_to_extent("@geometry"),
+            geometry_expression=self._clip_to_extent(lines),
             description=label.description, flat_rules=[], visible_polygons=True)
 
     @staticmethod
