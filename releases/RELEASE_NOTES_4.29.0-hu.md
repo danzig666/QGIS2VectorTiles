@@ -22,7 +22,7 @@ Debrecen térképe több mint 40 ezer fájl volt, ezért bárhová lassú volt f
 | Keresőindex és rekordok | 47 959 fájl, 45,8 MB | 2 fájl, 4,8 MB |
 | A kereső indulásakor letöltött manifest | kb. 7 MB | 224 KB (tömörítve 64 KB) |
 
-Egy utcanévre keresve a nézegető kb. 40 KB-ot tölt le. A telekinfó rekordjai is egy fájlba kerültek. Ami a térképarchívumot ki tudja szolgálni, az ezeket is ugyanúgy szolgálja ki (tartománykérés, külön tömörítés nélkül). Ha egy szerver nem kezeli a tartománykérést, akkor is működik, csak az ilyen fájlt egészben küldi.
+Egy utcanévre keresve a nézegető kb. 40 KB-ot tölt le. A telekinfó rekordjai is egy fájlba kerültek. Ami a térképarchívumot ki tudja szolgálni, az ezeket is ugyanúgy szolgálja ki (tartománykérés, külön tömörítés nélkül). A webszervernek továbbra is támogatnia kell a tartománykérést (HTTP `Range`): enélkül a térképarchívum nem olvasható, és a nézegető a térkép helyett hibaüzenetet mutat.
 
 ### Az extent kézzel is berajzolható
 *Map* fül → *Extent* → **Draw…**: az ablak félreáll, a QGIS térképen egy téglalapot húzva kijelölhető a publikált terület. Esc: mégse.
