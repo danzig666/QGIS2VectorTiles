@@ -644,10 +644,13 @@ class RulesExporter:
                 expr_fields = list(expr_fields) + [
                     (6, primary.recipe.param("x"), CALLOUT_X_FIELD),
                     (6, primary.recipe.param("y"), CALLOUT_Y_FIELD)]
+            label_text = None
             if primary.get_attr("t") == 1:
                 expr_fields = self._add_label_expression_field(
                     primary, expr_fields
                 )
+                label_text = next((expr for _, expr, name in expr_fields
+                                   if name == f"{_FIELD_PREFIX}_label"), None)
 
             # Evaluate scalar expressions on layer-CRS geometry, as QGIS does.
             layer_crs = primary.layer.crs().authid()
@@ -667,6 +670,10 @@ class RulesExporter:
             ]
             filter_expression = in_layer_crs(
                 primary.rule.filterExpression(), f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
+            if label_text:
+                filter_expression = self._with_label_text(
+                    filter_expression,
+                    in_layer_crs(label_text, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar))
 
             # Compute geometry transformation tuple.
             transformation = self._get_geometry_transformation(primary)
@@ -2908,6 +2915,14 @@ class RulesExporter:
         settings.isExpression = False
         settings.fieldName = field_name
         return fields
+
+    @staticmethod
+    def _with_label_text(filter_expression: str, text: str) -> str:
+        """QGIS draws nothing for a label whose text is NULL or empty, not
+        even its background shape; MapLibre would draw the shape (or an
+        icon) alone. Such features are left out of the label dataset."""
+        condition = f"coalesce(to_string({text}), '') <> ''"
+        return f"({filter_expression}) AND {condition}" if filter_expression else condition
 
     @staticmethod
     def _substituted(expression: str, substitutions) -> str:
