@@ -1161,8 +1161,8 @@ class RulesExporter:
     # Worker processes (export_workers)
     # -------------------------------------------------------------------
     # From this many datasets to export on: below, starting QGIS in the
-    # workers takes longer than they save.
-    _MIN_GROUPS_FOR_WORKERS = 40
+    # workers (seconds on Windows) takes about as long as they save.
+    _MIN_GROUPS_FOR_WORKERS = 150
 
     def _worker_count(self, pending: List[_RuleGroupSnapshot]) -> int:
         """Worker processes for this export: Q2VT_WORKERS=n sets it (0: none)."""

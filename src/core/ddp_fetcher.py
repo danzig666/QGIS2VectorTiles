@@ -63,10 +63,13 @@ class DataDefinedPropertiesFetcher:
     # The safe getter names of each class (dir() and the name checks were most
     # of the walk's time, every rule of every zoom walking the same classes).
     _safe_attrs: dict = {}
-    # (class, getter) found to give no QGIS object (an image, a number, a
-    # dict...): its value is never walked, so it is not called again (the
-    # symbol preview images were a fifth of the walk).
+    # (class, getter) found to give a plain value (a number, text, a dict, a
+    # Qt image or colour): never walked, so not called again (the symbol
+    # preview images were a fifth of the walk). Lists and anything else are
+    # always called: their items depend on the object (a Python symbol layer
+    # in a list of symbol layers).
     _no_objects: set = set()
+    _PLAIN_TYPES = (bool, int, float, str, bytes, dict, tuple)
 
     def __init__(self, qgis_object, min_scale, suffix=0, diagnostics=None, context=None):
         self._root = qgis_object
@@ -138,7 +141,9 @@ class DataDefinedPropertiesFetcher:
                     continue
 
                 first = children[0]
-                if first is not None and "qgis." not in str(type(first)):
+                if not isinstance(result, list) and (
+                        type(result) in self._PLAIN_TYPES
+                        or type(result).__module__.startswith(("PyQt5.", "PyQt6."))):
                     no_objects.add((kind, attr))
                     continue
                 if (

@@ -95,8 +95,10 @@ def test_direct_interval_markers_equal_the_expression(plugin):
                                 recipe.params + (("average", rng.choice([0.5, 3.0, 12.0])),))
         context = _context(project)
         expected = _rows(_chain(mat, lines, recipe, context))
+        # expressionContext() is a reference into its context: keep that alive.
+        direct_context = _context(project)
         direct = marker_points.interval_points_layer(
-            lines, recipe, "EPSG:3857", _context(project).expressionContext(),
+            lines, recipe, "EPSG:3857", direct_context.expressionContext(),
             mat.interval_points_expression(recipe, "EPSG:3857"))
         assert _rows(direct) == expected, (recipe, wkts)
 
