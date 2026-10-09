@@ -231,6 +231,40 @@ def test_labels_keep_the_zooms_of_a_renderer_rule_materialized_per_zoom(flattene
     assert len({r.output_dataset for r in labels}) == len(labels)
 
 
+def test_a_feature_drawn_by_two_rules_is_labelled_once(flattener):
+    """Zone polygons coloured by category, with a filterless last rule that
+    draws every outline: the labels were split per renderer rule, so the
+    catch-all rule labelled every zone a second time (two copies of each
+    code on the web). QGIS labels a drawn feature once."""
+    from qgis.core import (QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
+                           QgsFillSymbol, QgsPalLayerSettings, QgsRuleBasedRenderer,
+                           QgsVectorLayerSimpleLabeling)
+    root = QgsRuleBasedRenderer.Rule(None)
+    for zone, colour in (("K1", "255,0,0"), ("K2", "0,255,0")):
+        root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": colour}),
+                                                   filterExp=f"\"zone\" = '{zone}'"))
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple(
+        {"style": "no", "outline_color": "black"})))  # catch-all outline
+    layer = zoning_layer()
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(10, 14)
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    assert labels
+    for feature in layer.getFeatures():
+        for zoom in range(10, 15):
+            context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+            context.setFeature(feature)
+            hits = [r for r in labels if r.get_attr("o") <= zoom <= r.get_attr("i")
+                    and (not r.rule.filterExpression()
+                         or QgsExpression(r.rule.filterExpression()).evaluate(context))]
+            assert len(hits) == 1, (feature["zone"], zoom, [r.rule.filterExpression() for r in hits])
+
+
 def test_nested_rules_get_unique_ids(flattener):
     """Children of different parents (a nested rule-based renderer: land use
     with quality classes 1-8 under each use) had the same rule number at

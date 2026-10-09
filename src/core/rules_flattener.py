@@ -1565,15 +1565,69 @@ class RulesFlattener:
         ))
 
     def _split_by_matching_renderers(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
-        """Split a label rule by matching renderer rules with overlapping scale ranges."""
+        """Split a label rule into stretches of zooms with the same renderer
+        rules: each labels the features any of them draws (QGIS labels only
+        drawn features, each once). One copy per renderer rule labelled a
+        feature drawn by two rules twice: a category and a filterless
+        catch-all rule (fill and outline) gave every zone code two labels."""
+        label_min, label_max = label_rule.get_attr("o"), label_rule.get_attr("i")
+        runs = [(index, rule, span, visibility) for index, (rule, span, visibility)
+                in enumerate(self._renderer_runs(label_rule.layer))
+                if self._ranges_overlap(label_min, label_max, span[0], span[1])]
+        cuts = {label_min, label_max + 1}
+        for _, _, (low, high), _ in runs:
+            cuts.update(z for z in (low, high + 1) if label_min < z <= label_max)
+        cuts = sorted(cuts)
+        stretches = []  # [first zoom, last zoom, active runs]
+        for start, stop in zip(cuts, cuts[1:]):
+            active = tuple(run for run in runs if run[2][0] <= start <= run[2][1])
+            if not active:
+                continue
+            if stretches and stretches[-1][2] == active and stretches[-1][1] + 1 == start:
+                stretches[-1][1] = stop - 1
+            else:
+                stretches.append([start, stop - 1, active])
         split_rules = []
-        for renderer_idx, (renderer_rule, span, visibility) in enumerate(
-                self._renderer_runs(label_rule.layer)):
-            matched = self._match_label_to_renderer(label_rule, renderer_rule, renderer_idx,
-                                                    span, visibility)
-            if matched:
-                split_rules.append(matched)
+        for low, high, active in stretches:
+            # Rules shown in other browser intervals (scale limits within a
+            # zoom) keep their own label rule, shown where they are drawn.
+            groups: Dict[object, list] = {}
+            for run in active:
+                key = None if run[3] is None else (run[3].min_zoom, run[3].max_zoom)
+                groups.setdefault(key, []).append(run)
+            for group in groups.values():
+                matched = self._match_label_to_renderers(label_rule, tuple(group), low, high)
+                if matched:
+                    split_rules.append(matched)
         return split_rules if split_rules else [label_rule]
+
+    def _match_label_to_renderers(self, label_rule: FlattenedRule, active, low: int,
+                                  high: int) -> Optional[FlattenedRule]:
+        """The label rule for zooms ``low``..``high``, where the renderer rule
+        runs ``active`` draw: its filter is theirs OR-ed (none if one of them
+        has no filter)."""
+        filters: Optional[List[str]] = []
+        for _, renderer_rule, _, _ in active:
+            expression = renderer_rule.rule.filterExpression()
+            if not expression:
+                filters = None
+                break
+            if expression not in filters:
+                filters.append(expression)
+        if filters is None:
+            renderer_filter = ""
+        elif len(filters) == 1:
+            renderer_filter = filters[0]
+        else:
+            renderer_filter = " OR ".join(f"({expression})" for expression in filters)
+        visibility = None
+        visibilities = [run[3] for run in active]
+        if all(v is not None for v in visibilities):
+            visibility = visibilities[0]
+            for other in visibilities[1:]:
+                visibility = self._visibility_hull(visibility, other)
+        return self._match_label_to_renderer(label_rule, renderer_filter, active[0][0],
+                                             (low, high), visibility)
 
     def _renderer_runs(self, layer):
         """[(renderer rule, (first zoom, last zoom), visibility)] of a layer's
@@ -1619,25 +1673,22 @@ class RulesFlattener:
     def _match_label_to_renderer(
         self,
         label_rule: FlattenedRule,
-        renderer_rule: FlattenedRule,
+        renderer_filter: str,
         renderer_idx: int,
-        span=None,
-        visibility=None,
+        span,
+        renderer_visibility=None,
     ) -> Optional[FlattenedRule]:
         """Return a combined label/renderer rule if their zoom ranges overlap
-        (``span``, ``visibility``: the renderer rule's, or of its run of
-        per-zoom slices)."""
+        (``span``, ``renderer_visibility``: the renderer rules' zooms and
+        browser interval; ``renderer_filter``: the features they draw)."""
         label_min, label_max = label_rule.get_attr("o"), label_rule.get_attr("i")
-        renderer_min, renderer_max = span if span is not None else \
-            (renderer_rule.get_attr("o"), renderer_rule.get_attr("i"))
-        renderer_visibility = visibility if span is not None else renderer_rule.visibility
+        renderer_min, renderer_max = span
 
         if not self._ranges_overlap(label_min, label_max, renderer_min, renderer_max):
             return None
 
         rule_clone = label_rule.derive()
         label_filter = rule_clone.rule.filterExpression()
-        renderer_filter = renderer_rule.rule.filterExpression()
 
         if label_filter and renderer_filter:
             combined = f"({renderer_filter}) AND ({label_filter})"
