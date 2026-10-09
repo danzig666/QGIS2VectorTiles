@@ -347,7 +347,8 @@ def test_variant_addons_are_installed(tmp_path):
         if created:
             os.rmdir(folder)
     manifest = json.load(open(os.path.join(result.release.release_dir, "manifest.json"), encoding="utf-8"))
-    assert manifest["addons"] == ["assets/addons/zz_probe.mjs"]
+    # (a variant edition's own add-ons are listed too)
+    assert "assets/addons/zz_probe.mjs" in manifest["addons"] and manifest["addons"] == sorted(manifest["addons"])
     interaction = manifest["interaction"]
     assert not (interaction["overviewMap"] or interaction["threeD"] or interaction["drawing"])
     assert manifest["tools"]["draw"] is False
