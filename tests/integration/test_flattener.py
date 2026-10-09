@@ -252,3 +252,16 @@ def test_nested_rules_get_unique_ids(flattener):
     rules, _ = flattener()
     names = [r.output_dataset for r in rules]
     assert len(rules) == 12 and len(set(names)) == len(names), names
+
+
+def test_a_repeated_style_layer_id_is_renamed_and_reported(plugin):
+    """MapLibre rejects the whole style when a layer id repeats: whatever
+    produced it, the written style keeps the map loadable and says so."""
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.diagnostics = DiagnosticCollector()
+    exporter.style = {"layers": [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": "a"}, {"id": "a_2"}]}
+    exporter._unique_layer_ids()  # pylint: disable=protected-access
+    assert [l["id"] for l in exporter.style["layers"]] == ["a", "b", "a_2", "a_3", "a_2_2"]
+    assert len(exporter.diagnostics.by_code("Q2VT_STYLE_DUPLICATE_ID")) == 3

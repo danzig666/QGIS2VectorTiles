@@ -4109,12 +4109,28 @@ class QgisMapLibreStyleExporter:
             GlyphGenerator(self.glyphs, 'q2vt_label', glyphs_dir).generate()
         else:
             del self.style["glyphs"]
+        self._unique_layer_ids()
         rounded_style = self.round_numeric_values(self.style)
         self.style = rounded_style
         filepath = os.path.join(style_dir, filename)
         with open(filepath, "w", encoding="utf8") as f:
             json.dump(rounded_style, f, indent=indent, ensure_ascii=False)
         return filepath
+
+    def _unique_layer_ids(self) -> None:
+        """MapLibre rejects a whole style with a repeated layer id (no map at
+        all): a repeat is renamed with a suffix and reported."""
+        seen = set()
+        for layer_def in self.style["layers"]:
+            base = layer_def["id"]
+            new, count = base, 2
+            while new in seen:
+                new, count = f"{base}_{count}", count + 1
+            if new != base:
+                self.diagnostics.add("Q2VT_STYLE_DUPLICATE_ID",
+                                     f"Style layer id '{base}' repeated; renamed '{new}'.")
+                layer_def["id"] = new
+            seen.add(new)
 
     def round_numeric_values(self, obj, digits: int = 4):
         """Recursively round floats for compact output.

@@ -149,6 +149,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_RULE_OUTPUT_EMPTY": CodeInfo(
         Severity.WARNING, "A rule matched features but its geometry step produced none",
         "Check the geometry generator / conversion of this rule; it is missing from the map."),
+    "Q2VT_STYLE_DUPLICATE_ID": CodeInfo(
+        Severity.ERROR, "Two style layers had the same id",
+        "An export bug: the repeat was renamed so the map still loads, but the two rules may "
+        "share a dataset. Please report it."),
     "Q2VT_RULE_EXPORT_FAILED": CodeInfo(
         Severity.ERROR, "A rule could not be exported",
         "It is missing from the map. Report this as a converter bug with the diagnostic detail."),
