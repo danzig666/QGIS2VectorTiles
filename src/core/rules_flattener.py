@@ -1221,6 +1221,7 @@ class RulesFlattener:
                         outline_rule.rule.symbol())
                     if outline_symbol:
                         outline_rule.order = order + (1,)  # stroke above its fill
+                        outline_rule.translate = self._screen_offset(clone_symbol_layer)
                         outline_rule.rule.setSymbol(outline_symbol)
                         split_rules.append(outline_rule)
                         clone_symbol_layer.setStrokeStyle(Qt.PenStyle.NoPen)
@@ -1324,6 +1325,19 @@ class RulesFlattener:
             else:
                 rules.append(rule_clone)
         return rules
+
+    @staticmethod
+    def _screen_offset(fill_layer) -> Optional[tuple]:
+        """A simple fill's screen offset as a rule translate: QGIS shifts the
+        whole polygon, outline too (the fill itself is shifted by its own
+        fill-translate)."""
+        from qgis.core import QgsUnitTypes  # pylint: disable=import-outside-toplevel
+        from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
+        offset = fill_layer.offset()
+        if (abs(offset.x()) <= 1e-9 and abs(offset.y()) <= 1e-9) or \
+                normalize_unit(fill_layer.offsetUnit()) in ("map", "m"):
+            return None
+        return offset.x(), offset.y(), QgsUnitTypes.encodeUnit(fill_layer.offsetUnit())
 
     @staticmethod
     def _convert_fill_outline_to_line_symbol(fill_symbol: QgsFillSymbol) -> QgsFillSymbol | None:

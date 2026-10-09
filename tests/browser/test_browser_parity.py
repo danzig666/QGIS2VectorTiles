@@ -500,6 +500,19 @@ def test_qt_brush_patterns_are_drawn_like_qgis(tmp_path, brush):
     assert browser == pytest.approx(qgis, rel=0.1)
 
 
+def test_a_fill_offset_moves_its_outline_too(tmp_path):
+    """A simple fill with a screen offset: QGIS shifts the whole polygon,
+    outline included. The outline (exported as its own line) stayed put."""
+    from qgis.PyQt.QtCore import QPointF
+    layer = _polygon_layer(str(tmp_path / "offset.gpkg"), False)
+    symbol = QgsFillSymbol.createSimple({"color": "0,0,0,0", "outline_color": "black",
+                                         "outline_width": "3", "outline_width_unit": "Pixel"})
+    symbol.symbolLayer(0).setOffset(QPointF(9, -6))
+    symbol.symbolLayer(0).setOffsetUnit(Qgis.RenderUnit.Pixels)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
 def _feature_pattern(kind, tmp_path):
     """A screen-unit pattern of the given kind, feature-aligned (QGIS default)."""
     from qgis.core import (QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer,
