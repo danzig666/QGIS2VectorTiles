@@ -392,11 +392,13 @@ class SymbolMaterializer:
         """Offset polygon outlines like QGIS (``QgsSymbolLayerUtils::offsetLine``):
         every ring is buffered as its own polygon, so a positive offset moves
         exterior and holes towards the feature's interior whatever the ring
-        orientation. Map-unit offsets are materialized exactly; screen-unit
-        offsets keep a native offset on right-hand-rule rings (exterior
-        clockwise, holes counter-clockwise), where MapLibre's right-hand side
-        is the feature's interior. Placed markers (vertex,
-        centre...) are handled by the marker-line materialization."""
+        orientation. Map-unit offsets are materialized exactly, and so are
+        static screen-unit offsets of simple lines, per zoom band (see
+        _screen_polygon_offset); other screen-unit offsets keep a native
+        offset on right-hand-rule rings (exterior clockwise, holes
+        counter-clockwise), where MapLibre's right-hand side is the feature's
+        interior. Placed markers (vertex, centre...) are handled by the
+        marker-line materialization."""
         if layer.layerType() != "SimpleLine":
             placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
             if placements & mat.POINT_PLACEMENTS:
@@ -414,6 +416,10 @@ class SymbolMaterializer:
             params.append(("offset", float(layer.offset())))
             clone.setOffset(0.0)
         else:
+            if layer.layerType() == "SimpleLine":
+                bands = self._screen_polygon_offset(flat_rule, layer, params)
+                if bands is not None:
+                    return bands
             params.append(("rhr", True))
         rule.recipe = mat.Recipe("polygon_offset", params=tuple(params))
         rule.set_attr("m", 1)
@@ -421,6 +427,66 @@ class SymbolMaterializer:
             converted = self._hash_as_marker_line(clone, rule)
             replace_symbol_layer(rule.rule.symbol(), converted)
         return [rule]
+
+    def _screen_polygon_offset(self, flat_rule: FlattenedRule, layer,
+                               params) -> Optional[List[FlattenedRule]]:
+        """A screen-unit polygon outline offset as QGIS draws it: every ring
+        buffered as its own polygon in painter pixels (offsetLine: mitred,
+        limit 2) and stroked once. MapLibre's line-offset overlaps segments
+        and joins at every vertex (a translucent band blends twice there) and
+        does not bridge inlets narrower than twice the offset. Per eighth of
+        a zoom of the export's zooms (offset within +-4.5 %), converted at the
+        band's middle; native (right-hand-rule rings) when overzooming, for
+        data-defined offsets and over the output budget."""
+        offset_mm = _to_mm(layer.offset(), layer.offsetUnit())
+        props = layer.dataDefinedProperties()
+        if offset_mm is None or (props is not None and props.isActive(QgsSymbolLayer.Property.PropertyOffset)):
+            return None
+        low, high = self._zoom_range(flat_rule)
+        if low > high:
+            return None
+        zoom_rules = self._per_zoom(flat_rule)
+        vertices = self._layer_vertices(flat_rule.layer)
+        steps = next((n for n in (8, 4, 2, 1)
+                      if vertices * len(zoom_rules) * n <= self.MAX_PATTERN_ELEMENTS), 0)
+        if not steps:
+            self._report("Q2VT_PATTERN_BUDGET",
+                         "Polygon outline offsets would exceed the output budget; drawn with "
+                         "the browser's line offset.", flat_rule)
+            return None
+        rules = []
+        for rule in zoom_rules:
+            start = float(rule.get_attr("o"))
+            for band, zoom in self._sub_zoom_bands(rule, steps, False):
+                derived = band.derive()
+                derived.visibility = (band.visibility or ZoomInterval(start, start + 1.0)).intersect(
+                    ZoomInterval(start, start + 1.0))
+                derived.rule.symbol().symbolLayer(0).setOffset(0.0)
+                derived.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (
+                    ("offset", offset_mm * self._map_units_per_mm(flat_rule, zoom)),))
+                derived.set_attr("m", 1)
+                rules.append(derived)
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
+        if not overzoom.is_empty:  # past the last tiles: native, right-hand-rule rings
+            native = flat_rule.derive()
+            native.set_attr("o", high)
+            native.visibility = overzoom
+            native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
+            native.set_attr("m", 1)
+            rules.append(native)
+        return rules
+
+    def _layer_vertices(self, layer) -> int:
+        """Vertices of a source layer (cached): the size of per-zoom copies."""
+        from qgis.core import QgsFeatureRequest  # pylint: disable=import-outside-toplevel
+        cache = self.__dict__.setdefault("_vertices", {})
+        if layer.id() not in cache:
+            cache[layer.id()] = sum(
+                feature.geometry().constGet().nCoordinates()
+                for feature in layer.getFeatures(QgsFeatureRequest().setNoAttributes())
+                if feature.hasGeometry())
+        return cache[layer.id()]
 
     def _offset_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A map-unit line offset as the offset line itself
