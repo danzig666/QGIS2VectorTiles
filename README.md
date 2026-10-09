@@ -375,8 +375,8 @@ into a public, self-contained web map. The window title shows the plugin version
 On by default (each can be switched off on *Interaction → Viewer*):
 
 - **Layers** tab: QGIS groups, layers and their legend rules with QGIS swatches, a lock on layers
-  that are always shown, opacity sliders, a switch for all labels (always there with the tab),
-  and *Reset*. Without it, visitors get the legend, with an on/off switch for each layer.
+  that are always shown, opacity sliders, one switch for all labels (without it, labels are always
+  on), and *Reset*. Without it, visitors get the legend, with an on/off switch for each layer.
 - **Search** in the approved fields of all layers (needs *Popups* on); the chosen feature is
   zoomed to, marked and its popup opened.
 - **Filters** by value lists (with counts), number ranges or text.
