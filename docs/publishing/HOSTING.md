@@ -74,6 +74,25 @@ tab shows sizes, not a bill).
 * **Uploads**: a new release copies the files that did not change (same SHA-256) from the
   current release inside the bucket instead of uploading them again; only changed files —
   usually the map archive and a few small JSON files — are sent.
+* **Parallel export** (4.28, automatic): from 150 datasets on, worker processes (headless QGIS
+  instances started from QGIS's own Python, as many as *Output → CPU limit* allows) read the
+  file layers and prepare the datasets in parallel; the vector tiles of each layer are cut by
+  their own `ogr2ogr`, several at a time, while the records, legend, rasters and basemap are
+  prepared. The result is the same as in one process. Database, web and virtual layers, and
+  rules whose expressions read other layers of the project, are still done by QGIS itself.
+  `Q2VT_WORKERS=0` (environment variable) turns the workers off, `Q2VT_WORKERS=n` sets their
+  number.
+* **Fast marker lines** (*Output*, off by default): marker lines whose spacing is in screen
+  units (points, millimetres, pixels) are normally computed at QGIS's positions for every zoom
+  level — on a plan with many such lines most of the export. With this option the browser
+  places them along the lines instead: a much faster export, but the markers are not exactly
+  where QGIS draws them (the fidelity report says so).
+* **Network output folder** (a Windows share, a mapped network drive, an NFS/SMB mount): the
+  work files and the export cache stay on this computer (system temp folder); only the
+  finished release is written to the network folder, and the export log and fidelity report
+  are copied next to it (`.q2vt-work/<slug>/<export>/`).
+* The export log (`export_log.txt`) names the **slowest layers** (seconds for their datasets
+  and for their tiles): where to look first when an export is slow.
 
 ## Other S3-compatible storage
 

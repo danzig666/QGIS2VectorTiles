@@ -1488,3 +1488,60 @@ italic Liberation Sans) that was horizontal on the web.
 | Full test suite (`pytest`: unit, PyQGIS, browser) | 669 passed, 5 skipped, in 14 min (17.7 min before: the tests' own exports are faster too) |
 | New `tests/integration/test_memory_chains.py` | 2 passed (memory and file steps give the same tiles and steps are shared; a failing memory step is redone with files) |
 | 88-layer plan: every tile decoded and compared with 4.26.0 | identical (label layers as sets of features) |
+
+## 4.28.0: much faster export (direct markers, worker processes, background tiles)
+
+Measured on the 88-layer plan of 4.27 (z0–16, no cache, 4 cores): 6.9 min (4.27) → 54 s;
+1.8 min in one process (`Q2VT_WORKERS=0`); 27 s with *fast marker lines*; its 11-layer
+published set 8.7 → 7.5 s. Every tile decoded and compared
+with 4.26/4.27: identical (label layers as sets of features); fidelity diagnostics identical.
+
+- `core/marker_points.py`: interval marker positions and angles computed in Python with the
+  floating-point steps of the QGIS functions the expression used (`QgsLineString::length` /
+  `interpolatePoint`, `verticesAtDistance`, `lineAngle`, `averageAngle`, the `azimuth`
+  function; cumulative lengths + bisection instead of walking every line from its start for
+  every marker). Features it does not vouch for (no geometry, multipart, curves, Z/M,
+  zero length) are given to the original expression. Transforms use the same
+  `QgsCoordinateTransform` calls. `_interval_points_direct` (memory chains only; file mode
+  keeps the Processing chain). Fuzz-tested bit for bit against the chain (4200 random cases).
+- `core/datasets.py`: dataset files read with SQLite (`gpkg_info`: table, feature count,
+  fields) and pruned with `ALTER TABLE DROP COLUMN` (`drop_fields`; OGR fallback);
+  `ExportedDataset` handles instead of 3573 `QgsVectorLayer`s (`RulesExporter(light_results=True)`
+  from the converter only; anything else a layer offers opens it lazily).
+- `core/export_workers.py` + `export_worker_main.py`: worker processes (QGIS's own Python,
+  `QT_QPA_PLATFORM=offscreen`, `QgsApplication` + Processing, the plugin package under the
+  main process's name without its `__init__`), pickled length-prefixed messages on
+  stdin/stdout. State: extent, settings, global/project scope variables (the unpicklable ones
+  listed), transform context (XML), units, ellipsoid, zoom scale. Tasks: a file source read +
+  its base layer; a layer's rule groups in chunks (shared steps). The main process reads
+  database/web/virtual sources, exports groups whose expressions need the project
+  (`aggregate`, `get_feature`, `overlay_*`, `eval`, missing variables …) or do not parse in a
+  worker, and redoes whatever a worker failed at or held when it stopped; diagnostics
+  replayed and sorted into group order. From 150 groups on; `Q2VT_WORKERS`.
+- Tiles: one ogr2ogr per QGIS layer always (`Q2VT_SINGLE_OGR2OGR=1`: one run); a layer that
+  would keep a core busy alone is cut into zoom bands (CONF cut to the band; datasets ending
+  in the band run apart from those going on, as the writer simplifies a dataset's last CONF
+  zoom with `SIMPLIFICATION_MAX_ZOOM`; column splits were dropped: a spatial filter changes the
+  feature order). `merge_mbtiles` streams the parts in tile order (heap merge), gzips in
+  threads, copies single-part tiles; metadata of pieces merged per layer.
+- Publishing: `QGIS2VectorTiles(background_tiles=True)` returns once the tiles start
+  (`BackgroundTiles` thread polling the processes); RECORDS…STREETS run meanwhile; new stage
+  `TILES` (`finish_tiles`: validation, report); `abort_tiles` on failure/cancel. Progress bar:
+  datasets end at the EXPORT_MVT share's end, TILES has its own share.
+- Network output folder (`is_network_folder`: UNC / `DRIVE_REMOTE` / NFS-SMB-SSHFS mounts;
+  `Q2VT_LOCAL_WORK`): work folder and cache under the system temp folder; logs copied back.
+- Smaller: data-defined property walk caches safe getter names per class and skips getters
+  whose value is plain — numbers, text, dicts, Qt images (snapshot 6.3 → 3.4 s, identical
+  result; lists are always walked: a list getter once memoized after returning a Python symbol
+  layer hid every later pattern's sub-symbol, caught by the random-marker test); pattern sprite cells
+  memoized (96 calls, 19 cells); work GeoPackages written with SQLite `SYNCHRONOUS=OFF`,
+  journal in memory (thread-local GDAL options); export log names the slowest layers.
+- *Fast marker lines* (`output.fastMarkers`, off): screen-unit interval marker lines are left
+  to MapLibre's line placement (reported as `Q2VT_MARKER_PLACEMENT_APPROX`).
+
+| Run | Result |
+|---|---|
+| Full test suite (`pytest`: unit, PyQGIS, browser) | 688 passed, 5 skipped, in 13.8 min |
+| New: `test_marker_points.py`, `test_export_workers.py`, `test_export_speed.py` | 19 passed (direct markers = the expression on random lines; workers = one process, also when one stops; SQLite dataset reading/pruning; network folder; slowest-layers log; streaming merge; zoom bands = one run; fast marker lines) |
+| 88-layer plan, every tile compared with 4.26/4.27 | identical (labels as sets of features), diagnostics identical; one process too |
+| 11-layer published set, compared with 4.26 | identical |
