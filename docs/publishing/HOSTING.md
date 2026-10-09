@@ -92,7 +92,13 @@ tab shows sizes, not a bill).
   finished release is written to the network folder, and the export log and fidelity report
   are copied next to it (`.q2vt-work/<slug>/<export>/`).
 * The export log (`export_log.txt`) names the **slowest layers** (seconds for their datasets
-  and for their tiles): where to look first when an export is slow.
+  and for their tiles): where to look first when an export is slow. A big layer's tiles are
+  made in several pieces side by side ("in 26 parallel pieces"): their seconds add up to more
+  than the tiles took.
+* A layer drawn at every scale (no *scale-dependent visibility*), such as every parcel of a
+  city, is in the tiles of every zoom level: zoomed out, one tile holds all of it (several MB).
+  A scale range in QGIS (e.g. parcels from 1:25,000) makes the export faster and the web map
+  lighter, and the web map then matches QGIS at those scales too.
 
 ## Other S3-compatible storage
 

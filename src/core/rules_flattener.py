@@ -54,6 +54,27 @@ def combine_scale_ranges(low_a: float, high_a: float, low_b: float, high_b: floa
     return (min(lows) if lows else 0.0), (max(highs) if highs else 0.0)
 
 
+def _drop_inactive_properties(element) -> None:
+    """Remove the switched-off data-defined properties from a saved style:
+    QGIS keeps their expressions, which it does not use. (A parcel fill
+    whose unused outline width read @map_scale became a dataset per zoom.)"""
+    inactive = []
+    options = element.elementsByTagName("Option")
+    for i in range(options.count()):
+        option = options.item(i).toElement()
+        if option.attribute("type") != "Map":
+            continue
+        child = option.firstChildElement("Option")
+        while not child.isNull():
+            if child.attribute("name") == "active":
+                if child.attribute("value") == "false":
+                    inactive.append(option)
+                break
+            child = child.nextSiblingElement("Option")
+    for option in inactive:
+        option.parentNode().removeChild(option)
+
+
 class RulesFlattener:
     """Flatten QGIS rule-based styling with full property inheritance."""
 
@@ -1514,6 +1535,7 @@ class RulesFlattener:
             elem = QgsRuleBasedRenderer(root).save(doc, context)
 
         doc.appendChild(elem)
+        _drop_inactive_properties(elem)
         return "@map_scale" in doc.toString()
 
     def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, zoom: int,
