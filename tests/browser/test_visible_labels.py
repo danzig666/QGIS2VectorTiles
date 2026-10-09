@@ -482,6 +482,17 @@ def test_around_point_tries_the_next_position_when_one_does_not_fit_or_is_taken(
     assert len(boxes) == 2 and not _overlaps(*boxes)
 
 
+def test_around_point_label_of_a_polygon_smaller_than_its_label():
+    # A building-sized polygon (0.01 across) with a long name (0.16 x 0.04):
+    # an "over the point" label needs the polygon to hold it (else the
+    # polygon counts as a sliver in view), an "around" label goes beside it.
+    squares = [(1, 0, 0, 0, (2028, 2028, 2068, 2068))]
+    box = [0.08, 0.02]
+    assert _points(squares, [0, 0, 1, 1], {"box": box}) == {}
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})[1]
+    assert x == pytest.approx(0.5) and y + box[1] == pytest.approx(0.5 - AROUND["distance"])
+
+
 def test_around_point_distance_in_map_units_follows_the_zoom():
     fixed = _js("m.aroundOption({px: 10, anchors: ['top']}, 16, 0.001)")
     assert fixed == {"anchors": ["top"], "distance": pytest.approx(0.01)}

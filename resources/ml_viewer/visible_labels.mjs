@@ -449,7 +449,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     // "Always label": a polygon wholly on the screen keeps its label even
     // when it is smaller than the label (drawn smaller, see below).
     const whole = options.always && area(rings) >= 0.98 * area(loaded);
-    if (label && area(rings) < 4 * label[0] * label[1] && !whole) continue;  // only a sliver in view
+    // Only a sliver in view: no label. "Around point" labels go beside the
+    // polygon, so a polygon smaller than its label (a restaurant's building)
+    // keeps its label.
+    if (label && !options.around && area(rings) < 4 * label[0] * label[1] && !whole) continue;
     let scale = 1;
     if (pole) {
       const search = () => {
