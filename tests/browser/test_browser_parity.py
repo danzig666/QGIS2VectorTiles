@@ -513,6 +513,31 @@ def test_a_fill_offset_moves_its_outline_too(tmp_path):
     assert _compare(tmp_path, layer, metric="shape") < 0.05
 
 
+def test_a_wide_map_unit_line_crossing_a_tile_edge_has_straight_sides(tmp_path):
+    """A line 60 map units wide crossing a tile edge at a shallow angle: the
+    tiles keep it beyond their edge for its width (the default 10 px clip
+    buffer cut it short of the edge, and both sides of the band stepped
+    there)."""
+    from PIL import Image, ImageChops
+    from qgis.PyQt.QtCore import Qt
+    edge_x = 2120668.91274393  # a tile edge at zooms 15-17
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "road", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({edge_x - 80} {CENTER[1] - 300}, {edge_x + 80} {CENTER[1] + 300})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "road.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 60.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    _compare(tmp_path, layer, center=(edge_x, CENTER[1]))
+    masks = [Image.open(str(tmp_path / f"v_{n}.png")).convert("L").point(lambda v: 255 if v < 128 else 0)
+             for n in ("qgis", "browser")]
+    differ = sum(1 for v in ImageChops.difference(*masks).getdata() if v)
+    assert differ < 400, differ
+
+
 def _feature_pattern(kind, tmp_path):
     """A screen-unit pattern of the given kind, feature-aligned (QGIS default)."""
     from qgis.core import (QgsLinePatternFillSymbolLayer, QgsPointPatternFillSymbolLayer,
