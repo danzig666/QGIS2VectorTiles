@@ -16,6 +16,15 @@ def test_mul_never_uses_python_list_arithmetic():
     assert expr == ["*", ["to-number", ["coalesce", ["get", "q2vt_size"], 1], 1], 1.0 / 3]
 
 
+def test_to_string_and_to_boolean_fall_back_on_null():
+    """MapLibre's to-string turns null into '' and to-boolean into false: a
+    data-defined character or flag without a value lost its static one."""
+    assert ex.to_string(ex.get("c"), "A") == ["to-string", ["coalesce", ["get", "c"], "A"]]
+    assert ex.to_string("left") == "left"
+    assert ex.to_boolean(ex.get("b"), True) == ["to-boolean", ["coalesce", ["get", "b"], True]]
+    assert ex.to_boolean(False) is False
+
+
 def test_to_number_falls_back_on_null():
     """MapLibre's to-number turns null (a feature without the property) into
     0, not into its next argument: a null data-defined size drew labels at

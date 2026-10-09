@@ -550,13 +550,31 @@ class RulesFlattener:
             layer_id=layer.id())
 
     @staticmethod
-    def _heatmap_placeholder(heatmap):
+    def _heatmap_weight(heatmap, fields) -> str:
+        """The weight expression with QGIS's NULL rule made explicit: a weight
+        naming a numeric field reads the attribute, whose NULL weighs 0 (a
+        typed null converts to 0); any other NULL or non-number weighs 1
+        (QgsHeatmapRenderer keeps 1 when the value does not convert; the
+        web's fallback)."""
+        weight = heatmap.weightExpression()
+        if not weight:
+            return ""
+        index = fields.lookupField(weight)
+        expression = QgsExpression(weight)
+        if index < 0 and expression.isField():  # a quoted field name
+            index = fields.lookupField(next(iter(expression.referencedColumns())))
+        if index >= 0 and fields.at(index).isNumeric():
+            return f"coalesce({QgsExpression.quotedColumnRef(fields.at(index).name())}, 0)"
+        return weight
+
+    @classmethod
+    def _heatmap_placeholder(cls, heatmap, fields):
         """One rule exporting the points; its marker only carries the weight
         expression (Size) into the tiles. The style draws a MapLibre heatmap
         instead (FlattenedRule.heatmap)."""
         from qgis.core import QgsMarkerSymbol  # pylint: disable=import-outside-toplevel
         symbol = QgsMarkerSymbol.createSimple({"name": "circle", "size": "1"})
-        weight = heatmap.weightExpression()
+        weight = cls._heatmap_weight(heatmap, fields)
         if weight:
             symbol.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertySize,
                                                          QgsProperty.fromExpression(weight))
@@ -587,7 +605,8 @@ class RulesFlattener:
                                             project.transformContext()).transform(self.extent.center())
             latitude = center.y()
         context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
-        weight = QgsExpression(renderer.weightExpression()) if renderer.weightExpression() else None
+        expression = self._heatmap_weight(renderer, layer.fields())
+        weight = QgsExpression(expression) if expression else None
         if weight is not None:
             weight.prepare(context)
         points = []
@@ -601,7 +620,7 @@ class RulesFlattener:
                 try:
                     value = float(weight.evaluate(context))
                 except (TypeError, ValueError):
-                    continue
+                    value = 1.0  # as QGIS: a weight that does not convert counts 1
             for part in geometry.constParts():
                 point = to_project.transform(QgsPointXY(part.x(), part.y()))
                 points.append((point.x(), point.y(), value))
@@ -642,7 +661,7 @@ class RulesFlattener:
             return system
         self._quote_class_fields(system, layer.fields())
         if system.type() == "heatmapRenderer":
-            return self._heatmap_placeholder(system)
+            return self._heatmap_placeholder(system, layer.fields())
         if system.type() in self.POINT_GROUP_MODES and system.embeddedRenderer() is not None:
             return self._point_group_rules(system)
         return self._as_rule_renderer(system)

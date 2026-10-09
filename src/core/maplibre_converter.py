@@ -266,8 +266,8 @@ class PropertyExtractor:
             if kind == "color":
                 return ex.to_color(field_expr, value if isinstance(value, str) else "rgba(0, 0, 0, 0)")
             if kind == "boolean":
-                return ["to-boolean", field_expr]
-            return ["to-string", field_expr]
+                return ex.to_boolean(field_expr, value if isinstance(value, bool) else False)
+            return ex.to_string(field_expr, value if isinstance(value, str) else "")
         if qexpr.hasParserError() or qexpr.referencedColumns() or qexpr.needsGeometry():
             cls.context.report(
                 "Q2VT_DDP_NO_EMITTER",

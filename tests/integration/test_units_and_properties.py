@@ -48,6 +48,18 @@ def test_quoted_static_number_becomes_a_number(mc):
         1, QgsProperty.fromExpression("'3'")) == 3.0
 
 
+@pytest.mark.parametrize("static,kind,expected", [
+    (9.0, "number", ["to-number", ["coalesce", ["get", "q2vt_property_x_0"], 9.0], 9.0]),
+    ("A", "string", ["to-string", ["coalesce", ["get", "q2vt_property_x_0"], "A"]]),
+    (True, "boolean", ["to-boolean", ["coalesce", ["get", "q2vt_property_x_0"], True]])])
+def test_a_null_generated_value_uses_the_static_one(mc, static, kind, expected):
+    """A feature whose data-defined value is NULL (no tile attribute) gets
+    the symbol's own value, as QGIS's valueAsDouble/String/Bool give it;
+    MapLibre's to-number/to-string/to-boolean turn null into 0, '' and false."""
+    assert mc.PropertyExtractor.get_value_or_expression(
+        static, QgsProperty.fromExpression('"q2vt_property_x_0"'), kind) == expected
+
+
 def test_field_and_expression_reference_are_equivalent(mc):
     field = "q2vt_property_size_5_00"
     by_field = mc.PropertyExtractor.get_value_or_expression(2, QgsProperty.fromField(field))

@@ -52,6 +52,22 @@ def to_number(expr: Expression, fallback: float = 0) -> Expression:
     return ["to-number", ["coalesce", expr, finite(fallback)], finite(fallback)]
 
 
+def to_string(expr: Expression, fallback: str = "") -> Expression:
+    """Coerce to a string; null becomes ``fallback`` (MapLibre's to-string
+    turns null into '')."""
+    if isinstance(expr, str):
+        return expr
+    return ["to-string", ["coalesce", expr, fallback]]
+
+
+def to_boolean(expr: Expression, fallback: bool = False) -> Expression:
+    """Coerce to a boolean; null becomes ``fallback`` (MapLibre's to-boolean
+    turns null into false)."""
+    if isinstance(expr, bool):
+        return expr
+    return ["to-boolean", ["coalesce", expr, fallback]]
+
+
 def to_color(expr: Expression, fallback: str) -> Expression:
     if isinstance(expr, str):
         return expr
