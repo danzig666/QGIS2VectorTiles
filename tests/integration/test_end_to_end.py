@@ -513,7 +513,7 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
 
     around = labels_for(Qgis.LabelPlacement.AroundPoint, "around")[0]["metadata"]["q2vt:label-around"]
     assert around["px"] == pytest.approx(3 * 96 / 25.4, rel=0.01) and "zoom" not in around
-    assert around["anchors"][0] == "bottom"  # first try: above the point, as QGIS
+    assert around["anchors"][0] == "bottom-left"  # first try: above right of the point, as QGIS
     over = labels_for(Qgis.LabelPlacement.OverPoint, "over")[0]["metadata"]
     assert "q2vt:visible-polygons" in over and "q2vt:label-around" not in over
 

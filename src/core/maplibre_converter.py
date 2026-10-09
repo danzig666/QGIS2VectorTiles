@@ -1477,7 +1477,42 @@ class TextPropertyExtractor:
             return ["center", "top", "bottom", "left", "right"]
         if placement is not None and placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
             return None
-        return ["bottom",  "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"]
+        if placement == "OrderedPositionsAroundPoint":
+            ordered = TextPropertyExtractor.predefined_position_anchors(label_settings)
+            if ordered:
+                return ordered
+        return list(TextPropertyExtractor.AROUND_POINT_ANCHORS)
+
+    # QGIS "around point" (pal createCandidatesAroundPoint): the first
+    # candidate is top-right (45 degrees), costs rise both ways round the
+    # circle; of the 8 compass positions: TR, R, T, BR, TL, B, L, BL.
+    # MapLibre names the side of the label at the point ("bottom-left" =
+    # above right).
+    AROUND_POINT_ANCHORS = ("bottom-left", "left", "bottom", "top-left",
+                            "bottom-right", "top", "right", "top-right")
+    # Cartographic placement: predefinedPositionOrder codes (label XML).
+    PREDEFINED_POSITION_ANCHORS = {
+        "TL": "bottom-right", "TSL": "bottom-right", "T": "bottom", "TSR": "bottom-left",
+        "TR": "bottom-left", "L": "right", "R": "left", "BL": "top-right",
+        "BSL": "top-right", "B": "top", "BSR": "top-left", "BR": "top-left", "O": "center"}
+
+    @staticmethod
+    def predefined_position_anchors(label_settings) -> List[str]:
+        """Cartographic placement's positions in the QGIS order as MapLibre
+        anchors (read from the label XML: the order is not in every API)."""
+        from qgis.core import QgsReadWriteContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+        try:
+            element = label_settings.writeXml(QDomDocument(), QgsReadWriteContext())
+            codes = element.firstChildElement("placement").attribute("predefinedPositionOrder")
+        except (AttributeError, RuntimeError, TypeError):
+            codes = ""
+        anchors = []
+        for code in (codes or "TR,TL,BR,BL,R,L,TSR,BSR").split(","):
+            anchor = TextPropertyExtractor.PREDEFINED_POSITION_ANCHORS.get(code.strip())
+            if anchor and anchor not in anchors:
+                anchors.append(anchor)
+        return anchors
 
     @staticmethod
     def get_text_max_angle(label_settings: QgsPalLayerSettings) -> float:

@@ -530,7 +530,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       // keeps clear of better-ranked labels; else the first that fits.
       const target = labelPoint(rings);
       if (!target) continue;
-      const candidates = aroundCandidates(target, half, options.around);
+      const candidates = aroundCandidates(target, label.text || half, options.around);
       const fits = (p) => fit(...p) >= 0;
       const free = (p) => fits(p) && clear(...p) >= 0;
       const kept = old && Number.isInteger(old.slot) && candidates[old.slot] && within(inner, old.point)
@@ -577,8 +577,9 @@ export function aroundOption(around, zoom, perPx) {
   if (!around) return null;
   let px = Number(around.px) || 0;
   if (Number.isFinite(Number(around.zoom))) px *= 2 ** (zoom - Number(around.zoom));  // map units
+  // QGIS's order (pal createCandidatesAroundPoint): top-right first.
   const anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
-    : ["bottom", "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"];
+    : ["bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right", "top-right"];
   return { anchors, distance: px * perPx };
 }
 
@@ -1270,9 +1271,12 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
       width = Math.max(...lines.map((line) => line.length)) * charWidth * size;
       height = lines.length * 1.2 * size;
     }
+    const bare = [width / 2 * perPx, height / 2 * perPx];
     width += pad[1] + pad[3];
     height += pad[0] + pad[2];
-    return [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
+    const box = [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
+    box.text = bare;  // QGIS measures the "around point" distance from the bare text
+    return box;
   };
 }
 

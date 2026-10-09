@@ -211,6 +211,27 @@ def test_single_line_label_placement(mc):
     assert mc.TextPropertyExtractor.get_text_justify(settings) == "left"
 
 
+def test_around_point_candidates_in_qgis_order(mc):
+    """QGIS tries top-right first, then right, top, bottom-right... (pal
+    createCandidatesAroundPoint costs); cartographic placement follows the
+    layer's own position order. MapLibre names the side at the point."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.AroundPoint
+    assert mc.TextPropertyExtractor.get_text_variable_anchor(settings) == [
+        "bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right", "top-right"]
+    settings.placement = Qgis.LabelPlacement.OrderedPositionsAroundPoint
+    # The order as a project stores it (no Python API for it in every version).
+    from qgis.core import QgsReadWriteContext
+    from qgis.PyQt.QtXml import QDomDocument
+    doc = QDomDocument()
+    element = settings.writeXml(doc, QgsReadWriteContext())
+    element.firstChildElement("placement").setAttribute("predefinedPositionOrder", "T,BL")
+    ordered = QgsPalLayerSettings()
+    ordered.readXml(element, QgsReadWriteContext())
+    assert mc.TextPropertyExtractor.get_text_variable_anchor(ordered) == ["bottom", "top-right"]
+
+
 def test_map_unit_label_repeat_grows_with_the_map(mc):
     """A 200 m repeat distance is 200 m at every zoom: the label spacing
     doubles per zoom (one zoom's pixels repeated road names end to end

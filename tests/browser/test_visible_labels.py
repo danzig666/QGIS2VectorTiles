@@ -514,11 +514,26 @@ def test_around_point_label_of_a_polygon_smaller_than_its_label():
     assert x == pytest.approx(0.5) and y + box[1] == pytest.approx(0.5 - AROUND["distance"])
 
 
+def test_around_point_distance_is_measured_from_the_bare_text():
+    """QGIS keeps the label distance from the text itself: the box margin
+    and a background's padding do not push an around-point label further."""
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': ['literal', [3, 4, 3, 4]]}, 15, 1, 0.5)({t: 'abcd'});"
+            " return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert text == pytest.approx([10, 6]) and box == pytest.approx([16, 11])
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072))]
+    script_box = {"box": [0.08, 0.02]}
+    x, y = _points(squares, [0, 0, 1, 1], {**script_box, "around": AROUND})[1]
+    assert y + 0.02 == pytest.approx(0.5 - AROUND["distance"])
+
+
 def test_around_point_distance_in_map_units_follows_the_zoom():
     fixed = _js("m.aroundOption({px: 10, anchors: ['top']}, 16, 0.001)")
     assert fixed == {"anchors": ["top"], "distance": pytest.approx(0.01)}
     scaled = _js("m.aroundOption({px: 10, zoom: 14}, 16, 0.001)")
-    assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom"
+    # Without anchors: QGIS's first candidate, above right of the point.
+    assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom-left"
     assert _js("m.aroundOption(undefined, 16, 0.001)") is None
     candidates = _js("m.aroundCandidates([0.5, 0.5], [0.1, 0.02], "
                      "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
