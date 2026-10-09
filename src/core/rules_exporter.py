@@ -92,6 +92,7 @@ from qgis.PyQt.QtCore import QVariant
 from processing import run as run_processing
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsExpressionContext,
     QgsExpression,
@@ -99,6 +100,7 @@ from qgis.core import (
     QgsExpressionContextUtils,
     QgsProcessingContext,
     QgsProcessingFeedback,
+    QgsProcessingException,
     QgsFeatureRequest,
     QgsField,
     QgsPalLayerSettings,
@@ -183,6 +185,24 @@ _SERIAL_READ_PROVIDERS = frozenset(
 # Temp files prefered to be parquet but in linux which not support parquet they are became gpkg.
 _TEMP_LAYER_FORMAT = 'sqlite'
 _TEMP_RULE_FORMAT = 'gpkg'
+# In-memory chains (serial export): the steps of a rule group hand memory
+# layers to each other instead of temporary GeoPackages (opening and writing
+# a file cost ~15-20 ms per step; a memory step ~1 ms), and a step identical
+# to one already run in this export (the same filter or the same outline at
+# another zoom) is not run again. A step over more input features than this
+# writes a file as before (memory use stays bounded); the totals bound the
+# features kept for shared steps.
+_MEM_PREFIX = "q2vtmem:"
+_MEMORY_MAX_FEATURES = 50_000
+_SHARED_MAX_FEATURES = 1_000_000
+# Steps whose result depends only on their parameters (no randomness).
+_SHAREABLE_ALGORITHMS = frozenset({
+    "native:extractbyexpression", "native:polygonstolines", "native:multiparttosingleparts",
+    "native:fieldcalculator", "native:geometrybyexpression", "native:removenullgeometries",
+    "native:refactorfields", "native:dropmzvalues", "native:extractvertices", "native:explodelines",
+    "native:deletecolumn", "native:collect", "native:dissolve", "native:keepnbiggestparts",
+    "native:mergevectorlayers"})
+_NONDETERMINISTIC = re.compile(r"\b(rand|randf|uuid|now|random)\s*\(", re.IGNORECASE)
 # "Label every feature" layers (publication): each polygon's roomiest point
 # (pole of inaccessibility), its free radius and the polygon's direction
 # (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
@@ -283,6 +303,14 @@ _RING_CLOCKWISE_EXPRESSION = (
     "if(geom_to_wkt(exterior_ring(force_polygon_cw(@q2vt_p))) = "
     "geom_to_wkt(exterior_ring(@q2vt_p)), 1, 0))"
 )
+
+
+def _open_file(path: str, name: str, transform_context) -> QgsVectorLayer:
+    """A dataset file as a layer, without looking for a default style (the
+    datasets have none; the search costs a third of every open)."""
+    options = QgsVectorLayer.LayerOptions(transform_context)
+    options.loadDefaultStyle = False
+    return QgsVectorLayer(path, name, "ogr", options)
 
 
 class _InlineFuture(Future):
@@ -422,6 +450,19 @@ class RulesExporter:
         self._temp_files: set = set()
         self._temp_files_lock = threading.Lock()
 
+        # In-memory chains (see _MEM_PREFIX): on in the serial export, inside
+        # rule groups only (base layers and final datasets stay files).
+        self._memory_chains = not parallel and os.environ.get("Q2VT_FILE_CHAINS") != "1"
+        self._memory_active = False
+        self._mem: Dict[str, QgsVectorLayer] = {}       # token -> memory layer
+        self._shared: Dict[str, str] = {}                # step key -> token
+        self._shared_tokens: set = set()
+        self._shared_features = 0
+        self._group_tokens: List[str] = []
+        self._mem_counter = 0
+        self._file_counts: Dict[str, int] = {}
+        self.step_stats = {"run": 0, "shared": 0, "file": 0}
+
         # Single lock used to serialise reads from "needs_serial_read"
         # providers, regardless of how many workers exist. Conservative but
         # absolutely safe — Postgres/WFS/etc. are read one at a time, full stop.
@@ -467,6 +508,7 @@ class RulesExporter:
             # Phase 4 — collect results on caller thread.
             return self._collect_results(rule_groups, rule_outputs)
         finally:
+            self._release_all_layers()
             self._cleanup_temp_files()
 
     # -------------------------------------------------------------------
@@ -1047,7 +1089,25 @@ class RulesExporter:
         with the dataset in the export cache and replayed on reuse)."""
         before = len(self.diagnostics.items)
         try:
-            return self._export_one_rule_group(grp, source_path)
+            if not self._memory_chains:
+                return self._export_one_rule_group(grp, source_path)
+            self._memory_active = True
+            try:
+                return self._export_one_rule_group(grp, source_path)
+            except _Cancelled:
+                raise
+            except Exception as error:  # noqa: BLE001 - redone as before, with files
+                crash_log.note(f"Rule group {grp.output_dataset}: memory chain failed ({error}); "
+                               "redone with files")
+                del self.diagnostics.items[before:]
+                output_path = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")
+                if exists(output_path):
+                    os.remove(output_path)
+                self._memory_active = False
+                return self._export_one_rule_group(grp, source_path)
+            finally:
+                self._memory_active = False
+                self._release_group_layers()
         finally:
             added = self.diagnostics.items[before:]
             if self.parallel:  # other groups add concurrently: only this group's
@@ -1235,7 +1295,7 @@ class RulesExporter:
                 EXPRESSION=grp.filter_expression,
                 OUTPUT=filt_out,
             )
-            check = QgsVectorLayer(filt, "check", "ogr")
+            check = self._open(filt, "check")
             if not check.isValid() or check.featureCount() <= 0:
                 return None
             current_input = filt
@@ -1258,7 +1318,7 @@ class RulesExporter:
         if grp.recipe is not None and grp.recipe.kind == "marker_points":
             current_input = self._materialize_marker_points(
                 current_input, grp.recipe, grp.source_geometry)
-            check = QgsVectorLayer(current_input, "check", "ogr")
+            check = self._open(current_input, "check")
             if not check.isValid() or check.featureCount() <= 0:
                 return None
 
@@ -1268,7 +1328,7 @@ class RulesExporter:
             current_input = self._pattern_pieces(current_input, grp.recipe)
         elif grp.recipe is not None and grp.recipe.kind == "random_points":
             current_input = self._random_points(current_input, grp.recipe)
-            check = QgsVectorLayer(current_input, "check", "ogr")
+            check = self._open(current_input, "check")
             if not check.isValid() or check.featureCount() <= 0:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
@@ -1352,7 +1412,7 @@ class RulesExporter:
             EXPRESSION=grp.geometry_expression,
             **({"WITH_Z": True} if ranked else {}),
         )
-        check = QgsVectorLayer(transformed, "check", "ogr")
+        check = self._open(transformed, "check")
         if not check.isValid() or check.featureCount() <= 0:
             self._report_empty_output(grp, transbase)
             return None
@@ -1362,7 +1422,7 @@ class RulesExporter:
             if transformed is None:
                 self._report_empty_output(grp, transbase)
                 return None
-            check = QgsVectorLayer(transformed, "check", "ogr")
+            check = self._open(transformed, "check")
         anchors = [name for name in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD)
                    if check.fields().indexFromName(name) >= 0]
         if anchors:  # only needed to build the pieces' grids
@@ -1380,7 +1440,7 @@ class RulesExporter:
             REMOVE_EMPTY=True,
             **({"OUTPUT": output_path} if multipoints else {}),
         )
-        check = QgsVectorLayer(cleaned, "check", "ogr")
+        check = self._open(cleaned, "check")
         if not check.isValid() or check.featureCount() <= 0:
             del check
             if multipoints and exists(output_path):
@@ -1420,13 +1480,13 @@ class RulesExporter:
                 "fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
                 FIELD_TYPE={6: 0, 2: 1, 4: 1}.get(ftype, 2), FIELD_LENGTH=0,
                 FIELD_PRECISION=0, FORMULA=expr)
-        check = QgsVectorLayer(out, "check", "ogr")
+        check = self._open(out, "check")
         if not check.isValid() or check.featureCount() <= 0:
             return None
         return out
 
     def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
-        matched = QgsVectorLayer(source, "matched", "ogr")
+        matched = self._open(source, "matched")
         count = matched.featureCount() if matched.isValid() else 0
         if count > 0:
             self.diagnostics.add(
@@ -1445,7 +1505,7 @@ class RulesExporter:
         would restore the old order."""
         from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
                                QgsProject, QgsVectorFileWriter, QgsWkbTypes)
-        layer = QgsVectorLayer(source, "ranked_src", "ogr")
+        layer = self._open(source, "ranked_src")
         if not layer.isValid():
             return None
         names = layer.fields().names()
@@ -1521,7 +1581,7 @@ class RulesExporter:
         from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
                                QgsProject, QgsVectorFileWriter, QgsWkbTypes)
         from .fidelity.bands import BandBuilder  # pylint: disable=import-outside-toplevel
-        layer = QgsVectorLayer(source, "bands_src", "ogr")
+        layer = self._open(source, "bands_src")
         if not layer.isValid():
             return None
         # Bands under a pixel wide are merged, two zooms past the archive.
@@ -1581,7 +1641,7 @@ class RulesExporter:
             cached = self._point_group_cache.get(key)
             if cached is not None:
                 return cached
-            layer = QgsVectorLayer(source, "point_groups", "ogr")
+            layer = self._open(source, "point_groups")
             if not layer.isValid():
                 return None
             target = QgsCoordinateReferenceSystem(params.get("crs") or layer.crs().authid())
@@ -1697,7 +1757,7 @@ class RulesExporter:
         edge never reaches a tile and only the polygon edges are outlined."""
         from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsProject,  # pylint: disable=import-outside-toplevel
                                QgsVectorFileWriter, QgsWkbTypes)
-        layer = QgsVectorLayer(source, "merge_src", "ogr")
+        layer = self._open(source, "merge_src")
         if not layer.isValid():
             return None
         geometries = [f.geometry() for f in layer.getFeatures() if not f.geometry().isEmpty()]
@@ -1761,7 +1821,7 @@ class RulesExporter:
                                QgsProject, QgsReadWriteContext, QgsSymbolLayerUtils,
                                QgsVectorFileWriter, QgsWkbTypes)
         from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
-        layer = QgsVectorLayer(source, "interpolated_src", "ogr")
+        layer = self._open(source, "interpolated_src")
         if not layer.isValid():
             return None
 
@@ -1869,7 +1929,7 @@ class RulesExporter:
                                QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProject,
                                QgsVectorFileWriter, QgsWkbTypes)
         from .fidelity.arrows import arrow_polygons  # pylint: disable=import-outside-toplevel
-        layer = QgsVectorLayer(source, "arrows", "ogr") if isinstance(source, str) else source
+        layer = self._open(source, "arrows")
         if layer is None or not layer.isValid():
             return None
         pixel = float(recipe.param("pixel"))
@@ -1946,7 +2006,7 @@ class RulesExporter:
         on screen), for inner effect strips (fidelity/line_effects.py)."""
         from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
                                QgsLineString, QgsProject, QgsVectorFileWriter, QgsWkbTypes)
-        layer = QgsVectorLayer(source, "runs", "ogr") if isinstance(source, str) else source
+        layer = self._open(source, "runs")
         if layer is None or not layer.isValid():
             return None
         buckets = int(recipe.param("buckets"))
@@ -2073,7 +2133,7 @@ class RulesExporter:
         # One multipoint per polygon: the later per-feature steps (fields,
         # geometry expression, cleaning) then touch a few features instead of
         # hundreds of thousands; the final single-part split restores points.
-        fields = QgsVectorLayer(points, "fields", "ogr").fields()
+        fields = self._open(points, "fields").fields()
         if fields.indexFromName(f"{_FIELD_PREFIX}_orig_id") >= 0:
             points = self._run_alg_safe("collect", "native", INPUT=points,
                                         FIELD=[f"{_FIELD_PREFIX}_orig_id"])
@@ -2156,7 +2216,7 @@ class RulesExporter:
         if grp.include_required_fields_only != 0:
             # Read fields fresh in this worker thread; the QgsVectorLayer is
             # locally constructed and stays local.
-            tmp = QgsVectorLayer(current_input, "tmp", "ogr")
+            tmp = self._open(current_input, "tmp")
             if tmp.isValid():
                 for f in tmp.fields():
                     if 'ogc_fid' not in f.name().lower():
@@ -2166,7 +2226,7 @@ class RulesExporter:
         mapping.append(
             (6, f'"{_FIELD_PREFIX}_orig_id"', f"{_FIELD_PREFIX}_orig_id")
         )
-        source_fields = QgsVectorLayer(current_input, "fields", "ogr").fields()
+        source_fields = self._open(current_input, "fields").fields()
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
         if source_fields.indexFromName(FEATURE_KEY_FIELD) >= 0:
@@ -2217,7 +2277,7 @@ class RulesExporter:
                     if rule in self.flattened_rules:
                         self.flattened_rules.remove(rule)
                 continue
-            layer = QgsVectorLayer(on_disk, grp.output_dataset, "ogr")
+            layer = _open_file(on_disk, grp.output_dataset, self._transform_context)
             if layer.isValid() and layer.featureCount() > 0:
                 self.processed_layers.append(layer)
                 successful_rules.extend(grp.flat_rules)
@@ -2245,19 +2305,15 @@ class RulesExporter:
         * Returns an output path (string), never a live layer reference.
         """
         self._check_cancel()
-        context = QgsProcessingContext()
-        context.setExpressionContext(self._worker_expression_context())
-        if not self._planar:
-            context.setEllipsoid(self._ellipsoid)
-        context.setDistanceUnit(self._distance_unit)
-        context.setAreaUnit(self._area_unit)
-        context.setInvalidGeometryCheck(QgsFeatureRequest.InvalidGeometryCheck.GeometryNoCheck)
+        context = self._processing_context()
         feedback = QgsProcessingFeedback()
+        full_name = f"{algorithm_type}:{algorithm}"
+        if self._memory_active:
+            return self._run_in_memory(full_name, params, context, feedback)
 
         if params.get("OUTPUT") in (None, "TEMPORARY_OUTPUT"):
             params["OUTPUT"] = self._temp_path("temp")
 
-        full_name = f"{algorithm_type}:{algorithm}"
         crash_log.note(f"  {full_name} " + ", ".join(
             f"{k}={str(v)[:300]}" for k, v in params.items() if k not in ("INPUT", "OUTPUT")))
         # pylint: disable=E1111
@@ -2270,6 +2326,123 @@ class RulesExporter:
         if isinstance(output, QgsVectorLayer):
             return output.source()
         return output
+
+    def _processing_context(self) -> QgsProcessingContext:
+        context = QgsProcessingContext()
+        context.setExpressionContext(self._worker_expression_context())
+        if not self._planar:
+            context.setEllipsoid(self._ellipsoid)
+        context.setDistanceUnit(self._distance_unit)
+        context.setAreaUnit(self._area_unit)
+        context.setInvalidGeometryCheck(QgsFeatureRequest.InvalidGeometryCheck.GeometryNoCheck)
+        return context
+
+    # --- in-memory chains ---------------------------------------------------
+    def _open(self, ref, name: str = "layer") -> QgsVectorLayer:
+        """The layer of a step result: a memory layer (token) or a file."""
+        if isinstance(ref, QgsVectorLayer):
+            return ref
+        if isinstance(ref, str) and ref.startswith(_MEM_PREFIX):
+            return self._mem[ref]
+        return _open_file(ref, name, self._transform_context)
+
+    def _resolve(self, value):
+        if isinstance(value, str) and value.startswith(_MEM_PREFIX):
+            return self._mem[value]
+        if isinstance(value, list):
+            return [self._resolve(v) for v in value]
+        return value
+
+    def _input_features(self, params: dict) -> int:
+        total = 0
+        for key in ("INPUT", "POLYGONS", "LAYERS"):
+            for value in (params.get(key) if isinstance(params.get(key), list) else [params.get(key)]):
+                if isinstance(value, str) and value.startswith(_MEM_PREFIX):
+                    total += max(0, self._mem[value].featureCount())
+                elif isinstance(value, str) and value:
+                    if value not in self._file_counts:  # files do not change during the export
+                        layer = _open_file(value, "count", self._transform_context)
+                        self._file_counts[value] = max(0, layer.featureCount()) if layer.isValid() else 0
+                    total += self._file_counts[value]
+        return total
+
+    def _step_key(self, full_name: str, params: dict) -> Optional[str]:
+        """Identity of a step for sharing; None when it cannot be shared."""
+        if full_name not in _SHAREABLE_ALGORITHMS:
+            return None
+        plain = {}
+        for key, value in params.items():
+            if key == "OUTPUT":
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                plain[key] = value
+            elif isinstance(value, list) and all(isinstance(v, (str, int, float, bool, dict)) for v in value):
+                plain[key] = value
+            else:
+                return None  # a QgsProperty or a layer object: not shared
+            if _NONDETERMINISTIC.search(json.dumps(plain[key], default=str)):
+                return None
+        return json.dumps([full_name, plain], sort_keys=True, default=str)
+
+    def _run_in_memory(self, full_name: str, params: dict, context, feedback) -> str:
+        """A step of a rule group's chain: memory output (a token) unless it
+        writes the group's final dataset or its input is large."""
+        explicit = params.get("OUTPUT")
+        temporary = explicit in (None, "TEMPORARY_OUTPUT") or explicit in self._temp_files
+        if temporary and self._input_features(params) > _MEMORY_MAX_FEATURES:
+            temporary = False  # a large step writes a file, as before
+            if explicit in (None, "TEMPORARY_OUTPUT"):
+                params["OUTPUT"] = self._temp_path("temp")
+            self.step_stats["file"] += 1
+        key = self._step_key(full_name, params) if temporary else None
+        if key is not None and key in self._shared:
+            self.step_stats["shared"] += 1
+            return self._shared[key]
+        crash_log.note(f"  {full_name} (memory) " + ", ".join(
+            f"{k}={str(v)[:300]}" for k, v in params.items() if k not in ("INPUT", "OUTPUT")))
+        resolved = {k: self._resolve(v) for k, v in params.items()}
+        if temporary:
+            resolved["OUTPUT"] = "TEMPORARY_OUTPUT"
+        algorithm = QgsApplication.processingRegistry().createAlgorithmById(full_name)
+        if algorithm is None:
+            raise QgsProcessingException(f"Algorithm {full_name} not found")
+        # The parameters are ours and valid: no checkParameterValues (it opens
+        # every input once more).
+        results, ok = algorithm.run(resolved, context, feedback, {}, False)
+        if not ok:
+            raise QgsProcessingException(f"{full_name} failed")
+        self.step_stats["run"] += 1
+        output = results.get("OUTPUT")
+        if not temporary:
+            return output.source() if isinstance(output, QgsVectorLayer) else output
+        layer = context.takeResultLayer(output) if isinstance(output, str) else output
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            raise QgsProcessingException(f"{full_name}: no result layer")
+        self._mem_counter += 1
+        token = f"{_MEM_PREFIX}{self._mem_counter}"
+        self._mem[token] = layer
+        count = max(0, layer.featureCount())
+        if key is not None and self._shared_features + count <= _SHARED_MAX_FEATURES:
+            self._shared[key] = token
+            self._shared_tokens.add(token)
+            self._shared_features += count
+        else:
+            self._group_tokens.append(token)
+        return token
+
+    def _release_group_layers(self) -> None:
+        """Memory layers of the finished group (shared ones stay)."""
+        for token in self._group_tokens:
+            if token not in self._shared_tokens:
+                self._mem.pop(token, None)
+        self._group_tokens = []
+
+    def _release_all_layers(self) -> None:
+        self._mem.clear()
+        self._shared.clear()
+        self._shared_tokens.clear()
+        self._group_tokens = []
+        self._shared_features = 0
 
     def _worker_expression_context(self) -> QgsExpressionContext:
         """Global + project scope for a worker: copies of the main-thread
