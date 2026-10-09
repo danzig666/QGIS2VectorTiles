@@ -137,6 +137,11 @@ CODES: Dict[str, CodeInfo] = {
         "The ELSE condition uses sibling filters only."),
     "Q2VT_CALLOUT_APPROX": CodeInfo(
         Severity.WARNING, "Label callout exported as an approximate straight leader"),
+    "Q2VT_FEATURE_ORDER_ACROSS_RULES": CodeInfo(
+        Severity.WARNING, "Overlapping features of different rules are drawn in rule order",
+        "QGIS draws this layer feature by feature; the web map draws it rule by rule, so a later "
+        "rule covers earlier ones where features overlap. Turn on symbol levels if rule order "
+        "is intended."),
     "Q2VT_HYBRID_NOT_AVAILABLE": CodeInfo(
         Severity.WARNING, "Hybrid raster fallback is not implemented yet",
         "Unsupported components are reported instead of rasterized."),

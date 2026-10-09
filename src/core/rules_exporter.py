@@ -57,6 +57,7 @@ The redesign separates the export pipeline into clearly typed phases:
    ├──────────────────────────────────────────────────────────────────────┤
    │ Phase 4 — Result collection (caller thread)                          │
    │   * Wrap output Parquet files in QgsVectorLayer for the caller.      │
+   │   * Feature-order strata of overlapping features (style only).       │
    │   * Cleanup of temp files.                                           │
    └──────────────────────────────────────────────────────────────────────┘
 
@@ -103,10 +104,12 @@ from qgis.core import (
     QgsProcessingException,
     QgsFeatureRequest,
     QgsField,
+    QgsGeometry,
     QgsMemoryProviderUtils,
     QgsPalLayerSettings,
     QgsProperty,
     QgsRectangle,
+    QgsRuleBasedRenderer,
     QgsCoordinateTransform,
     QgsVectorFileWriter,
     QgsVectorLayer,
@@ -122,7 +125,8 @@ from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
 from .datasets import DatasetInfo, ExportedDataset, gpkg_info
 from . import marker_points
-from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.diagnostics import DiagnosticCollector, Severity
+from .fidelity import feature_order as fo
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
 from .fidelity import html_labels
 from .fidelity import materialize as mat
@@ -559,7 +563,8 @@ class RulesExporter:
             self._store_cached(pending, rule_outputs)
             rule_outputs.update(cached_outputs)
             # Phase 4 — collect results on caller thread.
-            return self._collect_results(rule_groups, rule_outputs)
+            layers, rules = self._collect_results(rule_groups, rule_outputs)
+            return layers, self._keep_feature_order(rules)
         finally:
             self._release_all_layers()
             self._cleanup_temp_files()
@@ -2608,6 +2613,164 @@ class RulesExporter:
                     if rule in self.flattened_rules:
                         self.flattened_rules.remove(rule)
         return self.processed_layers, successful_rules
+
+    # -------------------------------------------------------------------
+    # Feature order across rules (caller thread, after the datasets)
+    # -------------------------------------------------------------------
+    def _keep_feature_order(self, rules: List[FlattenedRule]) -> List[FlattenedRule]:
+        """``rules`` with feature-order strata (fidelity.feature_order): a
+        feature QGIS draws above an overlapping feature of a later rule is
+        drawn by a copy of its rule's style layers in a higher stratum. Only
+        the style changes (filters on the original feature id); datasets,
+        tiles and the export cache stay as they are."""
+        by_layer: Dict[str, List[FlattenedRule]] = {}
+        for rule in rules:
+            if rule.get_attr("t") == 0:
+                by_layer.setdefault(rule.layer.id(), []).append(rule)
+        copies: List[FlattenedRule] = []
+        for layer_rules in by_layer.values():
+            if self._is_cancelled():
+                break
+            try:
+                lifted = self._feature_strata(layer_rules)
+            except Exception:  # noqa: BLE001  (the layer keeps rule order)
+                self.feedback.reportError(
+                    f"Feature order of '{layer_rules[0].layer.name()}' not kept:\n"
+                    f"{traceback.format_exc()}")
+                continue
+            copies.extend(self._lift_features(layer_rules, lifted))
+        return rules + copies
+
+    def _feature_strata(self, rules: List[FlattenedRule]) -> Dict[int, Dict[Tuple[int, int], int]]:
+        """{pass: {(feature id, rule): stratum > 0}} of one layer's renderer
+        rules (order key: -layer, pass, stratum, rule, ...); {} when the layer
+        keeps rule order."""
+        layer = rules[0].layer
+        renderer = layer.renderer()
+        if renderer is None or _enum_value(layer.geometryType()) not in (1, 2):
+            return {}  # markers overlap by their size on screen
+        try:
+            levels = not isinstance(renderer, QgsRuleBasedRenderer) and renderer.usingSymbolLevels()
+        except (AttributeError, RuntimeError):
+            levels = True
+        # Symbol levels draw symbol by symbol, as the style layers do; merged,
+        # grouped, heatmap and inner-effect drawings are not per feature.
+        if levels or any(r.merge or r.heatmap or r.point_group or r.inner_effect or len(r.order) < 5
+                         for r in rules):
+            return {}
+        passes: Dict[int, Dict[int, List[FlattenedRule]]] = {}
+        for rule in rules:
+            passes.setdefault(rule.order[1], {}).setdefault(rule.order[3], []).append(rule)
+        # The datasets of what each rule draws on the map: polygons before
+        # lines (an outline lies on its polygon), plain before materialized.
+        footprints: Dict[int, Dict[int, List[str]]] = {}
+        for draw_pass, by_seq in passes.items():
+            names = {}
+            for seq, components in by_seq.items():
+                shapes = {r.output_dataset: r for r in components if r.get_attr("c") in (1, 2)}
+                names[seq] = [r.output_dataset for r in sorted(shapes.values(), key=lambda r: (
+                    -r.get_attr("c"), r.recipe is not None, bool(r.pre_generator), r.output_dataset))]
+            # One rule only, or a rule drawn only with markers: rule order.
+            if len(names) > 1 and all(names.values()):
+                footprints[draw_pass] = names
+        datasets = {name: _open_file(join(self.utils_dir, f"{name}.{_TEMP_RULE_FORMAT}"), name,
+                                     self._transform_context)
+                    for names in footprints.values() for group in names.values() for name in group}
+        count = sum(d.featureCount() for d in datasets.values() if d.isValid())
+        if count > fo.MAX_FEATURES:
+            self.diagnostics.add(
+                "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                f"Layer '{layer.name()}': {count} features are too many to check; overlapping "
+                "features of different rules are drawn in rule order.",
+                severity=Severity.INFO, layer_id=layer.id())
+            return {}
+        rows = {name: self._feature_footprints(dataset) for name, dataset in datasets.items()}
+        del datasets
+        # Overlaps narrower than about a tile unit at the last zoom: slivers
+        # between neighbours simplified apart (or invisible).
+        margin = self._simplification_tolerance() / _DATA_SIMPLIFICATION_TOLERANCE
+        result: Dict[int, Dict[Tuple[int, int], int]] = {}
+        for draw_pass, names in footprints.items():
+            parts: Dict[Tuple[int, int], list] = {}
+            ranks: Dict[int, float] = {}
+            for seq, group in names.items():
+                source: Dict[int, str] = {}  # one dataset per feature (zoom splits repeat it)
+                for name in group:
+                    for fid, rank, geometry in rows[name]:
+                        if source.setdefault(fid, name) == name:
+                            ranks.setdefault(fid, rank)
+                            parts.setdefault((fid, seq), []).append(geometry)
+            # QGIS's drawing order: feature by feature (request order), each
+            # with its rules in order.
+            keys = sorted(parts, key=lambda key: (ranks[key[0]], key))
+            items = [(fid, seq, parts[(fid, seq)][0] if len(parts[(fid, seq)]) == 1
+                      else QgsGeometry.collectGeometry(parts[(fid, seq)])) for fid, seq in keys]
+            lifted = fo.strata(items, margin)
+            if lifted:
+                result[draw_pass] = lifted
+        total = sum(len(lifted) for lifted in result.values())
+        top = max((s for lifted in result.values() for s in lifted.values()), default=0)
+        if total > fo.MAX_LIFTED or top > fo.MAX_STRATA:
+            self.diagnostics.add(
+                "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                f"Layer '{layer.name()}': {total} feature(s) that QGIS draws above overlapping "
+                f"features of later rules stay below them ({top} strata; the export keeps up to "
+                f"{fo.MAX_LIFTED} features in {fo.MAX_STRATA} strata).",
+                layer_id=layer.id())
+            return {}
+        return result
+
+    @staticmethod
+    def _feature_footprints(dataset) -> List[tuple]:
+        """(original feature id, drawing rank, geometry) of a dataset's rows."""
+        if not dataset.isValid():
+            return []
+        fields = dataset.fields()
+        id_index = fields.indexFromName(fo.ID_FIELD)
+        rank_index = fields.indexFromName(ORDER_FIELD)
+        if id_index < 0:
+            return []
+        request = QgsFeatureRequest().setSubsetOfAttributes(
+            [i for i in (id_index, rank_index) if i >= 0])
+        rows = []
+        for feature in dataset.getFeatures(request):
+            geometry = feature.geometry()
+            try:
+                fid = int(feature.attribute(id_index))
+            except (TypeError, ValueError):
+                continue
+            if geometry.isEmpty():
+                continue
+            try:  # the renderer's order-by rank, else the source order
+                rank = float(feature.attribute(rank_index)) if rank_index >= 0 else fid
+            except (TypeError, ValueError):
+                rank = fid
+            rows.append((fid, rank, geometry))
+        return rows
+
+    @staticmethod
+    def _lift_features(rules: List[FlattenedRule],
+                       lifted: Dict[int, Dict[Tuple[int, int], int]]) -> List[FlattenedRule]:
+        """Copies of the components of each rule with lifted features, one
+        per stratum ("_kNN" style names, owned by the rule in publishing),
+        drawing only those features; the rule itself draws the others."""
+        copies = []
+        for draw_pass, pairs in sorted(lifted.items()):
+            by_seq: Dict[int, Dict[int, List[int]]] = {}
+            for (fid, seq), stratum in pairs.items():
+                by_seq.setdefault(seq, {}).setdefault(stratum, []).append(fid)
+            for rule in rules:
+                strata = by_seq.get(rule.order[3]) if rule.order[1] == draw_pass else None
+                if not strata:
+                    continue
+                for stratum, ids in sorted(strata.items()):
+                    copy = rule.derive()
+                    copy.rule.setDescription(fo.copy_name(rule.rule.description(), stratum))
+                    copy.order = rule.order[:2] + (stratum,) + rule.order[3:]
+                    copy.feature_filter = fo.only(ids)
+                    copies.append(copy)
+                rule.feature_filter = fo.without(fid for ids in strata.values() for fid in ids)
+        return copies
 
     # -------------------------------------------------------------------
     # Worker-safe processing runner
