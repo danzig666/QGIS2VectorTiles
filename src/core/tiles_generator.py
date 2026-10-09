@@ -17,6 +17,8 @@ format.
   user cancels.
 """
 
+import heapq
+import itertools
 import json
 import math
 import os
@@ -27,6 +29,7 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from os import cpu_count
 from os.path import join, basename
 from typing import Dict, List, Optional, Tuple
@@ -37,6 +40,7 @@ from ..utils import main_thread
 from ..utils.config import _EPSG_CRS, _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM
 from .fidelity.dependencies import prunable_fields, style_field_dependencies
 from . import export_cache
+from .datasets import drop_fields, gpkg_info
 
 _MVT_MAX_ZOOM = 22
 
@@ -123,6 +127,10 @@ class GDALTilesGenerator:
         self.feedback = feedback
         self.layer_zooms = layer_zooms or {}
         self.progress_range = progress_range
+        # (table, fields) per dataset file, read once (remove_unused_fields).
+        self._datasets: Dict[str, Tuple[Optional[str], List[str]]] = {}
+        # ogr2ogr seconds per QGIS layer id (layer_groups), for the export log.
+        self.layer_seconds: Dict[str, float] = {}
 
     def _report(self, fraction: float) -> None:
         if self.feedback is not None:
@@ -157,7 +165,11 @@ class GDALTilesGenerator:
         return cost
 
     def generate(self) -> Tuple[str, int]:
-        """Build VRT, run ogr2ogr, return (mbtiles URI, min_zoom)."""
+        """Build VRT, run ogr2ogr, return (mbtiles URI, min_zoom).
+
+        The tiles of each QGIS layer are made by their own ogr2ogr, several
+        at a time, and merged (one ogr2ogr for everything used one core for
+        most of its time); Q2VT_SINGLE_OGR2OGR=1 makes them in one run."""
         self.remove_unused_fields()
         output, uri = self._prepare_output_paths()
         vrt_path = join(QgsProcessingUtils.tempFolder(), "layers.vrt")
@@ -165,7 +177,7 @@ class GDALTilesGenerator:
         min_zoom = self._get_global_min_zoom()
         max_zoom = self._get_global_max_zoom()
 
-        if self.cache is not None:
+        if self.cache is not None or os.environ.get("Q2VT_SINGLE_OGR2OGR") != "1":
             self._generate_per_layer(output, min_zoom, max_zoom)
         else:
             self._build_vrt(vrt_path)
@@ -190,6 +202,12 @@ class GDALTilesGenerator:
             for suffix in ("_vp", "_vl"):  # the polygons / lines of a label: its fields
                 if name.endswith(suffix):
                     required |= dependencies.get(name[:-len(suffix)], set())
+            info = gpkg_info(gpkg)  # SQLite: a fraction of an OGR open
+            if info is not None:
+                unused = prunable_fields(info.fields, required)
+                if drop_fields(gpkg, info.table, [n for n in info.fields if n in unused]):
+                    self._datasets[gpkg] = (info.table, [n for n in info.fields if n not in unused])
+                    continue
             ds = ogr.Open(gpkg, update=1)
             if ds is None:
                 continue
@@ -201,6 +219,7 @@ class GDALTilesGenerator:
             for i in range(len(names) - 1, -1, -1):
                 if names[i] in unused:
                     ogr_layer.DeleteField(i)
+            self._datasets[gpkg] = (ogr_layer.GetName(), [n for n in names if n not in unused])
             ds = None  # Flush changes and close the dataset
 
     # --- VRT construction ---
@@ -218,7 +237,7 @@ class GDALTilesGenerator:
             # keeps the name it was first written under (another rule's name
             # when only the rule's zoom range changed); without SrcLayer OGR
             # looks for a table named like the tile layer and writes nothing.
-            table = self._dataset_table(source)
+            table = self._table_of(source)
             if table and table != name:
                 ET.SubElement(node, "SrcLayer").text = table
             ET.SubElement(node, "LayerSRS").text = f"EPSG:{_EPSG_CRS}"
@@ -334,8 +353,15 @@ class GDALTilesGenerator:
         ds = None
         return name
 
+    def _table_of(self, path: str) -> Optional[str]:
+        known = self._datasets.get(path)
+        return known[0] if known else self._dataset_table(path)
+
     def _dataset_fields(self, layer: QgsVectorLayer) -> List[str]:
-        ds = ogr.Open(layer.source().split("|layername=")[0])
+        path = layer.source().split("|layername=")[0]
+        if path in self._datasets:
+            return list(self._datasets[path][1])
+        ds = ogr.Open(path)
         if ds is None:
             return []
         defn = ds.GetLayer(0).GetLayerDefn()
@@ -343,16 +369,19 @@ class GDALTilesGenerator:
         ds = None
         return names
 
-    def _tile_groups(self) -> List[Tuple[Optional[str], List[QgsVectorLayer]]]:
-        """[(cache key or None, datasets)] — one group per QGIS layer, in the
-        order of the datasets (the order of one combined export)."""
+    def _tile_groups(self) -> List[Tuple[str, Optional[str], List[QgsVectorLayer]]]:
+        """[(QGIS layer id, cache key or None, datasets)] — one group per QGIS
+        layer, in the order of the datasets (the order of one combined export)."""
         by_name = {self._layer_name(layer): layer for layer in self.layers}
         owner = {name: lid for lid, names in self.layer_groups.items() for name in names}
         groups: Dict[str, List[QgsVectorLayer]] = {}
         for name, layer in by_name.items():
             groups.setdefault(owner.get(name, f"dataset:{name}"), []).append(layer)
         out = []
-        for members in groups.values():
+        for owner_id, members in groups.items():
+            if self.cache is None:
+                out.append((owner_id, None, members))
+                continue
             parts = []
             for layer in members:
                 name = self._layer_name(layer)
@@ -362,8 +391,8 @@ class GDALTilesGenerator:
                     break
                 parts.append([name, key, list(self._layer_zoom_range(layer)),
                               self._dataset_fields(layer)])
-            out.append((export_cache.make_key("tiles", self._zooms, parts,
-                                              _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM)
+            out.append((owner_id, export_cache.make_key("tiles", self._zooms, parts,
+                                                        _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM)
                         if parts is not None else None, members))
         return out
 
@@ -374,8 +403,8 @@ class GDALTilesGenerator:
         work = join(self.output_dir, "layer_tiles")
         os.makedirs(work, exist_ok=True)
         parts, jobs = [], []
-        for number, (key, members) in enumerate(self._tile_groups()):
-            cached = self.cache.get_tiles(key) if key else None
+        for number, (owner, key, members) in enumerate(self._tile_groups()):
+            cached = self.cache.get_tiles(key) if key and self.cache is not None else None
             if cached:
                 parts.append(cached)
                 continue
@@ -385,17 +414,20 @@ class GDALTilesGenerator:
             self._build_vrt(vrt, members)
             self._write_layer_conf(conf, members)
             jobs.append((key, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf),
-                         self._job_cost(members)))
+                         self._job_cost(members), owner))
             parts.append(target)
-        if self.feedback is not None:
+        if self.feedback is not None and self.cache is not None:
             self.feedback.pushInfo(f"   Tiles: {len(parts) - len(jobs)} of {len(parts)} layers "
                                    "reused from earlier exports, " f"{len(jobs)} to generate")
-        self._run_parallel([cmd for _, _, cmd, _ in jobs], [cost for _, _, _, cost in jobs])
-        stored = {target: self.cache.put_tiles(key, target) for key, target, _, _ in jobs if key}
-        merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom)
+        self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
+        stored = {target: self.cache.put_tiles(key, target)
+                  for key, target, *_ in jobs if key and self.cache is not None}
+        merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom,
+                      workers=self._cpu_num())
         shutil.rmtree(work, ignore_errors=True)  # kept in the cache; not needed here
 
-    def _run_parallel(self, commands: List[List[str]], costs: Optional[List[float]] = None):
+    def _run_parallel(self, commands: List[List[str]], costs: Optional[List[float]] = None,
+                      labels: Optional[List[str]] = None):
         """Run ogr2ogr commands, several at a time, polled from this (main)
         thread so QGIS stays responsive and Cancel works. The biggest jobs
         (``costs``) start first, so none of them is left running alone at
@@ -423,6 +455,9 @@ class GDALTilesGenerator:
                 for job, proc in [(j, p) for j, p in running.items() if p.poll() is not None]:
                     del running[job]
                     tracker.finish(job, time.monotonic())
+                    if labels and job < len(labels):
+                        self.layer_seconds[labels[job]] = \
+                            self.layer_seconds.get(labels[job], 0.0) + tracker.finished[job]
                     _, stderr = proc.communicate()
                     if proc.returncode != 0:
                         error_msg = f"ogr2ogr failed.\nError: {stderr}"
@@ -515,10 +550,33 @@ def _tile_layers(data: bytes) -> bytes:
     return zlib.decompress(data, 47) if data[:2] == b"\x1f\x8b" else data
 
 
-def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int) -> None:
+def _tile_rows(path: str):
+    """A part's tiles in (zoom, column, row) order (its UNIQUE index)."""
+    part = sqlite3.connect(path)
+    try:
+        yield from part.execute("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles "
+                                "ORDER BY zoom_level, tile_column, tile_row")
+    finally:
+        part.close()
+
+
+def _merged_tile(chunks: List[bytes]) -> bytes:
+    """One tile of the parts' tiles at the same address (their layers, in
+    the parts' order); a tile of one part as it is when already gzipped."""
+    if len(chunks) == 1 and chunks[0][:2] == b"\x1f\x8b":
+        return chunks[0]
+    return _gzip(b"".join(_tile_layers(data) for data in chunks))
+
+
+def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,
+                  workers: int = 1) -> None:
     """One MBTiles of several MVT MBTiles with distinct layers: a tile's
     layers are concatenated (an MVT tile is a list of layer messages, so the
-    concatenation of tiles is a tile with all their layers) and gzipped."""
+    concatenation of tiles is a tile with all their layers) and gzipped.
+
+    The parts are read side by side in tile order (a few tiles in memory at
+    a time, not all of them), and the tiles of several parts are gzipped
+    ``workers`` at a time (zlib runs outside the GIL)."""
     if os.path.exists(output):
         os.remove(output)
     vector_layers, stats, bounds = [], [], None
@@ -533,12 +591,8 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int) -
             out.commit()
             out.execute("DETACH DATABASE part")
             return
-        merged: Dict[Tuple[int, int, int], List[bytes]] = {}
         for path in parts:
             with sqlite3.connect(path) as part:
-                for z, x, y, data in part.execute(
-                        "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles"):
-                    merged.setdefault((z, x, y), []).append(_tile_layers(data))
                 meta = dict(part.execute("SELECT name, value FROM metadata"))
             try:
                 info = json.loads(meta.get("json") or "{}")
@@ -552,8 +606,18 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int) -
                     min(bounds[0], west), min(bounds[1], south), max(bounds[2], east), max(bounds[3], north)]
             except (KeyError, ValueError):
                 pass
-        out.executemany("INSERT INTO tiles VALUES (?, ?, ?, ?)", (
-            (z, x, y, _gzip(b"".join(chunks))) for (z, x, y), chunks in sorted(merged.items())))
+        # heapq.merge is stable: tiles at the same address come in the parts' order.
+        rows = heapq.merge(*(_tile_rows(path) for path in parts), key=lambda row: row[:3])
+        tiles = ((address, [row[3] for row in group])
+                 for address, group in itertools.groupby(rows, key=lambda row: row[:3]))
+        with ThreadPoolExecutor(max(1, workers)) as pool:
+            while True:
+                batch = list(itertools.islice(tiles, 256))
+                if not batch:
+                    break
+                data = pool.map(_merged_tile, [chunks for _, chunks in batch])
+                out.executemany("INSERT INTO tiles VALUES (?, ?, ?, ?)",
+                                ((z, x, y, blob) for ((z, x, y), _), blob in zip(batch, data)))
         bounds = bounds or [-180.0, -85.0511, 180.0, 85.0511]
         center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2, min_zoom]
         metadata = {

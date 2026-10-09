@@ -12,10 +12,12 @@ Local export never needs credentials; a failed or cancelled stage leaves the
 previous local (and public) release current.
 """
 
+import hashlib
 import itertools
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -56,20 +58,94 @@ def _iter_records(path: str):
                 yield json.loads(line)
 
 
+# File systems of other computers: thousands of small work files are slow there.
+_NETWORK_FILE_SYSTEMS = {"nfs", "nfs4", "cifs", "smb3", "smbfs", "fuse.sshfs", "sshfs", "afs", "9p",
+                         "fuse.rclone", "davfs", "fuse.davfs2", "ncpfs", "coda"}
+
+
+def is_network_folder(path: str) -> bool:
+    """Whether ``path`` is on another computer: a Windows share (UNC path) or
+    mapped network drive, an NFS / SMB / SSHFS mount. Q2VT_LOCAL_WORK=1 / 0
+    decides instead (tests, unusual setups)."""
+    override = os.environ.get("Q2VT_LOCAL_WORK")
+    if override in ("0", "1"):
+        return override == "1"
+    path = os.path.abspath(path)
+    if os.name == "nt":
+        if path.startswith(("\\\\", "//")):
+            return True
+        drive = os.path.splitdrive(path)[0]
+        try:
+            import ctypes  # pylint: disable=import-outside-toplevel
+            return bool(drive) and ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4  # DRIVE_REMOTE
+        except (AttributeError, OSError, ValueError):
+            return False
+    try:
+        with open("/proc/mounts", encoding="utf-8") as handle:
+            mounts = [line.split()[:3] for line in handle]
+    except OSError:
+        return False
+    best, kind = "", ""
+    for entry in mounts:
+        if len(entry) < 3:
+            continue
+        mount = entry[1].replace("\\040", " ")
+        inside = path == mount or path.startswith(mount.rstrip("/") + "/")
+        if inside and len(mount) > len(best):
+            best, kind = mount, entry[2]
+    return kind in _NETWORK_FILE_SYSTEMS
+
+
+def _local_root(base: str) -> Optional[str]:
+    """The local folder of the work files of a network output folder (in the
+    system temp folder, one per output folder); None for a local one."""
+    if not is_network_folder(base):
+        return None
+    digest = hashlib.sha1(os.path.normcase(base).encode("utf-8")).hexdigest()[:12]
+    return os.path.join(tempfile.gettempdir(), "q2vt-work", digest)
+
+
 def publication_dirs(profile: PublicationProfile, base: Optional[str] = None):
+    """(publication folder, work folder). The work folder (the export's
+    datasets, tiles and logs) is on this computer when the output folder is a
+    network folder: only the finished release is written there."""
     base = base or profile.output.local_directory
     if not base:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "Choose a local output folder.")
     base = os.path.abspath(base)
-    return os.path.join(base, profile.slug), os.path.join(base, ".q2vt-work", profile.slug)
+    local = _local_root(base)
+    work = os.path.join(local, profile.slug) if local else os.path.join(base, ".q2vt-work", profile.slug)
+    return os.path.join(base, profile.slug), work
 
 
 def cache_dir(profile: PublicationProfile, base: Optional[str] = None) -> str:
-    """The export cache of a local output folder (shared by its publications)."""
+    """The export cache of a local output folder (shared by its publications;
+    on this computer for a network output folder, as the work folder)."""
     base = base or profile.output.local_directory
     if not base:
         raise PublishingError("Q2VT_PUB_PROFILE_INVALID", "Choose a local output folder.")
-    return os.path.join(os.path.abspath(base), ".q2vt-cache")
+    base = os.path.abspath(base)
+    local = _local_root(base)
+    return os.path.join(local, ".q2vt-cache") if local else os.path.join(base, ".q2vt-cache")
+
+
+_LOG_FILES = ("export_log.txt", "fidelity_report.html", "fidelity_report.json")
+
+
+def _copy_logs(export_folder: str, profile: PublicationProfile, base: Optional[str]) -> None:
+    """The export log and fidelity report of a local work folder copied next
+    to the output, where they are without a local work folder."""
+    base = os.path.abspath(base or profile.output.local_directory)
+    if not export_folder or not os.path.isdir(export_folder) or _local_root(base) is None:
+        return
+    target = os.path.join(base, ".q2vt-work", profile.slug, os.path.basename(export_folder))
+    try:
+        os.makedirs(target, exist_ok=True)
+        for name in _LOG_FILES:
+            if os.path.exists(os.path.join(export_folder, name)):
+                shutil.copyfile(os.path.join(export_folder, name), os.path.join(target, name))
+    except OSError:
+        pass  # the logs stay in the local work folder
 
 
 def _filter_fields(manifest_layers: List[dict], profile: PublicationProfile, domains) -> None:
@@ -231,6 +307,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
                               "basemap are drawn under the vector map).")
     publication_dir, work_dir = publication_dirs(profile, base_dir)
     os.makedirs(work_dir, exist_ok=True)
+    if _local_root(os.path.abspath(base_dir or profile.output.local_directory)):
+        progress.info(f"Network output folder: the work files are on this computer, in {work_dir}")
     raster_plans = _plan_rasters(project, profile, raster_configs, extent_3857)
     if staged is not None:
         staged.weigh(_stage_weights(profile, raster_plans))
@@ -256,7 +334,11 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         scale_limits={c.layer_id: (c.min_scale, c.max_scale) for c in vector_profile.layers
                       if c.included and (c.min_scale or c.max_scale)})
     progress.check()
-    if not exporter.convert_project_to_vector_tiles():
+    try:
+        converted = exporter.convert_project_to_vector_tiles()
+    finally:
+        _copy_logs(exporter.export_folder, profile, base_dir)
+    if not converted:
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "The vector tile export produced no tiles (see the export log).")
     bundle = exporter.export_bundle(profile.publication_id)

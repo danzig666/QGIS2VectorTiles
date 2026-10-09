@@ -153,6 +153,8 @@ class QGIS2VectorTiles:
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
+        self.layer_seconds: Dict[str, Dict[str, float]] = {}
+        self.export_folder = ""  # this run's folder (also when it fails)
 
     def convert_project_to_vector_tiles(self) -> Optional[QgsVectorTileLayer]:
         """Run the full conversion pipeline; return the output directory or None."""
@@ -161,6 +163,7 @@ class QGIS2VectorTiles:
             self._clear_project()
             fingerprint_before = self._project_style_fingerprint()
             temp_dir = self._create_temp_directory()
+            self.export_folder = temp_dir
             crash_log.start(temp_dir, self._log_header())
             self._log(". Starting conversion process...")
             start_time = perf_counter()
@@ -472,10 +475,11 @@ class QGIS2VectorTiles:
             cpu_percent=self.cpu_percent, diagnostics=self.diagnostics,
             progress_range=(5.0, 30.0), parallel=self.parallel,
             feature_keys=self.feature_keys, extra_tile_fields=self.extra_tile_fields,
-            cache=self.cache,
+            cache=self.cache, light_results=True,
         )
         result = exporter.export()
         self.dataset_keys = dict(exporter.dataset_keys)
+        self.layer_seconds = {"datasets": dict(exporter.layer_seconds)}
         return result
 
     def _has_features(self, layers: List[QgsVectorLayer]) -> bool:
@@ -503,16 +507,37 @@ class QGIS2VectorTiles:
         present = [layer_zooms[n] for n in (layer.name() for layer in layers) if n in layer_zooms]
         if present:
             self._expected_zooms = (min(z[0] for z in present), max(z[1] for z in present))
-        tiles_uri, min_zoom = GDALTilesGenerator(
+        generator = GDALTilesGenerator(
             layers, style, temp_dir, self.extent, self.cpu_percent, self.feedback,
             layer_zooms=layer_zooms, cache=self.cache, dataset_keys=self.dataset_keys,
             layer_groups=export_cache.source_layer_groups(rules or []),
             progress_range=(33.0, 97.0),
-        ).generate()
+        )
+        tiles_uri, min_zoom = generator.generate()
         if self.cache is not None:
             self._log(f". Export {self.cache.summary()}.")
+        self.layer_seconds["tiles"] = dict(generator.layer_seconds)
+        self._log_slowest_layers()
         self.min_zoom = min_zoom
         return tiles_uri
+
+    def _log_slowest_layers(self, count: int = 8) -> None:
+        """The layers that took longest (their datasets, their tiles): where
+        to look first when an export is slow."""
+        datasets = self.layer_seconds.get("datasets", {})
+        tiles = self.layer_seconds.get("tiles", {})
+        total = {lid: datasets.get(lid, 0.0) + tiles.get(lid, 0.0) for lid in set(datasets) | set(tiles)}
+        slowest = sorted((lid for lid in total if total[lid] >= 1.0), key=lambda lid: -total[lid])[:count]
+        if not slowest:
+            return
+        project = QgsProject.instance()
+
+        def name(lid):
+            layer = project.mapLayer(lid)
+            return layer.name() if layer is not None else lid
+        self._log(". Slowest layers: " + "; ".join(
+            f"{name(lid)} {total[lid]:.0f} s (datasets {datasets.get(lid, 0.0):.0f} s, "
+            f"tiles {tiles.get(lid, 0.0):.0f} s)" for lid in slowest))
 
     def _style_tiles(self, rules, temp_dir) -> Optional[QgsVectorTileLayer]:
         return TilesStyler(rules, temp_dir).apply_styling()

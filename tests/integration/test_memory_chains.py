@@ -114,6 +114,7 @@ def test_memory_chains_give_the_same_tiles_and_share_steps(plugin, tmp_path, mon
     memory = _export(tmp_path, "memory", monkeypatch, False, stats)
     _same(files, memory)
     assert stats["run"] > 0 and stats["shared"] > 0, stats  # the same filter / outline at other zooms
+    assert stats["direct"] > 0, stats  # 4.28: interval markers computed in Python (same tiles)
     marker_layers = {name for tile in memory.values() for name in tile if "t00" in name}
     assert len(marker_layers) > 3  # fills, roads and per-zoom marker datasets were exported
 

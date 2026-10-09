@@ -103,11 +103,14 @@ from qgis.core import (
     QgsProcessingException,
     QgsFeatureRequest,
     QgsField,
+    QgsMemoryProviderUtils,
     QgsPalLayerSettings,
     QgsProperty,
     QgsRectangle,
     QgsCoordinateTransform,
+    QgsVectorFileWriter,
     QgsVectorLayer,
+    QgsWkbTypes,
     QgsProject,
 )
 
@@ -117,6 +120,8 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
+from .datasets import ExportedDataset, gpkg_info
+from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
 from .fidelity import html_labels
@@ -386,10 +391,14 @@ class RulesExporter:
         feature_keys: Optional[Dict[str, str]] = None,
         extra_tile_fields: Optional[Dict[str, List[str]]] = None,
         cache: Optional["export_cache.ExportCache"] = None,
+        light_results: bool = False,
     ):
         self.flattened_rules = flattened_rules
         # Datasets of unchanged layers reused from earlier exports (None: off).
         self.cache = cache
+        # Results as ExportedDataset handles (path, name, feature count; the
+        # tile export needs no more) instead of QGIS layers.
+        self.light_results = light_results
         # {output dataset: cache key} of the datasets of this export (also
         # read by the tile generator for its per-layer tile cache).
         self.dataset_keys: Dict[str, str] = {}
@@ -461,7 +470,11 @@ class RulesExporter:
         self._group_tokens: List[str] = []
         self._mem_counter = 0
         self._file_counts: Dict[str, int] = {}
-        self.step_stats = {"run": 0, "shared": 0, "file": 0}
+        self.step_stats = {"run": 0, "shared": 0, "file": 0, "direct": 0}
+        # Seconds spent per QGIS layer (its base layer and its datasets), for
+        # the export log's slowest layers.
+        self.layer_seconds: Dict[str, float] = {}
+        self._timing_lock = threading.Lock()
 
         # Single lock used to serialise reads from "needs_serial_read"
         # providers, regardless of how many workers exist. Conservative but
@@ -785,6 +798,7 @@ class RulesExporter:
             self._progress(0.0, 0.15, number - 1, len(sources))
             main_thread.keep_responsive()
             out_path = join(self.utils_dir, f"materialized_{src.layer_id}.{_TEMP_LAYER_FORMAT}")
+            began = time.perf_counter()
 
             if exists(out_path):
                 # Idempotent restart support.
@@ -835,6 +849,7 @@ class RulesExporter:
                 if src.order_by:
                     self._add_order_field(out_path, src.order_by)
                 materialized[src.layer_id] = out_path
+                self._spent(src.layer_id, began)
             except _Cancelled:
                 raise
             except Exception:  # noqa: BLE001  (we want to swallow per-source)
@@ -948,6 +963,14 @@ class RulesExporter:
     def _build_one_base_layer(self, src_path: str, dst_path: str,
                               keep_vertices: bool = False, feature_anchor: bool = False) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
+        began = time.perf_counter()
+        try:
+            self._build_base_layer(src_path, dst_path, keep_vertices, feature_anchor)
+        finally:
+            self._spent(os.path.basename(dst_path)[len("map_layer_"):].rsplit(".", 1)[0], began)
+
+    def _build_base_layer(self, src_path: str, dst_path: str, keep_vertices: bool,
+                          feature_anchor: bool) -> None:
         self._check_cancel()
         crash_log.note(f"Base layer {dst_path}")
         transform_extent = self.transform_extent(src_path)
@@ -1084,10 +1107,16 @@ class RulesExporter:
                     outputs[grp.output_dataset] = None
         return outputs
 
+    def _spent(self, layer_id: str, began: float) -> None:
+        with self._timing_lock:
+            self.layer_seconds[layer_id] = self.layer_seconds.get(layer_id, 0.0) + \
+                time.perf_counter() - began
+
     def _export_one_rule_group_recorded(self, grp: _RuleGroupSnapshot, source_path: str):
         """_export_one_rule_group, keeping the diagnostics it adds (stored
         with the dataset in the export cache and replayed on reuse)."""
         before = len(self.diagnostics.items)
+        began = time.perf_counter()
         try:
             if not self._memory_chains:
                 return self._export_one_rule_group(grp, source_path)
@@ -1113,6 +1142,7 @@ class RulesExporter:
             if self.parallel:  # other groups add concurrently: only this group's
                 added = [d for d in added if d.component == grp.output_dataset]
             self._group_diagnostics[grp.output_dataset] = added
+            self._spent(grp.layer_id, began)
 
     # -------------------------------------------------------------------
     # Export cache
@@ -2177,7 +2207,9 @@ class RulesExporter:
             outputs.append(self._run_alg_safe(
                 "fieldcalculator", "native", INPUT=selected, FIELD_NAME=mat.ANGLE_FIELD,
                 FIELD_TYPE=0, FORMULA='"angle"'))
-        if "Interval" in recipe.placements:
+        if "Interval" in recipe.placements and self._memory_active:
+            outputs.append(self._interval_points_direct(lines, recipe))
+        elif "Interval" in recipe.placements:
             multipoints = self._run_alg_safe(
                 "geometrybyexpression", "native", INPUT=lines, OUTPUT_GEOMETRY=2, WITH_Z=True,
                 EXPRESSION=mat.interval_points_expression(recipe, f"EPSG:{_EPSG_CRS}"))
@@ -2266,7 +2298,9 @@ class RulesExporter:
         rule_groups: List[_RuleGroupSnapshot],
         rule_outputs: Dict[str, Optional[str]],
     ) -> Tuple[List[QgsVectorLayer], List[FlattenedRule]]:
-        """Wrap successful outputs in QgsVectorLayer; report failures."""
+        """The successful outputs as layers (ExportedDataset: path, name and
+        feature count read with SQLite; opening thousands of GeoPackages as
+        QGIS layers took a fifth of a big export); report failures."""
         successful_rules: List[FlattenedRule] = []
         for grp in rule_groups:
             out_path = rule_outputs.get(grp.output_dataset)
@@ -2277,7 +2311,14 @@ class RulesExporter:
                     if rule in self.flattened_rules:
                         self.flattened_rules.remove(rule)
                 continue
-            layer = _open_file(on_disk, grp.output_dataset, self._transform_context)
+            info = gpkg_info(on_disk) if self.light_results else None
+            if info is not None:
+                layer = ExportedDataset(
+                    on_disk, grp.output_dataset, info.count,
+                    lambda path=on_disk, name=grp.output_dataset: _open_file(
+                        path, name, self._transform_context))
+            else:
+                layer = _open_file(on_disk, grp.output_dataset, self._transform_context)
             if layer.isValid() and layer.featureCount() > 0:
                 self.processed_layers.append(layer)
                 successful_rules.extend(grp.flat_rules)
@@ -2423,6 +2464,52 @@ class RulesExporter:
         self._mem[token] = layer
         count = max(0, layer.featureCount())
         if key is not None and self._shared_features + count <= _SHARED_MAX_FEATURES:
+            self._shared[key] = token
+            self._shared_tokens.add(token)
+            self._shared_features += count
+        else:
+            self._group_tokens.append(token)
+        return token
+
+    def _interval_points_direct(self, lines: str, recipe: Recipe) -> str:
+        """The interval markers of ``lines`` computed in Python
+        (core.marker_points): the same points and angles as the expression
+        chain of the file mode, without walking every line from its start
+        for every marker. Shared like a Processing step; a file for a large
+        input, as _run_in_memory does."""
+        self._check_cancel()
+        expression = mat.interval_points_expression(recipe, f"EPSG:{_EPSG_CRS}")
+        key = json.dumps(["q2vt:interval_points", lines, expression])
+        if key in self._shared:
+            self.step_stats["shared"] += 1
+            return self._shared[key]
+        crash_log.note(f"  interval markers (direct) {dict(recipe.params)}")
+        source = self._open(lines, "lines")
+        fields, batches = marker_points.interval_points(
+            source, recipe, f"EPSG:{_EPSG_CRS}", self._worker_expression_context(), expression)
+        self.step_stats["direct"] += 1
+        if self._input_features({"INPUT": lines}) > _MEMORY_MAX_FEATURES:
+            path = self._temp_path("temp")
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "GPKG"
+            writer = QgsVectorFileWriter.create(path, fields, QgsWkbTypes.Point, source.crs(),
+                                                self._transform_context, options)
+            for batch in batches:
+                self._check_cancel()
+                writer.addFeatures(batch)
+            del writer
+            self.step_stats["file"] += 1
+            return path
+        layer = QgsMemoryProviderUtils.createMemoryLayer("points", fields, QgsWkbTypes.Point,
+                                                         source.crs())
+        for batch in batches:
+            self._check_cancel()
+            layer.dataProvider().addFeatures(batch)
+        self._mem_counter += 1
+        token = f"{_MEM_PREFIX}{self._mem_counter}"
+        self._mem[token] = layer
+        count = max(0, layer.featureCount())
+        if self._shared_features + count <= _SHARED_MAX_FEATURES:
             self._shared[key] = token
             self._shared_tokens.add(token)
             self._shared_features += count
