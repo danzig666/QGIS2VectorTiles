@@ -1113,13 +1113,19 @@ class IconPropertyExtractor:
         return "point"
 
     @staticmethod
-    def get_symbol_spacing(label_settings: QgsPalLayerSettings = None) -> float:
-        """Return ``symbol-spacing`` in pixels (MapLibre default: 250)."""
+    def get_symbol_spacing(label_settings: QgsPalLayerSettings = None) -> Union[float, List]:
+        """Return ``symbol-spacing`` in pixels (MapLibre default: 250); a
+        map-unit repeat distance grows with the map, as a zoom curve (one
+        zoom's pixels made labels repeat end to end further in)."""
         if label_settings is None:
             return 250.0
         try:
             distance = label_settings.repeatDistance
             if distance and distance > 0:
+                if normalize_unit(label_settings.repeatDistanceUnit) in ("map", "m"):
+                    return ex.clamp(PropertyExtractor.length(
+                        distance, label_settings.repeatDistanceUnit,
+                        map_unit_scale=label_settings.repeatDistanceMapUnitScale), 1.0, None)
                 return max(1.0, PropertyExtractor.static_pixels(
                     distance, label_settings.repeatDistanceUnit))
         except (AttributeError, RuntimeError):

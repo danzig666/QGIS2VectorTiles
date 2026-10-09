@@ -211,6 +211,25 @@ def test_single_line_label_placement(mc):
     assert mc.TextPropertyExtractor.get_text_justify(settings) == "left"
 
 
+def test_map_unit_label_repeat_grows_with_the_map(mc):
+    """A 200 m repeat distance is 200 m at every zoom: the label spacing
+    doubles per zoom (one zoom's pixels repeated road names end to end
+    further in); a millimetre repeat stays the same on screen."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 200
+    settings.repeatDistanceUnit = Qgis.RenderUnit.MapUnits
+    spacing = mc.IconPropertyExtractor.get_symbol_spacing(settings)
+    assert not ex.is_number(spacing)
+    at = {zoom: ex.evaluate_zoom_curve(spacing, zoom) for zoom in (14, 15)}
+    assert at[15] == pytest.approx(2 * at[14], rel=0.01)
+    assert at[14] == pytest.approx(200 / (40075016.68557849 / (512 * 2 ** 14)), rel=0.02)
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    assert mc.IconPropertyExtractor.get_symbol_spacing(settings) == pytest.approx(70 * 96 / 25.4)
+
+
 def test_label_text_replacements_match_qgis(plugin):
     """Szabályozás övezetkódok: the layer's text replacements ("Ut" -> "Köu",
     whole-word "Z" -> "Zkp", ...) were not applied to the exported labels."""

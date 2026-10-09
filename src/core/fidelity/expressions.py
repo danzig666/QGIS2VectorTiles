@@ -179,13 +179,41 @@ def clamp(expr: Expression, low: Optional[float] = None,
             value = min(value, high)
         return finite(value)
     if is_zoom_curve(expr):
-        return _map_outputs(expr, lambda out: clamp(out, low, high))
+        return _map_outputs(_with_crossings(expr, low, high), lambda out: clamp(out, low, high))
     result = expr
     if low is not None:
         result = ["max", result, finite(low)]
     if high is not None:
         result = ["min", result, finite(high)]
     return result
+
+
+def _with_crossings(curve: List, *bounds: Optional[float]) -> List:
+    """A numeric ``interpolate`` zoom curve with a stop added where it
+    crosses each bound, so that clamping the stop outputs cuts the curve
+    there instead of bending a whole segment (a map-unit curve of 0.0001 px
+    at z0 raised to 1 px came out about 1 px too large at z14)."""
+    if curve[0] != "interpolate" or curve[1][0] not in ("linear", "exponential"):
+        return curve
+    stops = list(zip(curve[3::2], curve[4::2]))
+    if any(not is_number(z) or not is_number(out) for z, out in stops):
+        return curve
+    base = float(curve[1][1]) if curve[1][0] == "exponential" else 1.0
+    body = [stops[0]]
+    for (z0, o0), (z1, o1) in zip(stops, stops[1:]):
+        cuts = []
+        for bound in bounds:
+            if bound is None or (o0 - bound) * (o1 - bound) >= 0:
+                continue
+            t = (bound - o0) / (o1 - o0)
+            if base == 1.0:
+                zoom = z0 + t * (z1 - z0)
+            else:
+                zoom = z0 + math.log(1.0 + t * (base ** (z1 - z0) - 1.0), base)
+            cuts.append((finite(zoom), bound))
+        body.extend(sorted(cuts))
+        body.append((z1, o1))
+    return list(curve[:3]) + [value for stop in body for value in stop]
 
 
 def exponential_zoom_curve(stops: Iterable, base: float = 2.0) -> Expression:
