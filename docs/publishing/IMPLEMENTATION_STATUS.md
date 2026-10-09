@@ -766,7 +766,8 @@ trademark found, and every checked domain was free; checked 4 Oct 2026).
 - **Test:** `tests/integration/test_label_font_style.py`.
 - **README demo:**
   - `docs/images/qwebmap-demo.gif` and `docs/images/qgis-vs-web.png`, made from the QGIS
-    training data (Swellendam, GPL-2.0).
+    training data (Swellendam, GPL-2.0). Replaced in 4.31.0 by the showcase video
+    (`docs/media/qwebmap-showcase.mp4`), its GIF and new screenshots in `docs/images/`.
   - Frames come from QGIS renders, the Publish window (`grab()`, after a real *Export locally*)
     and the exported viewer (Playwright).
   - The README leads with the symbology conversion.
