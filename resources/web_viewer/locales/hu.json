@@ -50,7 +50,6 @@
   "search.coverage": "{n} kereshető elem",
   "search.unavailable": "A keresés nem érhető el.",
   "feature.notFound": "A hivatkozott elem nem található a térkép ezen változatában.",
-  "feature.exportScoped": "E réteg elemhivatkozásai csak a térkép ezen változatában működnek.",
   "filter.all": "Mind",
   "filter.min": "Min.",
   "filter.max": "Max.",

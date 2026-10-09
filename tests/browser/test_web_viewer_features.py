@@ -154,6 +154,22 @@ def test_identify_one_record_per_feature_and_safe_popup(site, tmp_path):
     assert "sel=" in r["hash"] and urllib.parse.quote("00123/4", safe="") in r["hash"].replace("%2F", "%2F")
 
 
+def test_popup_has_no_version_note_on_export_scoped_layers(site, tmp_path):
+    """A layer without a feature key (links only work in this release) used
+    to add "Feature links of this layer only work in this version of the
+    map." to every popup: confusing, and it took space. No such note now."""
+    record = site["records"]["00123/4"]
+    results = _run(site["url"], [
+        {"eval": PRELUDE + "man.layers.forEach((l) => { l.identityScope = 'export'; }); return 1;"},
+        {"clickLngLat": record["p"]},
+        {"wait": 600},
+        {"eval": """const p = document.querySelector('.q2vt-popup');
+                    return { title: p && p.querySelector('h3').textContent,
+                             notes: p ? [...p.querySelectorAll('.q2vt-note')].map((n) => n.textContent) : null };"""},
+    ], tmp_path)
+    assert results[1]["title"] == "00123/4" and results[1]["notes"] == [], results[1]
+
+
 def test_search_finds_offscreen_features(site, tmp_path):
     results = _run(site["url"], [
         {"eval": "q2vtViewer.map.jumpTo({ center: [0, 0], zoom: 3 }); return 1;"},  # far away
