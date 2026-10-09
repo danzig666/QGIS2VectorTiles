@@ -464,6 +464,34 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert metadata["q2vt:label-orient"] == "free" and metadata["q2vt:label-anchor"] == "pole"
 
 
+def test_viewer_placed_labels_get_the_advance_of_each_character(export, tmp_path):
+    """Whether a label fits in its polygon depends on its length: the style
+    carries the label font's own advance per character (Qt's metrics, as
+    QGIS measures the label), not only a mean width."""
+    from qgis.PyQt.QtGui import QFontMetricsF
+    layer = zoning_layer(path=str(tmp_path / "metrics.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.placement = Qgis.LabelPlacement.Free
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    label = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+    font = label["metadata"]["q2vt:font"]
+    assert font == label["layout"]["text-font"][0]
+    entry = style["metadata"]["q2vt:font-metrics"][font]
+    advance = dict(zip(entry["chars"], entry["advances"]))
+    text = "t_felirat 1203/4 ő"
+    qt_font = settings.format().font()
+    qt_font.setPixelSize(1000)
+    expected = QFontMetricsF(qt_font).horizontalAdvance(text)
+    assert sum(advance[c] for c in text) == pytest.approx(expected, rel=0.02)
+    assert advance["i"] < advance["e"] < advance["W"]
+    assert 0.9 < entry["height"] < 1.5
+
+
 def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_path):
     """QGIS "Around point" on polygons: the label goes beside its point at
     the label distance (the viewer places it, see visible_labels.mjs), not

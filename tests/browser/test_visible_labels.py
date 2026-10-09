@@ -240,6 +240,27 @@ def test_style_expressions_for_label_sizes():
     assert _js(f"m.evaluate(['step', ['zoom'], 1, 10, 2, 15, 3], 12)") == 2
 
 
+def test_label_boxes_use_each_characters_advance():
+    """The style's font metrics (one advance per character, as QGIS measures
+    the label) instead of the mean width: narrow letters make a shorter box."""
+    style = {"metadata": {"q2vt:font-metrics": {"F": {"chars": "il W", "advances": [222, 222, 278, 944],
+                                                     "height": 1.15}}}}
+    layout = {"text-field": ["get", "t"], "text-size": 10}
+    expr = (f"(() => {{ const f = m.fontMetrics({json.dumps(style)}).get('F'); "
+            f"const box = (t, metrics, layout = {json.dumps(layout)}) => "
+            f"m.layoutBoxes(layout, 15, 1, 0.5, metrics)({{t}}); "
+            f"return [box('ill', f), box('ill', null), box('W W', f), box('il', f, "
+            f"{{...{json.dumps(layout)}, 'text-letter-spacing': 0.1, 'text-transform': 'uppercase'}})]; }})()")
+    narrow, mean, wide, spaced = _js(expr)
+    # half width = width / 2 + 2 px margin; half height = height / 2 + 2 px.
+    assert narrow == pytest.approx([3 * 2.22 / 2 + 2, 11.5 / 2 + 2])
+    assert mean == pytest.approx([3 * 5 / 2 + 2, 12 / 2 + 2])
+    assert wide[0] == pytest.approx((9.44 * 2 + 2.78) / 2 + 2)
+    # "IL": unknown upper-case letters count as the mean (0.5 em), plus one
+    # letter spacing between them.
+    assert spaced[0] == pytest.approx((5 + 5 + 1) / 2 + 2)
+
+
 def _lines(lines, view, options, before=None):
     """labelPoints of line features [(id, [[x, y], ...] in z0 tile units)]
     with kind "line" and the rotation written to "rot"; ``before`` sets a

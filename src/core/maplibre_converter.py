@@ -3634,6 +3634,11 @@ class QgisMapLibreStyleExporter:
                 # The font's mean advance per character (em): the viewer's
                 # label boxes (a generic 0.6 em made narrow fonts too wide).
                 layer_def["metadata"]["q2vt:char-width"] = char_width
+            if font and self._register_font_metrics(text_format, font):
+                # Each character's own advance: a label of narrow letters
+                # ("t_felirat") is up to a fifth shorter than the mean says,
+                # which decides whether it fits in its polygon.
+                layer_def["metadata"]["q2vt:font"] = font
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
     # MapLibre checks that a line label fits along its line with the
@@ -3978,6 +3983,39 @@ class QgisMapLibreStyleExporter:
             return None
         width = advance / 100.0 / len(cls._CHAR_SAMPLE)
         return round(width, 2) if 0.2 <= width <= 1.2 else None
+
+    # Characters whose advances the viewer gets: ASCII, Latin-1 and Latin
+    # Extended-A (Hungarian ő, ű...); any other counts as the mean width.
+    _METRIC_CHARS = "".join(map(chr, range(32, 127))) + "".join(map(chr, range(160, 384)))
+
+    def _register_font_metrics(self, text_format, font_name: str) -> bool:
+        """The label font's advance per character and its line height, in
+        em (Qt's font metrics, as QGIS measures labels), stored once per
+        font in the style's metadata["q2vt:font-metrics"][font_name]:
+        {"chars", "advances" (thousandths of an em, one per char), "height"}."""
+        fonts = self.style.setdefault("metadata", {}).setdefault("q2vt:font-metrics", {})
+        if font_name in fonts:
+            return True
+        try:
+            from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+            from qgis.core import QgsFontUtils  # pylint: disable=import-outside-toplevel
+            font = QFont(text_format.font())
+            if text_format.namedStyle():
+                QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
+            if getattr(text_format, "forcedBold", lambda: False)():
+                font.setBold(True)
+            if getattr(text_format, "forcedItalic", lambda: False)():
+                font.setItalic(True)
+            font.setPixelSize(1000)
+            metrics = QFontMetricsF(font)
+            advances = [round(metrics.horizontalAdvance(char)) for char in self._METRIC_CHARS]
+            height = metrics.height() / 1000.0
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        if not 0.5 <= height <= 3 or not any(advances):
+            return False
+        fonts[font_name] = {"chars": self._METRIC_CHARS, "advances": advances, "height": round(height, 3)}
+        return True
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:

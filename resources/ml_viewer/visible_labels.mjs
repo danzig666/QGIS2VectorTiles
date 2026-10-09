@@ -84,6 +84,7 @@ const KEEP_PX = 24;     // a kept centroid label stays this close to the centroi
 export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", options = {}) {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
   const style = map.getStyle();
+  const fonts = fontMetrics(style);
   const tileSource = style.sources[sourceId] || {};
   style.layers.forEach((layer, index) => {
     const polygons = layer.metadata && layer.metadata["q2vt:visible-polygons"];
@@ -190,7 +191,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     // Boxes of the labels MapLibre draws itself (building numbers, names...):
     // line labels keep clear of them too. Only when a line group needs them.
     let otherBoxes = null;
-    const others = () => (otherBoxes ??= renderedLabelBoxes(map, maplibregl, groups, zoom, perPx));
+    const others = () => (otherBoxes ??= renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts));
     const zoom = map.getZoom();
     for (const [polygons, group] of ranked) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
@@ -206,7 +207,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // Moving, or tiles still arriving (the visible part is not complete):
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
-        labelBox: labelBoxes(map, group, zoom, perPx),
+        labelBox: labelBoxes(map, group, zoom, perPx, fonts),
         avoid: group.kind === "line" ? placed.concat(others()) : placed.slice(),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
@@ -1213,26 +1214,64 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
-function labelBoxes(map, group, zoom, perPx) {
+function labelBoxes(map, group, zoom, perPx, fonts) {
   const layer = activeLayer(group, zoom);
-  return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6);
+  return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6,
+                     fonts?.get(layer.metadata?.["q2vt:font"]) || null);
+}
+
+// The label fonts' advance per character and line height (em) measured at
+// export: style metadata["q2vt:font-metrics"] -> Map(font -> {advance:
+// Map(char -> em), height}); a style layer's metadata["q2vt:font"] names its font.
+export function fontMetrics(style) {
+  const fonts = new Map();
+  for (const [name, entry] of Object.entries(style?.metadata?.["q2vt:font-metrics"] || {})) {
+    if (typeof entry?.chars !== "string" || !Array.isArray(entry.advances)) continue;
+    const advance = new Map();
+    [...entry.chars].forEach((char, i) => {
+      if (Number.isFinite(entry.advances[i])) advance.set(char, entry.advances[i] / 1000);
+    });
+    fonts.set(name, { advance, height: Number(entry.height) || 1.2 });
+  }
+  return fonts;
 }
 
 // Half width / height (world units) of a label's box, with LABEL_MARGIN_PX
-// around it; ``charWidth``: the font's mean advance per character (em,
-// metadata["q2vt:char-width"] measured at export).
+// around it. ``metrics`` (fontMetrics): each character's own advance, as
+// QGIS measures the label - a label of narrow letters is up to a fifth
+// shorter than the mean width says, which decides whether it fits in its
+// polygon; ``charWidth``: the font's mean advance per character (em,
+// metadata["q2vt:char-width"]), for other characters or without metrics.
 const LABEL_MARGIN_PX = 2;
-function layoutBoxes(layout, zoom, perPx, charWidth = 0.6) {
+export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null) {
   return (properties) => {
-    const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
+    let text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
     if (!text) return null;
     let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
     if (!Number.isFinite(size) || size <= 0) size = 16;
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
+    const transform = evaluate(layout["text-transform"], zoom, properties);
+    if (transform === "uppercase") text = text.toUpperCase();
+    else if (transform === "lowercase") text = text.toLowerCase();
     const lines = text.split("\n");
-    const width = Math.max(...lines.map((line) => line.length)) * charWidth * size + pad[1] + pad[3];
-    const height = lines.length * 1.2 * size + pad[0] + pad[2];
+    let width, height;
+    if (metrics) {
+      const spacing = Number(evaluate(layout["text-letter-spacing"] ?? 0, zoom, properties)) || 0;
+      const ems = (line) => {
+        const chars = [...line];
+        return chars.reduce((sum, char) => sum + (metrics.advance.get(char) ?? charWidth), 0)
+          + spacing * Math.max(0, chars.length - 1);
+      };
+      const lineHeight = Number(evaluate(layout["text-line-height"] ?? 1.2, zoom, properties)) || 1.2;
+      width = Math.max(...lines.map(ems)) * size;
+      height = (metrics.height + (lines.length - 1) * lineHeight) * size;
+    } else {
+      width = Math.max(...lines.map((line) => line.length)) * charWidth * size;
+      height = lines.length * 1.2 * size;
+    }
+    width += pad[1] + pad[3];
+    height += pad[0] + pad[2];
     return [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
   };
 }
@@ -1240,7 +1279,7 @@ function layoutBoxes(layout, zoom, perPx, charWidth = 0.6) {
 // World boxes of the point labels MapLibre draws from the other symbol
 // layers (estimated from text and size at the anchor; rotation, offsets and
 // icons ignored).
-function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx) {
+function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) {
   const ours = new Set();
   for (const group of groups.values()) {
     for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
@@ -1252,7 +1291,11 @@ function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx) {
   const sizes = new Map();
   for (const f of map.queryRenderedFeatures({ layers })) {
     if (f.geometry.type !== "Point") continue;  // labels along lines: their position is unknown here
-    if (!sizes.has(f.layer.id)) sizes.set(f.layer.id, layoutBoxes(f.layer.layout || {}, zoom, perPx));
+    if (!sizes.has(f.layer.id)) {
+      const metadata = f.layer.metadata || {};
+      sizes.set(f.layer.id, layoutBoxes(f.layer.layout || {}, zoom, perPx,
+        Number(metadata["q2vt:char-width"]) || 0.6, fonts?.get(metadata["q2vt:font"]) || null));
+    }
     const half = sizes.get(f.layer.id)(f.properties);
     if (!half) continue;
     const p = maplibregl.MercatorCoordinate.fromLngLat(f.geometry.coordinates);
