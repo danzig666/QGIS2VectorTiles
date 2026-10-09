@@ -354,6 +354,55 @@ def test_label_frames_follow_map_unit_text_between_zooms(tmp_path, monkeypatch, 
         assert abs(a - b) <= 2, (qf, bf)
 
 
+@pytest.mark.parametrize("zoom", [16.0, 16.5])
+def test_label_frames_with_a_data_defined_size_keep_a_map_unit_border(tmp_path, monkeypatch, zoom):
+    """Zone labels with a data-defined map-unit size and a frame bordered in
+    map units: the size cannot be read per zoom, so one frame image was made
+    for all zooms, its border converted at the lowest zoom (none drawn)."""
+    from qgis.core import (QgsPalLayerSettings, QgsProperty, QgsTextBackgroundSettings,
+                           QgsTextFormat, QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string&field=big:integer", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["1ő", 1])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.Size, QgsProperty.fromExpression('if("big" = 1, 17, 25)'))
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(3, 3))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(2)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png"))
+                          for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # the border is drawn, its edges within 2 px
+        assert abs(a - b) <= 2, (qf, bf, qt, bt)
+
+
 def _period(png, axis=0):
     """Dominant repeat distance (px) of a pattern's ink along ``axis``."""
     import numpy as np

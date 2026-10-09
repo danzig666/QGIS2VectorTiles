@@ -341,9 +341,12 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     metadata = {}
     if shape != "ellipse" and not size_px:
         fixed = math.ceil(radius + edge) + 1
+        # QGIS strokes the frame's outline centred on it: the text box plus
+        # the buffer reaches to the middle of the border.
+        inset = edge / 2.0
         metadata = {"stretchX": [[fixed, logical - fixed]],
                     "stretchY": [[fixed, logical - fixed]],
-                    "content": [edge, edge, logical - edge, logical - edge]}
+                    "content": [inset, inset, logical - inset, logical - inset]}
     return out, metadata
 
 

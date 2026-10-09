@@ -3834,7 +3834,11 @@ class QgisMapLibreStyleExporter:
         try:
             values = {z: ex.evaluate_zoom_curve(size, z) for z in range(0, 25)}
         except ex.ExpressionError:
-            return [layer_def]
+            if line:
+                return [layer_def]
+            # A data-defined size: the frame still needs its zoom's image and
+            # icon-size ramp (a map-unit border was lost in one image).
+            values = None
         low = layer_def.get("minzoom", 0)
         high = layer_def.get("maxzoom", 24)
         fit = self.LINE_LABEL_FIT_ZOOM
