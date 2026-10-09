@@ -90,3 +90,24 @@ def test_unset_multiline_alignment_of_an_old_project_is_left(extractor):
     assert extractor.get_text_justify(old) == "left"
     assert extractor.get_text_anchor(old) in ("center", "bottom-right", "bottom", "bottom-left", "right",
                                               "left", "top-right", "top", "top-left")
+
+
+@pytest.mark.parametrize("weight, italic", [
+    (QFont.Weight.DemiBold, False), (QFont.Weight.DemiBold, True),
+    (QFont.Weight.Medium, True), (QFont.Weight.Light, False)])
+def test_weights_between_the_four_faces_use_the_face_qgis_draws(extractor, weight, italic):
+    """A DemiBold, Medium or Light font without a style name: QGIS draws the
+    face Qt matches (Semibold, Light); the web used the nearest of Regular,
+    Italic, Bold and Bold Italic."""
+    from qgis.PyQt.QtGui import QFontInfo
+    from q2vt_plugin.src.core.glyphs_generator import GlyphGenerator  # pylint: disable=import-error
+    font = QFont("Open Sans")
+    font.setWeight(weight)
+    font.setItalic(italic)
+    info = QFontInfo(font)
+    if info.family() != "Open Sans" or info.styleName() in ("Regular", "Italic", "Bold", "Bold Italic"):
+        pytest.skip("the Open Sans Semibold / Light faces are not installed")
+    text_format = QgsTextFormat()
+    text_format.setFont(font)
+    assert extractor.get_text_font(text_format) == \
+        GlyphGenerator.resolve_fontstack("Open Sans", info.styleName())

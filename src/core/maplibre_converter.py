@@ -1166,6 +1166,18 @@ class TextPropertyExtractor:
         return None
 
     @staticmethod
+    def drawn_font(text_format: QgsTextFormat) -> QFont:
+        """The font QGIS draws (``QgsTextFormat::scaledFont``): the B/I
+        buttons (forcedBold, forcedItalic) on top of the font's own weight
+        and slant."""
+        font = QFont(text_format.font())
+        if getattr(text_format, "forcedBold", lambda: False)():
+            font.setBold(True)
+        if getattr(text_format, "forcedItalic", lambda: False)():
+            font.setItalic(True)
+        return font
+
+    @staticmethod
     def get_text_font(text_format: QgsTextFormat) -> str:
         """Return the fontstack name for ``text-font``.
 
@@ -1174,14 +1186,22 @@ class TextPropertyExtractor:
         glyph generator. An unresolvable font is reported as an error, since
         the browser would otherwise render the labels without glyphs.
         """
-        font = text_format.font()
+        font = TextPropertyExtractor.drawn_font(text_format)
         info = QFontInfo(font)
         candidates = [(font.family(), font.styleName())]
-        # Bold/italic set with the text format's B/I buttons (forcedBold,
-        # forcedItalic) or as the font's weight leave the style name empty:
-        # look for the matching face before falling back to the regular one.
-        bold = font.bold() or bool(getattr(text_format, "forcedBold", lambda: False)())
-        italic = font.italic() or bool(getattr(text_format, "forcedItalic", lambda: False)())
+        bold, italic = font.bold(), font.italic()
+        if not font.styleName() and (font.weight() != QFont.Weight.Normal or italic):
+            # A weight or slant without a style name: the face Qt matches it
+            # to, which QGIS draws ('Open Sans' DemiBold and Medium are
+            # 'Semibold', not 'Bold' or the regular face; Light is 'Light').
+            face = info.styleName().lower()
+            if info.family().lower() == font.family().lower() and \
+                    (not italic or "italic" in face or "oblique" in face):
+                stack = GlyphGenerator.resolve_fontstack(info.family(), info.styleName())
+                if stack:
+                    return stack
+        # Qt fell back (another family, no slanted face): the plain
+        # bold/italic face if one is installed, before the regular one.
         if not font.styleName() and (bold or italic):
             styles = (["Bold Italic", "Bold Oblique"] if bold and italic else
                       ["Bold"] if bold else ["Italic", "Oblique"])
@@ -4005,13 +4025,12 @@ class QgisMapLibreStyleExporter:
         try:
             from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
             from qgis.core import QgsFontUtils  # pylint: disable=import-outside-toplevel
-            font = QFont(text_format.font())
+            named = QgsTextFormat(text_format)
             if text_format.namedStyle():
+                font = QFont(text_format.font())
                 QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
-            if getattr(text_format, "forcedBold", lambda: False)():
-                font.setBold(True)
-            if getattr(text_format, "forcedItalic", lambda: False)():
-                font.setItalic(True)
+                named.setFont(font)
+            font = TextPropertyExtractor.drawn_font(named)  # the B/I buttons on top
             font.setPixelSize(1000)
             metrics = QFontMetricsF(font)
             advances = [round(metrics.horizontalAdvance(char)) for char in self._METRIC_CHARS]
