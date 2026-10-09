@@ -195,12 +195,18 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     arrow.setSubSymbol(QgsFillSymbol([shadow, top]))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     _, rules, _ = _export(layer, tmp_path)
-    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in rules]
-    shadow_rules = [r for r in rules if r.translate]
+    fills = [r for r in rules if r.get_attr("c") == 2]
+    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in fills]
+    shadow_rules = [r for r in fills if r.translate]
     assert colors[0] == "#000000" and colors[-1] == "#ff7f00"
     assert shadow_rules and all(r.translate == (-1.2, 1.4, "MM") for r in shadow_rules)
     assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
-    assert all(r.translate is None for r in rules if r not in shadow_rules)
+    assert all(r.translate is None for r in fills if r not in shadow_rules)
+    # The fills' default outline is a line on each copy, shifted with it.
+    outlines = [r for r in rules if r.get_attr("c") == 1]
+    assert {r.get_attr("m") for r in outlines} == {1, 2}
+    assert all(r.translate == ((-1.2, 1.4, "MM") if r.get_attr("m") == 1 else None)
+               for r in outlines)
 
 
 def test_screen_unit_shapeburst_distance_follows_the_zoom(plugin, tmp_path):

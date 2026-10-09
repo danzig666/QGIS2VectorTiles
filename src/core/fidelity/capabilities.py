@@ -114,11 +114,14 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("ArrowLine", "line", Strategy.MATERIALIZED,
                "The polygons QGIS fills (its straight and curved arrow construction, every "
                "head and arrow type, the vertex pairing of repeated and curved arrows), filled "
-               "with the arrow's fill symbol; screen sizes per eighth of a zoom. Opaque "
+               "with the arrow's fill symbol; a fill's outline is a line on the polygons' "
+               "edges (its width, dashes and join). Screen sizes per eighth of a zoom. Opaque "
                "multi-layer fills (a drop shadow) keep QGIS's per-arrow drawing order; the "
                "line keeps all its vertices.",
                ("Sizes are within +-4.5 % between eighths of a zoom; beyond the archive's "
                 "last zoom the arrows scale with the map.",
+                "Outlines are drawn above all the arrows' fills: where repeated arrows overlap, "
+                "QGIS covers an arrow's outline with the next arrow's fill.",
                 "QGIS rebuilds arrows from the line clipped to the view, so near the view's "
                 "edge its own arrows change while panning; the web map keeps the whole line.",
                 "Data-defined arrow sizes use their static values."),

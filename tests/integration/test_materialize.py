@@ -292,6 +292,60 @@ def test_map_unit_arrows_match_qgis(plugin, tmp_path, curved, repeated, head_typ
     assert mask_difference(reference, ours) < 0.01
 
 
+def test_arrow_outline_is_a_line_on_the_arrow_rings(plugin, tmp_path):
+    """QGIS strokes the arrow's fill outline centred on the arrow's edge with
+    its own width: exported as a line on the arrow polygons' rings, above the
+    fill (a fill-outline-color is one device pixel whatever the width)."""
+    from qgis.core import QgsArrowSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    layer = _layer("LineString", ["LINESTRING(-100 -80, -20 60, 20 -40, 100 60)"],
+                   str(tmp_path / "arrow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowWidth", 10), ("ArrowStartWidth", 10), ("HeadLength", 24),
+                        ("HeadThickness", 12)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    # One arrow per line: repeated arrows overlap at the vertices, where QGIS
+    # covers an arrow's outline with the next arrow's fill (outlines are drawn
+    # above all fills, as for polygon outlines).
+    arrow.setIsCurved(True)
+    arrow.setIsRepeated(False)
+    fill = arrow.subSymbol().symbolLayer(0)
+    fill.setColor(QColor("white"))
+    fill.setStrokeColor(QColor("black"))
+    fill.setStrokeWidth(4)
+    fill.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+
+    assert [r.get_attr("c") for r in rules] == [2, 1]  # the outline above the fill
+    assert all(r.recipe.kind == "arrow_polygons" for r in rules)
+    assert rules[0].rule.symbol().symbolLayer(0).strokeStyle() == 0  # Qt.NoPen
+    line = rules[1].rule.symbol()
+    assert line.type() == Qgis.SymbolType.Line
+    assert line.symbolLayer(0).layerType() == "SimpleLine"
+    assert line.symbolLayer(0).width() == 4
+    assert line.symbolLayer(0).widthUnit() == Qgis.RenderUnit.MapUnits
+    assert outputs[1].geometryType() == Qgis.GeometryType.Line
+    ours = ink_mask(render(outputs[::-1], EXTENT, (240, 240)))  # first layer on top
+    assert mask_difference(reference, ours) < 0.01
+
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 17
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 14
+    for index, rule in enumerate(rules):
+        exporter._convert_symbol(rule.rule.symbol(), f"s{index}", "src", "q2vt", 0, 22)
+    layer_defs = exporter.style["layers"]
+    assert [d["type"] for d in layer_defs] == ["fill", "line"]
+    assert "fill-outline-color" not in layer_defs[0]["paint"]
+
+
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])
 def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     from qgis.core import QgsPointPatternFillSymbolLayer

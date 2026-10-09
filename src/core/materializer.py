@@ -1716,20 +1716,55 @@ class SymbolMaterializer:
         rules = []
         for copy, fill_layer in enumerate(fill_layers):
             fill_layer = fill_layer.clone()
-            translate = None
+            translate = outline = None
             if fill_layer.layerType() == "SimpleFill":
                 offset = fill_layer.offset()
                 if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
                     translate = (offset.x(), offset.y(),
                                  QgsUnitTypes.encodeUnit(fill_layer.offsetUnit()))
                     fill_layer.setOffset(QPointF())
+                if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
+                    # QGIS strokes the arrow centred on its edge with the
+                    # stroke's width, dashes and join: a line on the polygons'
+                    # rings, above the fill (a fill-outline-color is one
+                    # device pixel inside the edge whatever the width).
+                    outline = QgsLineSymbol([self._fill_stroke_as_line(fill_layer)])
+                    outline.setOpacity(fill.opacity())
+                    fill_layer.setStrokeStyle(Qt.PenStyle.NoPen)
             symbol = QgsFillSymbol([fill_layer])
             symbol.setOpacity(fill.opacity())
+            brush = outline is None or fill_layer.brushStyle() != Qt.BrushStyle.NoBrush
             for band_rule, zoom in bands:
-                derived = self._with_symbol(band_rule, symbol.clone(), 2, 1 + copy, recipe(zoom, copy))
-                derived.translate = translate
-                rules.append(derived)
+                if brush:
+                    derived = self._with_symbol(band_rule, symbol.clone(), 2, 1 + copy,
+                                                recipe(zoom, copy))
+                    derived.translate = translate
+                    rules.append(derived)
+                if outline is not None:
+                    stroke = self._with_symbol(band_rule, outline.clone(), 1, 1 + copy,
+                                               recipe(zoom, copy))
+                    stroke.translate = translate  # shifted with its fill
+                    rules.append(stroke)
         return rules
+
+    @staticmethod
+    def _fill_stroke_as_line(fill_layer) -> QgsSimpleLineSymbolLayer:
+        """A simple fill's outline as a simple line (colour, width, style,
+        join and their data-defined values)."""
+        line = QgsSimpleLineSymbolLayer(fill_layer.strokeColor(), fill_layer.strokeWidth())
+        line.setWidthUnit(fill_layer.strokeWidthUnit())
+        line.setWidthMapUnitScale(fill_layer.strokeWidthMapUnitScale())
+        line.setPenStyle(fill_layer.strokeStyle())
+        line.setPenJoinStyle(fill_layer.penJoinStyle())
+        props = fill_layer.dataDefinedProperties()
+        for key in (QgsSymbolLayer.Property.PropertyStrokeColor,
+                    QgsSymbolLayer.Property.PropertyStrokeWidth,
+                    QgsSymbolLayer.Property.PropertyStrokeStyle,
+                    QgsSymbolLayer.Property.PropertyJoinStyle):
+            prop = props.property(key)
+            if prop is not None and prop.isActive():
+                line.setDataDefinedProperty(key, QgsProperty(prop))
+        return line
 
     # -- filled lines ----------------------------------------------------------
     def _filled_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:

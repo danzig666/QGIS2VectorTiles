@@ -3469,7 +3469,11 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":
-            return [2, "@geometry"]  # polygons built by _arrow_polygons
+            # Polygons built by _arrow_polygons; the arrow's outline
+            # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
+            if flat_rule.get_attr("c") == 1:
+                return [1, "boundary(@geometry)"]
+            return [2, "@geometry"]
         if recipe is not None and recipe.kind == "direction_runs":
             return [1, "@geometry"]  # runs built by _direction_runs
         if recipe is not None and recipe.kind == "simplified":
