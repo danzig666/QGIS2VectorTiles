@@ -2,11 +2,13 @@
 the askpass environment, the state-file plan (upload / keep / delete,
 repair, files replaced, a taken-over folder), the batch order (state first,
 index.html renamed last, removed files deleted, state last), the folder
-listing, failed deletions, error messages, profile validation; and end to
-end against a real local OpenSSH server (skipped without sshd / the OpenSSH
-client): publishing into a folder with a space in its name that holds
-unrelated files, under a restrictive umask, keys with a passphrase through
-askpass, host key change, cancel midway, public URL check."""
+listing and mode, OpenSSH's escaped output, failed deletions, error
+messages, profile validation; and end to end against a real local OpenSSH
+server (skipped without sshd / the OpenSSH client): publishing into a folder
+with a space in its name that holds unrelated files, under a restrictive
+umask, a team folder, accented folder names in any locale, keys with a
+passphrase through askpass, host key change, cancel midway, public URL
+check (an accented URL too)."""
 
 import hashlib
 import json
@@ -17,8 +19,8 @@ import pytest
 
 import publishing_sshd
 from publishing.errors import PublishingError
-from publishing.folder_publish import (failed_deletes, plan_sync, publish_folder, read_state, site_files,
-                                       upload_batch)
+from publishing.folder_publish import (failed_deletes, folder_url, plan_sync, publish_folder, read_state,
+                                       site_files, upload_batch)
 from publishing.models import DestinationConfig, PublicationProfile, ReleaseState
 from publishing.profile import (disclosure_fingerprint, dumps, load_profile, normalize_remote_dir,
                                 validate)
@@ -26,8 +28,9 @@ from publishing.providers import provider_for
 from publishing.providers.base import Credentials
 from publishing.providers import ssh as ssh_module
 from publishing.providers.ssh import (SECRET_ENV, STATE_NAME, SshProvider, askpass_env, ancestors,
-                                      batch_line, parse_listing, parse_target, sftp_quote, tmp_name,
-                                      write_askpass)
+                                      batch_line, folder_mode, parse_listing, parse_target, sftp_quote,
+                                      tmp_name, unescape_output, unvis, write_askpass)
+from publishing.public_verify import Http
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PUBLICATION = "6f1c2b8e-0d3a-4c55-9a77-1b2c3d4e5f60"
@@ -88,6 +91,7 @@ def test_temporary_names_folders_and_remote_dirs():
     ("www.example.com:public_html/map", {}),  # not explicit enough: stays as typed
     ("2001:db8::10", {}), ("fe80::1%eth0", {}), ("192.0.2.7", {}),  # addresses stay as typed
     ("www.example.com", {}),
+    ("https://www.example.com/map", {}), ("http://192.0.2.7:8080/map", {}),  # the web address: not a server
     ("", {}),
 ])
 def test_pasted_targets(text, expected):
@@ -120,6 +124,9 @@ def test_password_only_through_askpass(tmp_path, monkeypatch):
     # BatchMode=no before -b (sftp adds BatchMode=yes for -b; ssh keeps the first value).
     assert with_password.index("BatchMode=no") < with_password.index("-b")
     assert with_password[-2:] == ["--", "www.example.com"] and "User=deploy" in with_password
+    assert "-P" not in with_password  # port 22: a Port of ~/.ssh/config for this host applies
+    other_port = SshProvider(DestinationConfig(kind="ssh", host="alias", port=2222, remote_dir="m")).command("b")
+    assert other_port[other_port.index("-P") + 1] == "2222"
     assert "StrictHostKeyChecking=accept-new" in with_password
     assert "ControlMaster=no" in with_password and "ControlPath=none" in with_password  # no master keeps it
     keys_only = SshProvider(destination).command("batch.txt")
@@ -208,6 +215,9 @@ def test_plan_with_the_folder_listing():
     assert pending["index.html"] == {"sha256": "", "size": 4, "foreign": True}
     assert "foreign" not in pending["glyphs/Sans/0-255.pbf"]  # not there before: QWebMap's at once
     assert "foreign" not in pending["assets/app.mjs"] and all("foreign" not in e for e in plan.final["files"].values())
+    blocked = plan_sync({}, files, PUBLICATION, "r-1", {"data": ("-", 7), "index.html": ("d", 4096)})
+    assert blocked.blocked == ["data"] and "data" not in blocked.new_folders  # never chmod the user's file
+    assert blocked.replaced == [] and blocked.pending["files"]["index.html"]["foreign"] is True  # a folder there
     unknown = plan_sync(previous, files, PUBLICATION, "r-1", None)  # listing failed: trust the state
     assert unknown.repaired == [] and unknown.replaced == [] and unknown.new_folders == []
     assert unknown.folders == ["glyphs", "glyphs/Sans"]  # mkdir (errors ignored), no chmod
@@ -256,6 +266,19 @@ def test_parse_listing_of_ls_lan():
     assert parse_listing(stdout) == {"a b.txt": ("-", 10), "légende [1].json": ("-", 1), "-mdir": ("d", 4096),
                                      "data": ("l", 12), "-mdir/x 12 Oct  9 1.json": ("-", 123)}
     assert parse_listing("sftp> -ls -lan\n") is None  # the folder itself was not listed: unknown
+    assert folder_mode(stdout) == 0o755 and folder_mode("") == 0o755
+    team = "sftp> -ls -lan\ndrwxrwsr-x    ? 1000     50           4096 Oct  9 23:20 .\n"
+    assert folder_mode(team) == 0o2775  # group write and setgid: kept for the folders QWebMap creates
+    assert folder_mode(team.replace("rwxrwsr-x", "rwxr-s---")) == 0o2755
+    assert unescape_output("/srv/t\\303\\251rk\\303\\251p back\\slash") == "/srv/térkép back\\slash"
+
+
+def test_openssh_escaped_error_output():
+    """ssh and sftp write their errors with strnvis whatever the locale:
+    bytes outside ASCII as \\ooo, a backslash doubled."""
+    raw = b"remote delete /srv/t\\303\\251rk\\303\\251p back\\\\slash/old/\\305\\221.json: Failure"
+    assert unvis(raw) == "remote delete /srv/térkép back\\slash/old/ő.json: Failure"
+    assert unvis(b"a\\\\303 b") == "a\\303 b"  # an escaped backslash before digits
 
 
 def test_failed_deletions_are_named():
@@ -268,6 +291,54 @@ def test_failed_deletions_are_named():
     assert failed == {"old/only here.json": "Permission denied", "-x.json": "Failure"} and unattributed == 0
     assert failed_deletes("Couldn't delete file: Permission denied\nCouldn't delete file: No such file", "",
                           ["a"]) == ({}, 1)  # older clients do not name the file
+    accented = unvis(b"remote delete /srv/t\\303\\251rk\\303\\251p/old/\\305\\221.json: Failure\n"
+                     b"remote delete /elsewhere/x.json: Failure\nremote delete /srv/t\\303\\251rk\\303\\251p/b: "
+                     b"No such file")
+    # A failure it cannot attribute is still counted (a warning, and every removed file stays listed).
+    assert failed_deletes(accented, "/srv/térkép", ["old/ő.json", "b"]) == ({"old/ő.json": "Failure"}, 1)
+
+
+def test_public_url_of_the_folder_with_spaces_and_accents():
+    def url(base):
+        profile = PublicationProfile()
+        profile.destination.public_base_url = base
+        return folder_url(profile)
+    assert url("https://www.example.com/web maps/térkép") == \
+        "https://www.example.com/web%20maps/t%C3%A9rk%C3%A9p/"
+    assert url("https://www.example.com/a%20b/") == "https://www.example.com/a%20b/"  # already encoded
+    assert url("https://www.example.com/~me/map(1)") == "https://www.example.com/~me/map(1)/" and url("") == ""
+    for bad in ("http://127.0.0.1:9/web maps/x", "http://127.0.0.1:9/térkép/x"):  # never a crash
+        with pytest.raises(PublishingError) as error:
+            Http(timeout=2).request(bad)
+        assert error.value.code == "Q2VT_PUB_PUBLIC_VERIFY"
+
+
+class _NoServer:
+    """A provider that must not be reached (the checks before the upload)."""
+
+    remote_dir = "map"
+
+    def __init__(self, password=""):
+        self.password = password
+
+    def secrets(self):
+        return [self.password] if self.password else []
+
+    def describe(self):
+        return "deploy@www.example.com:map"
+
+    def prepare(self, *args, **kwargs):
+        raise AssertionError("no connection expected")
+
+
+def test_an_ssh_password_found_in_the_map_is_explained(tmp_path):
+    release = _Release(tmp_path / "rel", {"index.html": b"<html>Lakeside</html>",
+                                          "search.json": b'["Lakeside town hall"]'})
+    profile = PublicationProfile(title="Town map", slug="town-map", publication_id=PUBLICATION)
+    result = publish_folder(release, profile, _NoServer("Lakeside"), str(tmp_path / "work"), verify=False)
+    assert result.state == ReleaseState.FAILED and result.code == "Q2VT_PUB_SECRET_LEAK"
+    assert "The SSH password (or the key's passphrase) appears in the map's files (index.html, " \
+        "search.json)" in result.message and "use another password or a key" in result.message
 
 
 def test_upload_batch_order(tmp_path):
@@ -307,6 +378,8 @@ def test_upload_batch_order(tmp_path):
     assert '-mkdir "glyphs"' not in lines and "-chmod 755 \"glyphs\"" not in lines
     for folder in ("glyphs/Noto Sans", "data"):
         assert lines.index(f'-mkdir "{folder}"') + 1 == lines.index(f'-chmod 755 "{folder}"')
+    team = [line for line, _, _ in upload_batch(listed, "m", "/rel", "/st", files, folder_mode=0o2775)]
+    assert '-chmod 2775 "data"' in team
 
 
 def test_error_messages():
@@ -382,6 +455,7 @@ def test_profile_round_trip_validation_and_schema():
     assert validate(_ssh_profile(host="2001:db8::5")) == [] and validate(_ssh_profile(host="[2001:db8::5]")) == []
     assert validate(_ssh_profile(prefix="Not A Prefix!")) == []  # a bucket setting, hidden for SSH
     assert validate(_ssh_profile(identity_file="/home/me/keys 100%/id")) == []
+    assert validate(_ssh_profile(public_base_url="https://www.example.com/web maps/térkép")) == []
     local = PublicationProfile()
     local.destination.port = "abc"  # every kind: the window would fail on it
     assert any("destination.port" in p for p in validate(local))
@@ -395,7 +469,10 @@ def test_profile_round_trip_validation_and_schema():
                               ({"host": "www.example.com:2222"}, "destination.host"),
                               ({"identity_file": "/keys/${HOME}/id"}, "destination.identityFile"),
                               ({"remote_dir": "a\nb"}, "destination.remoteDir"),
-                              ({"public_base_url": "ftp://x"}, "destination.publicBaseUrl")]:
+                              ({"public_base_url": "ftp://x"}, "destination.publicBaseUrl"),
+                              ({"public_base_url": "https://www.example.com/map/index.html"},
+                               "without index.html"),
+                              ({"identity_file": "/home/me/.ssh/id_ed25519.pub"}, "this is the public key")]:
         problems = validate(_ssh_profile(**settings))
         assert any(message in p for p in problems), (settings, problems)
     profile = _ssh_profile()
@@ -570,6 +647,60 @@ def test_repair_failed_deletion_and_another_maps_folder(server, tmp_path):
 
 
 @needs_sshd
+@pytest.mark.parametrize("locale", ["C.UTF-8", "C"])
+def test_failed_deletion_in_an_accented_folder_is_named_and_retried(server, tmp_path, monkeypatch, locale):
+    """OpenSSH escapes its error lines (\\ooo, a doubled backslash) and, in a
+    non-UTF-8 locale, pwd's output too: the failure is still named."""
+    monkeypatch.setenv("LC_ALL", locale)
+    remote = tmp_path / "server" / "térkép back\\slash"
+    profile = PublicationProfile(title="Town map", slug="town-map", publication_id=PUBLICATION)
+    profile.destination = server.destination(str(remote))
+    provider = server.provider(profile.destination)
+    work = str(tmp_path / "work")
+    site = {"index.html": b"<html>first</html>", "old/ő.json": b"o"}
+    assert publish_folder(_Release(tmp_path / "rel-1", site), profile, provider, work,
+                          verify=False).state == ReleaseState.PUBLISHED
+    (remote / "old" / "ő.json").unlink()  # its path now holds something rm cannot delete
+    (remote / "old" / "ő.json").mkdir()
+    (remote / "old" / "ő.json" / "keep.txt").write_text("x")
+    second = publish_folder(_Release(tmp_path / "rel-2", {"index.html": b"<html>second</html>"},
+                                     "r-20260102T000000Z-0000000b"), profile, provider, work, verify=False)
+    assert second.state == ReleaseState.PUBLISHED, second.message
+    [warning] = second.warnings
+    assert "1 files of the previous map could not be deleted" in warning and "old/ő.json: Failure" in warning
+    state = json.loads((remote / STATE_NAME).read_text(encoding="utf-8"))
+    assert "old/ő.json" in state["files"]  # the next publish tries again
+
+
+@needs_sshd
+def test_team_folder_and_a_file_where_the_map_needs_a_folder(server, tmp_path):
+    """In a folder with group write and setgid (a team's) the new folders keep
+    both; a file of the user's where the map needs a folder stops the publish
+    before anything changes (never deleted, its mode untouched)."""
+    team = tmp_path / "server" / "team maps"
+    team.mkdir(parents=True)
+    team.chmod(0o2775)
+    profile = PublicationProfile(title="Town map", slug="town-map", publication_id=PUBLICATION)
+    profile.destination = server.destination(str(team))
+    work = str(tmp_path / "work")
+    assert publish_folder(_Release(tmp_path / "rel-1", SITE_1), profile, server.provider(profile.destination),
+                          work, verify=False).state == ReleaseState.PUBLISHED
+    for folder in ("data", "glyphs", "glyphs/Noto Sans Regular"):  # created under umask 027
+        assert os.stat(team / folder).st_mode & 0o7777 == 0o2775, folder
+    assert _mode(team / "index.html") == 0o644
+    remote = tmp_path / "server" / "map"
+    remote.mkdir()
+    (remote / "data").write_text("the user's file")
+    (remote / "data").chmod(0o600)
+    profile.destination = server.destination(str(remote))
+    blocked = publish_folder(_Release(tmp_path / "rel-2", SITE_1), profile, server.provider(profile.destination),
+                             work, verify=False)
+    assert blocked.state == ReleaseState.FAILED and "needs a folder where" in blocked.message
+    assert "data" in blocked.message and "Rename or remove that file" in blocked.message
+    assert os.listdir(remote) == ["data"] and _mode(remote / "data") == 0o600
+
+
+@needs_sshd
 def test_one_session_reports_progress_by_bytes(server, tmp_path):
     from publishing.progress import Progress
     from publishing.providers.ssh import local_path
@@ -692,13 +823,13 @@ def test_real_release_is_checked_through_its_public_url(server, tmp_path):
     release = build_release(fixture_bundle(str(tmp_path / "export")), profile,
                             str(tmp_path / "local" / "town-map"))
     root = tmp_path / "server" / "www"
-    remote = root / "town map"
+    remote = root / "térkép town"
     public = PreviewServer(str(root)).start()  # the web server of the SSH host
-    try:
-        profile.destination = server.destination(str(remote), public_base_url=public.url("town map"))
+    try:  # the folder's URL as a person types it: a space and accents, not percent-encoded
+        profile.destination = server.destination(str(remote), public_base_url=public.url() + "térkép town")
         result = publish_folder(release, profile, server.provider(profile.destination), str(tmp_path / "work"))
         assert result.state == ReleaseState.PUBLISHED and not result.warnings, (result.message, result.warnings)
-        assert result.stable_url == public.url("town map") + "/"
+        assert result.stable_url == public.url("térkép town") + "/"
         assert result.checks.checks and result.checks.ok  # index.html, modules, ranges of the archive
         assert set(_remote_files(remote)) == set(site_files(release.release_dir)) | {STATE_NAME}
         assert not (remote / "releases").exists() and not (remote / "current.json").exists()

@@ -371,9 +371,14 @@ def ssh_problems(dest) -> List[str]:
         errors.append("destination.identityFile: no control characters")
     elif dest.identity_file and "${" in dest.identity_file:  # ssh expands ${VAR} in key paths, no escape
         errors.append("destination.identityFile: a path without \"${\" (ssh would read a variable)")
+    elif dest.identity_file.lower().endswith(".pub"):  # it sits next to the private key in ~/.ssh
+        errors.append("destination.identityFile: this is the public key (.pub); choose the private key file, "
+                      "the same name without .pub")
     value = dest.public_base_url
     if value and urlparse(value).scheme not in ("http", "https"):
         errors.append("destination.publicBaseUrl: the folder's http:// or https:// address")
+    elif value and re.search(r"/index\.html?$", urlparse(value).path, re.I):
+        errors.append("destination.publicBaseUrl: the folder's address, without index.html at the end")
     return errors
 
 

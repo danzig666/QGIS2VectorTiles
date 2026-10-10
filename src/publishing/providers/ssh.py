@@ -115,8 +115,11 @@ def ancestors(folder: str) -> List[str]:
 def parse_target(text: str) -> Dict[str, object]:
     """Settings from a pasted ``user@host:/folder``, ``host:/folder``,
     ``host:2222`` or ``sftp://user@host:2222/folder``; ``{}`` for anything
-    else (a plain host name, an IPv6 address), which stays as typed."""
+    else (a plain host name, an IPv6 address, a web address), which stays as
+    typed."""
     value = (text or "").strip()
+    if re.match(r"^[a-z][a-z0-9+.-]*://", value, re.I) and not re.match(r"^(sftp|ssh|scp)://", value, re.I):
+        return {}  # e.g. the map's https:// address pasted into the wrong field
     if re.match(r"^(sftp|ssh|scp)://", value, re.I):
         parsed = urlparse(value)
         if not parsed.hostname:
@@ -186,7 +189,10 @@ def askpass_env(password: str, helper: str, base: Optional[dict] = None) -> dict
 
 def option_path(path: str) -> str:
     """A file path as the value of an ``ssh -o`` option: quoted, and ``%``
-    doubled (ssh expands ``%d``, ``%h``… in key and known_hosts paths)."""
+    doubled (ssh expands ``%d``, ``%h``… in key and known_hosts paths). On
+    Windows with ``/``: clients before 8.7 do not undo ``\\\\`` in quotes."""
+    if os.name == "nt":
+        path = path.replace("\\", "/")
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
@@ -202,8 +208,38 @@ def client_version(ssh: str) -> Optional[Tuple[int, int]]:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-# One entry of "ls -lan": type, size, date (month day time-or-year), name relative to the folder.
-_LS = re.compile(r"^([-dlbcps])\S{9}.*?\s(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}) (.+)$")
+def unvis(raw: bytes) -> str:
+    """ssh's and sftp's error output as text: OpenSSH writes it with
+    ``strnvis`` whatever the locale, so a byte outside printable ASCII (each
+    byte of ``é``) reads ``\\ooo`` and a backslash ``\\\\``."""
+    return re.sub(rb"\\(\\|[0-3][0-7]{2})", lambda m: b"\\" if m.group(1) == b"\\" else
+                  bytes([int(m.group(1), 8)]), raw).decode("utf-8", "replace")
+
+
+def unescape_output(text: str) -> str:
+    """A name in sftp's normal output (``pwd``, ``ls``): a client in a
+    non-UTF-8 locale prints bytes outside ASCII as ``\\ooo`` (a backslash
+    stays as it is)."""
+    if "\\" not in text:
+        return text
+    return re.sub(rb"\\([0-3][0-7]{2})", lambda m: bytes([int(m.group(1), 8)]),
+                  text.encode("utf-8")).decode("utf-8", "replace")
+
+
+# One entry of "ls -lan": type, permissions, size, date (month day time-or-year), name relative to the folder.
+_LS = re.compile(r"^([-dlbcps])(\S{9})\S*\s.*?\s(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}) (.+)$")
+
+
+def _listed(stdout: str):
+    """(type, permissions, size, name) of each entry ``ls -lan`` batch lines printed."""
+    listing = False
+    for line in stdout.splitlines():
+        if line.startswith("sftp> "):
+            listing = re.match(r"sftp> -?ls\b", line) is not None
+            continue
+        match = _LS.match(line) if listing else None
+        if match:
+            yield match.group(1), match.group(2), int(match.group(3)), unescape_output(match.group(4))
 
 
 def parse_listing(stdout: str) -> Optional[Dict[str, Tuple[str, int]]]:
@@ -211,24 +247,24 @@ def parse_listing(stdout: str) -> Optional[Dict[str, Tuple[str, int]]]:
     lines (type ``-`` file, ``d`` folder, ``l`` link…); None when the folder
     itself was not listed (its ``.`` entry is missing)."""
     found: Dict[str, Tuple[str, int]] = {}
-    listed = listing = False
-    for line in stdout.splitlines():
-        if line.startswith("sftp> "):
-            listing = re.match(r"sftp> -?ls\b", line) is not None
-            continue
-        match = _LS.match(line) if listing else None
-        if not match:
-            continue
-        kind, size, name = match.group(1), int(match.group(2)), match.group(3)
-        if "\\" in name:  # a client in a non-UTF-8 locale prints bytes as \ooo
-            name = re.sub(rb"\\([0-3][0-7]{2})", lambda m: bytes([int(m.group(1), 8)]),
-                          name.encode("utf-8")).decode("utf-8", "replace")
+    listed = False
+    for kind, _, size, name in _listed(stdout):
         if name == ".":
             listed = True
         if name.rsplit("/", 1)[-1] in (".", ".."):
             continue
         found[posixpath.normpath(name)] = (kind, size)
     return found if listed else None
+
+
+def folder_mode(stdout: str) -> int:
+    """The mode for the folders QWebMap creates: 755 (the web server reads
+    them whatever the server's umask), plus group write and setgid when the
+    folder itself has them (a team folder: other deployers can write too)."""
+    for _, permissions, _, name in _listed(stdout):
+        if name == ".":
+            return 0o755 | (0o020 if permissions[4] == "w" else 0) | (0o2000 if permissions[5] in "sS" else 0)
+    return 0o755
 
 
 def ssh_said(stderr: str) -> List[str]:
@@ -248,6 +284,7 @@ class RemoteFolder:
     cwd: str = ""                       # the folder's absolute path on the server
     listing: Optional[Dict[str, Tuple[str, int]]] = None  # see parse_listing (None: unknown)
     created: List[str] = field(default_factory=list)      # folders this session created
+    folder_mode: int = 0o755                               # for the folders QWebMap creates (folder_mode())
 
 
 class SshProvider:
@@ -324,8 +361,10 @@ class SshProvider:
             args += ["-o", f"IdentityFile={option_path(self.identity_file)}", "-o", "IdentitiesOnly=yes"]
         if self.user:
             args += ["-o", f"User={self.user}"]
+        if self.port != 22:  # 22: a Port set for this host in ~/.ssh/config applies
+            args += ["-P", str(self.port)]
         host = f"[{self.host}]" if ":" in self.host else self.host
-        return args + ["-P", str(self.port), "-b", batch, "--", host]
+        return args + ["-b", batch, "--", host]
 
     def run(self, lines: List[str], progress=None, weights: Optional[List[int]] = None,
             labels: Optional[Dict[int, str]] = None) -> Tuple[str, str]:
@@ -392,7 +431,7 @@ class SshProvider:
             for reader in readers:
                 reader.join(timeout=5)
             stdout = b"".join(out).decode("utf-8", "replace")
-            stderr = self._redact(b"".join(errors).decode("utf-8", "replace").replace("\r\n", "\n"))
+            stderr = self._redact(unvis(b"".join(errors)).replace("\r\n", "\n"))
             if code != 0:
                 failed = lines[started - 1] if 0 < started <= len(lines) else ""
                 raise self.classify(stderr, code, failed)
@@ -467,9 +506,10 @@ class SshProvider:
                                  r"host|network is unreachable|connection reset|kex_exchange_identification")
         if unreachable.search(lower):
             why = next((line for line in said if unreachable.search(line.lower())), last)
+            port = f"port {self.port}" if self.port != 22 else "its SSH port (22, or the Port of your ssh config)"
             return error("connection", "Q2VT_PUB_DESTINATION", f"The server {self.host} cannot be reached on "
-                         f"port {self.port} ({why}). Check the address, the port and the network or "
-                         "firewall.", retryable=True)
+                         f"{port} ({why}). Check the address, the port and the network or firewall.",
+                         retryable=True)
         if "subsystem request failed" in lower:
             return error("connection", "Q2VT_PUB_DESTINATION",
                          f"The server {self.host} accepted the login but offers no SFTP, which uploading "
@@ -492,9 +532,10 @@ class SshProvider:
         """One session: create the folder if needed, and write a test file
         twice to see whether a rename replaces a file (OpenSSH's
         posix-rename: atomic). With ``folders`` (a publish) it also reads the
-        state file and lists the folder and those subfolders. Folders it
-        created get mode 755 (readable by the web server whatever the
-        server's umask), in a second short session."""
+        state file and lists those subfolders (the folder itself is always
+        listed: its mode). Folders it created get ``folder_mode()`` (readable
+        by the web server whatever the server's umask), in a second short
+        session."""
         probe = os.path.join(local_dir, "probe.txt")
         with open(probe, "w", encoding="utf-8") as handle:
             handle.write("QWebMap write test; deleted at once.\n")
@@ -504,12 +545,11 @@ class SshProvider:
                 os.remove(path)
         parents = ancestors(self.remote_dir)
         lines = [batch_line("mkdir", folder, ignore_errors=True) for folder in parents]
-        lines += [batch_line("cd", self.remote_dir), "pwd", batch_line("lcd", local_path(local_dir))]
+        lines += [batch_line("cd", self.remote_dir), "pwd", batch_line("lcd", local_path(local_dir)), "-ls -lan"]
         if folders is not None:
             # The temporary state too: without posix-rename it is all there is between rm and rename.
             lines += [batch_line("get", STATE_NAME, "remote-state.json", ignore_errors=True),
-                      batch_line("get", STATE_NAME + TMP_SUFFIX, "remote-state-tmp.json", ignore_errors=True),
-                      "-ls -lan"]
+                      batch_line("get", STATE_NAME + TMP_SUFFIX, "remote-state-tmp.json", ignore_errors=True)]
             lines += [batch_line("ls -lan", folder, ignore_errors=True) for folder in sorted(folders)]
         first, second = PROBE_NAMES
         lines += [batch_line("put", "probe.txt", first), batch_line("put", "probe.txt", second),
@@ -520,7 +560,8 @@ class SshProvider:
         found.atomic = not re.search(r"(remote rename|couldn't rename)[^\n]*" + re.escape(first), stderr,
                                      re.IGNORECASE)
         cwd = re.search(r"^Remote working directory: (.+)$", stdout, re.MULTILINE)
-        found.cwd = cwd.group(1).rstrip("\r") if cwd else ""
+        found.cwd = unescape_output(cwd.group(1).rstrip("\r")) if cwd else ""
+        found.folder_mode = folder_mode(stdout)
         if folders is not None:
             found.listing = parse_listing(stdout)
         for path in states:
@@ -532,7 +573,8 @@ class SshProvider:
                                   re.MULTILINE | re.IGNORECASE))
         found.created = parents[existing:]
         if found.created:
-            self.run([batch_line("chmod 755", folder, ignore_errors=True) for folder in found.created])
+            self.run([batch_line(f"chmod {found.folder_mode:o}", folder, ignore_errors=True)
+                      for folder in found.created])
         return found
 
     def inspect(self) -> List[Tuple[str, bool, str]]:
@@ -549,7 +591,8 @@ class SshProvider:
             shutil.rmtree(local, ignore_errors=True)
         who = f" as {self.user}" if self.user else ""
         folder = self.remote_dir + (f" ({found.cwd})" if found.cwd and found.cwd != self.remote_dir else "")
-        return [("connection", True, f"Logged in to {self.host} (port {self.port}){who}."),
+        port = f" (port {self.port})" if self.port != 22 else ""
+        return [("connection", True, f"Logged in to {self.host}{port}{who}."),
                 ("folder", True, f"{folder}: " + ("created" if self.remote_dir in found.created else "exists")
                  + "; a test file was written and deleted."),
                 ("replace", found.atomic, "Files are replaced atomically (rename over the old file)."

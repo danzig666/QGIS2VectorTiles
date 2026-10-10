@@ -30,6 +30,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from .bundle import sha256_path
 from .deployments import PublishResult
@@ -55,7 +56,8 @@ class SyncPlan:
     replaced: List[str] = field(default_factory=list)   # existing files QWebMap had not uploaded
     repaired: List[str] = field(default_factory=list)   # listed, but missing or another size there
     folders: List[str] = field(default_factory=list)    # to create (mkdir)
-    new_folders: List[str] = field(default_factory=list)  # known to be missing: created with mode 755
+    new_folders: List[str] = field(default_factory=list)  # known to be missing: chmod after mkdir
+    blocked: List[str] = field(default_factory=list)    # folders the site needs, files there
     pending: dict = field(default_factory=dict)         # state written before anything changes
     final: dict = field(default_factory=dict)           # state written at the end
 
@@ -132,17 +134,19 @@ def plan_sync(previous: Dict[str, dict], files: Dict[str, dict], publication_id:
             plan.repaired.append(path)
         (plan.unchanged if same else plan.upload).append(path)
     plan.upload.sort(key=lambda p: (p == ENTRY, p))
-    # Not QWebMap's (yet): new paths that may exist there (all of them when the listing is unknown).
+    # Not QWebMap's (yet): new paths that may exist there (all of them when the listing is unknown);
+    # a folder of the user's there too (the rename fails on it, but it must never count as QWebMap's).
     foreign = {p for p in plan.upload if (p not in previous or previous[p].get("foreign"))
-               and (remote is None or (p in remote and remote[p][0] != "d"))}
+               and (remote is None or p in remote)}
     if remote is not None:
-        plan.replaced = sorted(foreign)
+        plan.replaced = sorted(p for p in foreign if remote[p][0] != "d")
     plan.delete = sorted(p for p in previous if p not in files and not previous[p].get("foreign"))
     plan.leftovers = sorted(p for p, entry in previous.items() if not entry.get("sha256") and p not in files)
     needed = _parents(plan.upload)
     existing = {p for p, (kind, _) in (remote or {}).items() if kind in ("d", "l")}
     plan.folders = sorted(needed - existing, key=lambda f: (f.count("/"), f))
-    plan.new_folders = list(plan.folders) if remote is not None else []
+    plan.new_folders = [f for f in plan.folders if remote is not None and f not in remote]
+    plan.blocked = sorted(f for f in _parents(files) if f in (remote or {}) and f not in existing)
     pending = {p: previous[p] for p in previous if p not in plan.upload}
     pending.update({p: {"sha256": "", "size": files[p]["size"]} for p in plan.upload})
     for path in foreign:  # QWebMap's only once renamed: never deleted on the strength of this entry
@@ -171,11 +175,12 @@ def state_lines(state_name: str, atomic: bool) -> List[str]:
 
 
 def upload_batch(plan: SyncPlan, remote_dir: str, release_dir: str, state_dir: str,
-                 files: Dict[str, dict], atomic: bool = True) -> List[Tuple[str, int, str]]:
+                 files: Dict[str, dict], atomic: bool = True,
+                 folder_mode: int = 0o755) -> List[Tuple[str, int, str]]:
     """The upload session's sftp batch as ``(line, bytes it uploads, file)``.
     ``state_dir`` holds ``pending.json`` and ``final.json``. Without an
     atomic rename (no posix-rename on the server) a target is deleted just
-    before the rename."""
+    before the rename. New folders get ``folder_mode`` (ssh.folder_mode)."""
     lines: List[Tuple[str, int, str]] = []
 
     def add(line: str, size: int = 0, path: str = ""):
@@ -194,7 +199,7 @@ def upload_batch(plan: SyncPlan, remote_dir: str, release_dir: str, state_dir: s
     for folder in plan.folders:
         add(batch_line("mkdir", folder, ignore_errors=True))
         if folder in plan.new_folders:  # readable by the web server whatever the server's umask
-            add(batch_line("chmod 755", folder, ignore_errors=True))
+            add(batch_line(f"chmod {folder_mode:o}", folder, ignore_errors=True))
     for path in sorted(plan.upload, key=lambda p: (files[p]["size"], p)):  # small files first
         add(batch_line("put", path, tmp_name(path)), files[path]["size"], path)
         add(batch_line("chmod 644", tmp_name(path), ignore_errors=True))  # readable by the web server
@@ -216,17 +221,20 @@ def upload_batch(plan: SyncPlan, remote_dir: str, release_dir: str, state_dir: s
 def failed_deletes(stderr: str, cwd: str, paths: Iterable[str]) -> Tuple[Dict[str, str], int]:
     """``({path: reason}, unattributed)`` of the ``rm`` lines that failed;
     a file that is already gone counts as deleted. sftp names the absolute
-    path (``remote delete <cwd>/<path>: <reason>``); older clients do not
-    (``unattributed`` counts those failures)."""
+    path (``remote delete <cwd>/<path>: <reason>``; ``stderr`` with
+    OpenSSH's escapes undone, ssh.unvis); older clients do not, and a line
+    that matches no path also counts (``unattributed``)."""
     failed = {}
-    lines = stderr.splitlines()
+    lines = [line for line in stderr.splitlines() if "no such file" not in line.lower()]
+    matched = set()
     for path in paths:
         prefix = f"remote delete {cwd.rstrip('/')}/{batch_arg(path)}: " if cwd else None
-        for line in lines:
-            if prefix and line.startswith(prefix) and "no such file" not in line.lower():
+        for index, line in enumerate(lines):
+            if prefix and line.startswith(prefix):
                 failed[path] = line[len(prefix):].strip()
-    unattributed = sum(1 for line in lines if line.lower().startswith("couldn't delete file:")
-                       and "no such file" not in line.lower())
+                matched.add(index)
+    unattributed = sum(1 for index, line in enumerate(lines) if index not in matched and line.lower().startswith(
+        ("couldn't delete file:", "remote delete ")))
     return failed, unattributed
 
 
@@ -240,9 +248,14 @@ def _write_json(path: str, payload: dict) -> None:
 
 
 def folder_url(profile: PublicationProfile) -> str:
-    """The public address of the folder (``…/``), or "" when not given."""
+    """The public address of the folder (``…/``), or "" when not given; its
+    path percent-encoded (``/web maps/térkép`` → ``/web%20maps/t%C3%A9rk%C3%A9p``)."""
     base = (profile.destination.public_base_url or "").strip().rstrip("/")
-    return base + "/" if base else ""
+    if not base:
+        return ""
+    parts = urlsplit(base)
+    path = quote(parts.path, safe="/%:@!$&'()*+,;=~")
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")) + "/"
 
 
 def publish_folder(release, profile: PublicationProfile, provider, work_dir: str, progress=None,
@@ -257,6 +270,13 @@ def publish_folder(release, profile: PublicationProfile, provider, work_dir: str
     try:
         files = site_files(release.release_dir)
         problems = scan_bundle(release.release_dir, sorted(files), list(secrets) + provider.secrets())
+        leaked = [p.rsplit(": ", 1)[0] for p in problems
+                  if p.endswith((": credential value", ": secret/canary bytes"))]
+        if leaked and provider.secrets():  # the SSH password: a word a person chose
+            raise PublishingError(
+                "Q2VT_PUB_SECRET_LEAK", f"The SSH password (or the key's passphrase) appears in the map's files "
+                f"({_names(leaked)}): publishing them would make it public. If the map contains it by chance "
+                "(a place name, say), use another password or a key; otherwise remove it from the data.")
         if problems:
             raise PublishingError("Q2VT_PUB_SECRET_LEAK", "; ".join(problems[:5]))
         os.makedirs(work_dir, exist_ok=True)
@@ -269,6 +289,9 @@ def publish_folder(release, profile: PublicationProfile, provider, work_dir: str
                           f"it over: the {len(previous)} files QWebMap uploaded for it are replaced or "
                           "deleted.")
         plan = plan_sync(previous, files, profile.publication_id, release.release_id, remote.listing)
+        if plan.blocked:  # never deleted (not QWebMap's): the user decides
+            raise PublishingError("Q2VT_PUB_DESTINATION", "The map needs a folder where the server's folder has a "
+                                  f"file: {_names(plan.blocked)}. Rename or remove that file, then publish again.")
         size = sum(files[p]["size"] for p in plan.upload)
         progress.info(f"{len(plan.upload)} new or changed files ({size / 1e6:.1f} MB) to upload, "
                       f"{len(plan.unchanged)} unchanged, {len(plan.delete)} to delete")
@@ -283,14 +306,18 @@ def publish_folder(release, profile: PublicationProfile, provider, work_dir: str
                                    "each changed file was briefly missing while it was replaced.")
         _write_json(os.path.join(local, "pending.json"), plan.pending)
         _write_json(os.path.join(local, "final.json"), plan.final)
-        batch = upload_batch(plan, provider.remote_dir, release.release_dir, local, files, remote.atomic)
+        batch = upload_batch(plan, provider.remote_dir, release.release_dir, local, files, remote.atomic,
+                             remote.folder_mode)
         labels = {index: f"Uploading {path} ({size / 1e6:.1f} MB)…"
                   for index, (_, size, path) in enumerate(batch) if size > LARGE}
         _, stderr = provider.run([line for line, _, _ in batch], progress.sub(0.03, 0.9),
                                  [size for _, size, _ in batch], labels)
         failed, unattributed = failed_deletes(stderr, remote.cwd, plan.delete)
-        if failed:  # still QWebMap's: listed again, so the next publish tries again
-            kept = dict(plan.final["files"], **{p: previous[p] for p in failed})
+        # Still QWebMap's: listed again, so the next publish tries again (all of them when sftp did
+        # not say which; a file already gone is then simply dropped).
+        retry = plan.delete if unattributed else sorted(failed)
+        if retry:
+            kept = dict(plan.final["files"], **{p: previous[p] for p in retry})
             _write_json(os.path.join(local, "final.json"),
                         _state(kept, profile.publication_id, release.release_id, True))
             listed = f"They stay listed in {STATE_NAME} and the next publish tries again."
@@ -299,12 +326,11 @@ def publish_folder(release, profile: PublicationProfile, provider, work_dir: str
                              + state_lines("final.json", remote.atomic))
             except PublishingError as error:
                 listed = f"They could not be listed for the next publish either ({error.message})."
-            result.warnings.append(
-                f"{len(failed)} files of the previous map could not be deleted from the server ("
-                + "; ".join(f"{p}: {why}" for p, why in sorted(failed.items())[:5]) + "). " + listed)
-        if unattributed:
-            result.warnings.append(f"{unattributed} files of the previous map could not be deleted from the "
-                                   "server (this OpenSSH client does not say which).")
+            named = "; ".join(f"{p}: {why}" for p, why in sorted(failed.items())[:5])
+            if unattributed:
+                named = "; ".join(filter(None, [named, f"{unattributed} more: sftp did not say which"]))
+            result.warnings.append(f"{len(failed) + unattributed} files of the previous map could not be "
+                                   f"deleted from the server ({named}). {listed}")
         result.uploaded_bytes = size
         result.state = ReleaseState.PUBLISHED
         result.message = f"Published into {provider.describe()}."

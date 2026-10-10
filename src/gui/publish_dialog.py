@@ -2554,10 +2554,13 @@ class PublishDialog(QDialog):
         except OSError as error:
             QMessageBox.warning(self, tr("Export settings"), str(error))
             return False
-        self.status.setText(
-            tr("Settings exported to {} with the object storage keys (secret included: keep the file "
-               "private).").format(path) if keys else
-            tr("Settings exported to {} (no object storage keys).").format(path))
+        if keys:
+            self.status.setText(tr("Settings exported to {} with the object storage keys (secret included: "
+                                   "keep the file private).").format(path))
+        elif profile.destination.kind == "ssh":
+            self.status.setText(tr("Settings exported to {} (without the SSH password).").format(path))
+        else:
+            self.status.setText(tr("Settings exported to {} (no object storage keys).").format(path))
         return True
 
     def _exportable_credentials(self, profile):
@@ -2766,14 +2769,16 @@ class PublishDialog(QDialog):
         if profile.destination.kind == "local":
             QMessageBox.information(self, tr("Destination"), tr("Local only: nothing to test."))
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # an SSH login can take seconds
         try:
-            checks = self._provider().inspect()
+            provider = self._provider()  # may ask for the QGIS master password: normal cursor
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # an SSH login can take seconds
+            try:
+                checks = provider.inspect()
+            finally:
+                QApplication.restoreOverrideCursor()
         except PublishingError as error:
             self._fail(error.code, error.message, error.detail)
             return
-        finally:
-            QApplication.restoreOverrideCursor()
         text = "\n".join(f"{'✔' if ok else '✖'} {name}: {detail}" for name, ok, detail in checks)
         QMessageBox.information(self, tr("Connection"), text)
 
@@ -2852,7 +2857,9 @@ class PublishDialog(QDialog):
                "again, index.html is replaced last, and only files QWebMap uploaded before are ever "
                "deleted (listed in .q2vt-files.json in the folder). Uses the OpenSSH client (sftp) of this "
                "computer. A new server's host key is accepted on first use; a changed one stops the "
-               "upload.") if ssh else
+               "upload.") + (tr(" On Windows a password or passphrase needs OpenSSH 8.4 or newer (Windows "
+                                 "10's built-in client is older: use a key or ssh-agent there).")
+                              if os.name == "nt" else "") if ssh else
             tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
                "address: connect a custom domain to the bucket (r2.dev is rate "
                "limited and meant for development). Nothing is created, made "
@@ -2890,11 +2897,12 @@ class PublishDialog(QDialog):
         authentication database (Basic configuration), then selected."""
         from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
         user, password = self.d_ssh_user.text().strip(), self.d_ssh_password.text()
-        if not user or not password:
-            QMessageBox.information(self, tr("Password"), tr("Enter the user and the password (or the key's "
-                                                             "passphrase) first."))
+        if not password:  # the user is optional, as in the User field (ssh's default user)
+            QMessageBox.information(self, tr("Password"), tr("Enter the password (or the key's passphrase) "
+                                                             "first."))
             return
-        name = f"SSH {user}@{self.d_ssh_host.text().strip() or 'server'} (QWebMap)"
+        server = self.d_ssh_host.text().strip() or "server"
+        name = f"SSH {user}@{server} (QWebMap)" if user else f"SSH {server} (QWebMap)"
         try:
             config_id = store_auth_config(name, user, password)
         except PublishingError as error:
@@ -3088,8 +3096,9 @@ class PublishDialog(QDialog):
         if profile.destination.kind == "local" or not profile.destination.public_base_url:
             return ""
         from ..publishing.public_verify import join_url  # pylint: disable=import-outside-toplevel
-        if profile.destination.kind == "ssh":  # the folder itself
-            return join_url(profile.destination.public_base_url, "index.html")
+        if profile.destination.kind == "ssh":  # the folder itself (its address percent-encoded)
+            from ..publishing.folder_publish import folder_url  # pylint: disable=import-outside-toplevel
+            return folder_url(profile) + "index.html"
         return join_url(profile.destination.public_base_url, publication_prefix(profile), "index.html")
 
     def publish(self):

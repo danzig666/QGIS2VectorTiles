@@ -2,9 +2,11 @@
 for that kind, a pasted user@server:/folder (and a typed host:port or IPv6
 address that must stay as typed), settings saved in the project without the
 password, the review target, saved logins and public URLs never shared with
-R2 / S3, closing with unfinished settings, and Test connection plus a
-publication through the window into a local OpenSSH server's folder
-(skipped without sshd / the OpenSSH client)."""
+R2 / S3, closing with unfinished settings, saving a password without a user
+name, the exported settings' wording, Test connection's messages without the
+busy cursor, and Test connection plus a publication through the window into
+a local OpenSSH server's folder (skipped without sshd / the OpenSSH
+client)."""
 
 import json
 import os
@@ -13,7 +15,7 @@ import time
 import pytest
 from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QVariant
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QApplication, QMessageBox
 
 import publishing_sshd
 from q2vt_fixtures import reset_project, to_geopackage
@@ -89,6 +91,9 @@ def test_ssh_fields_paste_saved_settings_and_review(project, messages):
         ("ssh", "www.example.com", 2222, "deploy", "/srv/web maps/town")
     dialog.refresh_review()
     assert "Target: https://www.example.com/town/index.html" in dialog.review.toPlainText()
+    dialog.d_public.setText("https://www.example.com/web maps/térkép")  # links percent-encoded
+    dialog.refresh_review()
+    assert "Target: https://www.example.com/web%20maps/t%C3%A9rk%C3%A9p/index.html" in dialog.review.toPlainText()
     dialog.d_public.clear()
     dialog.refresh_review()
     assert "Target: deploy@www.example.com (port 2222), folder /srv/web maps/town" in dialog.review.toPlainText()
@@ -166,7 +171,8 @@ def test_typed_server_address_stays_as_typed(project, messages):
     dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))
     dialog.d_ssh_dir.setText("/var/www/html/map")
     for typed, host, port in (("www.example.com:2222", "www.example.com", 2222),  # host:port → the port
-                              ("2001:db8::10", "2001:db8::10", 2222), ("192.0.2.7", "192.0.2.7", 2222)):
+                              ("2001:db8::10", "2001:db8::10", 2222), ("192.0.2.7", "192.0.2.7", 2222),
+                              ("https://www.example.com/map", "https://www.example.com/map", 2222)):
         dialog.d_ssh_host.setText(typed)
         dialog.d_ssh_host.editingFinished.emit()
         assert (dialog.d_ssh_host.text(), dialog.d_ssh_port.value()) == (host, port), typed
@@ -174,6 +180,42 @@ def test_typed_server_address_stays_as_typed(project, messages):
     dialog.d_ssh_host.setText("deploy@www.example.com:/srv/other")  # an explicit folder: taken, and said
     dialog.d_ssh_host.editingFinished.emit()
     assert dialog.d_ssh_dir.text() == "/srv/other" and "folder /srv/other" in dialog.status.text()
+    dialog.close()
+
+
+def test_password_without_user_export_wording_and_test_connection_cursor(project, messages, monkeypatch,
+                                                                          tmp_path):
+    dialog = _dialog()
+    dialog.d_kind.setCurrentIndex(dialog.d_kind.findData("ssh"))
+    dialog.d_ssh_host.setText("www.example.com")
+    dialog.d_ssh_dir.setText("/srv/map")
+    import q2vt_plugin.src.publishing.credentials as credentials  # pylint: disable=import-error
+    stored = []
+    monkeypatch.setattr(credentials, "store_auth_config",
+                        lambda name, user, password: stored.append((name, user, password)) or "sshpw2")
+    dialog.d_ssh_password.setText("pw for the default user")
+    dialog.save_ssh_password()  # no user name: ssh's default user, as in the User field
+    assert stored == [("SSH www.example.com (QWebMap)", "", "pw for the default user")], messages
+    assert dialog.d_ssh_password.text() == ""
+    assert dialog.export_settings_file(str(tmp_path / "town.q2vt.json"))
+    assert dialog.status.text().endswith("(without the SSH password).")
+    from q2vt_plugin.src.publishing.errors import PublishingError  # pylint: disable=import-error
+    cursors = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: cursors.append(("box", QApplication.overrideCursor())))
+
+    class Refused:
+        def inspect(self):
+            cursors.append(("login", QApplication.overrideCursor()))
+            raise PublishingError("Q2VT_PUB_CREDENTIALS", "The server refused the login.")
+
+    def provider():  # QGIS may ask for its master password here: never under the busy cursor
+        cursors.append(("provider", QApplication.overrideCursor()))
+        return Refused()
+    monkeypatch.setattr(dialog, "_provider", provider)
+    dialog.test_connection()
+    assert [name for name, _ in cursors] == ["provider", "login", "box"]
+    assert cursors[0][1] is None and cursors[1][1] is not None and cursors[2][1] is None, cursors
+    assert QApplication.overrideCursor() is None
     dialog.close()
 
 

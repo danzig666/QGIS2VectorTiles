@@ -1830,11 +1830,38 @@ Review fixes (same feature, before release):
   MapLibre's own requests cannot carry it, so HOSTING.md recommends `Cache-Control: no-cache`
   for the folder instead.
 
+Second review fixes:
+
+- OpenSSH writes its error lines with `strnvis` whatever the locale (`é` as `\303\251`, a
+  backslash doubled), and in a non-UTF-8 locale `pwd` and `ls` print `\ooo` too: both are
+  decoded (`unvis`, `unescape_output`), so a deletion that fails in an accented folder is named,
+  stays listed and is retried, and messages show the real names. A failure sftp does not name
+  is still warned about, and then every removed file stays listed for the next publish.
+- The public URL's path is percent-encoded (a space or accented letters in the folder's
+  address); a malformed URL in the check is a warning, never a failed publish (`Http.request`
+  turns `ValueError` / `HTTPException` into `PublishingError`). A URL ending in `index.html`
+  and a `.pub` key file are refused with what to choose instead.
+- `-P` only for a port other than 22, so a `Port` of `~/.ssh/config` for the host applies.
+- A file of the user's where the site needs a folder stops the publish before anything
+  changes (no `chmod` on it); a folder of the user's at a file's path is marked `foreign` while
+  pending, so it is never listed as QWebMap's. New folders get group write and setgid when the
+  remote folder has them (a team folder), else 755.
+- Window: Test connection opens the saved login (master password) and shows its message
+  without the busy cursor; a web address pasted into *SSH server* stays as typed; *Save in
+  QGIS…* needs no user name; exporting SSH settings says the password is left out; an SSH
+  password found in the map's files gets its own explanation; on Windows the note mentions the
+  OpenSSH 8.4 need for passwords. Key paths go to ssh with `/` on Windows (clients before 8.7
+  do not undo `\\` in quotes; not tested on Windows).
+- Not changed: `SendEnv -QWEBMAP_SSH_SECRET` would not help (command-line options are read
+  before `~/.ssh/config`, so a `SendEnv` there is added afterwards; servers accept only the
+  names their `AcceptEnv` lists); the password stays in the environment of sftp / ssh as the
+  askpass design needs.
+
 | Run | Result |
 |---|---|
-| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1 with SFTP umask 027) | 37 passed |
-| `pytest tests/integration/test_publish_dialog_ssh.py` | 5 passed |
-| `test_publishing_profile`, `test_publishing_providers`, `test_publishing_validation`, `test_publish_dialog`, `test_publish_dialog_r2`, `test_publish_dialog_extent`, `test_publish_dialog_layers` | 30, 16, 28, 7, 3, 8, 6 passed |
+| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1 with SFTP umask 027) | 45 passed |
+| `pytest tests/integration/test_publish_dialog_ssh.py` | 6 passed |
+| `test_publishing_profile`, `test_publishing_providers`, `test_publishing_validation`, `test_publishing_preview_server`, `test_publish_dialog`, `test_publish_dialog_r2`, `test_publish_dialog_extent`, `test_publish_dialog_layers` | 30, 16, 28, 17, 7, 3, 8, 6 passed |
 
 Not verified here: Windows (askpass `.cmd` helper and its UTF-8 output, the `ssh -V` check,
 `System32\OpenSSH` lookup, the listing of non-ASCII names by Win32-OpenSSH) and non-OpenSSH
