@@ -310,6 +310,28 @@ def test_line_label_needs_room_along_the_visible_stretch():
     assert set(points) == {2}
 
 
+def test_short_line_label_with_degraded_placement():
+    """A dimension line shorter than its label: QGIS makes no candidate
+    along it; with "Allow degraded placement" the label is drawn level,
+    its bottom-left corner on the line's interior point (GEOS: the end
+    nearest the centroid, the first on a tie, for two points); without
+    it, no label. Not for a line cut by the screen edge."""
+    lines = [(1, [[1000, 1000], [1200, 1100]]),                        # 224 long, the label 410
+             (2, [[1000, 2000], [1100, 2000], [1300, 2000]]),          # an inner vertex
+             (3, [[1900, 3000], [2200, 3000]])]                        # cut by the screen edge
+    box = [0.05, 0.01]
+    assert _lines(lines, [0, 0, 0.5, 1], {"box": box}) == {}
+    points = _lines(lines, [0, 0, 0.5, 1], {"box": box, "degraded": True, "textAnchor": "bottom"})
+    assert set(points) == {1, 2}
+    x, y, rotation = points[1]
+    # Bottom-centre anchor: half a label right of the corner, on its baseline.
+    assert (x, y) == pytest.approx((1000 / 4096 + box[0], 1000 / 4096)) and rotation == 0
+    x, y, _ = points[2]
+    assert (x, y) == pytest.approx((1100 / 4096 + box[0], 2000 / 4096))
+    x, y, _ = _lines(lines[:1], [0, 0, 0.5, 1], {"box": box, "degraded": True, "textAnchor": "center"})[1]
+    assert (x, y) == pytest.approx((1000 / 4096 + box[0], 1000 / 4096 - box[1]))
+
+
 def test_line_label_slides_along_to_fit_and_keeps_clear():
     # A label already placed on the middle: the line label slides along the
     # line until its box is clear; nowhere clear: no label; a kept spot near

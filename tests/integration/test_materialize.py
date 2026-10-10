@@ -236,6 +236,41 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature"}
 
 
+def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plugin, tmp_path):
+    """A map exported from zoom 0 (the Publish window's default): the
+    per-zoom textures are capped at 12; they were counted from zoom 0, so
+    zoom 11's texture - a sub-pixel tint of nothing - was drawn at every
+    zoom above it and the fill vanished. The highest zooms get them."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 3)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(5)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reset_project(layer)
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    exporter._convert_symbol(layer.renderer().symbol(), "s", "src", "q2vt", 0, 24)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    zooms = pattern[3::2]
+    assert len(pattern[2::2]) == exporter.MAX_PATTERN_ZOOMS
+    assert zooms[-1] == 18 and zooms == list(range(8, 19))  # up to maxzoom + 2, the first below
+    cell = exporter.pattern_images[pattern[-1]].img_1x  # zoom 18: squares 3 m in 5 m cells
+    assert cell.getbbox() is not None and cell.size[0] >= 8
+
+
 def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     """Patterns sized only in screen units are flagged for the patched
     MapLibre (drawn at the real zoom) and rendered at their true size, not
