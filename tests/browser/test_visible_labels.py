@@ -332,6 +332,21 @@ def test_short_line_label_with_degraded_placement():
     assert (x, y) == pytest.approx((1000 / 4096 + box[0], 1000 / 4096 - box[1]))
 
 
+def test_line_labels_overlap_only_if_qgis_allows_it():
+    """Two dimension lines side by side whose level labels collide: with
+    "Allow overlap if required" both are drawn, the second overlapping;
+    with "Never overlap" the second is left out (as QGIS)."""
+    lines = [(1, [[1000, 1000], [1100, 1050]]), (2, [[1010, 1020], [1110, 1070]])]
+    options = {"box": [0.05, 0.01], "degraded": True, "textAnchor": "bottom"}
+    assert set(_lines(lines, [0, 0, 0.5, 1], options)) == {1}
+    assert set(_lines(lines, [0, 0, 0.5, 1], {**options, "overlap": True})) == {1, 2}
+    # Along a line too: a long line under an already placed label.
+    long_line = [(3, [[0, 2048], [4096, 2048]])]
+    blocked = {"box": [0.05, 0.01], "avoid": [[0, 0.4, 1, 0.6]]}
+    assert _lines(long_line, [0, 0, 0.9, 1], blocked) == {}
+    assert set(_lines(long_line, [0, 0, 0.9, 1], {**blocked, "overlap": True})) == {3}
+
+
 def test_line_label_slides_along_to_fit_and_keeps_clear():
     # A label already placed on the middle: the line label slides along the
     # line until its box is clear; nowhere clear: no label; a kept spot near

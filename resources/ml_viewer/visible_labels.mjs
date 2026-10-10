@@ -96,6 +96,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
     if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
     if (layer.metadata["q2vt:line-degraded"]) groups.get(polygons).degraded = true;
+    if (layer.metadata["q2vt:overlap"] === "if-required") groups.get(polygons).overlap = true;
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
     // "Around point" (QGIS): beside the point at the label distance, not on it.
     if (layer.metadata["q2vt:label-around"]) groups.get(polygons).around = layer.metadata["q2vt:label-around"];
@@ -223,7 +224,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // "always", they would otherwise sit on top of them.
         avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
-        degraded: Boolean(group.degraded),
+        degraded: Boolean(group.degraded), overlap: Boolean(group.overlap),
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -1094,7 +1095,7 @@ function project(chain, [x, y]) {
 // and is clear of the labels placed before, else the nearest such spot
 // along that stretch or a shorter one; a wholly visible line too short for
 // the label gets it level at the line (QGIS degraded placement) if allowed;
-// no clear spot: no label (as QGIS).
+// no clear spot: overlapping if QGIS allows it ("if required"), else no label.
 function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
   const withRotation = (rotation) => (options.rotationField
     ? { ...properties, [options.rotationField]: rotation } : properties);
@@ -1130,6 +1131,9 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
       if (kept && kept.fit >= 0 && kept.clear) return result(kept);
     }
   }
+  // "Allow overlap if required" (QGIS): no clear spot, the best one that
+  // fits on the screen overlaps; "Never overlap": no label.
+  let overlapping = null;
   for (const { chain, length } of visible) {
     if (length < 2 * lo) break;  // the label does not fit along it (nor along shorter ones)
     // From the middle outwards, in steps of a quarter label (at most 40).
@@ -1139,6 +1143,7 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
       if (s < lo - 1e-12 || s > length - lo + 1e-12) continue;
       const c = candidate(chain, s);
       if (c && c.fit >= 0 && c.clear) return result(c);
+      if (c && c.fit >= 0 && !overlapping) overlapping = c;
     }
   }
   // A wholly visible line too short for its label (a dimension line):
@@ -1157,11 +1162,11 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     const [cx, cy] = [px + hx, py - hy];
     const box = [cx - hx, cy - hy, cx + hx, cy + hy];
     const fit = Math.min(box[0] - view[0], view[2] - box[2], box[1] - view[1], view[3] - box[3]);
-    if (fit >= 0 && !avoid.some((other) => intersect(other, box))) {
-      return { point: [ax, ay], properties: withRotation(0), box };
-    }
+    const spot = { point: [ax, ay], properties: withRotation(0), box };
+    if (fit >= 0 && !avoid.some((other) => intersect(other, box))) return spot;
+    if (fit >= 0 && options.overlap && !overlapping) return spot;
   }
-  return null;
+  return options.overlap && overlapping ? result(overlapping) : null;
 }
 
 // GEOS InteriorPointLine: the interior vertex nearest the line's centroid,
