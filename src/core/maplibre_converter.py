@@ -2549,7 +2549,12 @@ class QgisMapLibreStyleExporter:
         """
         low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
-        top = min(top, float(self.maxzoom) + 3.0, low + self.MAX_PATTERN_ZOOMS)
+        top = min(top, float(self.maxzoom) + 3.0)
+        # Over the cap, the highest zooms get their own texture (zoomed out,
+        # a map-unit pattern is a tint of sub-pixel cells): the lowest of
+        # them also serves the zooms below. Counted from the lowest zoom
+        # instead, a map exported from zoom 0 had no texture above zoom 11.
+        low = max(low, math.ceil(top) - self.MAX_PATTERN_ZOOMS)
         saved = self.context.reference_zoom
         self._pattern_zoom_bands = True
         stops = []
@@ -3864,6 +3869,10 @@ class QgisMapLibreStyleExporter:
                 # "line": a line label put at the middle of the line's visible part.
                 "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
+            if layer_def["metadata"]["q2vt:visible-kind"] == "line" and self._allow_degraded(label_settings):
+                # A line too short for its label: QGIS draws it level at a
+                # point of the line ("Allow degraded placement").
+                layer_def["metadata"]["q2vt:line-degraded"] = True
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around
@@ -4317,6 +4326,13 @@ class QgisMapLibreStyleExporter:
         if ex.is_number(text):
             return text + own
         return ["+", text, own]
+
+    @staticmethod
+    def _allow_degraded(label_settings) -> bool:
+        try:
+            return bool(label_settings.placementSettings().allowDegradedPlacement())
+        except AttributeError:  # QGIS < 3.26
+            return False
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:

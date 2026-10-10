@@ -42,7 +42,18 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.31.0**. Newest first:
+This README describes QWebMap **4.32.0**. Newest first:
+
+**4.32.0** — finding layers in big projects, editable zoomed-out limits
+- **Finding layers:** the *Map* tab's layer list has a filter box (part of the name, upper or
+  lower case, accents not needed) and *Only published layers*; the *Interaction* tab lists the
+  layers by name with a find box; every layer drop-down takes typing.
+- **Zoomed-out load…:** every layer's feature and label zooms can be changed by hand; the lowest
+  zoom removes a limit.
+- **Fixes:** map-unit pattern fills of maps exported from zoom 0 showed only their outline
+  (hatched areas); dimension labels longer than their line are drawn level at the line, as QGIS
+  does with *Allow degraded placement*; line labels overlap where QGIS allows it; label frames
+  turn with their label (corners included); Free polygon labels sit in the middle of long strips.
 
 **4.31.0** — SSH / SFTP publishing, click-to-draw extent, fidelity fixes
 - **No more missing rules or blank maps:** a rule whose expression fails on one feature (for
@@ -281,6 +292,13 @@ into a public, self-contained web map. The window title shows the plugin version
 - **Layers** (*Map* tab): per layer or group, *Publish*, *At start* (visible when the map opens)
   and *Switchable* (untick it to make a layer or group always shown); per layer, *Legend*.
   Publishing never changes the project's own layer visibility.
+- **Finding layers** in projects with hundreds of them: the *Map* tab's filter box shows, as you
+  type, the layers whose name contains the text (upper or lower case, accents not needed) with
+  their groups, and *Only published layers* hides the rest. The *Interaction* tab lists the
+  published layers by name, with a find box when there are more than 10. Every layer drop-down
+  (extent, house numbers, parcel report, terrain, WMS) takes typing and lists the matching layers.
+- **Zoomed-out load…** (*Map* tab): every layer's zooms, of its features and of its labels, can be
+  changed by hand, not only the suggested ones; the lowest zoom removes a limit.
 - **Many layers at once:** select rows (Ctrl/Shift + click), then *Selected layers* or right-click.
   *Publish the visible layers* publishes exactly what the QGIS Layers panel shows.
 - **Map themes** (*Map* tab): *Publish its layers* adds a theme's layers (several themes add up),
