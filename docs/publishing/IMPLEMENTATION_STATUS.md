@@ -1653,14 +1653,23 @@ feature-lookup shards.
   from where it went down, otherwise it is a click whose release slipped; a later click less
   than `startDragDistance()` (10 px by default) from the first corner is ignored, and so is
   a rectangle under 4 px wide or high, measured in map units (`mapUnitsPerPixel()`), so a
-  rotated canvas is measured right too. The tool goes only once the left and right buttons
-  are up: right click or Esc while a button is down cancels at the release, and Esc then
-  does not take back a rectangle drawn already. (While a button is down the canvas gives keys
-  only to its `keyPressed` signal, not to the map tool's `keyPressEvent`, so the tool listens
-  to both.) A short-lived event filter on the canvas viewport eats the rest of a double click
-  on the last corner, so the tool that comes back (Pan: zoom in, re-centre) gets none of the
-  gesture. Done, the tool deletes itself (`deleteLater`; the canvas is its parent and would
-  keep one per drawing, which a right click in a transient map tool could bring back). The
+  rotated canvas is measured right too. A double click before the first corner is no corner:
+  its first click was not on the map (*Draw…* double-clicked: the window steps aside at the
+  first click and Qt sends the second one to the map as a double click). The tool goes only
+  once the left and right buttons are up: right click or Esc while a button is down cancels
+  at the release, and a left release while the right button is down is no corner (that right
+  click is a cancel on its way). (While a mouse button is down, or while the map is panned
+  with Space or the middle button, the canvas gives keys only to its `keyPressed` signal, not
+  to the map tool's `keyPressEvent`; otherwise to both. The tool listens to both, so Esc
+  also cancels during such a pan.) A short-lived event filter on the canvas viewport eats the
+  rest of a double click on the last corner, so the tool that comes back (Pan: zoom in,
+  re-centre) gets none of the gesture; if that double click's release is lost (a broken
+  mouse grab), the filter ends at the next press of that button or the first mouse event
+  with it up. Done, the tool deletes itself (`deleteLater`, also when `done` raises; the
+  canvas is its parent and would keep one per drawing, which a right click in a transient
+  map tool could bring back). An area EPSG:3857 cannot take (beyond the poles on a map in
+  degrees: `transformBoundingBox` raises `QgsCsException`) leaves the extent unchanged, with
+  a note in the window's status line; the same for *Map canvas*. The
   window gives the map canvas the keyboard focus (Esc before the first click), takes its
   message bar notice back when the drawing ends, clears the status bar only if it still shows
   the tool's hint (the hint is shown again on mouse moves after a QGIS status tip replaced

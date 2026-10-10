@@ -22,9 +22,9 @@ import traceback
 from urllib.parse import urlparse
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
-                       QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
-                       QgsTask, QgsVectorLayer, QgsWkbTypes)
+                       QgsCsException, QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer,
+                       QgsMessageLog, QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle,
+                       QgsSettings, QgsTask, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
@@ -740,7 +740,13 @@ class PublishDialog(QDialog):
             self.e_logo.setText(path)
 
     def _use_canvas_extent(self, rect=None):
-        self.profile.view.extent = self._canvas_extent_3857(rect)
+        try:
+            extent = self._canvas_extent_3857(rect)
+        except QgsCsException:  # e.g. beyond the poles on a map in degrees
+            self.status.setText(tr("This area is outside what a web map can show (web maps end "
+                                   "short of the poles); the extent is unchanged."))
+            return
+        self.profile.view.extent = extent
         self.profile.view.extent_layer = ""
         self.e_extent_layer.blockSignals(True)
         self.e_extent_layer.setLayer(None)
@@ -780,12 +786,12 @@ class PublishDialog(QDialog):
             return
         self._extent_tool = None
         self._drop_draw_notice()
-        if rect is not None:
-            self._use_canvas_extent(rect)
         # Not at once: the window comes back over the map, and the rest of a
         # double click on the last corner would click whatever is under the
         # mouse there (Draw… again, Publish, a checkbox).
         self._back_timer.start(QApplication.doubleClickInterval())
+        if rect is not None:
+            self._use_canvas_extent(rect)
 
     def _back_from_drawing(self):
         self.show()

@@ -46,7 +46,8 @@ class _DoubleClickRest(QObject):
     (the double click and its release), so the map tool that came back does
     not get it: the Pan tool would zoom in and re-centre the map, a selection
     tool could select. Gone after the double-click interval or at the next
-    press."""
+    press; if the double click's release is lost (a broken mouse grab), at
+    the next press of that button or the first mouse event with it up."""
 
     def __init__(self, viewport):
         super().__init__(viewport)
@@ -64,6 +65,10 @@ class _DoubleClickRest(QObject):
         if self._button is not None:  # inside the double click: all of it
             if kind == QEvent.Type.MouseButtonRelease and event.button() == self._button:
                 self._stop()
+                return True
+            if event.button() == self._button or not event.buttons() & self._button:
+                self._stop()  # its release was lost: this is the next tool's
+                return False
             return True
         if kind == QEvent.Type.MouseButtonDblClick:
             self._button = event.button()
@@ -111,15 +116,16 @@ class ExtentTool(QgsMapTool):
 
     def activate(self):
         super().activate()
-        # While a mouse button is down the canvas gives keys only to this
-        # signal, not to keyPressEvent.
-        self.canvas().keyPressed.connect(self._key_while_pressed)
+        # While a mouse button is down, or the map is being panned (Space or
+        # the middle button held), the canvas gives keys only to this signal,
+        # not to keyPressEvent.
+        self.canvas().keyPressed.connect(self._key_while_busy)
         self._tell(tr("Click the first corner of the published area. Right click or Esc cancels."))
 
     def cancel(self) -> None:
-        """Stop drawing (``done`` gets None, or the rectangle if it was drawn
-        already) and bring the previous tool back: once the mouse buttons
-        are up, or their release would go to that tool."""
+        """Stop drawing (``done`` gets None) and bring the previous tool
+        back: once the mouse buttons are up, or their release would go to
+        that tool."""
         if self._done is None:
             return
         if not self._ending:
@@ -146,7 +152,14 @@ class ExtentTool(QgsMapTool):
         self._tell(tr("Click the opposite corner. Right click or Esc cancels."))
 
     def canvasDoubleClickEvent(self, event):  # noqa: N802 - Qt override
-        # Qt sends a quick second press near the first as a double click.
+        # Qt sends a quick second press near the first as a double click,
+        # also when the first press was not on the map: Draw… double-clicked,
+        # the window steps aside at the first click and the second lands on
+        # the map. With no first corner yet the first press was not this
+        # tool's (it would have set the corner), and this is no corner.
+        if event.button() == Qt.MouseButton.LeftButton and self._start is None:
+            self._held = event.buttons() & TOOL_BUTTONS
+            return
         self.canvasPressEvent(event)
 
     def canvasMoveEvent(self, event):  # noqa: N802 - Qt override
@@ -168,7 +181,9 @@ class ExtentTool(QgsMapTool):
         elif event.button() == Qt.MouseButton.LeftButton and self._pressed:
             self._pressed = False
             opening, self._opening = self._opening, False
-            if not self._ending:
+            # Not with the right button down: that is a cancel on its way
+            # (its release cancels).
+            if not self._ending and not self._held & Qt.MouseButton.RightButton:
                 self._corner(event, opening)
         # Not while a button is still down: its release would go to the
         # previous tool (the Pan tool would re-centre the map).
@@ -203,13 +218,15 @@ class ExtentTool(QgsMapTool):
             return
         super().keyPressEvent(event)
 
-    def _key_while_pressed(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape and self._held:
-            self.cancel()  # the tool goes at the release
+    def _key_while_busy(self, event) -> None:
+        # (Also after keyPressEvent when the canvas gives the key to both:
+        # cancelled already then.)
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancel()  # with a button down, the tool goes at its release
 
     def deactivate(self):
         try:
-            self.canvas().keyPressed.disconnect(self._key_while_pressed)
+            self.canvas().keyPressed.disconnect(self._key_while_busy)
         except TypeError:  # not connected
             pass
         self._clear()
@@ -217,8 +234,10 @@ class ExtentTool(QgsMapTool):
         if self._done is not None:  # another map tool was chosen
             self._tell("")
             done, self._done = self._done, None
-            done(None)
-            self._forget()
+            try:
+                done(None)
+            finally:
+                self._forget()
 
     def _tell(self, text: str) -> None:
         self._told = text
@@ -255,8 +274,10 @@ class ExtentTool(QgsMapTool):
             canvas.unsetMapTool(self)
         if after_click:
             _DoubleClickRest(canvas.viewport())
-        done(self._result)
-        self._forget()
+        try:
+            done(self._result)
+        finally:  # (also when ``done`` fails)
+            self._forget()
 
     def _forget(self) -> None:
         """Done: the tool keeps nothing alive (the window behind ``hint``,

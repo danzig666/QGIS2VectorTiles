@@ -302,6 +302,7 @@ def _window_on_a_canvas():
     def mouse(kind, x, y, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton):
         tool = canvas.mapTool()
         handler = {QEvent.Type.MouseButtonPress: tool.canvasPressEvent, QEvent.Type.MouseMove: tool.canvasMoveEvent,
+                   QEvent.Type.MouseButtonDblClick: tool.canvasDoubleClickEvent,
                    QEvent.Type.MouseButtonRelease: tool.canvasReleaseEvent}[kind]
         handler(QgsMapMouseEvent(canvas, kind, QPoint(x, y), button, buttons, Qt.KeyboardModifier.NoModifier))
 
@@ -435,3 +436,45 @@ def test_closing_the_window_gives_the_drawing_up(project, messages):
     dialog.close()
     w.wait()
     assert not dialog.isVisible() and canvas.mapTool() is w.pan
+
+
+def test_double_clicking_draw_gives_no_corner(project, messages):
+    """Draw… double-clicked: the second click lands on the map (the window
+    stepped aside at the first) as a double click. It is no corner: the
+    user's next two clicks give the extent."""
+    from qgis.PyQt.QtCore import QEvent  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error
+    w = _window_on_a_canvas()
+    w.dialog.show()
+    w.dialog._draw_extent()  # pylint: disable=protected-access
+    left = Qt.MouseButton.LeftButton
+    w.mouse(QEvent.Type.MouseButtonDblClick, 300, 220, left, left)
+    w.mouse(QEvent.Type.MouseButtonRelease, 300, 220, left)
+    assert isinstance(w.canvas.mapTool(), ExtentTool) and "first corner" in w.status[-1]
+    w.click(60, 40)
+    assert isinstance(w.canvas.mapTool(), ExtentTool) and "opposite corner" in w.status[-1]
+    w.click(250, 200)
+    w.back()
+    assert [round(v) for v in w.dialog.profile.view.extent] == w.map_extent(60, 40, 250, 200)
+    w.dialog.close()
+
+
+def test_an_area_a_web_map_cannot_show(project, messages):
+    """Drawn beyond the poles on a map in degrees: EPSG:3857 cannot take it.
+    The window says so and comes back, the extent stays as it was."""
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle  # pylint: disable=import-outside-toplevel
+    w = _window_on_a_canvas()
+    w.canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+    w.canvas.setExtent(QgsRectangle(0, 95, 40, 125))
+    w.dialog.show()
+    before = list(w.dialog.profile.view.extent)
+    w.dialog._draw_extent()  # pylint: disable=protected-access
+    w.click(100, 50)
+    w.click(200, 110)
+    assert w.canvas.mapTool() is w.pan
+    w.back()
+    assert w.dialog.profile.view.extent == before and "web map" in w.dialog.status.text()
+    w.dialog.status.setText("")
+    w.dialog._use_canvas_extent()  # Map canvas  # pylint: disable=protected-access
+    assert w.dialog.profile.view.extent == before and "web map" in w.dialog.status.text()
+    w.dialog.close()
