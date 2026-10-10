@@ -1763,7 +1763,7 @@ and in the browser view by view.
 | Tests (full suite, each file in its own process) | 707 passed, 5 skipped |
 
 
-## Unreleased: SSH / SFTP server destination (one folder, not versioned)
+## 4.31.0: SSH / SFTP server destination (one folder, not versioned)
 
 Owner request: an ssh/scp uploader for publishing that does not upload versioned, but always
 into the folder the user gives.

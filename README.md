@@ -44,7 +44,7 @@ a full web viewer · no map server, database or Docker
 
 This README describes QWebMap **4.31.0**. Newest first:
 
-**4.31.0** — fidelity fixes
+**4.31.0** — SSH / SFTP publishing, click-to-draw extent, fidelity fixes
 - **No more missing rules or blank maps:** a rule whose expression fails on one feature (for
   example text in a numeric field) is no longer dropped from the web map; like QGIS, the export
   skips just that value. Nested rule-based renderers (rules inside rules) no longer share ids,
@@ -69,8 +69,18 @@ This README describes QWebMap **4.31.0**. Newest first:
   polygons keep theirs.
 - **Markers:** hairline (zero-width) marker outlines are one pixel wide, and point-pattern dots
   are crisp.
+- **More fixes:** Qt brush fills (hatched, cross) draw their pattern instead of a solid colour;
+  polygon labels *Using perimeter*, upper-case labels from lower-case data, labels with an empty
+  (NULL) data-defined size and labels with a non-numeric data-defined position show again; label
+  frames wrap the text like QGIS; line labels allowed above or below the line go beside it;
+  overlapping point markers stack in feature order.
 
 Also in 4.31.0, in the Publish window:
+- **SSH / SFTP server** (*Destination* tab): the map goes straight into the folder you give on
+  your own web server, not versioned. Only new and changed files are uploaded; files with the
+  same names are replaced, your other files stay. Log in with a key, ssh-agent or a **password**
+  (typed for the session or saved encrypted in QGIS); *Test connection* checks the login and the
+  folder.
 - **Drawing the extent:** *Map* tab → *Extent* → **Draw…** works like QGIS's own rectangle tools:
   click one corner, then the opposite one (no need to hold the mouse button; dragging still
   works, and a click that slips a few pixels is still a click). Corners snap when QGIS snapping
