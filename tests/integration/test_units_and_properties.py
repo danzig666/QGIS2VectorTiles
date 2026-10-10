@@ -48,12 +48,24 @@ def test_quoted_static_number_becomes_a_number(mc):
         1, QgsProperty.fromExpression("'3'")) == 3.0
 
 
+@pytest.mark.parametrize("static,kind,expected", [
+    (9.0, "number", ["to-number", ["coalesce", ["get", "q2vt_property_x_0"], 9.0], 9.0]),
+    ("A", "string", ["to-string", ["coalesce", ["get", "q2vt_property_x_0"], "A"]]),
+    (True, "boolean", ["to-boolean", ["coalesce", ["get", "q2vt_property_x_0"], True]])])
+def test_a_null_generated_value_uses_the_static_one(mc, static, kind, expected):
+    """A feature whose data-defined value is NULL (no tile attribute) gets
+    the symbol's own value, as QGIS's valueAsDouble/String/Bool give it;
+    MapLibre's to-number/to-string/to-boolean turn null into 0, '' and false."""
+    assert mc.PropertyExtractor.get_value_or_expression(
+        static, QgsProperty.fromExpression('"q2vt_property_x_0"'), kind) == expected
+
+
 def test_field_and_expression_reference_are_equivalent(mc):
     field = "q2vt_property_size_5_00"
     by_field = mc.PropertyExtractor.get_value_or_expression(2, QgsProperty.fromField(field))
     by_expr = mc.PropertyExtractor.get_value_or_expression(
         2, QgsProperty.fromExpression(f'"{field}"'))
-    assert by_field == by_expr == ["to-number", ["get", field], 2]
+    assert by_field == by_expr == ["to-number", ["coalesce", ["get", field], 2], 2]
 
 
 def test_color_field_reference_is_typed(mc):
@@ -209,6 +221,46 @@ def test_single_line_label_placement(mc):
     assert mc.TextPropertyExtractor.get_text_anchor(settings) == "bottom"
     settings.multilineAlign = Qgis.LabelMultiLineAlignment.Left
     assert mc.TextPropertyExtractor.get_text_justify(settings) == "left"
+
+
+def test_around_point_candidates_in_qgis_order(mc):
+    """QGIS tries top-right first, then right, top, bottom-right... (pal
+    createCandidatesAroundPoint costs); cartographic placement follows the
+    layer's own position order. MapLibre names the side at the point."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.AroundPoint
+    assert mc.TextPropertyExtractor.get_text_variable_anchor(settings) == [
+        "bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right", "top-right"]
+    settings.placement = Qgis.LabelPlacement.OrderedPositionsAroundPoint
+    # The order as a project stores it (no Python API for it in every version).
+    from qgis.core import QgsReadWriteContext
+    from qgis.PyQt.QtXml import QDomDocument
+    doc = QDomDocument()
+    element = settings.writeXml(doc, QgsReadWriteContext())
+    element.firstChildElement("placement").setAttribute("predefinedPositionOrder", "T,BL")
+    ordered = QgsPalLayerSettings()
+    ordered.readXml(element, QgsReadWriteContext())
+    assert mc.TextPropertyExtractor.get_text_variable_anchor(ordered) == ["bottom", "top-right"]
+
+
+def test_map_unit_label_repeat_grows_with_the_map(mc):
+    """A 200 m repeat distance is 200 m at every zoom: the label spacing
+    doubles per zoom (one zoom's pixels repeated road names end to end
+    further in); a millimetre repeat stays the same on screen."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 200
+    settings.repeatDistanceUnit = Qgis.RenderUnit.MapUnits
+    spacing = mc.IconPropertyExtractor.get_symbol_spacing(settings)
+    assert not ex.is_number(spacing)
+    at = {zoom: ex.evaluate_zoom_curve(spacing, zoom) for zoom in (14, 15)}
+    assert at[15] == pytest.approx(2 * at[14], rel=0.01)
+    assert at[14] == pytest.approx(200 / (40075016.68557849 / (512 * 2 ** 14)), rel=0.02)
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    assert mc.IconPropertyExtractor.get_symbol_spacing(settings) == pytest.approx(70 * 96 / 25.4)
 
 
 def test_label_text_replacements_match_qgis(plugin):

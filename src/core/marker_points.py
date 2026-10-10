@@ -263,13 +263,21 @@ def interval_points(source, recipe, export_crs: str, expression_context, express
         if positions is None or backward is None:
             return positions
         moved = []
+        step = interval * 1e-3
         for x, y, angle in positions:  # one by one, as transform() moves a multipoint
-            point = QgsPoint(x, y, angle)
+            # The angle turns with the grid: a step along the marker's
+            # direction, carried over too (an azimuth in EOV is off by the
+            # meridian convergence in Web Mercator).
+            ahead = QgsPoint(x + step * math.sin(math.radians(angle)),
+                             y + step * math.cos(math.radians(angle)))
+            point = QgsPoint(x, y)
             try:
                 point.transform(backward)
+                ahead.transform(backward)
             except QgsCsException:
                 return None
-            moved.append((point.x(), point.y(), angle))
+            azimuth = math.degrees(math.atan2(ahead.x() - point.x(), ahead.y() - point.y())) % 360.0
+            moved.append((point.x(), point.y(), angle + (azimuth - angle + 540.0) % 360.0 - 180.0))
         return moved
 
     def batches():

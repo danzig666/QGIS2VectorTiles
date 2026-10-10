@@ -47,6 +47,70 @@ def test_inactive_categories_are_dropped(flattener):
     assert "'Lk'" not in filters and "'K1'" in filters
 
 
+def test_a_category_field_with_an_operator_in_its_name_is_the_field(flattener):
+    """A categorized renderer on a field named "a/b": QGIS reads the field
+    (a field of that name exists), not the division of fields a and b."""
+    from qgis.core import (QgsCategorizedSymbolRenderer, QgsFeature, QgsField, QgsFillSymbol,
+                           QgsGeometry, QgsRendererCategory, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "stops", "memory")
+    layer.dataProvider().addAttributes([QgsField(name, QVariant.Int) for name in ("a", "b", "a/b")])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([6, 3, 1])  # a / b = 2, the field "a/b" = 1
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 10 0, 10 10, 0 0))"))
+    layer.dataProvider().addFeatures([feature])
+    layer.setRenderer(QgsCategorizedSymbolRenderer("a/b", [
+        QgsRendererCategory(value, QgsFillSymbol.createSimple({"color": color, "outline_style": "no"}),
+                            str(value))
+        for value, color in ((1, "red"), (2, "blue"))]))
+    reset_project(layer)
+    rules, _ = flattener()
+    drawn = [r.rule.symbol().color().name() for r in rules
+             if list(layer.getFeatures(QgsFeatureRequest(QgsExpression(r.rule.filterExpression()))))]
+    assert drawn == ["#ff0000"]
+
+
+def test_a_position_that_is_not_a_number_leaves_the_label_free(flattener):
+    """Data-defined label X/Y read from text fields: QGIS pins a label only
+    where both convert to numbers; text that does not ("n/a") is no
+    position and the label is placed normally. Such features went to the
+    pinned labels, where no point could be made: the label was lost."""
+    from qgis.core import (QgsFeature, QgsField, QgsFillSymbol, QgsGeometry, QgsPalLayerSettings,
+                           QgsProperty, QgsSingleSymbolRenderer, QgsVectorLayer,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QVariant
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "lots", "memory")
+    layer.dataProvider().addAttributes([QgsField(n, QVariant.String) for n in ("name", "px", "py")])
+    layer.updateFields()
+    features = []
+    for values in (["A", "10.5", "20"], ["B", "n/a", "20"], ["C", None, None]):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes(values)
+        feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 50 0, 50 50, 0 0))"))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    props = settings.dataDefinedProperties()
+    props.setProperty(QgsPalLayerSettings.Property.PositionX, QgsProperty.fromField("px"))
+    props.setProperty(QgsPalLayerSettings.Property.PositionY, QgsProperty.fromField("py"))
+    settings.setDataDefinedProperties(props)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener()
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    pinned = [r for r in labels if r.get_attr("p") == 1]
+    free = [r for r in labels if r.get_attr("p") != 1]
+
+    def names(group):
+        return sorted({f["name"] for r in group for f in layer.getFeatures(
+            QgsFeatureRequest(QgsExpression(r.rule.filterExpression())))})
+    assert names(pinned) == ["A"] and names(free) == ["B", "C"]
+
+
 def test_single_zoom_rule_has_nonempty_interval(flattener):
     layer = rule_based(zoning_layer(), [
         ("narrow", "", zm.zoom_to_scale(3.2), zm.zoom_to_scale(3.8), True, "255,0,0")])
@@ -229,3 +293,160 @@ def test_labels_keep_the_zooms_of_a_renderer_rule_materialized_per_zoom(flattene
     assert labels and all((r.get_attr("o"), r.get_attr("i")) == (11, 17) for r in labels), \
         [(r.output_dataset, r.get_attr("o"), r.get_attr("i")) for r in labels]
     assert len({r.output_dataset for r in labels}) == len(labels)
+
+
+def test_a_feature_drawn_by_two_rules_is_labelled_once(flattener):
+    """Zone polygons coloured by category, with a filterless last rule that
+    draws every outline: the labels were split per renderer rule, so the
+    catch-all rule labelled every zone a second time (two copies of each
+    code on the web). QGIS labels a drawn feature once."""
+    from qgis.core import (QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
+                           QgsFillSymbol, QgsPalLayerSettings, QgsRuleBasedRenderer,
+                           QgsVectorLayerSimpleLabeling)
+    root = QgsRuleBasedRenderer.Rule(None)
+    for zone, colour in (("K1", "255,0,0"), ("K2", "0,255,0")):
+        root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": colour}),
+                                                   filterExp=f"\"zone\" = '{zone}'"))
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple(
+        {"style": "no", "outline_color": "black"})))  # catch-all outline
+    layer = zoning_layer()
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(10, 14)
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    assert labels
+    for feature in layer.getFeatures():
+        for zoom in range(10, 15):
+            context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+            context.setFeature(feature)
+            hits = [r for r in labels if r.get_attr("o") <= zoom <= r.get_attr("i")
+                    and (not r.rule.filterExpression()
+                         or QgsExpression(r.rule.filterExpression()).evaluate(context))]
+            assert len(hits) == 1, (feature["zone"], zoom, [r.rule.filterExpression() for r in hits])
+
+
+def test_nested_rules_get_unique_ids(flattener):
+    """Children of different parents (a nested rule-based renderer: land use
+    with quality classes 1-8 under each use) had the same rule number at
+    their depth: one id and one dataset for several rules, and duplicate
+    style layer ids that stopped the web map from loading."""
+    from qgis.core import QgsFillSymbol, QgsRuleBasedRenderer, QgsSymbol
+    root = QgsRuleBasedRenderer.Rule(None)
+    for zone, colour in (("K1", "255,0,0"), ("K2", "0,255,0")):
+        parent = QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": colour}),
+                                           filterExp=f"\"zone\" = '{zone}'")
+        for width in (0.2, 0.4):
+            parent.appendChild(QgsRuleBasedRenderer.Rule(
+                QgsFillSymbol.createSimple({"color": colour, "outline_width": str(width)}),
+                filterExp=f"\"width\" = {width}"))
+        root.appendChild(parent)
+    layer = zoning_layer()
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    reset_project(layer)
+    rules, _ = flattener()
+    names = [r.output_dataset for r in rules]
+    assert len(rules) == 12 and len(set(names)) == len(names), names
+
+
+def test_a_repeated_style_layer_id_is_renamed_and_reported(plugin):
+    """MapLibre rejects the whole style when a layer id repeats: whatever
+    produced it, the written style keeps the map loadable and says so."""
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.diagnostics = DiagnosticCollector()
+    exporter.style = {"layers": [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": "a"}, {"id": "a_2"}]}
+    exporter._unique_layer_ids()  # pylint: disable=protected-access
+    assert [l["id"] for l in exporter.style["layers"]] == ["a", "b", "a_2", "a_3", "a_2_2"]
+    assert len(exporter.diagnostics.by_code("Q2VT_STYLE_DUPLICATE_ID")) == 3
+
+
+def _curved_river(tmp_path, name="river", **options):
+    """A river layer with a curved label repeated every 70 mm (9 pt)."""
+    from qgis.core import (Qgis, QgsFeature, QgsField, QgsGeometry, QgsLineSymbol,
+                           QgsPalLayerSettings, QgsProperty, QgsSingleSymbolRenderer,
+                           QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import to_geopackage
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", name, "memory")
+    memory.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    memory.updateFields()
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Koornlands"])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "LINESTRING(2119000 6019000, 2121000 6020500, 2123000 6020000)"))
+    memory.dataProvider().addFeatures([feature])
+    layer = to_geopackage(memory, str(tmp_path / f"{name}.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = options.get("placement", Qgis.LabelPlacement.Curved)
+    settings.repeatDistance = options.get("repeat", 70)
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(options.get("size", 9))
+    fmt.setSizeUnit(options.get("unit", Qgis.RenderUnit.Points))
+    settings.setFormat(fmt)
+    if options.get("dd_size"):
+        settings.dataDefinedProperties().setProperty(
+            QgsPalLayerSettings.Property.Size, QgsProperty.fromExpression('length("name")'))
+    if options.get("merge"):
+        line = settings.lineSettings()
+        line.setMergeLines(True)
+        settings.setLineSettings(line)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return layer
+
+
+def test_repeated_curved_line_labels_are_laid_out_per_zoom(flattener, tmp_path):
+    """Swellendam rivers: a curved label repeated along its line becomes one
+    rule per zoom that lays its labels out at export time (MapLibre's line
+    placement dropped them on wiggly rivers); the last zoom keeps its
+    overzoom. The recipe holds the zoom's pixels: the text size, and QGIS's
+    repeat distance as at zoom + 0.5 in the tile zoom's pixels. Labels the
+    export cannot lay out as QGIS does (once per line, parallel,
+    data-defined size, merged lines) stay one rule on MapLibre's placement."""
+    import math
+    from qgis.core import Qgis
+    others = {"once": {"repeat": 0}, "parallel": {"placement": Qgis.LabelPlacement.Line},
+              "sized": {"dd_size": True}, "merged": {"merge": True}}
+    reset_project(_curved_river(tmp_path), *(_curved_river(tmp_path, name, **options)
+                                             for name, options in others.items()))
+    rules, _ = flattener(11, 14)
+    labels = {}
+    for rule in rules:
+        if rule.get_attr("t") == 1:
+            labels.setdefault(rule.layer.name(), []).append(rule)
+    for name in others:
+        assert [(r.recipe, r.get_attr("o"), r.get_attr("i")) for r in labels[name]] == \
+            [(None, 11, 14)], name
+    river = sorted(labels["river"], key=lambda r: r.get_attr("o"))
+    assert [(r.get_attr("o"), r.get_attr("i")) for r in river] == [(z, z) for z in range(11, 15)]
+    assert [r.visibility.max_zoom for r in river] == [12, 13, 14, None]
+    assert len({r.output_dataset for r in river}) == 4
+    recipe = river[0].recipe
+    assert recipe.kind == "label_windows" and recipe.param("zoom") == 11
+    assert recipe.param("size") == pytest.approx(12.0)                 # 9 pt
+    assert recipe.param("repeat") == pytest.approx(70 * 96 / 25.4 / math.sqrt(2))
+    assert recipe.param("chop") == pytest.approx(1 / math.sqrt(2))
+    assert recipe.param("fit") == 1.0
+    assert (recipe.param("max_in"), recipe.param("max_out"), recipe.param("max_angle")) == \
+        (25.0, -25.0, 25.0)
+
+
+def test_map_unit_curved_labels_fit_maplibre_line_check(flattener, tmp_path):
+    """Map-unit text: the recipe's size is the tile zoom's; MapLibre checks
+    the fit of zoom 17's labels with their zoom-18 size (twice as long)."""
+    from qgis.core import Qgis
+    reset_project(_curved_river(tmp_path, size=20, unit=Qgis.RenderUnit.MapUnits))
+    rules, _ = flattener(16, 17)
+    labels = {r.get_attr("o"): r.recipe for r in rules if r.get_attr("t") == 1}
+    assert labels[16].param("size") == pytest.approx(20 * 512 * 2 ** 16 / 40075016.68557849)
+    assert labels[17].param("size") == pytest.approx(2 * labels[16].param("size"))
+    assert labels[16].param("fit") == 1.0 and labels[17].param("fit") == pytest.approx(2.0)
+    assert labels[16].param("chop") == pytest.approx(1.0)               # grows with the map

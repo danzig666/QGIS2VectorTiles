@@ -188,6 +188,7 @@ button { cursor: pointer; }
 
 /* Layer tree */
 .q2vt-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 0 6px; }
+.q2vt-pane-head > .q2vt-chip:only-child { margin-left: auto; } /* Reset without the labels switch */
 .q2vt-row-labels { flex: 1 1 auto; }
 .q2vt-tree, .q2vt-tree ul { list-style: none; margin: 0; padding: 0; }
 .q2vt-tree ul { margin-left: 15px; padding-left: 6px; border-left: 1px solid var(--q2vt-border); }

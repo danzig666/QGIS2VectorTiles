@@ -237,6 +237,49 @@ def test_heatmap_becomes_a_maplibre_heatmap(plugin, tmp_path):
     assert paint["heatmap-radius"] == pytest.approx(10 * 96 / 25.4 * 1.33, rel=0.01)
 
 
+@pytest.mark.parametrize("weight,expected", [('w', [2.0, 0.0, 0.0]), ('"w"', [2.0, 0.0, 0.0]),
+                                              ('"w" * 1', [2.0, None, 0.0])])
+def test_heatmap_null_weight_follows_qgis(plugin, tmp_path, weight, expected):
+    """QgsHeatmapRenderer reads a weight naming a numeric field from the
+    attribute: its NULL weighs 0. Any other NULL weighs 1 (the value does
+    not convert; the web fallback). The exported weight makes the field's
+    NULL explicit."""
+    from qgis.core import (NULL, QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
+                           QgsFeature, QgsField, QgsGeometry, QgsHeatmapRenderer,
+                           QgsProcessingFeedback, QgsSymbolLayer, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_fixtures import reset_project, to_geopackage
+    memory = QgsVectorLayer("Point?crs=EPSG:3857", "heat", "memory")
+    memory.dataProvider().addAttributes([QgsField("w", QVariant.Double)])
+    memory.updateFields()
+    features = []
+    for k, value in enumerate([2.0, None, 0.0]):
+        feature = QgsFeature(memory.fields())
+        feature.setAttributes([value])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({-60 + 60 * k} 0)"))
+        features.append(feature)
+    memory.dataProvider().addFeatures(features)
+    layer = to_geopackage(memory, str(tmp_path / "heat.gpkg"))
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setWeightExpression(weight)
+    layer.setRenderer(heatmap)
+    reset_project(layer)
+    rules = RulesFlattener(14, 16, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           extent=EXTENT).flatten_all_rules()
+    prop = rules[0].rule.symbol().symbolLayer(0).dataDefinedProperties().property(
+        QgsSymbolLayer.Property.PropertySize)
+    expression = QgsExpression(prop.asExpression())
+    context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+    values = []
+    for feature in layer.getFeatures():
+        context.setFeature(feature)
+        value = expression.evaluate(context)
+        values.append(None if value is None or value == NULL else float(value))
+    assert values == expected
+
+
 def _converter():
     from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
     from fidelity.diagnostics import DiagnosticCollector

@@ -14,6 +14,7 @@ store); proxies from the standard environment variables.
 
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import ssl
@@ -81,20 +82,23 @@ class Http:
 
     def request(self, url: str, method: str = "GET", headers: Optional[dict] = None,
                 limit: int = SMALL):
-        """(status, headers dict lower-case, body ≤ limit bytes, truncated?)."""
-        req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT,
-                                                                  "Cache-Control": "no-cache",
-                                                                  **(headers or {})})
+        """(status, headers dict lower-case, body ≤ limit bytes, truncated?).
+        Any failure, a malformed URL too, is a PublishingError."""
         try:
-            response = self.opener.open(req, timeout=self.timeout)
-        except urllib.error.HTTPError as error:
-            response = error
-        except (urllib.error.URLError, OSError) as error:
+            req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT,
+                                                                      "Cache-Control": "no-cache",
+                                                                      **(headers or {})})
+            try:
+                response = self.opener.open(req, timeout=self.timeout)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                status = response.status if hasattr(response, "status") else response.code
+                head = {k.lower(): v for k, v in response.headers.items()}
+                body = b"" if method == "HEAD" else response.read(limit + 1)
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
+            # ValueError: e.g. a space or an accented letter left unencoded in the URL
             raise PublishingError("Q2VT_PUB_PUBLIC_VERIFY", f"{url}: {error}") from error
-        with response:
-            status = response.status if hasattr(response, "status") else response.code
-            head = {k.lower(): v for k, v in response.headers.items()}
-            body = b"" if method == "HEAD" else response.read(limit + 1)
         return status, head, body[:limit], len(body) > limit
 
 

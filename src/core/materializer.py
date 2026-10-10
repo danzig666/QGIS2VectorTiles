@@ -392,10 +392,13 @@ class SymbolMaterializer:
         """Offset polygon outlines like QGIS (``QgsSymbolLayerUtils::offsetLine``):
         every ring is buffered as its own polygon, so a positive offset moves
         exterior and holes towards the feature's interior whatever the ring
-        orientation. Map-unit offsets are materialized exactly; screen-unit
-        offsets keep a native offset on counter-clockwise rings, where
-        MapLibre's right-hand side is the interior. Placed markers (vertex,
-        centre...) are handled by the marker-line materialization."""
+        orientation. Map-unit offsets are materialized exactly, and so are
+        static screen-unit offsets of simple lines, per zoom band (see
+        _screen_polygon_offset); other screen-unit offsets keep a native
+        offset on right-hand-rule rings (exterior clockwise, holes
+        counter-clockwise), where MapLibre's right-hand side is the feature's
+        interior. Placed markers (vertex, centre...) are handled by the
+        marker-line materialization."""
         if layer.layerType() != "SimpleLine":
             placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
             if placements & mat.POINT_PLACEMENTS:
@@ -413,13 +416,77 @@ class SymbolMaterializer:
             params.append(("offset", float(layer.offset())))
             clone.setOffset(0.0)
         else:
-            params.append(("ccw", True))
+            if layer.layerType() == "SimpleLine":
+                bands = self._screen_polygon_offset(flat_rule, layer, params)
+                if bands is not None:
+                    return bands
+            params.append(("rhr", True))
         rule.recipe = mat.Recipe("polygon_offset", params=tuple(params))
         rule.set_attr("m", 1)
         if layer.layerType() == "HashLine":
             converted = self._hash_as_marker_line(clone, rule)
             replace_symbol_layer(rule.rule.symbol(), converted)
         return [rule]
+
+    def _screen_polygon_offset(self, flat_rule: FlattenedRule, layer,
+                               params) -> Optional[List[FlattenedRule]]:
+        """A screen-unit polygon outline offset as QGIS draws it: every ring
+        buffered as its own polygon in painter pixels (offsetLine: mitred,
+        limit 2) and stroked once. MapLibre's line-offset overlaps segments
+        and joins at every vertex (a translucent band blends twice there) and
+        does not bridge inlets narrower than twice the offset. Per eighth of
+        a zoom of the export's zooms (offset within +-4.5 %), converted at the
+        band's middle; native (right-hand-rule rings) when overzooming, for
+        data-defined offsets and over the output budget."""
+        offset_mm = _to_mm(layer.offset(), layer.offsetUnit())
+        props = layer.dataDefinedProperties()
+        if offset_mm is None or (props is not None and props.isActive(QgsSymbolLayer.Property.PropertyOffset)):
+            return None
+        low, high = self._zoom_range(flat_rule)
+        if low > high:
+            return None
+        zoom_rules = self._per_zoom(flat_rule)
+        vertices = self._layer_vertices(flat_rule.layer)
+        steps = next((n for n in (8, 4, 2, 1)
+                      if vertices * len(zoom_rules) * n <= self.MAX_PATTERN_ELEMENTS), 0)
+        if not steps:
+            self._report("Q2VT_PATTERN_BUDGET",
+                         "Polygon outline offsets would exceed the output budget; drawn with "
+                         "the browser's line offset.", flat_rule)
+            return None
+        rules = []
+        for rule in zoom_rules:
+            start = float(rule.get_attr("o"))
+            for band, zoom in self._sub_zoom_bands(rule, steps, False):
+                derived = band.derive()
+                derived.visibility = (band.visibility or ZoomInterval(start, start + 1.0)).intersect(
+                    ZoomInterval(start, start + 1.0))
+                derived.rule.symbol().symbolLayer(0).setOffset(0.0)
+                derived.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (
+                    ("offset", offset_mm * self._map_units_per_mm(flat_rule, zoom)),))
+                derived.set_attr("m", 1)
+                rules.append(derived)
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
+        if not overzoom.is_empty:  # past the last tiles: native, right-hand-rule rings
+            native = flat_rule.derive()
+            native.set_attr("o", high)
+            native.visibility = overzoom
+            native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
+            native.set_attr("m", 1)
+            rules.append(native)
+        return rules
+
+    def _layer_vertices(self, layer) -> int:
+        """Vertices of a source layer (cached): the size of per-zoom copies."""
+        from qgis.core import QgsFeatureRequest  # pylint: disable=import-outside-toplevel
+        cache = self.__dict__.setdefault("_vertices", {})
+        if layer.id() not in cache:
+            cache[layer.id()] = sum(
+                feature.geometry().constGet().nCoordinates()
+                for feature in layer.getFeatures(QgsFeatureRequest().setNoAttributes())
+                if feature.hasGeometry())
+        return cache[layer.id()]
 
     def _offset_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A map-unit line offset as the offset line itself
@@ -1167,6 +1234,10 @@ class SymbolMaterializer:
         self._report("Q2VT_PATTERN_APPROXIMATE",
                      "SVG fill tiles crossing the polygon edge are drawn whole when their "
                      "centre is inside (QGIS clips the texture).", flat_rule)
+        if abs(layer.angle() % 360.0) > 1e-9:
+            self._report("Q2VT_PATTERN_APPROXIMATE",
+                         "Rotated SVG fill in map units: each SVG is turned, but the grid is not "
+                         "(QGIS turns the whole texture).", flat_rule)
         recipe = mat.grid_recipe(width, height, 0.0, 0.0, width / 2.0, -height / 2.0,
                                  self.project_crs or flat_rule.layer.crs().authid(),
                                  self._anchor(layer, flat_rule))
@@ -1345,6 +1416,11 @@ class SymbolMaterializer:
         exact_interval = self._exact_interval(layer)
         zoom_interval = not exact_interval and self._zoom_interval(layer)
         if not points and not exact_interval and not zoom_interval:
+            if "Interval" in placements and \
+                    layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyInterval):
+                self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                             "Data-defined interval: the browser spaces these markers along the lines, "
+                             "not at QGIS's positions.", flat_rule)
             return None  # interval driven by data: native repeated symbol
         if "CurvePoint" in points:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
@@ -1640,20 +1716,55 @@ class SymbolMaterializer:
         rules = []
         for copy, fill_layer in enumerate(fill_layers):
             fill_layer = fill_layer.clone()
-            translate = None
+            translate = outline = None
             if fill_layer.layerType() == "SimpleFill":
                 offset = fill_layer.offset()
                 if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
                     translate = (offset.x(), offset.y(),
                                  QgsUnitTypes.encodeUnit(fill_layer.offsetUnit()))
                     fill_layer.setOffset(QPointF())
+                if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
+                    # QGIS strokes the arrow centred on its edge with the
+                    # stroke's width, dashes and join: a line on the polygons'
+                    # rings, above the fill (a fill-outline-color is one
+                    # device pixel inside the edge whatever the width).
+                    outline = QgsLineSymbol([self._fill_stroke_as_line(fill_layer)])
+                    outline.setOpacity(fill.opacity())
+                    fill_layer.setStrokeStyle(Qt.PenStyle.NoPen)
             symbol = QgsFillSymbol([fill_layer])
             symbol.setOpacity(fill.opacity())
+            brush = outline is None or fill_layer.brushStyle() != Qt.BrushStyle.NoBrush
             for band_rule, zoom in bands:
-                derived = self._with_symbol(band_rule, symbol.clone(), 2, 1 + copy, recipe(zoom, copy))
-                derived.translate = translate
-                rules.append(derived)
+                if brush:
+                    derived = self._with_symbol(band_rule, symbol.clone(), 2, 1 + copy,
+                                                recipe(zoom, copy))
+                    derived.translate = translate
+                    rules.append(derived)
+                if outline is not None:
+                    stroke = self._with_symbol(band_rule, outline.clone(), 1, 1 + copy,
+                                               recipe(zoom, copy))
+                    stroke.translate = translate  # shifted with its fill
+                    rules.append(stroke)
         return rules
+
+    @staticmethod
+    def _fill_stroke_as_line(fill_layer) -> QgsSimpleLineSymbolLayer:
+        """A simple fill's outline as a simple line (colour, width, style,
+        join and their data-defined values)."""
+        line = QgsSimpleLineSymbolLayer(fill_layer.strokeColor(), fill_layer.strokeWidth())
+        line.setWidthUnit(fill_layer.strokeWidthUnit())
+        line.setWidthMapUnitScale(fill_layer.strokeWidthMapUnitScale())
+        line.setPenStyle(fill_layer.strokeStyle())
+        line.setPenJoinStyle(fill_layer.penJoinStyle())
+        props = fill_layer.dataDefinedProperties()
+        for key in (QgsSymbolLayer.Property.PropertyStrokeColor,
+                    QgsSymbolLayer.Property.PropertyStrokeWidth,
+                    QgsSymbolLayer.Property.PropertyStrokeStyle,
+                    QgsSymbolLayer.Property.PropertyJoinStyle):
+            prop = props.property(key)
+            if prop is not None and prop.isActive():
+                line.setDataDefinedProperty(key, QgsProperty(prop))
+        return line
 
     # -- filled lines ----------------------------------------------------------
     def _filled_line(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
@@ -1778,37 +1889,55 @@ class SymbolMaterializer:
                 0.5 if opaque and not overlap else 0.0)
         return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
 
+    # Shapeburst distances in screen units: band sets per quarter of a zoom
+    # (within +-9 % of QGIS's width), fewer when over the output budget.
+    SHAPEBURST_ZOOM_STEPS = (4, 2, 1)
+
     def _shapeburst(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
-        """A shapeburst fill as inset bands from the edge (colour 1) inwards."""
+        """A shapeburst fill as inset bands from the edge (colour 1) inwards.
+        A distance in screen units keeps its width on screen at every scale
+        in QGIS: one band set per zoom step, the distance in map units at the
+        middle of the step (96 dpi CSS pixels, the project CRS's units)."""
         whole = layer.useWholeShape()
-        distance = 0.0
-        if not whole:
-            distance = layer.maxDistance()
-            mm = _to_mm(distance, layer.distanceUnit())
-            if mm is not None:
-                # Screen units: the map distance at the middle of the rule's
-                # zoom range within the export's zooms (Web Mercator metres;
-                # 96 dpi CSS pixels). A rule without a scale limit starts at
-                # zoom 0: its middle was far below the exported zooms, the
-                # bands spread over a far larger distance than QGIS's.
-                if flat_rule.get_attr("o") is not None and flat_rule.get_attr("i") is not None:
-                    low, high = self._zoom_range(flat_rule)
-                    zoom = (min(float(low), float(high)) + float(high)) / 2
-                else:
-                    zoom = 16.0
-                distance = mm * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** zoom)
-                self._report("Q2VT_GRADIENT_APPROXIMATE",
-                             f"Shapeburst distance in screen units is fixed at zoom {zoom:g}.", flat_rule)
-            if not distance or distance <= 0:
-                return []
         if layer.blurRadius():
             self._report("Q2VT_GRADIENT_APPROXIMATE",
                          "Shapeburst blur is not applied (bands are already smooth steps).", flat_rule)
         crs = self.project_crs or flat_rule.layer.crs().authid()
+        ramp = self._ramp_of(layer)
 
-        def recipe(band, bands, _overlap):
-            return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, bands, crs)
-        return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
+        def bands(rule, distance):
+            def recipe(band, count, _overlap):
+                return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, count, crs)
+            return self._band_rules(rule, layer, ramp, recipe)
+
+        if whole:
+            return bands(flat_rule, 0.0)
+        distance = layer.maxDistance()
+        mm = _to_mm(distance, layer.distanceUnit())
+        if mm is None:  # map units: one band set
+            return bands(flat_rule, distance) if distance and distance > 0 else []
+        if mm <= 0:
+            return []
+        if flat_rule.get_attr("o") is None or flat_rule.get_attr("i") is None:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst distance in screen units is fixed at zoom 16.", flat_rule)
+            return bands(flat_rule, mm * self._map_units_per_mm(flat_rule, 16.0))
+        low, high = self._zoom_range(flat_rule)
+        count = self._band_count([ramp.color(i / 64) for i in range(65)])
+        features = self._layer_totals(flat_rule.layer)[2]
+        steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
+                      if features * count * (high - low + 1) * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        if steps < self.SHAPEBURST_ZOOM_STEPS[0]:
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst distance in screen units is set per {} to stay within the "
+                         "output size (width within about {} %).".format(
+                             "half zoom" if steps == 2 else "zoom", 19 if steps == 2 else 41), flat_rule)
+        zoom_rules = self._per_zoom(flat_rule)
+        rules = []
+        for index, rule in enumerate(zoom_rules):
+            for band_rule, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
+                rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
+        return rules
 
     def _hatch(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         sub = layer.subSymbol()

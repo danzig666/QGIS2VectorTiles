@@ -39,6 +39,11 @@ a double-size copy after every whole zoom. The patch:
    repeat was squeezed by two texels. Across the line it now runs from the
    first row's centre to the last row's; along it exactly over the image.
 
+6. joins a line whose last point is its first (polygon outlines exported as
+   lines, closed contours) at that point like a polygon ring, as Qt strokes
+   a closed path, instead of drawing two caps there; a ring's dashes start
+   at its first vertex (stock MapLibre counted the closing segment first).
+
 Idempotent; run after updating MapLibre:
 
     python3 tools/patch_maplibre.py [--check]
@@ -235,6 +240,46 @@ def _bucket_patch(text: str) -> str:
         f"n=this.layoutVertexArray;{m.group(3)}((e,t)=>{{n.emplaceBack(e,t);q2&&q2.emplaceBack(q2x,q2y)}}"), text)
 
 
+CLOSED_MARK = "/*q2vt-closed-lines*/"
+CLOSED = re.compile(r"let (\w)=(\w+)\.types\[(\w)\.type\]===`Polygon`,(\w)=(\w)\.length;")
+
+
+# for(let t=d;t<u;t++){if(g=t===u-1?l?e[d+1]:void 0:e[t+1]  ...  h&&this.updateDistance(h,m),w===`miter`)
+RING_LOOP = re.compile(r"for\(let (\w)=(\w);\1<(\w);\1\+\+\)\{if\((\w)=\1===\3-1\?(\w)\?")
+RING_DISTANCE = re.compile(r"(\w)&&this\.updateDistance\(\1,(\w)\),(\w)===`miter`\)")
+
+
+def _closed_line_patch(text: str) -> str:
+    """Shared bundle: a line whose last point is its first (a polygon outline
+    exported as a line, a closed contour) is joined there like a polygon
+    ring, as Qt strokes a closed path; stock MapLibre gave it two caps
+    there (a knob with square caps, a darker spot on translucent lines).
+    A ring's dashes start at its first vertex, as in QGIS: stock MapLibre
+    counted the closing segment before it (the pattern started shifted)."""
+    if len(CLOSED.findall(text)) != 1:
+        raise SystemExit("line bucket polygon test: expected exactly one match")
+    text = CLOSED.sub(lambda m: (
+        f"let {m.group(1)}={m.group(2)}.types[{m.group(3)}.type]===`Polygon`||{CLOSED_MARK}"
+        f"{m.group(5)}.length>3&&{m.group(5)}[0].equals({m.group(5)}[{m.group(5)}.length-1]),"
+        f"{m.group(4)}={m.group(5)}.length;"), text)
+    loops = RING_LOOP.findall(text)
+    distances = RING_DISTANCE.findall(text)
+    if len(loops) != 1 or len(distances) != 1:
+        raise SystemExit("line bucket ring distance: expected exactly one loop and one update")
+    index, first = loops[0][0], loops[0][1]
+    return RING_DISTANCE.sub(lambda m: (
+        f"{m.group(1)}&&{index}>{first}&&this.updateDistance({m.group(1)},{m.group(2)}),"
+        f"{m.group(3)}===`miter`)"), text)
+
+
+def _shared_patch(text: str) -> str:
+    if BUCKET_MARK not in text:
+        text = _bucket_patch(text)
+    if CLOSED_MARK not in text:
+        text = _closed_line_patch(text)
+    return text
+
+
 def patch(text: str) -> str:
     if FILL_MARK not in text:
         text = _fill_patch(text)
@@ -280,11 +325,11 @@ def main() -> int:
         shared = handle.read()
     if "--check" in sys.argv:
         done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK)) \
-            and BUCKET_MARK in shared
+            and BUCKET_MARK in shared and CLOSED_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
     for path, old, new in ((BUNDLE, text, patch(text)),
-                           (SHARED, shared, shared if BUCKET_MARK in shared else _bucket_patch(shared))):
+                           (SHARED, shared, _shared_patch(shared))):
         if new != old:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(new)

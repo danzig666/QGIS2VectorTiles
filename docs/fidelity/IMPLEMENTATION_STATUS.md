@@ -18,16 +18,17 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 | PR-09 | Feature-context properties, native circles, sprite variants | **Done** | Native circle layers for plain circles; per-value sprite variants with a budget; static-vs-feature detection. |
 | PR-10 | Exact marker-line positions | **Done** | Vertex/first/last/inner/central/segment-centre and map-unit interval markers (offset along the line, averaged angles) materialized at the QGIS positions; polygon outlines offset like QGIS (ring buffers); ring filters. Screen-unit intervals materialized per zoom (native placement beyond the last tile zoom). *Approximate:* screen-unit intervals and corner-angle averaging over a screen length are exact at the middle of each zoom (spacing within ±19 % inside the zoom). |
 | PR-11 | Label typography, glyph calibration, offsets | **Done** | Glyph metrics calibrated (24 px em, bearings), size factor removed, font stacks shared with glyph generation, `ő`/`ű`. |
-| PR-12 | Render ordering, geometry hardening | **Done** | QGIS draw order (later rules on top, rendering passes, layer tree), renderer order-by as sort keys, symbol-reach extent buffer with tile pruning, generators in the layer CRS, same-type generators drawn with their sub-symbol. *Not reproducible:* per-feature interleaving of different style layers. |
+| PR-12 | Render ordering, geometry hardening | **Done** | QGIS draw order (later rules on top, rendering passes, layer tree), renderer order-by as sort keys, symbol-reach extent buffer with tile pruning, generators in the layer CRS, same-type generators drawn with their sub-symbol. Feature order across rules (layers without symbol levels; rule-based: within a pass): a feature QGIS draws above an overlapping feature of a later rule is drawn by a copy of its rule's style layers in a higher "stratum" (filter on `q2vt_orig_id`; touching polygons and slivers narrower than a tile unit at the last zoom do not count; lines that touch or meet within a tile unit do, as a street ending on a main road covers half of it); beyond 5000 lifted features or 8 strata the layer keeps rule order and reports `Q2VT_FEATURE_ORDER_ACROSS_RULES` (a line layer first keeps the order of its crossings only, with a note; above 100 000 dataset rows: a note, not checked). Line and polygon layers; markers, merged/inverted, cluster, heatmap and inner-effect layers keep rule order. *Not reproducible:* per-feature interleaving of the symbol layers of one rule (QGIS: fill and outline of A, then of B; the web map: all fills, then all outlines). |
 | PR-13 | Pinned labels and callouts | **Partial** | Data-defined X/Y labels exported at the point with the data-defined alignment, always shown; simple callouts as leader lines ending at the label anchor. *Missing:* QGIS PAL-computed placements; leaders ending on the label box. |
-| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows are the polygons `QgsArrowSymbolLayer` fills (a port of its straight and curved arrow construction with Qt's own arcs, every head and arrow type, its vertex pairing; pixel-identical to QGIS in tests), built in painter pixels per eighth of a zoom for screen sizes and filled with the arrow's fill symbol; opaque multi-layer fills (drop shadows) keep QGIS's per-arrow drawing order; arrow lines keep all their vertices (no base-layer simplification). Hash lines as marker lines; filled lines as strokes. |
+| PR-14 | Arrows / hash lines / filled lines | **Done** | Arrows are the polygons `QgsArrowSymbolLayer` fills (a port of its straight and curved arrow construction with Qt's own arcs, every head and arrow type, its vertex pairing; pixel-identical to QGIS in tests), built in painter pixels per eighth of a zoom for screen sizes and filled with the arrow's fill symbol; a fill's outline is a line on the arrow polygons' edges with its own width, dashes and join (not a one-pixel fill outline); opaque multi-layer fills (drop shadows) keep QGIS's per-arrow drawing order; arrow lines keep all their vertices (no base-layer simplification). Hash lines as marker lines; filled lines as strokes. |
 | PR-15 | Raster fallback / compositing groups | Not started | *Hybrid* mode is selectable but reports `Q2VT_HYBRID_NOT_AVAILABLE`. |
 | PR-16 | Atomic publication, HTTP packaging, UI report | **Mostly done** | Cancellable `ogr2ogr`, XML-safe VRT, JSON/HTML report, strict failures remove only the new output; optional static web package (`web/`: XYZ tiles, relative-URL style, viewer; written atomically, works from any sub-directory of a plain web server); popups escape attribute text. *Missing:* PMTiles output, fidelity panel inside the viewer. |
 
 ## Symbology added beyond the plan (4.14)
 
-Every built-in QGIS 3.34 symbol layer type is now converted; only plugin-provided symbol
-layer types are reported as unsupported. Measured with the gallery (`tools/gallery`,
+Every built-in QGIS 3.34 symbol layer type is now converted except the animated marker and the
+mask marker (and, in later QGIS versions, the linear referencing line); these and
+plugin-provided symbol layer types are reported as unsupported. Measured with the gallery (`tools/gallery`,
 zooms 14.6 / 16.25 / 17.8, colour mismatch = pixels whose colour is outside the browser's
 blend tolerance):
 
@@ -108,12 +109,20 @@ overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`
 * ELSE rules now follow the scale ranges of their siblings as QGIS does.
 * Horizontal/free polygon labels are centred instead of using variable anchors; only
   "around point" placements use variable anchors.
+* Horizontal/free polygon labels placed by the web viewer also keep clear of the point
+  labels MapLibre draws itself (place names, building numbers), as line and "around
+  point" labels do: QGIS places all labels together, so a park's name no longer runs into
+  a place name inside the park. Each of those labels is measured with its own text.
 * Unsupported fills (gradient, shapeburst, …) are omitted and reported instead of being
   drawn black; failed sprites are omitted and reported instead of being transparent.
 * Data-defined widths, sizes and opacities are converted to the browser's units.
 * Valid polygons keep their rings exactly as stored (start vertex, hole orientation);
   only invalid geometries are repaired. Marker intervals, dashes and offsets on polygon
   outlines now start where QGIS starts them, on every ring.
+* A closed line (a polygon outline, a closed contour) is joined at its first vertex as
+  Qt strokes a closed path, without the two caps MapLibre drew there (a square knob, a
+  darker spot on translucent outlines; patched MapLibre). With bevel or round joins the
+  closing wedge is still drawn twice, as on MapLibre's own polygon rings.
 * Map-unit custom dashes are exported as their dashes from the zoom where the pattern is
   6 px long, so markers drawn in the gaps stay in the gaps.
 * Random marker fills draw the QGIS number of markers (positions differ: QGIS draws them
@@ -144,3 +153,12 @@ overlapping`, `tests/integration/test_materialize.py -k whole_and_in_qgis_order`
 * 4.14: screen-size marker intervals, point clusters and point displacement are exported in
   eighths of a zoom: more datasets and a longer export for such layers.
 * 4.14: arrows draw their tapered body, QGIS-size heads and every fill layer (drop shadows).
+* Label backgrounds sized as a buffer wrap the font's ascent and descent as in QGIS: they
+  were fitted to MapLibre's 1.2 em line box (Open Sans: 0.16 em too short, all of it above
+  the text). The frame's stroke is centred on QGIS's rectangle, rounded corners have QGIS's
+  radius at the middle of the stroke, and the stroke keeps its colour (no darker edge with a
+  light line inside). Map-unit text (zoom-curve sizes) keeps the bare buffer; QGIS's
+  whole-pixel ascent at 96 dpi can leave about 1 px more room above the text. Tests:
+  `tests/browser/test_browser_parity.py -k millimetre_label_frame`,
+  `tests/integration/test_label_font_style.py -k frame_padding`,
+  `tests/unit/test_patterns_and_assets.py -k label_frame`.

@@ -49,9 +49,11 @@ class Capability:
 
 _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("SimpleFill", "fill", Strategy.NATIVE,
-               "Solid fill color and opacity; outline exported as a separate line layer.",
-               ("Qt brush styles other than solid/no-brush are drawn solid.",),
-               ("tests/integration/test_converter.py",)),
+               "Solid fill color and opacity; outline exported as a separate line layer. Qt "
+               "brush styles (dense dots, hatching, crossing) as their 8 px pattern texture, "
+               "started at the corner of the view as in QGIS.",
+               ("A Qt brush style with a data-defined colour or style is drawn solid.",),
+               ("tests/integration/test_converter.py", "tests/browser/test_browser_parity.py")),
     Capability("SimpleLine", "line", Strategy.NATIVE,
                "Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit "
                "custom dashes are exported as their dashes (Qt pattern restarted on every "
@@ -95,11 +97,12 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("FilledMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
     Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,
                "First/last/every vertex, inner vertices, central point, segment centres and "
-               "map-unit intervals (with offset along the line) are exported as point features "
-               "at the QGIS positions with the line azimuth; polygon outline offsets buffer "
-               "every ring like QGIS.",
-               ("Screen-unit intervals are a native repeated symbol: start position differs "
-                "and spacing is within about ±41 % between integer zooms.",
+               "intervals (with offset along the line; map units exactly, screen units per "
+               "eighth of a zoom) are exported as point features at the QGIS positions with the "
+               "line azimuth; polygon outline offsets buffer every ring like QGIS.",
+               ("Data-defined intervals, and screen-unit intervals with Fast marker lines on, "
+                "are a native repeated symbol: start position differs and spacing is within "
+                "about ±41 % between integer zooms (reported).",
                 "Map-unit intervals denser than 8 px on screen use the native symbol at "
                 "those zooms."),
                ("tests/integration/test_materialize.py",
@@ -111,11 +114,14 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("ArrowLine", "line", Strategy.MATERIALIZED,
                "The polygons QGIS fills (its straight and curved arrow construction, every "
                "head and arrow type, the vertex pairing of repeated and curved arrows), filled "
-               "with the arrow's fill symbol; screen sizes per eighth of a zoom. Opaque "
+               "with the arrow's fill symbol; a fill's outline is a line on the polygons' "
+               "edges (its width, dashes and join). Screen sizes per eighth of a zoom. Opaque "
                "multi-layer fills (a drop shadow) keep QGIS's per-arrow drawing order; the "
                "line keeps all its vertices.",
                ("Sizes are within +-4.5 % between eighths of a zoom; beyond the archive's "
                 "last zoom the arrows scale with the map.",
+                "Outlines are drawn above all the arrows' fills: where repeated arrows overlap, "
+                "QGIS covers an arrow's outline with the next arrow's fill.",
                 "QGIS rebuilds arrows from the line clipped to the view, so near the view's "
                 "edge its own arrows change while panning; the web map keeps the whole line.",
                 "Data-defined arrow sizes use their static values."),
@@ -194,7 +200,7 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "set distance, rings ignored when set).",
                ("Smooth colour change becomes steps of about one level (up to 1024 bands); blur is "
                 "not applied.",
-                "A distance in screen units is fixed at the middle of the visible zooms.")),
+                "A distance in screen units is set per quarter zoom (within about 9 %).")),
     Capability("InterpolatedLine", "line", Strategy.MATERIALIZED,
                "Colour and width interpolated along each line between the per-feature start "
                "and end values: exported as short pieces (about 64 over the value range) with "

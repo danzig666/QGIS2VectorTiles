@@ -56,7 +56,8 @@ def site(tmp_path_factory):
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),
                "lid": layer_logical_id(parcels.id()),
-               "records": {r["k"]: r for r in records}}
+               "records": {r["k"]: r for r in records},
+               "manifest": json.load(open(os.path.join(rel, "manifest.json"), encoding="utf-8"))}
 
 
 PRELUDE = "const v = q2vtViewer, m = v.map, c = v.controls.control, s = v.controls.state, man = v.manifest;"
@@ -132,6 +133,43 @@ def test_visible_labels_follow_toggles_and_filters(site, tmp_path):
     assert results[4] == 0  # no orphan labels for a hidden layer
 
 
+@pytest.fixture(scope="module")
+def site_without_popups(tmp_path_factory):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_pipeline import CANARY, _parcels, _profile  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    base = tmp_path_factory.mktemp("nopopups")
+    parcels = _parcels(str(base / "parcels.gpkg"))
+    project = reset_project()
+    project.addMapLayer(parcels)
+    profile = _profile(parcels, base)
+    profile.layers[0].initially_visible = True
+    profile.interaction.popups = False
+    result = export_local(project, profile, EXTENT, canaries=[CANARY])
+    with PreviewServer(os.path.dirname(result.publication_dir)) as server:
+        yield {"url": server.url(f"{profile.slug}/index.html")}
+
+
+def test_search_works_without_popups(site_without_popups, tmp_path):
+    """With popups off the search box used to be left out (it opened the
+    found feature through the popup code). Now a found feature is zoomed to
+    and marked, without a popup."""
+    results = _run(site_without_popups["url"], [
+        {"eval": "q2vtViewer.map.jumpTo({ center: [0, 0], zoom: 3 }); return !!document.getElementById('q2vt-search');"},
+        {"type": ["#q2vt-search", "00123/5"]},
+        {"wait": 1200},
+        {"press": "ArrowDown"}, {"press": "Enter"},
+        {"wait": 2500},
+        {"eval": """const m = q2vtViewer.map, c = m.getCenter();
+                    return { zoom: m.getZoom(), lng: c.lng, popups: document.querySelectorAll('.q2vt-popup').length,
+                             marker: !!m.getLayer('q2vt_search_marker') };"""},
+    ], tmp_path)
+    assert results[0] is True
+    r = results[1]
+    assert r["zoom"] > 10 and abs(r["lng"] - 19.06) < 0.05 and r["popups"] == 0 and r["marker"], r
+
+
 def test_identify_one_record_per_feature_and_safe_popup(site, tmp_path):
     record = site["records"]["00123/4"]
     results = _run(site["url"], [
@@ -152,6 +190,22 @@ def test_identify_one_record_per_feature_and_safe_popup(site, tmp_path):
     assert ["Megjegyzés", "<script>alert(1)</script>"] in r["rows"]  # A15: shown as text
     assert r["scripts"] == 0 and r["xss"] == 0
     assert "sel=" in r["hash"] and urllib.parse.quote("00123/4", safe="") in r["hash"].replace("%2F", "%2F")
+
+
+def test_popup_has_no_version_note_on_export_scoped_layers(site, tmp_path):
+    """A layer without a feature key (links only work in this release) used
+    to add "Feature links of this layer only work in this version of the
+    map." to every popup: confusing, and it took space. No such note now."""
+    record = site["records"]["00123/4"]
+    results = _run(site["url"], [
+        {"eval": PRELUDE + "man.layers.forEach((l) => { l.identityScope = 'export'; }); return 1;"},
+        {"clickLngLat": record["p"]},
+        {"wait": 600},
+        {"eval": """const p = document.querySelector('.q2vt-popup');
+                    return { title: p && p.querySelector('h3').textContent,
+                             notes: p ? [...p.querySelectorAll('.q2vt-note')].map((n) => n.textContent) : null };"""},
+    ], tmp_path)
+    assert results[1]["title"] == "00123/4" and results[1]["notes"] == [], results[1]
 
 
 def test_search_finds_offscreen_features(site, tmp_path):
@@ -206,6 +260,37 @@ def test_permalink_round_trip(site, tmp_path):
     bad = _run(site["url"] + "#v=1&r-=not-a-rule&o=lyr-x:500&f=%%%&map=99/999/999", [
         {"eval": PRELUDE + "return { errors: v.diagnostics.errors.length, zoom: m.getZoom() };"}], tmp_path)
     assert bad[0]["errors"] == 0 and bad[0]["zoom"] <= 24  # untrusted URL state ignored safely
+
+
+def test_a_link_shows_what_its_sender_saw(site, tmp_path):
+    """A returning visitor's remembered choices (labels off, a rule off) used
+    to stay when they opened someone's link: the link only names what the
+    sender changed from the published map, and it was merged into the saved
+    state. Pasted into a tab where the map was open, only the hash changed
+    and the viewer ignored the link altogether. A link now shows the
+    published map with the sender's changes, in a new tab or the same one."""
+    rules = [r["id"] for r in site["manifest"]["rules"]]
+    link = f"{site['url']}#v=1&r-={urllib.parse.quote(rules[1], safe='')}"
+    state = PRELUDE + ("return { labels: s.value.labels, r0: s.value.rules[man.rules[0].id], "
+                       "r1: s.value.rules[man.rules[1].id] };")
+    remember = PRELUDE + "s.set({ labels: false }); s.setIn('rules', man.rules[0].id, false); return 1;"
+    # The same tab: only the hash changes.
+    results = _run(site["url"], [
+        {"eval": remember},
+        {"goto": link},
+        {"eval": "for (let i = 0; i < 100 && !(window.q2vtViewer && q2vtViewer.ready && q2vtViewer.controls); i++) "
+                 "await new Promise((r) => setTimeout(r, 100)); return 1;"},
+        {"wait": 500},
+        {"eval": state},
+    ], tmp_path)
+    assert results[2] == {"labels": True, "r0": True, "r1": False}
+    # A new visit (a new tab) with the remembered choices in storage.
+    results = _run(site["url"], [
+        {"eval": remember},
+        {"goto": site["url"] + "?new-tab=1" + link[len(site["url"]):]},
+        {"eval": state},
+    ], tmp_path)
+    assert results[1] == {"labels": True, "r0": True, "r1": False}
 
 
 def test_measure_distance(site, tmp_path):

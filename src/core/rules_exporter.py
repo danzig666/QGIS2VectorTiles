@@ -57,6 +57,7 @@ The redesign separates the export pipeline into clearly typed phases:
    ├──────────────────────────────────────────────────────────────────────┤
    │ Phase 4 — Result collection (caller thread)                          │
    │   * Wrap output Parquet files in QgsVectorLayer for the caller.      │
+   │   * Feature-order strata of overlapping features (style only).       │
    │   * Cleanup of temp files.                                           │
    └──────────────────────────────────────────────────────────────────────┘
 
@@ -103,10 +104,12 @@ from qgis.core import (
     QgsProcessingException,
     QgsFeatureRequest,
     QgsField,
+    QgsGeometry,
     QgsMemoryProviderUtils,
     QgsPalLayerSettings,
     QgsProperty,
     QgsRectangle,
+    QgsRuleBasedRenderer,
     QgsCoordinateTransform,
     QgsVectorFileWriter,
     QgsVectorLayer,
@@ -121,8 +124,10 @@ from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
 from .datasets import DatasetInfo, ExportedDataset, gpkg_info
+from . import label_lines
 from . import marker_points
-from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.diagnostics import DiagnosticCollector, Severity
+from .fidelity import feature_order as fo
 from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
 from .fidelity import html_labels
 from .fidelity import materialize as mat
@@ -212,6 +217,9 @@ _SHAREABLE_ALGORITHMS = frozenset({
     "native:deletecolumn", "native:collect", "native:dissolve", "native:keepnbiggestparts",
     "native:mergevectorlayers"})
 _NONDETERMINISTIC = re.compile(r"\b(rand|randf|uuid|now|random)\s*\(", re.IGNORECASE)
+# The expression parameter of each expression-driven step.
+_EXPRESSION_PARAMETERS = {"fieldcalculator": "FORMULA", "extractbyexpression": "EXPRESSION",
+                          "geometrybyexpression": "EXPRESSION"}
 # "Label every feature" layers (publication): each polygon's roomiest point
 # (pole of inaccessibility), its free radius and the polygon's direction
 # (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
@@ -559,7 +567,8 @@ class RulesExporter:
             self._store_cached(pending, rule_outputs)
             rule_outputs.update(cached_outputs)
             # Phase 4 — collect results on caller thread.
-            return self._collect_results(rule_groups, rule_outputs)
+            layers, rules = self._collect_results(rule_groups, rule_outputs)
+            return layers, self._keep_feature_order(rules)
         finally:
             self._release_all_layers()
             self._cleanup_temp_files()
@@ -644,10 +653,13 @@ class RulesExporter:
                 expr_fields = list(expr_fields) + [
                     (6, primary.recipe.param("x"), CALLOUT_X_FIELD),
                     (6, primary.recipe.param("y"), CALLOUT_Y_FIELD)]
+            label_text = None
             if primary.get_attr("t") == 1:
                 expr_fields = self._add_label_expression_field(
                     primary, expr_fields
                 )
+                label_text = next((expr for _, expr, name in expr_fields
+                                   if name == f"{_FIELD_PREFIX}_label"), None)
 
             # Evaluate scalar expressions on layer-CRS geometry, as QGIS does.
             layer_crs = primary.layer.crs().authid()
@@ -667,6 +679,10 @@ class RulesExporter:
             ]
             filter_expression = in_layer_crs(
                 primary.rule.filterExpression(), f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
+            if label_text:
+                filter_expression = self._with_label_text(
+                    filter_expression,
+                    in_layer_crs(label_text, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar))
 
             # Compute geometry transformation tuple.
             transformation = self._get_geometry_transformation(primary)
@@ -1385,6 +1401,8 @@ class RulesExporter:
         every part, a centroid fill not on every part."""
         if grp.keep_biggest_part is not None:
             return grp.keep_biggest_part
+        if grp.recipe is not None and grp.recipe.kind == "label_windows":
+            return False  # every window is a label (_label_windows keeps the longest part)
         if grp.rule_type == 1 and not grp.visible_polygons:
             settings = grp.flat_rules[0].rule.settings()
             if settings and not settings.labelPerPart:
@@ -1663,6 +1681,10 @@ class RulesExporter:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "direction_runs":
             current_input = self._direction_runs(current_input, grp.recipe, grp.source_geometry)
+            if current_input is None:
+                return None
+        elif grp.recipe is not None and grp.recipe.kind == "label_windows":
+            current_input = self._label_windows(current_input, grp)
             if current_input is None:
                 return None
 
@@ -2387,6 +2409,111 @@ class RulesExporter:
         del writer
         return out if written else None
 
+    def _label_windows(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
+        """Worker: repeated curved line labels laid out at the recipe's zoom
+        as QGIS lays them out (core/label_lines.py): one short line per
+        label, along its characters and inside one tile, with the feature's
+        fields; MapLibre centres the label on it ("line-center")."""
+        from qgis.core import NULL, QgsFeature, QgsFields, QgsLineString, QgsPoint  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QFont, QFontMetrics, QFontMetricsF  # pylint: disable=import-outside-toplevel
+        recipe = grp.recipe
+        text = next((expr for _, expr, name in grp.expression_fields
+                     if name == f"{_FIELD_PREFIX}_label"), None)
+        layer = self._open(source, "windows")
+        if not text or layer is None or not layer.isValid():
+            return None
+        expression = QgsExpression(text)
+        context = self._worker_expression_context()
+        context.appendScope(QgsExpressionContextUtils.layerScope(layer))
+        expression.prepare(context)
+        zoom, size = int(recipe.param("zoom")), float(recipe.param("size"))
+        fit, chop = float(recipe.param("fit", 1.0)), float(recipe.param("chop", 1.0))
+        # The advances MapLibre lays the label out with: the glyphs'
+        # (GlyphGenerator: whole pixels of a 24 px em) and the letter spacing
+        # between them.
+        font = QFont()
+        font.fromString(recipe.param("font"))
+        font.setPixelSize(24)
+        metrics = QFontMetrics(font)
+        spacing = float(recipe.param("spacing", 0.0)) * size
+        transform = recipe.param("transform", "none")
+        # pal's candidate step: a sixth of the text height, or the engine's
+        # line candidates per centimetre (at 96 dpi), whichever is longer.
+        per_cm = float(recipe.param("candidates_per_cm", 5.0)) or 5.0
+        step = max(QFontMetricsF(font).height() * size / 24 / 6, 10.0 * 96 / 25.4 / per_cm)
+        settings = dict(repeat=float(recipe.param("repeat")), step=step,
+                        max_in=float(recipe.param("max_in", 25.0)),
+                        max_out=float(recipe.param("max_out", -25.0)),
+                        max_angle=float(recipe.param("max_angle", 25.0)),
+                        angle_window=0.6 * size * fit, anchor=float(recipe.param("anchor", 0.5)),
+                        margin=max(2.0, 0.25 * size * fit))
+        widths: Dict[str, List[float]] = {}
+
+        def advances(label: str) -> List[float]:
+            if label not in widths:
+                shown = label.upper() if transform == "uppercase" else \
+                    label.lower() if transform == "lowercase" else label
+                drawn = [char for char in shown.strip() if metrics.inFontUcs4(ord(char))]
+                widths[label] = [metrics.horizontalAdvance(char) * size / 24
+                                 + (spacing if i < len(drawn) - 1 else 0.0)
+                                 for i, char in enumerate(drawn)]
+            return widths[label]
+
+        # QGIS labels only the longest part of a feature unless every part
+        # is labelled (the base layer has the parts as features).
+        orig = layer.fields().indexFromName(f"{_FIELD_PREFIX}_orig_id")
+        chosen = None
+        if not recipe.param("per_part") and orig >= 0:
+            longest: Dict[Any, Tuple[float, int]] = {}
+            for feature in layer.getFeatures():
+                length = feature.geometry().length() if feature.hasGeometry() else 0.0
+                key = feature.attribute(orig)
+                if key not in longest or length > longest[key][0]:
+                    longest[key] = (length, feature.id())
+            chosen = {fid for _, fid in longest.values()}
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        out = self._temp_path("windows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.LineString, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        world = 2 * math.pi * 6378137.0  # EPSG:3857 metres -> CSS px of the zoom
+        pixel, half = world / (512.0 * 2 ** zoom), world / 2
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            if (chosen is not None and feature.id() not in chosen) or not feature.hasGeometry():
+                continue
+            context.setFeature(feature)
+            value = expression.evaluate(context)
+            if expression.hasEvalError() or value is None or value == NULL:
+                continue
+            drawn = advances(str(value))
+            if not drawn:
+                continue
+            for part in feature.geometry().constParts():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                xs = [(line.xAt(i) + half) / pixel for i in range(line.numPoints())]
+                ys = [(half - line.yAt(i)) / pixel for i in range(line.numPoints())]
+                for window in label_lines.label_windows(
+                        xs, ys, [width * fit for width in drawn],
+                        chop_width=sum(drawn) * chop, **settings):
+                    out_feature = QgsFeature(fields)
+                    for field in fields:
+                        out_feature[field.name()] = feature[field.name()]
+                    out_feature.setGeometry(QgsGeometry(QgsLineString(
+                        [QgsPoint(x * pixel - half, half - y * pixel) for x, y in window])))
+                    writer.addFeature(out_feature)
+                    written += 1
+        del writer
+        return out if written else None
+
     @staticmethod
     def _painter_visible(shapes, shifts, target: int):
         """The visible part of fill layer ``target`` of each shape when every
@@ -2610,6 +2737,187 @@ class RulesExporter:
         return self.processed_layers, successful_rules
 
     # -------------------------------------------------------------------
+    # Feature order across rules (caller thread, after the datasets)
+    # -------------------------------------------------------------------
+    def _keep_feature_order(self, rules: List[FlattenedRule]) -> List[FlattenedRule]:
+        """``rules`` with feature-order strata (fidelity.feature_order): a
+        feature QGIS draws above an overlapping feature of a later rule is
+        drawn by a copy of its rule's style layers in a higher stratum. Only
+        the style changes (filters on the original feature id); datasets,
+        tiles and the export cache stay as they are."""
+        by_layer: Dict[str, List[FlattenedRule]] = {}
+        for rule in rules:
+            if rule.get_attr("t") == 0:
+                by_layer.setdefault(rule.layer.id(), []).append(rule)
+        copies: List[FlattenedRule] = []
+        for layer_rules in by_layer.values():
+            if self._is_cancelled():
+                break
+            try:
+                lifted = self._feature_strata(layer_rules)
+            except Exception:  # noqa: BLE001  (the layer keeps rule order)
+                self.feedback.reportError(
+                    f"Feature order of '{layer_rules[0].layer.name()}' not kept:\n"
+                    f"{traceback.format_exc()}")
+                continue
+            copies.extend(self._lift_features(layer_rules, lifted))
+        return rules + copies
+
+    def _feature_strata(self, rules: List[FlattenedRule]) -> Dict[int, Dict[Tuple[int, int], int]]:
+        """{pass: {(feature id, rule): stratum > 0}} of one layer's renderer
+        rules (order key: -layer, pass, stratum, rule, ...); {} when the layer
+        keeps rule order."""
+        layer = rules[0].layer
+        renderer = layer.renderer()
+        if renderer is None or _enum_value(layer.geometryType()) not in (1, 2):
+            return {}  # markers overlap by their size on screen
+        try:
+            levels = not isinstance(renderer, QgsRuleBasedRenderer) and renderer.usingSymbolLevels()
+        except (AttributeError, RuntimeError):
+            levels = True
+        # Symbol levels draw symbol by symbol, as the style layers do; merged,
+        # grouped, heatmap and inner-effect drawings are not per feature.
+        if levels or any(r.merge or r.heatmap or r.point_group or r.inner_effect or len(r.order) < 5
+                         for r in rules):
+            return {}
+        passes: Dict[int, Dict[int, List[FlattenedRule]]] = {}
+        for rule in rules:
+            passes.setdefault(rule.order[1], {}).setdefault(rule.order[3], []).append(rule)
+        # The datasets of what each rule draws on the map: polygons before
+        # lines (an outline lies on its polygon), plain before materialized.
+        footprints: Dict[int, Dict[int, List[str]]] = {}
+        for draw_pass, by_seq in passes.items():
+            names = {}
+            for seq, components in by_seq.items():
+                shapes = {r.output_dataset: r for r in components if r.get_attr("c") in (1, 2)}
+                names[seq] = [r.output_dataset for r in sorted(shapes.values(), key=lambda r: (
+                    -r.get_attr("c"), r.recipe is not None, bool(r.pre_generator), r.output_dataset))]
+            # One rule only, or a rule drawn only with markers: rule order.
+            if len(names) > 1 and all(names.values()):
+                footprints[draw_pass] = names
+        datasets = {name: _open_file(join(self.utils_dir, f"{name}.{_TEMP_RULE_FORMAT}"), name,
+                                     self._transform_context)
+                    for names in footprints.values() for group in names.values() for name in group}
+        count = sum(d.featureCount() for d in datasets.values() if d.isValid())
+        if count > fo.MAX_FEATURES:
+            self.diagnostics.add(
+                "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                f"Layer '{layer.name()}': {count} features are too many to check; overlapping "
+                "features of different rules are drawn in rule order.",
+                severity=Severity.INFO, layer_id=layer.id())
+            return {}
+        rows = {name: self._feature_footprints(dataset) for name, dataset in datasets.items()}
+        del datasets
+        # Overlaps narrower than about a tile unit at the last zoom: slivers
+        # between neighbours simplified apart (or invisible).
+        margin = self._simplification_tolerance() / _DATA_SIMPLIFICATION_TOLERANCE
+        drawn: Dict[int, list] = {}
+        for draw_pass, names in footprints.items():
+            parts: Dict[Tuple[int, int], list] = {}
+            ranks: Dict[int, float] = {}
+            for seq, group in names.items():
+                source: Dict[int, str] = {}  # one dataset per feature (zoom splits repeat it)
+                for name in group:
+                    for fid, rank, geometry in rows[name]:
+                        if source.setdefault(fid, name) == name:
+                            ranks.setdefault(fid, rank)
+                            parts.setdefault((fid, seq), []).append(geometry)
+            # QGIS's drawing order: feature by feature (request order), each
+            # with its rules in order.
+            keys = sorted(parts, key=lambda key: (ranks[key[0]], key))
+            drawn[draw_pass] = [(fid, seq, parts[(fid, seq)][0] if len(parts[(fid, seq)]) == 1
+                                 else QgsGeometry.collectGeometry(parts[(fid, seq)]))
+                                for fid, seq in keys]
+
+        def lift(touching_lines: bool):
+            result = {}
+            for draw_pass, items in drawn.items():
+                lifted = fo.strata(items, margin, touching_lines)
+                if lifted:
+                    result[draw_pass] = lifted
+            total = sum(len(lifted) for lifted in result.values())
+            top = max((s for lifted in result.values() for s in lifted.values()), default=0)
+            return result, total, top, total <= fo.MAX_LIFTED and top <= fo.MAX_STRATA
+
+        result, total, top, fits = lift(True)
+        lines = any(_enum_value(geometry.type()) == 1
+                    for items in drawn.values() for _, _, geometry in items)
+        if not fits and lines:
+            # Lines that only touch (ways ending at a junction) lift far more
+            # features than crossings: keep at least the crossings' order.
+            crossing, _, _, crossing_fits = lift(False)
+            if crossing_fits:
+                self.diagnostics.add(
+                    "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                    f"Layer '{layer.name()}': too many lines of different rules meet ({total} "
+                    f"feature(s) in {top} strata; the export keeps up to {fo.MAX_LIFTED} features "
+                    f"in {fo.MAX_STRATA} strata): lines that cross keep QGIS's drawing order, "
+                    "lines that only touch (at junctions) are drawn in rule order.",
+                    severity=Severity.INFO, layer_id=layer.id())
+                return crossing
+        if not fits:
+            self.diagnostics.add(
+                "Q2VT_FEATURE_ORDER_ACROSS_RULES",
+                f"Layer '{layer.name()}': {total} feature(s) that QGIS draws above overlapping "
+                f"features of later rules stay below them ({top} strata; the export keeps up to "
+                f"{fo.MAX_LIFTED} features in {fo.MAX_STRATA} strata).",
+                layer_id=layer.id())
+            return {}
+        return result
+
+    @staticmethod
+    def _feature_footprints(dataset) -> List[tuple]:
+        """(original feature id, drawing rank, geometry) of a dataset's rows."""
+        if not dataset.isValid():
+            return []
+        fields = dataset.fields()
+        id_index = fields.indexFromName(fo.ID_FIELD)
+        rank_index = fields.indexFromName(ORDER_FIELD)
+        if id_index < 0:
+            return []
+        request = QgsFeatureRequest().setSubsetOfAttributes(
+            [i for i in (id_index, rank_index) if i >= 0])
+        rows = []
+        for feature in dataset.getFeatures(request):
+            geometry = feature.geometry()
+            try:
+                fid = int(feature.attribute(id_index))
+            except (TypeError, ValueError):
+                continue
+            if geometry.isEmpty():
+                continue
+            try:  # the renderer's order-by rank, else the source order
+                rank = float(feature.attribute(rank_index)) if rank_index >= 0 else fid
+            except (TypeError, ValueError):
+                rank = fid
+            rows.append((fid, rank, geometry))
+        return rows
+
+    @staticmethod
+    def _lift_features(rules: List[FlattenedRule],
+                       lifted: Dict[int, Dict[Tuple[int, int], int]]) -> List[FlattenedRule]:
+        """Copies of the components of each rule with lifted features, one
+        per stratum ("_kNN" style names, owned by the rule in publishing),
+        drawing only those features; the rule itself draws the others."""
+        copies = []
+        for draw_pass, pairs in sorted(lifted.items()):
+            by_seq: Dict[int, Dict[int, List[int]]] = {}
+            for (fid, seq), stratum in pairs.items():
+                by_seq.setdefault(seq, {}).setdefault(stratum, []).append(fid)
+            for rule in rules:
+                strata = by_seq.get(rule.order[3]) if rule.order[1] == draw_pass else None
+                if not strata:
+                    continue
+                for stratum, ids in sorted(strata.items()):
+                    copy = rule.derive()
+                    copy.rule.setDescription(fo.copy_name(rule.rule.description(), stratum))
+                    copy.order = rule.order[:2] + (stratum,) + rule.order[3:]
+                    copy.feature_filter = fo.only(ids)
+                    copies.append(copy)
+                rule.feature_filter = fo.without(fid for ids in strata.values() for fid in ids)
+        return copies
+
+    # -------------------------------------------------------------------
     # Worker-safe processing runner
     # -------------------------------------------------------------------
     def _run_alg_safe(
@@ -2630,6 +2938,27 @@ class RulesExporter:
         context = self._processing_context()
         feedback = QgsProcessingFeedback()
         full_name = f"{algorithm_type}:{algorithm}"
+        key = _EXPRESSION_PARAMETERS.get(algorithm) if algorithm_type == "native" else None
+        if key and isinstance(params.get(key), str) and params[key].strip():
+            # An expression that fails on one feature (text in a numeric
+            # field...): QGIS skips that value - the property keeps its
+            # default, the rule does not match, no label or generated
+            # geometry - while the algorithm would abort the whole step. (The
+            # line break keeps a trailing "--" comment from eating the ")".)
+            # A value a numeric field cannot hold (text in a rotation field)
+            # is NULL too: the writer dropped the whole feature (its label).
+            cast = {0: "to_real", 1: "to_int"}.get(params.get("FIELD_TYPE")) \
+                if algorithm == "fieldcalculator" else None
+            params[key] = f"try({cast}({params[key]}\n))" if cast else f"try({params[key]}\n)"
+        if algorithm == "refactorfields" and algorithm_type == "native":
+            def safe(field):
+                expression = str(field.get("expression") or "")
+                if not expression.strip():
+                    return field
+                cast = {6: "to_real", 2: "to_int", 4: "to_int"}.get(field.get("type"))
+                wrapped = f"try({cast}({expression}\n))" if cast else f"try({expression}\n)"
+                return {**field, "expression": wrapped}
+            params["FIELDS_MAPPING"] = [safe(field) for field in params.get("FIELDS_MAPPING") or []]
         if self._memory_active:
             return self._run_in_memory(full_name, params, context, feedback)
 
@@ -2910,6 +3239,14 @@ class RulesExporter:
         return fields
 
     @staticmethod
+    def _with_label_text(filter_expression: str, text: str) -> str:
+        """QGIS draws nothing for a label whose text is NULL or empty, not
+        even its background shape; MapLibre would draw the shape (or an
+        icon) alone. Such features are left out of the label dataset."""
+        condition = f"coalesce(to_string({text}), '') <> ''"
+        return f"({filter_expression}) AND {condition}" if filter_expression else condition
+
+    @staticmethod
     def _substituted(expression: str, substitutions) -> str:
         """The label text with QGIS's text replacements applied, in order
         (``QgsStringReplacement::process``): plain replacements honour the
@@ -2975,7 +3312,7 @@ class RulesExporter:
 
     @staticmethod
     def _layer_point_expression(x: str, y: str, layer_crs: str) -> str:
-        point = f"make_point({x}, {y})"
+        point = f"make_point(to_real({x}), to_real({y}))"
         export_crs = f"EPSG:{_EPSG_CRS}"
         if not layer_crs or layer_crs == export_crs:
             return point
@@ -2999,12 +3336,10 @@ class RulesExporter:
         (kept upright), above/below/on the point as the placement flags say.
         """
         settings = flat_rule.rule.settings()
-        if settings is None or flat_rule.get_attr("g") != 1 or \
+        if settings is None or flat_rule.get_attr("g") not in (1, 2) or \
                 settings.geometryGeneratorEnabled or self._pinned_position(settings):
             return
-        placement = getattr(settings.placement, "value", settings.placement)
-        if int(placement) not in (int(Qgis.LabelPlacement.Line),
-                                  int(Qgis.LabelPlacement.Curved)):
+        if not self._labels_along_line(flat_rule):
             return
         if float(settings.repeatDistance or 0) > 0:
             return
@@ -3012,12 +3347,14 @@ class RulesExporter:
             flags = int(settings.lineSettings().placementFlags())
         except (AttributeError, TypeError):
             flags = 1
-        side = "on" if flags & 1 or not flags & 6 else ("above" if flags & 2 else "below")
+        from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+        side = TextPropertyExtractor.side_of(
+            flags, TextPropertyExtractor.placement_name(settings) in ("Curved", "PerimeterCurved"))
         quadrant = {"on": Qgis.LabelQuadrantPosition.Over,
                     "above": Qgis.LabelQuadrantPosition.Above,
                     "below": Qgis.LabelQuadrantPosition.Below}[side]
         rotation = (
-            f"with_variable('q2vt_l', {self._LONGEST_PART}, with_variable('q2vt_a', "
+            f"with_variable('q2vt_l', {self._label_line(flat_rule)}, with_variable('q2vt_a', "
             f"line_interpolate_angle(@q2vt_l, length(@q2vt_l) / 2) - 90, "
             f"if(@q2vt_a > 90, @q2vt_a - 180, if(@q2vt_a <= -90, @q2vt_a + 180, @q2vt_a))))")
         settings.placement = Qgis.LabelPlacement.OverPoint
@@ -3029,13 +3366,47 @@ class RulesExporter:
             QgsPalLayerSettings.Property.LabelRotation, QgsProperty.fromExpression(rotation))
         flat_rule.line_label_midpoint = True
 
+    # Exterior ring of the largest part of a (multi)polygon: the outline a
+    # QGIS perimeter label follows (pal labels the largest part).
+    _LARGEST_RING = (
+        "exterior_ring(if(is_multipart(@geometry), geometry_n(@geometry, "
+        "array_find(array_foreach(generate_series(1, num_geometries(@geometry)), "
+        "area(geometry_n(@geometry, @element))), array_max(array_foreach("
+        "generate_series(1, num_geometries(@geometry)), area(geometry_n(@geometry, "
+        "@element))))) + 1), @geometry))")
+    # Exterior rings of every part ("Label every part of multi-part features").
+    _EXTERIOR_RINGS = (
+        "if(is_multipart(@geometry), collect_geometries(array_foreach(generate_series(1, "
+        "num_geometries(@geometry)), exterior_ring(geometry_n(@geometry, @element)))), "
+        "exterior_ring(@geometry))")
+
+    @staticmethod
+    def _labels_along_line(flat_rule: FlattenedRule) -> bool:
+        """A label that follows its line: line and curved line labels, and
+        polygon labels "Using perimeter" (Line) or "Using perimeter (curved)"."""
+        settings = flat_rule.rule.settings()
+        if settings is None:
+            return False
+        placement = int(getattr(settings.placement, "value", settings.placement))
+        if flat_rule.get_attr("g") == 2:
+            return placement in (int(Qgis.LabelPlacement.Line),
+                                 int(Qgis.LabelPlacement.PerimeterCurved))
+        return placement in (int(Qgis.LabelPlacement.Line), int(Qgis.LabelPlacement.Curved))
+
+    def _label_line(self, flat_rule: FlattenedRule) -> str:
+        """The line a label drawn once per feature is placed on: the longest
+        part of a line, the outline of a polygon's largest part."""
+        return self._LARGEST_RING if flat_rule.get_attr("g") == 2 else self._LONGEST_PART
+
     def _get_labeling_transformation(self, flat_rule: FlattenedRule):
+        if flat_rule.recipe is not None and flat_rule.recipe.kind == "label_windows":
+            return [1, "@geometry"]  # windows built by _label_windows
         settings = flat_rule.rule.settings()
         target_geom = flat_rule.get_attr("g")
         transform_expr = "@geometry"
         if getattr(flat_rule, "line_label_midpoint", False):
             flat_rule.set_attr("c", 0)
-            return [0, f"with_variable('q2vt_l', {self._LONGEST_PART}, "
+            return [0, f"with_variable('q2vt_l', {self._label_line(flat_rule)}, "
                        f"line_interpolate_point(@q2vt_l, length(@q2vt_l) / 2))"]
         pinned = self._pinned_position(settings)
         if pinned is not None:
@@ -3050,6 +3421,12 @@ class RulesExporter:
                 settings.geometryGenerator, flat_rule)
             settings.geometryGeneratorEnabled = False
             flat_rule.set_attr("c", target_geom)
+        elif target_geom == 2 and self._labels_along_line(flat_rule):
+            # A perimeter label repeated along the outline: the rings, as
+            # lines (a centroid has no line for MapLibre's line placement).
+            flat_rule.set_attr("c", 1)
+            target_geom = 1
+            transform_expr = self._EXTERIOR_RINGS if settings.labelPerPart else self._LARGEST_RING
         elif target_geom == 2:
             # A label on the visible part: the static point (for clients
             # without the viewer's visible-polygon labels) lies in the part
@@ -3117,7 +3494,11 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":
-            return [2, "@geometry"]  # polygons built by _arrow_polygons
+            # Polygons built by _arrow_polygons; the arrow's outline
+            # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
+            if flat_rule.get_attr("c") == 1:
+                return [1, "boundary(@geometry)"]
+            return [2, "@geometry"]
         if recipe is not None and recipe.kind == "direction_runs":
             return [1, "@geometry"]  # runs built by _direction_runs
         if recipe is not None and recipe.kind == "simplified":
@@ -3217,9 +3598,10 @@ class RulesExporter:
             rule.visible_polygons = name
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
             rule.visible_kind = "line"
+        lines = self._EXTERIOR_RINGS if flat_rule.get_attr("g") == 2 else "@geometry"
         return dataclasses.replace(
             label, output_dataset=name, geometry_target=1,
-            geometry_expression=self._clip_to_extent("@geometry"),
+            geometry_expression=self._clip_to_extent(lines),
             description=label.description, flat_rules=[], visible_polygons=True)
 
     @staticmethod

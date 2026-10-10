@@ -184,20 +184,24 @@ _TILED: "OrderedDict" = None  # (marker, cell, positions) -> cell image (tile_ma
 _TILED_MAX = 48
 
 
-def tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
+def tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True,
+                 snap: bool = False):
     """``_tile_markers``, remembered: the same pattern cell is asked for at
     several zoom levels and by several styles (96 calls, 19 cells in a big
-    project), each a few thousand markers composited one by one."""
+    project), each a few thousand markers composited one by one. ``snap``:
+    each marker on whole pixels, as QPainter::drawImage puts QGIS's cached
+    simple-marker image (supersampling smeared those dots over a pixel)."""
     global _TILED  # pylint: disable=global-statement
     import hashlib  # pylint: disable=import-outside-toplevel
     from collections import OrderedDict  # pylint: disable=import-outside-toplevel
     if _TILED is None:
         _TILED = OrderedDict()
     key = (hashlib.sha1(marker.tobytes()).hexdigest(), marker.mode, marker.size, int(cell_w), int(cell_h),
-           tuple((float(x), float(y)) for x, y in positions), bool(wrap))
+           tuple((float(x), float(y)) for x, y in positions), bool(wrap), bool(snap))
     cell = _TILED.get(key)
     if cell is None:
-        cell = _TILED[key] = _tile_markers(marker, cell_w, cell_h, positions, wrap)
+        cell = _TILED[key] = (_paste_markers(marker, cell_w, cell_h, positions, wrap, qt_round=True)
+                              if snap else _tile_markers(marker, cell_w, cell_h, positions, wrap))
         while len(_TILED) > _TILED_MAX:
             _TILED.popitem(last=False)
     else:
@@ -229,8 +233,11 @@ def _tile_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True
     return cell.resize((max(1, cell_w), max(1, cell_h)), Image.BOX)
 
 
-def _paste_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True):
-    """``tile_markers`` with every marker rounded to whole pixels."""
+def _paste_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = True,
+                   qt_round: bool = False):
+    """``tile_markers`` with every marker rounded to whole pixels; ``qt_round``:
+    halves rounded up, like Qt's qRound (Python rounds them to even, which
+    alternates on the x.5 positions odd-sized marker images always have)."""
     from PIL import Image  # pylint: disable=import-outside-toplevel
 
     cell = Image.new("RGBA", (max(1, cell_w), max(1, cell_h)), (0, 0, 0, 0))
@@ -239,8 +246,12 @@ def _paste_markers(marker, cell_w: int, cell_h: int, positions, wrap: bool = Tru
     for x, y in positions:
         for wx in shifts_x:
             for wy in shifts_y:
-                left = int(round(x + wx - half_w))
-                top = int(round(y + wy - half_h))
+                if qt_round:
+                    left = math.floor(x + wx - half_w + 0.5)
+                    top = math.floor(y + wy - half_h + 0.5)
+                else:
+                    left = int(round(x + wx - half_w))
+                    top = int(round(y + wy - half_h))
                 if left >= cell_w or top >= cell_h or left + marker.width <= 0 \
                         or top + marker.height <= 0:
                     continue
@@ -324,15 +335,24 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     if shape == "ellipse":
         draw.ellipse(box, fill=fill, outline=outline, width=width)
     else:
-        draw.rounded_rectangle(box, radius=radius * scale, fill=fill, outline=outline,
+        # QGIS strokes the rounded rectangle centred on its outline: the
+        # outer edge has the radius plus half the stroke (PIL's radius is
+        # the outer one).
+        outer = radius + edge / 2 if radius > 0 else 0.0
+        draw.rounded_rectangle(box, radius=outer * scale, fill=fill, outline=outline,
                                width=width)
-    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.LANCZOS)
+    # Area average of the supersampled image (Lanczos overshoots: a darker
+    # stroke with a light line just inside it).
+    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.BOX)
     metadata = {}
     if shape != "ellipse" and not size_px:
         fixed = math.ceil(radius + edge) + 1
+        # QGIS strokes the frame's outline centred on it: the text box plus
+        # the buffer reaches to the middle of the border.
+        inset = edge / 2.0
         metadata = {"stretchX": [[fixed, logical - fixed]],
                     "stretchY": [[fixed, logical - fixed]],
-                    "content": [edge, edge, logical - edge, logical - edge]}
+                    "content": [inset, inset, logical - inset, logical - inset]}
     return out, metadata
 
 

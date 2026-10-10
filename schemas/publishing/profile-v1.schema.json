@@ -217,7 +217,8 @@
           "enum": [
             "local",
             "r2",
-            "s3"
+            "s3",
+            "ssh"
           ]
         },
         "accountId": {
@@ -249,6 +250,26 @@
         },
         "conditionalWrites": {
           "type": "boolean"
+        },
+        "host": {
+          "type": "string",
+          "description": "SSH / SFTP server"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "type": "string"
+        },
+        "remoteDir": {
+          "type": "string",
+          "description": "SSH: the folder the site is written into (not versioned)"
+        },
+        "identityFile": {
+          "type": "string",
+          "description": "SSH: private key file on this computer (a path, never the key)"
         }
       }
     },

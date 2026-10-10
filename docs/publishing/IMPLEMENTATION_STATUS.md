@@ -766,7 +766,8 @@ trademark found, and every checked domain was free; checked 4 Oct 2026).
 - **Test:** `tests/integration/test_label_font_style.py`.
 - **README demo:**
   - `docs/images/qwebmap-demo.gif` and `docs/images/qgis-vs-web.png`, made from the QGIS
-    training data (Swellendam, GPL-2.0).
+    training data (Swellendam, GPL-2.0). Replaced in 4.31.0 by the showcase video
+    (`docs/media/qwebmap-showcase.mp4`), its GIF and new screenshots in `docs/images/`.
   - Frames come from QGIS renders, the Publish window (`grab()`, after a real *Export locally*)
     and the exported viewer (Playwright).
   - The README leads with the symbology conversion.
@@ -1642,7 +1643,43 @@ feature-lookup shards.
   a 224 KB manifest (64 KB gzip), queries load 9–42 KB (gzip).
 - Publish window: *Draw…* next to *Map canvas* (`gui/extent_tool.py`, a `QgsMapToolExtent`):
   the window steps aside, a dragged rectangle (map canvas CRS → EPSG:3857) becomes the fixed
-  extent; Esc or another map tool cancels; the previous map tool comes back.
+  extent; Esc or another map tool cancels; the previous map tool comes back. From 4.31.0 the
+  tool is a `QgsMapTool` drawn by two clicks (first corner, opposite corner; a rubber band in
+  the canvas CRS in between; press-drag-release still works), with the canvas snapping
+  (`QgsMapMouseEvent.snapPoint`, snap indicator), step hints in the QGIS status bar, and right
+  click as another way to cancel. Click or drag is decided on the unsnapped screen position:
+  the press on the first corner is a drag only when it is released at least 20 px (across
+  plus down; more than `QApplication.startDragDistance()`; QGIS's zoom tool uses 20 too)
+  from where it went down, otherwise it is a click whose release slipped; a later click less
+  than `startDragDistance()` (10 px by default) from the first corner is ignored, and so is
+  a rectangle under 4 px wide or high, measured in map units (`mapUnitsPerPixel()`), so a
+  rotated canvas is measured right too. A double click before the first corner is no corner:
+  its first click was not on the map (*Draw…* double-clicked: the window steps aside at the
+  first click and Qt sends the second one to the map as a double click). The tool goes only
+  once the left and right buttons are up: right click or Esc while a button is down cancels
+  at the release, and a left release while the right button is down is no corner (that right
+  click is a cancel on its way). (While a mouse button is down, or while the map is panned
+  with Space or the middle button, the canvas gives keys only to its `keyPressed` signal, not
+  to the map tool's `keyPressEvent`; otherwise to both. The tool listens to both, so Esc
+  also cancels during such a pan.) A short-lived event filter on the canvas viewport eats the
+  rest of a double click on the last corner, so the tool that comes back (Pan: zoom in,
+  re-centre) gets none of the gesture; if that double click's release is lost (a broken
+  mouse grab), the filter ends at the next press of that button or the first mouse event
+  with it up. Done, the tool deletes itself (`deleteLater`, also when `done` raises; the
+  canvas is its parent and would keep one per drawing, which a right click in a transient
+  map tool could bring back). An area EPSG:3857 cannot take (beyond the poles on a map in
+  degrees: `transformBoundingBox` raises `QgsCsException`) leaves the extent unchanged, with
+  a note in the window's status line; the same for *Map canvas*. The
+  window gives the map canvas the keyboard focus (Esc before the first click), takes its
+  message bar notice back when the drawing ends, clears the status bar only if it still shows
+  the tool's hint (the hint is shown again on mouse moves after a QGIS status tip replaced
+  it), and comes back `QApplication.doubleClickInterval()` after the drawing, so the rest of a
+  double click on the last corner cannot click a button in it. Opening the window again (Web
+  menu) or closing it (also when the plugin is unloaded) while drawing gives the drawing up
+  and brings the previous map tool back. Tests:
+  `tests/integration/test_publish_dialog_extent.py` (synthetic `QgsMapMouseEvent`s, and mouse
+  and key events sent through the canvas viewport, on an offscreen canvas),
+  `test_publish_dialog.py`.
 - The action is in the Web menu itself (`iface.webMenu().addAction`), named
   "QWebMap: Publish Web Map…", not in a QWebMap submenu.
 
@@ -1725,3 +1762,107 @@ and in the browser view by view.
 | Showcase project, QGIS vs browser | shapeburst water and river labels now match |
 | Tests (full suite, each file in its own process) | 707 passed, 5 skipped |
 
+
+## 4.31.0: SSH / SFTP server destination (one folder, not versioned)
+
+Owner request: an ssh/scp uploader for publishing that does not upload versioned, but always
+into the folder the user gives.
+
+- `DestinationConfig` kind `ssh` with `host`, `port` (22), `user`, `remoteDir`, `identityFile`
+  (a path, never a key); `publicBaseUrl` is the folder's optional address. Validated in
+  `profile.ssh_problems` (nothing can become an ssh option; not the server's root; PMTiles
+  required), part of the review fingerprint, in the profile JSON Schema.
+- `providers/ssh.py`: the system OpenSSH client (`sftp -b`, one process per session; on Windows
+  also `%SystemRoot%\System32\OpenSSH`), batch arguments quoted for sftp's own parser (spaces,
+  quotes, backslashes, glob characters, non-ASCII), `BatchMode=yes` for keys / ssh-agent, a
+  password or passphrase only through a temporary askpass helper reading the sftp process's
+  environment (`SSH_ASKPASS_REQUIRE=force`; `BatchMode=no` given before `-b`, as ssh keeps the
+  first value), `StrictHostKeyChecking=accept-new`, progress from sftp's echo of each batch line
+  weighted by bytes, cancel stops the process group, errors classified (client missing, login
+  refused, unknown / unreachable host, host key changed, folder not creatable, permission
+  denied, connection lost).
+- `folder_publish.py`: the release folder's content (as in the offline ZIP) written straight
+  into the folder. One session reads `.q2vt-files.json` (path → SHA-256, size of what QWebMap
+  uploaded), creates the folder and checks write access and posix-rename; a second writes the
+  state with the changing files marked unknown, uploads new / changed files to temporary names,
+  renames them over their targets (`index.html` last; without posix-rename a delete first),
+  deletes only files the previous state lists, removes folders left empty, writes the final
+  state. With a public URL the folder is verified like an R2 release (`verify_release`);
+  problems there are warnings, as the files are already live.
+- Publish window: *SSH / SFTP server* in *Destination* with its own rows (server, port, user,
+  folder, key file, session password + *Save in QGIS…*); bucket, prefix, keys, retention,
+  conditional writes, CORS and *Releases and rollback…* hidden for it; a pasted
+  `user@server:/folder` or `sftp://` address fills the rows; *Test connection* creates the folder
+  and writes / deletes a test file; the SSH password never goes into the settings file.
+- The Publish window has no Qt translation files (its strings go through `tr()` only), so there
+  is no Hungarian text to add for the new rows.
+
+Review fixes (same feature, before release):
+
+- The saved login and the public URL are kept per destination family in the window (SSH vs
+  R2 / S3): switching kinds never hands R2 keys to ssh (as user and password) or the SSH
+  password to S3 signing, and never keeps the R2 domain as the folder's URL. The hidden bucket
+  prefix no longer blocks SSH settings; the fingerprint of an SSH destination leaves bucket and
+  prefix out.
+- The first session also lists the folder and the site's subfolders (`ls -lan`, one session):
+  listed files that are missing or have another size there are uploaded again; existing files
+  QWebMap had not uploaded are replaced (one log line counts them, as the owner wants; while
+  pending they are marked `foreign` and never deleted); folders QWebMap creates get mode 755
+  (the remote folder and its parents in a short second session), existing ones keep theirs.
+- Another publication's folder is taken over (one log line) instead of refused. A deletion that
+  fails is warned about and stays listed (a third short session rewrites the state). Without
+  posix-rename, a lone temporary state file is read when the state file itself is missing.
+- `./` before batch arguments starting with `-`; key and known_hosts paths as quoted `-o`
+  values with `%` doubled (`-i` looks for the unexpanded path), `${` refused; `/.` and `/x/..`
+  refused like `/` (`normalize_remote_dir` resolves `.` and `..`); a host with `:` must be an
+  IPv6 address; `ControlMaster=no`, `ControlPath=none`.
+- Pasted targets: only `user@host[:path]`, `host:/path`, `host:<port>` and `sftp://` are
+  parsed; a plain host or an IPv6 address stays as typed, and the window says what it filled.
+- Errors: no SFTP subsystem, a PuTTY key, a key readable by others, a non-executable askpass
+  helper; Test connection names the stage and shows ssh's own last lines for less clear
+  failures. On Windows a password with OpenSSH before 8.4 (`ssh -V`) is refused with an
+  explanation; the `.cmd` helper switches to UTF-8 (`chcp 65001`).
+- Closing the window saves the settings only when they are valid (an invalid profile would not
+  load next time, and the window would start from defaults). A selected QGIS authentication
+  configuration that does not exist (settings from another computer) is named as such. The
+  binary leak scan ignores secrets shorter than 6 characters, as the text scan does.
+- Not changed: the viewer does not version its requests (`?v=`): ES module imports and
+  MapLibre's own requests cannot carry it, so HOSTING.md recommends `Cache-Control: no-cache`
+  for the folder instead.
+
+Second review fixes:
+
+- OpenSSH writes its error lines with `strnvis` whatever the locale (`é` as `\303\251`, a
+  backslash doubled), and in a non-UTF-8 locale `pwd` and `ls` print `\ooo` too: both are
+  decoded (`unvis`, `unescape_output`), so a deletion that fails in an accented folder is named,
+  stays listed and is retried, and messages show the real names. A failure sftp does not name
+  is still warned about, and then every removed file stays listed for the next publish.
+- The public URL's path is percent-encoded (a space or accented letters in the folder's
+  address); a malformed URL in the check is a warning, never a failed publish (`Http.request`
+  turns `ValueError` / `HTTPException` into `PublishingError`). A URL ending in `index.html`
+  and a `.pub` key file are refused with what to choose instead.
+- `-P` only for a port other than 22, so a `Port` of `~/.ssh/config` for the host applies.
+- A file of the user's where the site needs a folder stops the publish before anything
+  changes (no `chmod` on it); a folder of the user's at a file's path is marked `foreign` while
+  pending, so it is never listed as QWebMap's. New folders get group write and setgid when the
+  remote folder has them (a team folder), else 755.
+- Window: Test connection opens the saved login (master password) and shows its message
+  without the busy cursor; a web address pasted into *SSH server* stays as typed; *Save in
+  QGIS…* needs no user name; exporting SSH settings says the password is left out; an SSH
+  password found in the map's files gets its own explanation; on Windows the note mentions the
+  OpenSSH 8.4 need for passwords. Key paths go to ssh with `/` on Windows (clients before 8.7
+  do not undo `\\` in quotes; not tested on Windows).
+- Not changed: `SendEnv -QWEBMAP_SSH_SECRET` would not help (command-line options are read
+  before `~/.ssh/config`, so a `SendEnv` there is added afterwards; servers accept only the
+  names their `AcceptEnv` lists); the password stays in the environment of sftp / ssh as the
+  askpass design needs.
+
+| Run | Result |
+|---|---|
+| `pytest tests/unit/test_publishing_ssh.py` (OpenSSH 9.6 client and server, throwaway `sshd` on 127.0.0.1 with SFTP umask 027) | 45 passed |
+| `pytest tests/integration/test_publish_dialog_ssh.py` | 6 passed |
+| `test_publishing_profile`, `test_publishing_providers`, `test_publishing_validation`, `test_publishing_preview_server`, `test_publish_dialog`, `test_publish_dialog_r2`, `test_publish_dialog_extent`, `test_publish_dialog_layers` | 30, 16, 28, 17, 7, 3, 8, 6 passed |
+
+Not verified here: Windows (askpass `.cmd` helper and its UTF-8 output, the `ssh -V` check,
+`System32\OpenSSH` lookup, the listing of non-ASCII names by Win32-OpenSSH) and non-OpenSSH
+SFTP servers (the non-atomic replace path is covered by unit tests of the batch only).

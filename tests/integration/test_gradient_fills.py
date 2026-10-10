@@ -8,10 +8,10 @@ import sys
 
 import numpy as np
 import pytest
-from qgis.core import (Qgis, QgsFeatureRequest, QgsFillSymbol, QgsGradientColorRamp, QgsGradientFillSymbolLayer, QgsGradientStop,
-                       QgsLineSymbol, QgsShapeburstFillSymbolLayer, QgsSimpleLineSymbolLayer,
-                       QgsSingleSymbolRenderer)
-from qgis.PyQt.QtGui import QColor
+from qgis.core import (Qgis, QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsGradientColorRamp, QgsGradientFillSymbolLayer,
+                       QgsGradientStop, QgsLineSymbol, QgsPointXY, QgsRectangle, QgsShapeburstFillSymbolLayer,
+                       QgsSimpleLineSymbolLayer, QgsSingleSymbolRenderer)
+from qgis.PyQt.QtGui import QColor, QTransform
 
 from q2vt_render import render
 
@@ -30,7 +30,7 @@ def _pixels(image):
     return np.frombuffer(ptr, np.uint8).reshape(image.height(), image.width(), 4)[..., :3].astype(int)
 
 
-def _export(layer, tmp_path):
+def _export(layer, tmp_path, min_zoom=14):
     """Like test_materialize._export, at a few zooms (bands are per rule)."""
     from qgis.core import QgsProcessingFeedback
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
@@ -39,10 +39,10 @@ def _export(layer, tmp_path):
     from q2vt_fixtures import reset_project
     reset_project(layer)
     diags = DiagnosticCollector()
-    rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    rules = RulesFlattener(min_zoom, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     utils = tmp_path / "utils"
     utils.mkdir()
-    layers, rules = RulesExporter(rules, EXTENT, 14, 15, str(utils), 0, QgsProcessingFeedback(),
+    layers, rules = RulesExporter(rules, EXTENT, min_zoom, 15, str(utils), 0, QgsProcessingFeedback(),
                                   diagnostics=diags).export()
     by_name = {l.name(): l for l in layers}
     rendered = []
@@ -60,13 +60,19 @@ def _export(layer, tmp_path):
     return rendered, rules, diags
 
 
-def _compare(plugin, tmp_path, fill_layer):
+def _compare(plugin, tmp_path, fill_layer, scale=1.0, min_zoom=14):
+    """QGIS against the exported bands, the house scaled by ``scale`` (and
+    the view with it)."""
     from scipy import ndimage
-    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    house = QgsGeometry.fromWkt(HOUSE)
+    house.transform(QTransform.fromScale(scale, scale))
+    extent = QgsRectangle(EXTENT)
+    extent.scale(scale, QgsPointXY(0, 0))
+    layer = _layer("Polygon", [house.asWkt()], str(tmp_path / "src.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill_layer])))
-    expected = _pixels(render([layer], EXTENT))
-    rendered, rules, diags = _export(layer, tmp_path)
-    got = _pixels(render(list(reversed(rendered)), EXTENT))  # first rule = bottom band
+    expected = _pixels(render([layer], extent))
+    rendered, rules, diags = _export(layer, tmp_path, min_zoom)
+    got = _pixels(render(list(reversed(rendered)), extent))  # first rule = bottom band
     # Inside the polygon, away from its anti-aliased edge.
     inside = ndimage.binary_erosion((expected != 255).any(axis=2), iterations=2)
     diff = np.abs(expected - got).max(axis=2)
@@ -109,6 +115,18 @@ def test_colour_ramp_gradient_matches_qgis(plugin, tmp_path):
     fill.setReferencePoint2(fill.referencePoint2().__class__(1, 1))
     _, _, mean, p99 = _compare(plugin, tmp_path, fill)
     assert mean < 3.5 and p99 < 30, (mean, p99)
+
+
+def test_small_feature_keeps_its_outer_bands_at_a_low_min_zoom(plugin, tmp_path):
+    """A 30 m feature published from zoom 11 is a pixel or two wide there:
+    the band edges' clearance from its vertices (two tile units at zoom 11,
+    ~10 m) must not swallow the outer half of its gradient at every zoom."""
+    fill = QgsGradientFillSymbolLayer(QColor("#cfe8b6"), QColor("#2f6b37"),
+                                      Qgis.GradientColorSource.SimpleTwoColor, Qgis.GradientType.Radial)
+    fill.setReferencePoint1(fill.referencePoint1().__class__(0.5, 0.5))
+    fill.setReferencePoint2(fill.referencePoint2().__class__(1, 1))
+    _, _, mean, p99 = _compare(plugin, tmp_path, fill, scale=1 / 6, min_zoom=11)
+    assert mean < 3.5 and p99 < 8, (mean, p99)
 
 
 @pytest.mark.parametrize("whole", [True, False])
@@ -177,19 +195,26 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     arrow.setSubSymbol(QgsFillSymbol([shadow, top]))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     _, rules, _ = _export(layer, tmp_path)
-    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in rules]
-    shadow_rules = [r for r in rules if r.translate]
+    fills = [r for r in rules if r.get_attr("c") == 2]
+    colors = [r.rule.symbol().symbolLayer(0).color().name() for r in fills]
+    shadow_rules = [r for r in fills if r.translate]
     assert colors[0] == "#000000" and colors[-1] == "#ff7f00"
     assert shadow_rules and all(r.translate == (-1.2, 1.4, "MM") for r in shadow_rules)
     assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
-    assert all(r.translate is None for r in rules if r not in shadow_rules)
+    assert all(r.translate is None for r in fills if r not in shadow_rules)
+    # The fills' default outline is a line on each copy, shifted with it.
+    outlines = [r for r in rules if r.get_attr("c") == 1]
+    assert {r.get_attr("m") for r in outlines} == {1, 2}
+    assert all(r.translate == ((-1.2, 1.4, "MM") if r.get_attr("m") == 1 else None)
+               for r in outlines)
 
 
-def test_screen_unit_shapeburst_distance_is_taken_at_the_exported_zooms(plugin, tmp_path):
-    """A shapeburst distance in millimetres is converted to map units at the
-    middle of the exported zooms (14-15 here), also for a rule without a
-    scale limit (it used the middle of zoom 0 and the last zoom: bands spread
-    over a far larger distance, the fill one colour)."""
+def test_screen_unit_shapeburst_distance_follows_the_zoom(plugin, tmp_path):
+    """A shapeburst distance in millimetres keeps its width on screen in
+    QGIS: one band set per quarter zoom of the exported zooms (14-15 here),
+    each converted at its middle zoom (one distance for every zoom made the
+    ramp twice as wide one zoom further in; a rule without a scale limit
+    once took zoom 0's middle - the fill one colour)."""
     from qgis.core import QgsProcessingFeedback
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
     from fidelity.diagnostics import DiagnosticCollector
@@ -204,9 +229,33 @@ def test_screen_unit_shapeburst_distance_is_taken_at_the_exported_zooms(plugin, 
     diags = DiagnosticCollector()
     rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     bands = [r for r in rules if r.recipe is not None and r.recipe.kind == "color_bands"]
-    assert len(bands) == 1
-    distance = dict(dict(bands[0].recipe.params)["bands"][1].params)["distance"]
-    expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** 14.5)
-    assert distance == pytest.approx(expected, rel=1e-6)
-    assert any("fixed at zoom 14.5" in d.message for d in diags.items)
+    assert len(bands) == 8
+    for band in bands:
+        middle = band.visibility.min_zoom + 0.125
+        distance = dict(dict(band.recipe.params)["bands"][1].params)["distance"]
+        expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** middle)
+        assert distance == pytest.approx(expected, rel=1e-3), middle
+    assert sorted(b.visibility.min_zoom for b in bands) == [14 + i / 4 for i in range(8)]
+    assert not any("fixed at zoom" in d.message for d in diags.items)
 
+
+
+def test_fewer_shapeburst_steps_are_reported(plugin, tmp_path, monkeypatch):
+    """Over the output budget, a screen-unit shapeburst gets one band set per
+    half zoom or per zoom (width within about 19 % or 41 %): reported now."""
+    from qgis.core import QgsProcessingFeedback
+    from q2vt_plugin.src.core import materializer  # pylint: disable=import-error
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_fixtures import reset_project
+    monkeypatch.setattr(materializer.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 1)
+    fill = QgsShapeburstFillSymbolLayer(QColor("#5f9fd2"), QColor("#d3e9f7"))
+    fill.setUseWholeShape(False)
+    fill.setMaxDistance(2.2)
+    fill.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    assert any("per zoom" in d.message for d in diags.by_code("Q2VT_GRADIENT_APPROXIMATE"))

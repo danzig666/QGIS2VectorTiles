@@ -292,6 +292,60 @@ def test_map_unit_arrows_match_qgis(plugin, tmp_path, curved, repeated, head_typ
     assert mask_difference(reference, ours) < 0.01
 
 
+def test_arrow_outline_is_a_line_on_the_arrow_rings(plugin, tmp_path):
+    """QGIS strokes the arrow's fill outline centred on the arrow's edge with
+    its own width: exported as a line on the arrow polygons' rings, above the
+    fill (a fill-outline-color is one device pixel whatever the width)."""
+    from qgis.core import QgsArrowSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    layer = _layer("LineString", ["LINESTRING(-100 -80, -20 60, 20 -40, 100 60)"],
+                   str(tmp_path / "arrow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowWidth", 10), ("ArrowStartWidth", 10), ("HeadLength", 24),
+                        ("HeadThickness", 12)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    # One arrow per line: repeated arrows overlap at the vertices, where QGIS
+    # covers an arrow's outline with the next arrow's fill (outlines are drawn
+    # above all fills, as for polygon outlines).
+    arrow.setIsCurved(True)
+    arrow.setIsRepeated(False)
+    fill = arrow.subSymbol().symbolLayer(0)
+    fill.setColor(QColor("white"))
+    fill.setStrokeColor(QColor("black"))
+    fill.setStrokeWidth(4)
+    fill.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+
+    assert [r.get_attr("c") for r in rules] == [2, 1]  # the outline above the fill
+    assert all(r.recipe.kind == "arrow_polygons" for r in rules)
+    assert rules[0].rule.symbol().symbolLayer(0).strokeStyle() == 0  # Qt.NoPen
+    line = rules[1].rule.symbol()
+    assert line.type() == Qgis.SymbolType.Line
+    assert line.symbolLayer(0).layerType() == "SimpleLine"
+    assert line.symbolLayer(0).width() == 4
+    assert line.symbolLayer(0).widthUnit() == Qgis.RenderUnit.MapUnits
+    assert outputs[1].geometryType() == Qgis.GeometryType.Line
+    ours = ink_mask(render(outputs[::-1], EXTENT, (240, 240)))  # first layer on top
+    assert mask_difference(reference, ours) < 0.01
+
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 17
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 14
+    for index, rule in enumerate(rules):
+        exporter._convert_symbol(rule.rule.symbol(), f"s{index}", "src", "q2vt", 0, 22)
+    layer_defs = exporter.style["layers"]
+    assert [d["type"] for d in layer_defs] == ["fill", "line"]
+    assert "fill-outline-color" not in layer_defs[0]["paint"]
+
+
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])
 def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     from qgis.core import QgsPointPatternFillSymbolLayer
@@ -313,6 +367,22 @@ def test_point_pattern_clip_modes_match_qgis(plugin, tmp_path, clip):
     ours = ink_mask(render(grid, EXTENT, (240, 240)))
 
     assert mask_difference(reference, ours) < 0.15
+
+
+def test_a_rotated_map_unit_svg_fill_is_reported(plugin, tmp_path):
+    """Map-unit SVG fills are a grid of SVG markers: a rotated fill turns each
+    SVG but not the grid (QGIS turns the whole texture). Unreported before."""
+    from qgis.core import QgsSVGFillSymbolLayer
+    svg = tmp_path / "dot.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+                   '<rect x="2" y="4" width="6" height="2" fill="black"/></svg>')
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "rsvg.gpkg"))
+    fill = QgsSVGFillSymbolLayer(str(svg), 20, 30)
+    fill.setPatternWidthUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    _, _, diags = _export(plugin, layer, tmp_path)
+    assert any("Rotated SVG fill" in d.message for d in diags.by_code("Q2VT_PATTERN_APPROXIMATE"))
 
 
 def test_svg_fill_without_svg_draws_only_its_stroke(plugin, tmp_path):
@@ -345,6 +415,26 @@ def test_polygon_offset_moves_every_ring_inwards(plugin, wkt):
         mat.Recipe("polygon_offset", params=(("offset", 1.0),))))
     result = expr.evaluate(context)
     assert result.asWkt() == "MultiLineString ((1 1, 9 1, 9 9, 1 9, 1 1),(2 2, 8 2, 8 8, 2 8, 2 2))"
+
+
+@pytest.mark.parametrize("wkt", [
+    "POLYGON((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3))",
+    "POLYGON((0 0,0 10,10 10,10 0,0 0),(3 3,3 7,7 7,7 3,3 3))",
+    "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0),(3 3,7 3,7 7,3 7,3 3)))"])
+def test_screen_offset_rings_have_the_interior_on_their_right(plugin, wkt):
+    """Screen-unit polygon offsets stay native (MapLibre line-offset, positive
+    = right of the line): exterior clockwise, holes counter-clockwise (map y
+    up) put the feature's interior on the right, where QGIS offsets inward."""
+    from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature, QgsGeometry
+    from fidelity import materialize as mat
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(wkt))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    expr = QgsExpression(mat.polygon_offset_expression(
+        mat.Recipe("polygon_offset", params=(("rhr", True),))))
+    assert expr.evaluate(context).asWkt() == \
+        "MultiLineString ((0 0, 0 10, 10 10, 10 0, 0 0),(3 3, 7 3, 7 7, 3 7, 3 3))"
 
 
 @pytest.mark.parametrize("on_surface", [False, True])
@@ -504,6 +594,21 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
     assert any(r.recipe is None and r.visibility is not None
                and r.visibility.min_zoom == top + 1 for r in rules)
+
+
+def test_a_data_defined_interval_is_reported(plugin, tmp_path):
+    """An interval read from a field cannot be placed per zoom: MapLibre
+    spaces those markers itself. That used to happen without a report."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "dd.gpkg"))
+    stroke = QgsMarkerLineSymbolLayer(True, 4)
+    stroke.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+    stroke.setSubSymbol(_marker())
+    stroke.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval, QgsProperty.fromExpression('"id" + 3'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([stroke])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    assert any("Data-defined interval" in d.message for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
 
 
 @pytest.mark.parametrize("ring_filter", [1, 2])

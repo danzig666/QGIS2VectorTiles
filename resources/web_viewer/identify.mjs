@@ -156,7 +156,6 @@ export class Identify {
     } else if (layer && record && !feature && !matchesFilters(layer, state.filters[layerId], record.a)) {
       box.append(element("p", "q2vt-note", t("popup.hiddenByFilter")));
     }
-    if (layer && layer.identityScope === "export") box.append(element("p", "q2vt-note", t("feature.exportScoped")));
     if (layer && layer.deepLinks && this.viewer.permalink) {
       const link = element("button", "q2vt-chip q2vt-chip-ghost", t("popup.link"));
       link.type = "button";

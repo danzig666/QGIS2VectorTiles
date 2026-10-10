@@ -563,7 +563,7 @@ class QGIS2VectorTiles:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
-            fast_markers=self.fast_markers,
+            fast_markers=self.fast_markers, lengths=self.lengths,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).
@@ -736,6 +736,14 @@ class QGIS2VectorTiles:
                            for rule in rules or [] if getattr(rule, "inner_effect", None)},
             z_orders={rule.rule.description(): rule.z_order
                       for rule in rules or [] if getattr(rule, "z_order", None)},
+            feature_filters={rule.rule.description(): rule.feature_filter
+                             for rule in rules or [] if getattr(rule, "feature_filter", None)},
+            label_windows={rule.rule.description() for rule in rules or []
+                           if rule.recipe is not None and rule.recipe.kind == "label_windows"},
+            # QGIS layer opacity applies to the features, not to the labels.
+            layer_opacities={rule.rule.description(): rule.layer.opacity() for rule in rules or []
+                             if rule.layer is not None and rule.get_attr("t") == 0
+                             and rule.layer.opacity() < 1.0},
         )
         exporter.export()
         return exporter

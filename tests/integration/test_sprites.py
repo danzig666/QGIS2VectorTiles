@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from qgis.core import (QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsMarkerSymbol,
+from qgis.core import (Qgis, QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsMarkerSymbol,
                        QgsSimpleMarkerSymbolLayer)
 from qgis.PyQt.QtGui import QColor
 
@@ -179,3 +179,38 @@ def test_point_pattern_texture_applies_the_offset(plugin, monkeypatch):
     rolled = ImageChops.offset(cells[0], 4, 0)  # 4 px to the right
     assert ImageChops.difference(rolled, cells[1]).getbbox() is None
     assert ImageChops.difference(cells[0], cells[1]).getbbox() is not None
+
+
+def _outline_ink(img):
+    """Ink of the outline along the middle row's left half (dark pixels of a
+    white marker with a black stroke), in pixels."""
+    rgba = img.convert("RGBA")
+    width, height = rgba.size
+    row = [rgba.getpixel((x, height // 2)) for x in range(width // 2)]
+    return sum((255 - r) / 255 * a / 255 for r, _g, _b, a in row)
+
+
+@pytest.mark.parametrize("ratio", [1, 3, 6])
+def test_zero_width_stroke_is_one_css_pixel_in_oversampled_sprites(sg, ratio):
+    """QGIS draws a zero stroke width one device pixel wide: in a sprite
+    oversampled 3x that was a third of a CSS pixel, a grey fringe once
+    MapLibre shrinks the icon (the black outline of flow arrows)."""
+    layer = QgsSimpleMarkerSymbolLayer()
+    layer.setShape(Qgis.MarkerShape.Square)
+    layer.setSize(4)
+    layer.setColor(QColor("white"))
+    layer.setStrokeColor(QColor("black"))
+    layer.setStrokeWidth(0)
+    image = sg.SymbolImage(QgsMarkerSymbol([layer.clone()]), "m", ratio).img
+    assert _outline_ink(image) == pytest.approx(ratio, rel=0.35)
+    assert layer.strokeWidth() == 0  # the project's symbol is left alone
+
+
+def test_data_defined_stroke_width_is_kept_in_sprites(sg):
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = QgsSimpleMarkerSymbolLayer()
+    layer.setStrokeWidth(0)
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth, QgsProperty.fromValue(0.5))
+    symbol = QgsMarkerSymbol([layer])
+    sg._hairlines_to_one_pixel(symbol)  # pylint: disable=protected-access
+    assert symbol.symbolLayer(0).strokeWidth() == 0

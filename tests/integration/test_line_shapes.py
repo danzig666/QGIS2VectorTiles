@@ -206,6 +206,38 @@ def test_inner_shadow_line_exports_strips_by_direction(plugin, tmp_path):
 
 
 # -- screen-unit offsets -------------------------------------------------------
+COMB = "POLYGON((-80 -60, 80 -60, 80 60, 2 60, 2 -10, -2 -10, -2 60, -80 60, -80 -60))"
+
+
+@pytest.mark.parametrize("offset", [1.6, -1.6])
+def test_screen_polygon_outline_offset_is_qgis_buffered_ring_per_band(plugin, tmp_path, offset):
+    """A millimetre offset of a polygon outline (a band along the edge) is
+    exported as each ring buffered like QGIS, per eighth of a zoom: MapLibre's
+    line-offset overlapped at every vertex (a translucent band blended twice)
+    and did not bridge the 4 m inlet, narrower than twice the offset."""
+    layer = _layer("Polygon", [COMB], str(tmp_path / "comb.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor(90, 168, 100), 3.2)
+    line.setOffset(offset)
+    line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    outputs, _ = _export(layer, tmp_path, 15, 16)
+    bands = [(o, r) for o, r in outputs if r.recipe is not None]
+    assert {r.recipe.kind for _, r in bands} == {"polygon_offset"}
+    within = [(o, r) for o, r in bands if r.recipe.param("rhr") is None]
+    assert len(within) == 16 and len(bands) - len(within) <= 1
+    for out, rule in within[::5]:
+        assert rule.rule.symbol().symbolLayer(0).offset() == 0
+        zoom = (rule.visibility.min_zoom + rule.visibility.max_zoom) / 2
+        assert rule.recipe.param("offset") == pytest.approx(
+            offset / 1000 * 295828763.7957775 / 2 ** zoom, rel=1e-3)
+        # The exported rings are lines: drawn with the band's line layer.
+        out.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([rule.rule.symbol().symbolLayer(0).clone()])))
+        view = _view(zoom)
+        reference = ink_mask(render([layer], view, (240, 240)))
+        ours = ink_mask(render([out], view, (240, 240)))
+        assert mask_difference(reference, ours) < 0.08, zoom
+
+
 def test_screen_offset_is_the_qgis_offset_curve_per_band(plugin, tmp_path):
     """A 3 mm offset of a zigzag line (loops in MapLibre's line-offset) is
     exported as offset curves per eighth of a zoom, each drawn like QGIS at

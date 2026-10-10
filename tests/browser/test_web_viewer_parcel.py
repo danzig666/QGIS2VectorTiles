@@ -165,6 +165,32 @@ def legend_only_site(tmp_path_factory):
         yield built
 
 
+@pytest.fixture(scope="module")
+def no_labels_switch_site(tmp_path_factory):
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "integration"))
+    from test_publishing_parcel_report import build_site  # pylint: disable=import-error
+    built = build_site(tmp_path_factory.mktemp("nolabelsswitch"), labels_toggle=False)
+    publication = os.path.dirname(os.path.dirname(built["rel"]))
+    with PreviewServer(os.path.dirname(publication)) as server:
+        built["url"] = server.url(f"{os.path.basename(publication)}/index.html")
+        yield built
+
+
+def test_the_labels_switch_can_be_left_out(no_labels_switch_site, tmp_path):
+    """Interaction -> Viewer -> Labels switch unticked: the Layers tab has no
+    labels switch, and labels stay on (a remembered or linked 'labels off'
+    could not be undone without the switch). The viewer used to ignore it."""
+    results = _run(no_labels_switch_site["url"], [
+        {"eval": """return { row: !!document.querySelector('#q2vt-pane-layers .q2vt-row-labels'),
+                             tree: !!document.querySelector('#q2vt-pane-layers .q2vt-tree'),
+                             labels: q2vtViewer.controls.state.value.labels };"""},
+        {"eval": "q2vtViewer.controls.state.set({ labels: false }); "
+                 "await new Promise((r) => setTimeout(r, 200)); return q2vtViewer.controls.state.value.labels;"},
+    ], tmp_path)
+    assert results[0] == {"row": False, "tree": True, "labels": True}
+    assert results[1] is True
+
+
 LEGEND_ROWS = """return [...document.querySelectorAll('#q2vt-pane-legend .q2vt-legend-layer')].map((b) => ({
   title: (b.querySelector('h3 > span:last-child') || b.querySelector('.q2vt-legend-item > span:last-child')).textContent,
   on: b.querySelector('input[role=switch]') ? b.querySelector('input[role=switch]').checked : null,

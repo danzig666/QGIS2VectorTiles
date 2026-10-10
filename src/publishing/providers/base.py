@@ -105,5 +105,8 @@ def provider_for(destination, credentials: Optional[Credentials], prefix: str, *
     if destination.kind == "s3":
         from .s3 import S3Provider  # pylint: disable=import-outside-toplevel
         return S3Provider(destination, credentials, prefix, **kwargs)
+    if destination.kind == "ssh":  # one folder, not versioned: no prefix (folder_publish.py)
+        from .ssh import SshProvider  # pylint: disable=import-outside-toplevel
+        return SshProvider(destination, credentials, **kwargs)
     from .local import LocalProvider  # pylint: disable=import-outside-toplevel
     return LocalProvider(destination, prefix, **kwargs)

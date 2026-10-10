@@ -125,14 +125,16 @@ class _Context:
         self.back = QTransform(self.ow, 0, 0, self.oh, self.ox, self.oy)
         self.reach = {}
 
-    def free_edges(self, kind: int, origin, direction):
+    def free_edges(self, kind: int, origin, direction, limit: float = math.inf):
         """``t -> t'``: a band edge moved off the feature's vertices.
 
         A band edge along a polygon edge (e.g. a hole's side parallel to a
         linear gradient's bands) touches it; once the tiles quantize the
         coordinates such a ring falls apart and the hole is filled in the
         browser. Edges within ``clearance`` of a vertex move to that
-        distance (a fraction of a colour level)."""
+        distance, at most ``limit`` (in t, a fraction of a colour level): a
+        feature only a few pixels wide at the lowest zoom would otherwise
+        lose its outer bands at every zoom."""
         if not self.clearance:
             return lambda t: t
         key = (kind, origin, direction)
@@ -151,6 +153,7 @@ class _Context:
             ts = sorted({round(t_of(v.x(), v.y()), 12) for v in self.unit.vertices()})
             self._edges[key] = (ts, self.clearance * step)
         ts, eps = self._edges[key]
+        eps = min(eps, limit)
         if not ts or eps <= 0:
             return lambda t: t
 
@@ -179,7 +182,7 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
     dx, dy = p2x - p1x, p2y - p1y
     length = max(math.hypot(dx, dy), 1e-9)
     # Band edges keep clear of the feature's vertices (see _Context.free_edges).
-    free = ctx.free_edges(kind, (p1x, p1y), (dx, dy)) if kind in (0, 1) else (lambda t: t)
+    free = ctx.free_edges(kind, (p1x, p1y), (dx, dy), 0.25 / bands) if kind in (0, 1) else (lambda t: t)
     reach = math.sqrt(2) + 1  # beyond every corner of the unit box
     start, end = _band_interval(band, bands, overlap)
     start = None if start is None else free(start)

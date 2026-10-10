@@ -41,6 +41,14 @@ need an explicit approval (stored with the settings as a fingerprint).
   public files, URLs or the upload journal.
 * Use a bucket-scoped token with object read/write only. Bucket, domain, CORS and public
   access settings are changed by you in the Cloudflare dashboard, never by the plugin.
+* **SSH / SFTP server**: the profile holds the host, user, folder and the *path* of a key
+  file, never a key or password. A password (or key passphrase) reaches ssh only through a
+  temporary askpass helper that reads it from the sftp process's environment; it is never on
+  a command line, in a file, log or settings file, and the helper's folder is removed after
+  each session; no shared connection (`ControlMaster`) outlives the upload with it. The saved
+  login of R2 / S3 is never used for SSH, nor the other way round. A new server's host key is
+  accepted on first use and remembered; a changed key stops the upload. Only files listed in
+  the folder's `.q2vt-files.json` (safe relative paths inside the folder) are ever deleted.
 
 ## Export cache
 

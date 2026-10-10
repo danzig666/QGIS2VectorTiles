@@ -32,6 +32,7 @@ from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
 from .fidelity import expressions as ex
+from .fidelity import feature_order
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
@@ -41,7 +42,8 @@ from .materializer import pattern_anchor_kind, pattern_in_viewport
 from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
                                  solve_periodic_cell)
 from .fidelity.units import LengthConverter, MapUnitScale, UnitError, normalize_unit
-from ..utils.config import _SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX
+from ..utils.config import (_SPRITE_QUALITY, _MAPLIBRE_LABELS_FACTOR, _FIELD_PREFIX,
+                            _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM)
 
 
 def _enum_int(value, default=None):
@@ -264,8 +266,8 @@ class PropertyExtractor:
             if kind == "color":
                 return ex.to_color(field_expr, value if isinstance(value, str) else "rgba(0, 0, 0, 0)")
             if kind == "boolean":
-                return ["to-boolean", field_expr]
-            return ["to-string", field_expr]
+                return ex.to_boolean(field_expr, value if isinstance(value, bool) else False)
+            return ex.to_string(field_expr, value if isinstance(value, str) else "")
         if qexpr.hasParserError() or qexpr.referencedColumns() or qexpr.needsGeometry():
             cls.context.report(
                 "Q2VT_DDP_NO_EMITTER",
@@ -478,15 +480,35 @@ class LinePropertyExtractor:
             }.get(_enum_int(symbol_layer.penStyle()))
             if pattern is None:
                 return None
+        if len(pattern) % 2:
+            pattern = pattern + pattern
+        pattern = LinePropertyExtractor._without_empty_dashes(pattern)
         # Qt draws square and round caps on every dash (one line width longer,
         # gaps one width shorter); MapLibre does so for round caps only
         # (measured), so square-capped dashes are lengthened here.
         if _enum_int(symbol_layer.penCapStyle()) == 0x10:  # Qt::SquareCap
-            pattern = [value + 1.0 if i % 2 == 0 else max(0.0, value - 1.0)
+            pattern = [value + 1.0 if i % 2 == 0 and value > 0 else
+                       value if i % 2 == 0 else max(0.0, value - 1.0)
                        for i, value in enumerate(pattern)]
-        if len(pattern) % 2:
-            pattern = pattern + pattern
         return [round(v, 4) for v in pattern]
+
+    @staticmethod
+    def _without_empty_dashes(pattern: List[float]) -> List[float]:
+        """A dash of length 0 draws nothing in QGIS, cap or not: it is left
+        out and the gaps around it join (MapLibre drew it as a dot, with the
+        cap added). Dash-gap pairs; the last gap wraps to the first."""
+        pairs = [[pattern[i], pattern[i + 1]] for i in range(0, len(pattern), 2)]
+        if all(dash <= 0 for dash, _ in pairs):
+            return [0.0, sum(gap for _, gap in pairs)]
+        while pairs[0][0] <= 0:  # start on a dash: the leading gap goes last
+            pairs = pairs[1:] + pairs[:1]
+        kept = []
+        for dash, gap in pairs:
+            if dash <= 0:
+                kept[-1][1] += gap
+            else:
+                kept.append([dash, gap])
+        return [value for pair in kept for value in pair]
 
     @staticmethod
     def get_line_offset(symbol_layer: QgsSimpleLineSymbolLayer) -> Union[float, List]:
@@ -1113,13 +1135,19 @@ class IconPropertyExtractor:
         return "point"
 
     @staticmethod
-    def get_symbol_spacing(label_settings: QgsPalLayerSettings = None) -> float:
-        """Return ``symbol-spacing`` in pixels (MapLibre default: 250)."""
+    def get_symbol_spacing(label_settings: QgsPalLayerSettings = None) -> Union[float, List]:
+        """Return ``symbol-spacing`` in pixels (MapLibre default: 250); a
+        map-unit repeat distance grows with the map, as a zoom curve (one
+        zoom's pixels made labels repeat end to end further in)."""
         if label_settings is None:
             return 250.0
         try:
             distance = label_settings.repeatDistance
             if distance and distance > 0:
+                if normalize_unit(label_settings.repeatDistanceUnit) in ("map", "m"):
+                    return ex.clamp(PropertyExtractor.length(
+                        distance, label_settings.repeatDistanceUnit,
+                        map_unit_scale=label_settings.repeatDistanceMapUnitScale), 1.0, None)
                 return max(1.0, PropertyExtractor.static_pixels(
                     distance, label_settings.repeatDistanceUnit))
         except (AttributeError, RuntimeError):
@@ -1141,6 +1169,11 @@ class IconPropertyExtractor:
         """Return ``symbol-z-order`` (default ``"auto"``)."""
         return "auto"
 
+    # Map markers: QGIS draws them in feature order, a later one on top. The
+    # tiles keep that order; "auto" (with a constant sort key) stacks
+    # overlapping icons by their height on the screen instead.
+    MARKER_Z_ORDER = "source"
+
 
 class TextPropertyExtractor:
     """Extract text paint and layout properties from QGIS label settings."""
@@ -1160,6 +1193,18 @@ class TextPropertyExtractor:
         return None
 
     @staticmethod
+    def drawn_font(text_format: QgsTextFormat) -> QFont:
+        """The font QGIS draws (``QgsTextFormat::scaledFont``): the B/I
+        buttons (forcedBold, forcedItalic) on top of the font's own weight
+        and slant."""
+        font = QFont(text_format.font())
+        if getattr(text_format, "forcedBold", lambda: False)():
+            font.setBold(True)
+        if getattr(text_format, "forcedItalic", lambda: False)():
+            font.setItalic(True)
+        return font
+
+    @staticmethod
     def get_text_font(text_format: QgsTextFormat) -> str:
         """Return the fontstack name for ``text-font``.
 
@@ -1168,14 +1213,22 @@ class TextPropertyExtractor:
         glyph generator. An unresolvable font is reported as an error, since
         the browser would otherwise render the labels without glyphs.
         """
-        font = text_format.font()
+        font = TextPropertyExtractor.drawn_font(text_format)
         info = QFontInfo(font)
         candidates = [(font.family(), font.styleName())]
-        # Bold/italic set with the text format's B/I buttons (forcedBold,
-        # forcedItalic) or as the font's weight leave the style name empty:
-        # look for the matching face before falling back to the regular one.
-        bold = font.bold() or bool(getattr(text_format, "forcedBold", lambda: False)())
-        italic = font.italic() or bool(getattr(text_format, "forcedItalic", lambda: False)())
+        bold, italic = font.bold(), font.italic()
+        if not font.styleName() and (font.weight() != QFont.Weight.Normal or italic):
+            # A weight or slant without a style name: the face Qt matches it
+            # to, which QGIS draws ('Open Sans' DemiBold and Medium are
+            # 'Semibold', not 'Bold' or the regular face; Light is 'Light').
+            face = info.styleName().lower()
+            if info.family().lower() == font.family().lower() and \
+                    (not italic or "italic" in face or "oblique" in face):
+                stack = GlyphGenerator.resolve_fontstack(info.family(), info.styleName())
+                if stack:
+                    return stack
+        # Qt fell back (another family, no slanted face): the plain
+        # bold/italic face if one is installed, before the regular one.
         if not font.styleName() and (bold or italic):
             styles = (["Bold Italic", "Bold Oblique"] if bold and italic else
                       ["Bold"] if bold else ["Italic", "Oblique"])
@@ -1344,14 +1397,23 @@ class TextPropertyExtractor:
     @staticmethod
     def line_side(label_settings: QgsPalLayerSettings) -> str:
         """"on", "above" or "below": where QGIS places a line label
-        (``QgsLabelLineSettings.placementFlags``; on-line wins when allowed)."""
+        (``QgsLabelLineSettings.placementFlags``)."""
         try:
             flags = _enum_int(label_settings.lineSettings().placementFlags(), 1)
         except (AttributeError, TypeError):
             return "on"
-        if flags & 1 or not flags & 6:
-            return "on"
-        return "above" if flags & 2 else "below"
+        curved = TextPropertyExtractor.placement_name(label_settings) in ("Curved", "PerimeterCurved")
+        return TextPropertyExtractor.side_of(flags, curved)
+
+    @staticmethod
+    def side_of(flags: int, curved: bool = False) -> str:
+        """The side QGIS picks among the allowed ones (OnLine 1, AboveLine 2,
+        BelowLine 4), measured on lone straight labels: beside the line wins
+        over on it, above over below (a curved label allowed all three took
+        either, as its candidates' costs tie)."""
+        if flags & 2:
+            return "above"
+        return "below" if flags & 4 else "on"
 
     @staticmethod
     def get_line_text_offset(label_settings: QgsPalLayerSettings,
@@ -1424,12 +1486,13 @@ class TextPropertyExtractor:
     @staticmethod
     def get_text_radial_offset(label_settings: QgsPalLayerSettings,
                                text_size_px: Union[float, List] = 16.0) -> float:
-        """Return ``text-radial-offset`` in ems for "around point" placement.
-
-        0.7 em is the historical empirical clearance around the point symbol;
-        the QGIS label distance is added on top of it.
+        """Return ``text-radial-offset`` in ems for "around point" placement:
+        the QGIS label distance. Measured from the point ("From point"), the
+        label touches it at distance 0; measured from the symbol's bounds,
+        0.7 em stands for the symbol (its size is not known here).
         """
-        base = 0.7
+        from_symbol = _enum_int(getattr(label_settings, "offsetType", 0), 0) == 1
+        base = 0.7 if from_symbol else 0.0
         try:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):
@@ -1451,7 +1514,42 @@ class TextPropertyExtractor:
             return ["center", "top", "bottom", "left", "right"]
         if placement is not None and placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
             return None
-        return ["bottom",  "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"]
+        if placement == "OrderedPositionsAroundPoint":
+            ordered = TextPropertyExtractor.predefined_position_anchors(label_settings)
+            if ordered:
+                return ordered
+        return list(TextPropertyExtractor.AROUND_POINT_ANCHORS)
+
+    # QGIS "around point" (pal createCandidatesAroundPoint): the first
+    # candidate is top-right (45 degrees), costs rise both ways round the
+    # circle; of the 8 compass positions: TR, R, T, BR, TL, B, L, BL.
+    # MapLibre names the side of the label at the point ("bottom-left" =
+    # above right).
+    AROUND_POINT_ANCHORS = ("bottom-left", "left", "bottom", "top-left",
+                            "bottom-right", "top", "right", "top-right")
+    # Cartographic placement: predefinedPositionOrder codes (label XML).
+    PREDEFINED_POSITION_ANCHORS = {
+        "TL": "bottom-right", "TSL": "bottom-right", "T": "bottom", "TSR": "bottom-left",
+        "TR": "bottom-left", "L": "right", "R": "left", "BL": "top-right",
+        "BSL": "top-right", "B": "top", "BSR": "top-left", "BR": "top-left", "O": "center"}
+
+    @staticmethod
+    def predefined_position_anchors(label_settings) -> List[str]:
+        """Cartographic placement's positions in the QGIS order as MapLibre
+        anchors (read from the label XML: the order is not in every API)."""
+        from qgis.core import QgsReadWriteContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtXml import QDomDocument  # pylint: disable=import-outside-toplevel
+        try:
+            element = label_settings.writeXml(QDomDocument(), QgsReadWriteContext())
+            codes = element.firstChildElement("placement").attribute("predefinedPositionOrder")
+        except (AttributeError, RuntimeError, TypeError):
+            codes = ""
+        anchors = []
+        for code in (codes or "TR,TL,BR,BL,R,L,TSR,BSR").split(","):
+            anchor = TextPropertyExtractor.PREDEFINED_POSITION_ANCHORS.get(code.strip())
+            if anchor and anchor not in anchors:
+                anchors.append(anchor)
+        return anchors
 
     @staticmethod
     def get_text_max_angle(label_settings: QgsPalLayerSettings) -> float:
@@ -1635,6 +1733,9 @@ class QgisMapLibreStyleExporter:
         effect_roles: Optional[Dict[str, str]] = None,
         inner_effects: Optional[Dict[str, dict]] = None,
         z_orders: Optional[Dict[str, str]] = None,
+        feature_filters: Optional[Dict[str, list]] = None,
+        label_windows: Optional[set] = None,
+        layer_opacities: Optional[Dict[str, float]] = None,
     ):
         """Initialise the exporter.
 
@@ -1671,6 +1772,13 @@ class QgisMapLibreStyleExporter:
         self.inner_effects = inner_effects or {}
         # Style name -> symbol-z-order ("source": data order).
         self.z_orders = z_orders or {}
+        # Style name -> filter of its feature-order stratum (fidelity.feature_order).
+        self.feature_filters = feature_filters or {}
+        # Style names of repeated curved line labels laid out at export time:
+        # one short line per label (RulesExporter._label_windows).
+        self.label_windows = label_windows or set()
+        # Style name -> the QGIS layer's opacity (Layer Rendering), below 1.
+        self.layer_opacities = layer_opacities or {}
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1826,13 +1934,51 @@ class QgisMapLibreStyleExporter:
             return
         self.context.component = style.styleName()
         self.context.source_layer = style.layerName()
+        first = len(self.style["layers"])
+        try:
+            self._convert_style_layers(style, bounds, first)
+        finally:
+            opacity = self.layer_opacities.get(style.styleName())
+            if opacity is not None:
+                self._apply_layer_opacity(self.style["layers"][first:], opacity)
+
+    _OPACITY_PAINT = {"fill": ("fill-opacity",), "line": ("line-opacity",),
+                      "circle": ("circle-opacity", "circle-stroke-opacity"),
+                      "symbol": ("icon-opacity", "text-opacity"),
+                      "fill-extrusion": ("fill-extrusion-opacity",), "heatmap": ("heatmap-opacity",)}
+
+    def _apply_layer_opacity(self, layer_defs, opacity: float) -> None:
+        """QGIS draws a layer with an opacity below 1 as one image and blends
+        it once; the browser can only make each of its style layers that
+        transparent (where they overlap, the result is a little darker)."""
+        for layer_def in layer_defs:
+            if layer_def.get("metadata", {}).get("q2vt:layer-opacity"):
+                continue  # a feature-order copy of layers already done
+            paint = layer_def.setdefault("paint", {})
+            for prop in self._OPACITY_PAINT.get(layer_def.get("type"), ()):
+                paint[prop] = ex.mul(paint.get(prop, 1), float(opacity))
+            layer_def.setdefault("metadata", {})["q2vt:layer-opacity"] = float(opacity)
+
+    def _convert_style_layers(self, style, bounds, first: int) -> None:
         if style.styleName() in self.heatmaps:
             self._heatmap_layer(style, self.heatmaps[style.styleName()], bounds)
             return
         if style.styleName() in getattr(self, "inner_effects", {}):
             self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
-        first = len(self.style["layers"])
+        feature_filter = getattr(self, "feature_filters", {}).get(style.styleName())
+        sources = self.__dict__.setdefault("_stratum_sources", {})
+        base = feature_order.copied_from(style.styleName())
+        if feature_filter and base in sources:
+            # A feature-order stratum copy (fidelity.feature_order): the style
+            # layers of its rule again (with the same images), drawn higher.
+            for layer_def in copy.deepcopy(sources[base]):
+                suffix = layer_def["id"][len(base):] if layer_def["id"].startswith(base) \
+                    else f"_{layer_def['id']}"
+                layer_def["id"] = style.styleName() + suffix
+                self.style["layers"].append(layer_def)
+            self._apply_feature_filter(self.style["layers"][first:], feature_filter)
+            return
         z_order = getattr(self, "z_orders", {}).get(style.styleName())
         # Pattern markers sit at fractional pixels, which QGIS draws
         # anti-aliased. MapLibre draws a 1:1 icon at the nearest pixel, which
@@ -1854,8 +2000,30 @@ class QgisMapLibreStyleExporter:
             for layer_def in self.style["layers"][first:]:
                 if layer_def.get("type") == "symbol":
                     layer_def.setdefault("layout", {})["symbol-z-order"] = z_order
+        if feature_filter:
+            if base is None:  # the rule's own style layers, kept for its copies
+                sources[style.styleName()] = copy.deepcopy(self.style["layers"][first:])
+            self._apply_feature_filter(self.style["layers"][first:], feature_filter)
+
+    @staticmethod
+    def _apply_feature_filter(layer_defs, feature_filter) -> None:
+        """Draw only the features of the style's feature-order stratum
+        (fidelity.feature_order), within any filter the layer has."""
+        for layer_def in layer_defs:
+            old = layer_def.get("filter")
+            layer_def["filter"] = ["all", old, feature_filter] if old else feature_filter
 
     PATTERN_MARKER_OVERSAMPLING = 2.0
+
+    @staticmethod
+    def _cached_marker_image(marker) -> bool:
+        """QGIS draws every layer of ``marker`` from its cached image at
+        whole pixels: simple markers without data-defined properties
+        (QgsSimpleMarkerSymbolLayer::startRender / renderPoint)."""
+        layers = [marker.symbolLayer(i) for i in range(marker.symbolLayerCount())]
+        return bool(layers) and all(layer.layerType() == "SimpleMarker"
+                                    and not layer.dataDefinedProperties().hasActiveProperties()
+                                    for layer in layers)
 
     _TRANSLATE = {"fill": "fill", "line": "line", "circle": "circle", "symbol": "icon"}
 
@@ -2134,6 +2302,28 @@ class QgisMapLibreStyleExporter:
         return name
 
     @staticmethod
+    def _offset_ems(dx, dy, size, baseline: float):
+        """A font marker's offset in ems of its size, baseline added: [x, y],
+        or a zoom step of them when offset and size do not scale alike (a
+        map-unit scale limit on one of them). text-offset is laid out at the
+        tile's whole zoom only: each zoom takes the ratio of its middle
+        (exact there, within sqrt(2) at its ends)."""
+        if all(ex.is_number(v) for v in (dx, dy, size)):
+            return [ex.ratio(dx, size), ex.ratio(dy, size) + baseline]
+        pairs = []
+        for zoom in range(0, 25):
+            den = ex.evaluate_zoom_curve(size, zoom + 0.5)
+            pairs.append((zoom, [round(ex.evaluate_zoom_curve(dx, zoom + 0.5) / den, 4) if den else 0.0,
+                                 round(ex.evaluate_zoom_curve(dy, zoom + 0.5) / den + baseline, 4)
+                                 if den else baseline]))
+        if all(pair == pairs[0][1] for _, pair in pairs):
+            return pairs[0][1]
+        expression = ["step", ["zoom"], ["literal", pairs[0][1]]]
+        for zoom, pair in pairs[1:]:
+            expression += [zoom, ["literal", pair]]
+        return expression
+
+    @staticmethod
     def _font_marker_baseline_em(symbol_layer) -> float:
         """Half the ascent of the marker's font, in ems (``QgsFontMarkerSymbolLayer``
         draws the text with its baseline this far below the point)."""
@@ -2223,6 +2413,7 @@ class QgisMapLibreStyleExporter:
             "text-pitch-alignment": "viewport",
             "text-rotate": IconPropertyExtractor.get_icon_rotate(symbol_layer=symbol_layer),
             "symbol-placement": "point",
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         }
         # QGIS puts the baseline half the font's ascent below the point;
@@ -2233,17 +2424,20 @@ class QgisMapLibreStyleExporter:
         if offset.x() or offset.y():
             static_size = size if not isinstance(size, list) or ex.is_zoom_curve(size) else \
                 PropertyExtractor.length(symbol_layer.size(), symbol_layer.sizeUnit())
-            dx = PropertyExtractor.length(offset.x(), symbol_layer.offsetUnit())
-            dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit())
-            ems = [ex.ratio(dx, static_size), ex.ratio(dy, static_size)]
-            if all(ex.is_number(v) for v in ems):
-                ems[1] += baseline
-            else:
+            scale = symbol_layer.offsetMapUnitScale()
+            dx = PropertyExtractor.length(offset.x(), symbol_layer.offsetUnit(), None, scale)
+            dy = PropertyExtractor.length(offset.y(), symbol_layer.offsetUnit(), None, scale)
+            try:
+                ems = self._offset_ems(dx, dy, static_size, baseline)
+            except (ex.ExpressionError, TypeError, IndexError):
                 self.context.report("Q2VT_MIXED_UNITS",
                                     "Font marker offset and size use different unit families.")
                 ems = [0.0, baseline]
-        if abs(ems[0]) > 1e-6 or abs(ems[1]) > 1e-6:
-            layout["text-offset"] = [round(ems[0], 4), round(ems[1], 4)]
+        if not ex.is_expression(ems):
+            if abs(ems[0]) > 1e-6 or abs(ems[1]) > 1e-6:
+                layout["text-offset"] = [round(ems[0], 4), round(ems[1], 4)]
+        else:
+            layout["text-offset"] = ems
         layer_def["layout"].update(layout)
         paint = {
             "text-color": PropertyExtractor.get_value_or_expression(
@@ -2425,6 +2619,34 @@ class QgisMapLibreStyleExporter:
         self.pattern_images[name] = PatternImages(cell_1x, cell_2x)
         return name
 
+    def _register_brush_pattern(self, layer) -> Optional[str]:
+        """Texture of a Qt brush pattern (dense dots, hatching, crossing):
+        QGIS fills with the brush itself, an 8 px pattern (at any DPI, twice
+        that on a 2x screen) starting at the corner of the view. A
+        data-defined colour or style has no single texture (None)."""
+        from qgis.PyQt.QtGui import QBrush, QImage, QPainter  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        style = layer.brushStyle()
+        if _enum_int(style) not in range(2, 15):  # Dense1Pattern .. DiagCrossPattern
+            return None
+        props = layer.dataDefinedProperties()
+        for key in (QgsSymbolLayer.Property.PropertyFillColor,
+                    QgsSymbolLayer.Property.PropertyFillStyle):
+            prop = props.property(key)
+            if prop and prop.isActive():
+                return None
+        cells = []
+        for ratio in (1, 2):
+            image = QImage(16 * ratio, 16 * ratio, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            image.setDevicePixelRatio(ratio)
+            painter = QPainter(image)
+            painter.fillRect(0, 0, 16, 16, QBrush(layer.color(), style))
+            painter.end()
+            image.setDevicePixelRatio(1)
+            cells.append(SymbolImage._qt_to_pil(image))  # pylint: disable=protected-access
+        return self._textures(cells[0], cells[1], 0.0, "Brush pattern")
+
     def _register_point_pattern(self, layer) -> Optional[str]:
         """Seamless texture for a point pattern spaced in screen units."""
         from .fidelity.patterns import (apply_pattern_positions, point_pattern_cell,  # pylint: disable=import-outside-toplevel
@@ -2471,11 +2693,12 @@ class QgisMapLibreStyleExporter:
                                                       layer.displacementXUnit(), 2 * dx),
                               self._pattern_offset_px(layer.displacementY(),
                                                       layer.displacementYUnit(), 2 * dy))
+            snap = self._cached_marker_image(marker)
             for ratio, image in ((1, one), (2, two)):
                 width, height, positions = apply_pattern_positions(
                     dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio,
                     off_x * ratio, off_y * ratio)
-                cells.append(tile_markers(image, width, height, positions, wrap=False))
+                cells.append(tile_markers(image, width, height, positions, wrap=False, snap=snap))
             return self._textures(cells[0], cells[1], 0.0, "Point pattern")
         for ratio, image in ((1, one), (2, two)):
             width, height, positions, _ = point_pattern_cell(
@@ -3030,7 +3253,7 @@ class QgisMapLibreStyleExporter:
             "symbol-spacing": IconPropertyExtractor.get_symbol_spacing(),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
-            "symbol-z-order": IconPropertyExtractor.get_symbol_z_order(),
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         })
         layer_def["paint"].update({
@@ -3135,7 +3358,7 @@ class QgisMapLibreStyleExporter:
             "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(symbol_layer),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
-            "symbol-z-order": IconPropertyExtractor.get_symbol_z_order(),
+            "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
             "visibility": "visible",
         })
         if offset_px:
@@ -3385,11 +3608,12 @@ class QgisMapLibreStyleExporter:
 
         if isinstance(symbol_layer, QgsSimpleFillSymbolLayer):
             if symbol_layer.brushStyle() != Qt.BrushStyle.NoBrush:
-                if _enum_int(symbol_layer.brushStyle()) != 1:  # not Qt.SolidPattern
+                brush = self._register_brush_pattern(symbol_layer)
+                if brush is None and _enum_int(symbol_layer.brushStyle()) != 1:  # not Qt.SolidPattern
                     self.context.report(
                         "Q2VT_PATTERN_APPROXIMATE",
-                        "Qt brush patterns are drawn as a solid fill.",
-                        strategy=Strategy.APPROXIMATE.value)
+                        "Qt brush pattern with a data-defined colour or style is drawn as a "
+                        "solid fill.", strategy=Strategy.APPROXIMATE.value)
                 layer_def["paint"].update({
                     "fill-color": FillPropertyExtractor.get_fill_color(symbol_layer),
                     "fill-opacity": FillPropertyExtractor.get_fill_opacity(symbol_layer, symbol),
@@ -3405,6 +3629,14 @@ class QgisMapLibreStyleExporter:
                         PropertyExtractor.static_pixels(offset.x(), symbol_layer.offsetUnit()),
                         PropertyExtractor.static_pixels(offset.y(), symbol_layer.offsetUnit())]
                     layer_def["paint"]["fill-translate-anchor"] = "viewport"
+                if brush is not None:
+                    # The pattern image carries the colour; it starts at the
+                    # corner of the view, as QGIS's brush.
+                    del layer_def["paint"]["fill-color"]
+                    layer_def["paint"]["fill-pattern"] = brush
+                    metadata = layer_def.setdefault("metadata", {})
+                    metadata[self.SCREEN_PATTERN_FLAG] = True
+                    metadata[self.PATTERN_ANCHOR_FLAG] = "viewport"
                 color_prop = symbol_layer.dataDefinedProperties().property(
                     QgsSymbolLayer.Property.PropertyFillColor)
                 if color_prop and color_prop.isActive():
@@ -3574,6 +3806,12 @@ class QgisMapLibreStyleExporter:
             offset = TextPropertyExtractor.get_line_text_offset(label_settings, em_size)
             if offset != [0, 0]:
                 layer_def["layout"]["text-offset"] = offset
+        if style_name in self.label_windows and not pinned:
+            # Each feature is the window of one label, laid out as QGIS lays
+            # it out: the label is centred on it ("line" would place its own
+            # anchors along it, half a label + 2 em from its start).
+            layer_def["layout"]["symbol-placement"] = "line-center"
+            layer_def["layout"].pop("symbol-spacing", None)
 
         layer_def["paint"].update({
             "text-color": TextPropertyExtractor.get_text_color(text_format, label_settings),
@@ -3634,6 +3872,11 @@ class QgisMapLibreStyleExporter:
                 # The font's mean advance per character (em): the viewer's
                 # label boxes (a generic 0.6 em made narrow fonts too wide).
                 layer_def["metadata"]["q2vt:char-width"] = char_width
+            if font and self._register_font_metrics(text_format, font):
+                # Each character's own advance: a label of narrow letters
+                # ("t_felirat") is up to a fifth shorter than the mean says,
+                # which decides whether it fits in its polygon.
+                layer_def["metadata"]["q2vt:font"] = font
         self.style["layers"].extend(self._line_label_zoom_split(layer_def))
 
     # MapLibre checks that a line label fits along its line with the
@@ -3690,7 +3933,11 @@ class QgisMapLibreStyleExporter:
         try:
             values = {z: ex.evaluate_zoom_curve(size, z) for z in range(0, 25)}
         except ex.ExpressionError:
-            return [layer_def]
+            if line:
+                return [layer_def]
+            # A data-defined size: the frame still needs its zoom's image and
+            # icon-size ramp (a map-unit border was lost in one image).
+            values = None
         low = layer_def.get("minzoom", 0)
         high = layer_def.get("maxzoom", 24)
         fit = self.LINE_LABEL_FIT_ZOOM
@@ -3728,12 +3975,20 @@ class QgisMapLibreStyleExporter:
         return out
 
     def _map_unit_frame(self, background, zoom: int) -> Optional[str]:
-        """Frame image with the map-unit stroke of ``zoom``: drawn at
-        icon-size 0.5 -> 1 over the zoom, so the image stroke is doubled."""
+        """Frame image with the map-unit stroke for [zoom, zoom + 1).
+
+        A text-fitted rectangle's border lies in the image's fixed (not
+        stretched) margin, which MapLibre draws in image pixels whatever the
+        icon-size: the border cannot grow within the zoom, so it is drawn at
+        the stroke of zoom + 0.5, within sqrt(2) of QGIS's at either end (a
+        doubled stroke was twice QGIS's at the whole zoom). An ellipse is
+        scaled whole with the icon (icon-size 0.5 -> 1): its stroke stays
+        doubled."""
+        ellipse = _enum_int(background.type(), 0) in (2, 3)
         stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
                                                  background.strokeWidthUnit(),
-                                                 reference_zoom=zoom)
-        return self._background_image(background, stroke_px=2.0 * stroke)
+                                                 reference_zoom=zoom if ellipse else zoom + 0.5)
+        return self._background_image(background, stroke_px=2.0 * stroke if ellipse else stroke)
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:
@@ -3920,6 +4175,9 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-text-fit"] = text_fit
 
         text_fit_padding = IconPropertyExtractor.get_icon_text_fit_padding(background)
+        if text_fit_padding and label_settings is not None:
+            text_fit_padding = self._frame_fit_padding(text_fit_padding, label_settings.format(),
+                                                       layer_def["layout"])
         if text_fit_padding:
             layer_def["layout"]["icon-text-fit-padding"] = text_fit_padding
 
@@ -3978,6 +4236,68 @@ class QgisMapLibreStyleExporter:
             return None
         width = advance / 100.0 / len(cls._CHAR_SAMPLE)
         return round(width, 2) if 0.2 <= width <= 1.2 else None
+
+    # Characters whose advances the viewer gets: ASCII, Latin-1 and Latin
+    # Extended-A (Hungarian ő, ű...); any other counts as the mean width.
+    _METRIC_CHARS = "".join(map(chr, range(32, 127))) + "".join(map(chr, range(160, 384)))
+
+    def _register_font_metrics(self, text_format, font_name: str) -> bool:
+        """The label font's advance per character and its line height, in
+        em (Qt's font metrics, as QGIS measures labels), stored once per
+        font in the style's metadata["q2vt:font-metrics"][font_name]:
+        {"chars", "advances" (thousandths of an em, one per char), "height"}."""
+        fonts = self.style.setdefault("metadata", {}).setdefault("q2vt:font-metrics", {})
+        if font_name in fonts:
+            return True
+        try:
+            from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+            metrics = QFontMetricsF(self._metrics_font(text_format))
+            advances = [round(metrics.horizontalAdvance(char)) for char in self._METRIC_CHARS]
+            height = metrics.height() / 1000.0
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        if not 0.5 <= height <= 3 or not any(advances):
+            return False
+        fonts[font_name] = {"chars": self._METRIC_CHARS, "advances": advances, "height": round(height, 3)}
+        return True
+
+    @staticmethod
+    def _metrics_font(text_format) -> QFont:
+        """The label font QGIS draws (its named style, the B/I buttons on
+        top) at 1000 px: Qt's font metrics in thousandths of an em."""
+        from qgis.core import QgsFontUtils  # pylint: disable=import-outside-toplevel
+        named = QgsTextFormat(text_format)
+        if text_format.namedStyle():
+            font = QFont(text_format.font())
+            QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
+            named.setFont(font)
+        font = TextPropertyExtractor.drawn_font(named)  # the B/I buttons on top
+        font.setPixelSize(1000)
+        return font
+
+    def _frame_fit_padding(self, padding, text_format, layout):
+        """``icon-text-fit-padding`` around QGIS's text box. MapLibre fits a
+        frame to its own line box (text-line-height ems, the baseline 7/24 em
+        below its middle); QGIS's frame wraps the font's ascent and descent.
+        The difference goes into the top and bottom padding. Map-unit text
+        (a text-size zoom curve) keeps the bare buffer."""
+        size = layout.get("text-size")
+        if not ex.is_number(size) or not (isinstance(padding, list) and len(padding) == 4
+                                          and all(ex.is_number(v) for v in padding)):
+            return padding
+        try:
+            from qgis.PyQt.QtGui import QFontMetricsF  # pylint: disable=import-outside-toplevel
+            metrics = QFontMetricsF(self._metrics_font(text_format))
+            ascent, descent = metrics.ascent() / 1000.0, metrics.descent() / 1000.0
+        except (AttributeError, RuntimeError, TypeError):
+            return padding
+        if not 0.5 <= ascent + descent <= 3:
+            return padding
+        line_height = layout.get("text-line-height", 1.2)
+        half = (line_height if ex.is_number(line_height) else 1.2) / 2
+        top = (ascent - half - _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
+        bottom = (descent - half + _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
+        return [round(padding[0] + top, 4), padding[1], round(padding[2] + bottom, 4), padding[3]]
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:
@@ -4065,12 +4385,28 @@ class QgisMapLibreStyleExporter:
             GlyphGenerator(self.glyphs, 'q2vt_label', glyphs_dir).generate()
         else:
             del self.style["glyphs"]
+        self._unique_layer_ids()
         rounded_style = self.round_numeric_values(self.style)
         self.style = rounded_style
         filepath = os.path.join(style_dir, filename)
         with open(filepath, "w", encoding="utf8") as f:
             json.dump(rounded_style, f, indent=indent, ensure_ascii=False)
         return filepath
+
+    def _unique_layer_ids(self) -> None:
+        """MapLibre rejects a whole style with a repeated layer id (no map at
+        all): a repeat is renamed with a suffix and reported."""
+        seen = set()
+        for layer_def in self.style["layers"]:
+            base = layer_def["id"]
+            new, count = base, 2
+            while new in seen:
+                new, count = f"{base}_{count}", count + 1
+            if new != base:
+                self.diagnostics.add("Q2VT_STYLE_DUPLICATE_ID",
+                                     f"Style layer id '{base}' repeated; renamed '{new}'.")
+                layer_def["id"] = new
+            seen.add(new)
 
     def round_numeric_values(self, obj, digits: int = 4):
         """Recursively round floats for compact output.

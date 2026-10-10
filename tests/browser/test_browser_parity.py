@@ -12,12 +12,14 @@ import os
 import subprocess
 
 import pytest
-from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature,
+from qgis.core import (Qgis, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform, QgsFeature, QgsField,
                        QgsGeometry, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
-                       QgsProcessingFeedback, QgsProject, QgsRectangle,
+                       QgsProcessingFeedback, QgsProject, QgsRectangle, QgsRendererCategory,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
                        QgsSingleSymbolRenderer, QgsVectorLayer, QgsFillSymbol,
                        QgsLineSymbol)
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 
 import sys
@@ -25,7 +27,7 @@ import sys
 from q2vt_fixtures import reset_project, to_geopackage
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_browser_smoke import HERE, PORT, _serve  # noqa: E402 pylint: disable=wrong-import-position
+from test_browser_smoke import HERE, _serve  # noqa: E402 pylint: disable=wrong-import-position
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 CENTER = (2120500.0, 6020500.0)
@@ -73,7 +75,7 @@ def _compare(tmp_path, layer, metric="near", center=CENTER):
     server = _serve(export_dir)
     try:
         run = subprocess.run(["node", os.path.join(HERE, "gallery_capture.mjs"), export_dir,
-                              str(PORT), str(views), str(tmp_path)],
+                              str(server.port), str(views), str(tmp_path)],
                              capture_output=True, text=True, cwd=HERE, timeout=120)
         assert run.returncode == 0, run.stderr
     finally:
@@ -135,9 +137,25 @@ def test_polygon_outline_offsets_follow_the_source_ring(tmp_path, kind, clockwis
     assert _compare(tmp_path, layer) > 0.95
 
 
+@pytest.mark.parametrize("offset", [-3.0, 3.0])
+@pytest.mark.parametrize("clockwise", [False, True])
+def test_polygon_outline_screen_offsets_follow_qgis(tmp_path, clockwise, offset):
+    """A millimetre offset stays a native line offset: a positive one moves
+    the outline inside the polygon like QGIS, whatever the ring order."""
+    layer = _polygon_layer(str(tmp_path / "rings.gpkg"), clockwise)
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    # The wrong side is 6 mm (about 22 px) away from QGIS's outline.
+    assert _compare(tmp_path, layer) > 0.95
+
+
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])
-@pytest.mark.parametrize("pattern", ["custom", "dash", "dashdot"])
+@pytest.mark.parametrize("pattern", ["custom", "custom_empty_dash", "dash", "dashdot"])
 def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
+    """Dash lengths and caps. A dash of length 0 draws nothing in QGIS, whatever
+    the cap (it was drawn as a dot)."""
     from qgis.PyQt.QtCore import Qt
     layer = _polygon_layer(str(tmp_path / "rings.gpkg"), False)
     line = QgsSimpleLineSymbolLayer(QColor("black"), 3.0)
@@ -146,6 +164,12 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
         line.setUseCustomDashPattern(True)
         line.setCustomDashVector([6.0, 10.0])
         line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+    elif pattern == "custom_empty_dash":  # screen units: a native dash array
+        line.setWidth(4.0)
+        line.setWidthUnit(Qgis.RenderUnit.Pixels)
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector([12.0, 8.0, 0.0, 12.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Pixels)
     else:
         line.setPenStyle({"dash": Qt.PenStyle.DashLine,
                           "dashdot": Qt.PenStyle.DashDotLine}[pattern])
@@ -154,6 +178,11 @@ def test_dash_patterns_follow_qt(tmp_path, cap, pattern):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
     # Pixel-level: dash lengths and caps (a 1-width error per dash fails).
     assert _compare(tmp_path, layer, metric="shape") < 0.08
+    if pattern == "custom_empty_dash":  # no dot: as much ink as QGIS
+        from PIL import Image
+        qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+                         for n in ("qgis", "browser"))
+        assert browser == pytest.approx(qgis, rel=0.1)
 
 
 @pytest.mark.parametrize("placement,gallery_cell", [
@@ -193,6 +222,42 @@ def test_map_unit_line_labels_are_drawn(tmp_path, placement, gallery_cell):
     assert ink_browser > line_only and ink_browser == pytest.approx(ink_qgis, rel=0.35)
 
 
+def test_repeated_curved_labels_of_a_wiggly_river_are_drawn(tmp_path):
+    """Swellendam rivers: a curved label repeated along a river whose
+    vertices turn 30 degrees every 5 px. MapLibre's own line placement
+    found no anchor on it (its angle check adds up the wiggles); the export
+    lays the label out as QGIS does and MapLibre draws it. (The river lies
+    in the view: QGIS cuts the visible part at the repeat distance.)"""
+    import math
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=name:string", "rivers", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttribute("name", "Koornlands")
+    x, y, points = CENTER[0] - 114.0, CENTER[1] - 20.0, []
+    for i in range(49):  # 5 m segments heading 10 +- 15 degrees: 240 m
+        points.append(f"{x} {y}")
+        heading = math.radians(10 + (15 if i % 2 else -15))
+        x, y = x + 5 * math.cos(heading), y + 5 * math.sin(heading)
+    feature.setGeometry(QgsGeometry.fromWkt(f"LINESTRING({', '.join(points)})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "rivers.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"line_style": "no"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    ink_qgis, ink_browser = _compare(tmp_path, layer, metric="ink")
+    assert ink_qgis > 100  # QGIS draws the label (the river itself is not drawn)
+    assert ink_browser == pytest.approx(ink_qgis, rel=0.35)
+
+
 @pytest.mark.parametrize("font", ["DejaVu Serif", "DejaVu Sans"])
 def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
     """QGIS draws a font marker with its baseline half the font's ascent
@@ -210,6 +275,132 @@ def test_font_marker_text_sits_where_qgis_draws_it(tmp_path, font):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
     # 0.16 em (8 px here) too high shifted most of the ink off its place.
     assert _compare(tmp_path, layer, metric="shape") < 0.12
+
+
+@pytest.mark.parametrize("limited", ["both", "size"])
+def test_a_font_marker_offset_in_map_units_with_a_scale_limit(tmp_path, limited):
+    """A font marker on a line, sized and offset in map units with a minimum scale
+    (zoomed out past it, both keep their size at that scale): the offset was
+    read without its scale limit, did not divide evenly into the size and
+    was dropped (the text sat on its point). Limited on the size only, the
+    offset in ems changes with the zoom."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsMapUnitScale
+    from qgis.PyQt.QtCore import QPointF
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "lines", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 100} {CENTER[1]}, {CENTER[0] + 100} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    marker = QgsFontMarkerSymbolLayer("DejaVu Sans", "Vv", 20)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setOffset(QPointF(0, -30))
+    marker.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    limit = QgsMapUnitScale(2000, 0)  # the view (about 1:3200) is zoomed out past it
+    marker.setSizeMapUnitScale(limit)
+    if limited == "both":
+        marker.setOffsetMapUnitScale(limit)
+    marker_line = QgsMarkerLineSymbolLayer()
+    marker_line.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    marker_line.setRotateSymbols(False)
+    marker_line.setSubSymbol(QgsMarkerSymbol([marker]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([marker_line])))
+    _compare(tmp_path, layer, metric="shape")
+    (_, top, _, bottom), _ = _ink_boxes(tmp_path)
+    (_, btop, _, bbottom), _ = _ink_boxes(tmp_path, "browser")
+    assert abs((top + bottom) / 2 - (btop + bbottom) / 2) <= 3, ((top, bottom), (btop, bbottom))
+
+
+@pytest.mark.parametrize("placement,flags,repeat", [
+    ("line", ("OnLine", "AboveLine"), 0), ("line", ("OnLine", "BelowLine"), 0),
+    ("curved", ("OnLine", "AboveLine", "BelowLine"), 0), ("line", ("OnLine", "AboveLine"), 120)])
+def test_line_labels_take_the_side_qgis_takes(tmp_path, placement, flags, repeat):
+    """Line labels allowed on the line and beside it: QGIS puts a label
+    beside the line at the label distance (above first; curved labels allowed
+    everywhere below); the web always put it on the line."""
+    from qgis.core import (QgsLabeling, QgsPalLayerSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=t:string", "lines", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Mill Road"])
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 140} {CENTER[1]}, {CENTER[0] + 140} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple(
+        {"color": "255,0,0", "width": "0.4"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = {"line": Qgis.LabelPlacement.Line, "curved": Qgis.LabelPlacement.Curved}[placement]
+    settings.dist = 4
+    settings.distUnits = Qgis.RenderUnit.Millimeters
+    settings.repeatDistance = repeat
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(18)
+    fmt.setSizeUnit(Qgis.RenderUnit.Pixels)
+    fmt.setColor(QColor("black"))
+    settings.setFormat(fmt)
+    value = QgsLabeling.LinePlacementFlags(getattr(QgsLabeling.LinePlacementFlag, flags[0]))
+    for name in flags[1:]:
+        value = value | getattr(QgsLabeling.LinePlacementFlag, name)
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(value)
+    settings.setLineSettings(line_settings)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (_, qtop, _, qbottom), (_, btop, _, bbottom) = (_black_box(tmp_path, n) for n in ("qgis", "browser"))
+    line = SIZE / 2
+    qgis, browser = (qtop + qbottom) / 2 - line, (btop + bbottom) / 2 - line
+    assert qgis * browser > 0 and abs(browser) > 8, (qgis, browser)  # the same side, off the line
+    if repeat:  # drawn once per line, the viewer places it (see the follow-up below)
+        assert abs(qgis - browser) <= 4, (qgis, browser)
+
+
+def test_overlapping_markers_stack_in_feature_order(tmp_path):
+    """Two markers of one rule that overlap: QGIS draws the later feature on
+    top. MapLibre stacked them by their height on the screen (the lower one
+    on top) - here the later marker is the upper one."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=c:string", "pts", "memory")
+    for colour, dx, dy in (("255,0,0", 10, -10), ("0,0,255", -10, 10)):  # the second is higher
+        feature = QgsFeature(memory.fields())
+        feature.setAttributes([colour])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0] + dx} {CENTER[1] + dy})"))
+        memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "pts.gpkg"))
+    symbol = QgsMarkerSymbol.createSimple({"name": "square", "size": "12", "outline_style": "no"})
+    symbol.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                                 QgsProperty.fromExpression('"c"'))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _compare(tmp_path, layer, metric="shape")
+    from PIL import Image
+    middle = SIZE // 2
+    colours = [Image.open(str(tmp_path / f"v_{n}.png")).convert("RGB").getpixel((middle, middle))
+               for n in ("qgis", "browser")]
+    assert colours[0][2] > 200 and colours[1][2] > 200, colours  # blue (the later one) on top
+
+
+def _black_box(tmp_path, name):
+    """Bounding box of the black (text) ink of a capture, red left out."""
+    from PIL import Image
+    image = Image.open(str(tmp_path / f"v_{name}.png")).convert("RGB")
+    mask = Image.new("L", image.size)
+    mask.putdata([255 if max(p) < 110 else 0 for p in image.getdata()])
+    return mask.getbbox()
+
+
+def _ink_boxes(tmp_path, name="qgis"):
+    """Bounding box of the dark ink of a capture, and its ink count."""
+    from PIL import Image
+    image = Image.open(str(tmp_path / f"v_{name}.png")).convert("L")
+    mask = image.point(lambda v: 255 if v < 128 else 0)
+    return mask.getbbox(), sum(1 for v in mask.getdata() if v)
 
 
 def test_thin_lines_get_the_ink_qgis_gives_them(tmp_path):
@@ -253,6 +444,65 @@ def _red_and_blue_boxes(path):
         boxes.append((min(p[0] for p in points), min(p[1] for p in points),
                       max(p[0] for p in points), max(p[1] for p in points)))
     return boxes
+
+
+@pytest.mark.parametrize("zoom", [16.0, 16.5, 16.95])
+def test_a_map_unit_frame_border_is_as_thick_as_qgis(tmp_path, monkeypatch, zoom):
+    """A frame bordered in map units: the border lies in the frame image's
+    fixed margin, which MapLibre does not scale with icon-size, so a border
+    made twice as thick (for icon-size 0.5) stayed twice QGIS's at the
+    whole zoom. Drawn at the stroke of the zoom's middle, it stays within
+    sqrt(2) of QGIS's over the zoom."""
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from PIL import Image
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["1"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(12, 4))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(2)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+
+    def border(name):
+        """Red ink across the frame's top and bottom edges, per column, over
+        the columns left of the text (px of full red)."""
+        image = Image.open(str(tmp_path / f"v_{name}.png")).convert("RGB")
+        (x0, y0, x1, y1), (tx0, _, _, _) = _red_and_blue_boxes(str(tmp_path / f"v_{name}.png"))
+        columns = range(x0 + 4, tx0 - 2)
+        ink = sum(max(0, image.getpixel((x, y))[0] - image.getpixel((x, y))[1]) / 255
+                  for x in columns for y in range(image.height))
+        return ink / len(columns) / 2
+
+    qgis, browser = border("qgis"), border("browser")
+    assert 0.6 <= browser / qgis <= 1.55, (qgis, browser)
 
 
 @pytest.mark.parametrize("zoom", [16.0, 16.5])
@@ -300,6 +550,126 @@ def test_label_frames_follow_map_unit_text_between_zooms(tmp_path, monkeypatch, 
                           for n in ("qgis", "browser"))
     for a, b in zip(qf, bf):  # frame edges within 2 px
         assert abs(a - b) <= 2, (qf, bf)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 16.5])
+def test_label_frames_with_a_data_defined_size_keep_a_map_unit_border(tmp_path, monkeypatch, zoom):
+    """Zone labels with a data-defined map-unit size and a frame bordered in
+    map units: the size cannot be read per zoom, so one frame image was made
+    for all zooms, its border converted at the lowest zoom (none drawn)."""
+    from qgis.core import (QgsPalLayerSettings, QgsProperty, QgsTextBackgroundSettings,
+                           QgsTextFormat, QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string&field=big:integer", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["1ő", 1])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.Size, QgsProperty.fromExpression('if("big" = 1, 17, 25)'))
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(3, 3))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(2)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png"))
+                          for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # the border is drawn, its edges within 2 px
+        assert abs(a - b) <= 2, (qf, bf, qt, bt)
+
+
+def test_millimetre_label_frame_wraps_the_text_like_qgis(tmp_path):
+    """A frame sized as a millimetre buffer around Open Sans text: QGIS fits
+    it to the font's ascent and descent (1.36 em), MapLibre to its own
+    1.2 em line box. The frame was 2.5 px too short at 16 px, all of it
+    above the text, which then sat high in its frame."""
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from qgis.PyQt.QtGui import QFont, QFontDatabase
+    from q2vt_fixtures import to_geopackage as save
+    if "Open Sans" not in QFontDatabase().families():
+        pytest.skip("Open Sans is not installed")
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Hg"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setFont(QFont("Open Sans"))
+    fmt.setSize(12)  # points: 16 px
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(1.4, 0.7))
+    frame.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    frame.setRadii(QSizeF(1, 1))
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(0.3)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    (q_top, q_bottom, q_text), (b_top, b_bottom, b_text) = (
+        _frame_and_text_rows(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    # QGIS rounds the ascent up to whole pixels (18 px, not 17.1): about 1 px
+    # more room above the text remains.
+    assert b_bottom - b_top == pytest.approx(q_bottom - q_top, abs=1)
+    assert b_text - b_top == pytest.approx(q_text - q_top, abs=1.5)
+    assert b_bottom - b_text == pytest.approx(q_bottom - q_text, abs=1.5)
+
+
+def _frame_and_text_rows(path):
+    """Rows (anti-aliasing weighted) of a red frame's top and bottom stroke
+    across the text's columns, and of the middle of the blue text's ink."""
+    import numpy as np
+    from PIL import Image
+    rgb = np.asarray(Image.open(path).convert("RGB")).astype(float)
+    red = np.clip((255 - rgb[..., 1]) / 255, 0, 1) * (rgb[..., 0] - rgb[..., 2] > 60)
+    blue = np.clip((255 - rgb[..., 0]) / 255, 0, 1) * (rgb[..., 2] - rgb[..., 0] > 60)
+    ys, xs = np.nonzero(blue > 0.4)
+    rows = np.arange(rgb.shape[0])
+    cover = red[:, xs.min():xs.max() + 1].mean(axis=1)
+    middle = int(ys.mean())
+    top = (rows[:middle] * cover[:middle]).sum() / cover[:middle].sum()
+    bottom = (rows[middle:] * cover[middle:]).sum() / cover[middle:].sum()
+    ink = blue.sum(axis=1)
+    return top, bottom, (rows * ink).sum() / ink.sum()
 
 
 def _period(png, axis=0):
@@ -369,6 +739,110 @@ def test_viewport_aligned_patterns_start_at_the_view_corner(tmp_path, kind):
     pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
     assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+@pytest.mark.parametrize("brush", ["diagonal_x", "horizontal", "dense4"])
+def test_qt_brush_patterns_are_drawn_like_qgis(tmp_path, brush):
+    """A simple fill with a Qt brush style (crossed diagonals, horizontal
+    lines, dense dots): QGIS fills with the brush, an 8 px pattern starting
+    at the corner of the view. It was drawn as a solid fill."""
+    layer = _polygon_layer(str(tmp_path / "brush.gpkg"), False)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "0,0,0", "style": brush, "outline_style": "no"})))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
+    from PIL import Image
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.1)
+
+
+def test_a_fill_offset_moves_its_outline_too(tmp_path):
+    """A simple fill with a screen offset: QGIS shifts the whole polygon,
+    outline included. The outline (exported as its own line) stayed put."""
+    from qgis.PyQt.QtCore import QPointF
+    layer = _polygon_layer(str(tmp_path / "offset.gpkg"), False)
+    symbol = QgsFillSymbol.createSimple({"color": "0,0,0,0", "outline_color": "black",
+                                         "outline_width": "3", "outline_width_unit": "Pixel"})
+    symbol.symbolLayer(0).setOffset(QPointF(9, -6))
+    symbol.symbolLayer(0).setOffsetUnit(Qgis.RenderUnit.Pixels)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+@pytest.mark.parametrize("join", ["miter", "bevel"])
+def test_a_ring_is_joined_at_its_first_vertex(tmp_path, join):
+    """A polygon outline travels as a closed line. Qt strokes a closed path
+    with a join at its first vertex; MapLibre gave that vertex two caps (a
+    square knob, twice the ink of a translucent outline)."""
+    from qgis.PyQt.QtCore import Qt
+    layer = _polygon_layer(str(tmp_path / "ring.gpkg"), False)
+    symbol = QgsFillSymbol.createSimple({"color": "0,0,0,0", "outline_color": "0,0,0,128",
+                                         "outline_width": "8", "outline_width_unit": "Pixel"})
+    symbol.symbolLayer(0).setPenJoinStyle({"miter": Qt.PenJoinStyle.MiterJoin,
+                                           "bevel": Qt.PenJoinStyle.BevelJoin}[join])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    assert _compare(tmp_path, layer, metric="shape") < 0.03
+    from PIL import Image
+    # Ink around the ring's first vertex, (-120, -90) from the centre. With
+    # bevel joins MapLibre draws a ring's closing wedge twice (as on its own
+    # polygon rings): 7 % more ink there; the caps gave 28 %.
+    scale = gallery.EARTH / (512 * 2 ** ZOOM)
+    x, y = round(SIZE / 2 - 120 / scale), round(SIZE / 2 + 90 / scale)
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L")
+                         .crop((x - 12, y - 12, x + 12, y + 12)).getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.01 if join == "miter" else 0.1)
+
+
+def test_a_wide_map_unit_line_crossing_a_tile_edge_has_straight_sides(tmp_path):
+    """A line 60 map units wide crossing a tile edge at a shallow angle: the
+    tiles keep it beyond their edge for its width (the default 10 px clip
+    buffer cut it short of the edge, and both sides of the band stepped
+    there)."""
+    from PIL import Image, ImageChops
+    from qgis.PyQt.QtCore import Qt
+    edge_x = 2120668.91274393  # a tile edge at zooms 15-17
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "road", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({edge_x - 80} {CENTER[1] - 300}, {edge_x + 80} {CENTER[1] + 300})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "road.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 60.0)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    _compare(tmp_path, layer, center=(edge_x, CENTER[1]))
+    masks = [Image.open(str(tmp_path / f"v_{n}.png")).convert("L").point(lambda v: 255 if v < 128 else 0)
+             for n in ("qgis", "browser")]
+    differ = sum(1 for v in ImageChops.difference(*masks).getdata() if v)
+    assert differ < 400, differ
+
+
+def test_around_point_labels_touch_their_point_at_distance_zero(tmp_path):
+    """"Around point" labels measured from the point at distance 0: QGIS puts
+    the label's corner on the point (above right first). The web kept an
+    extra 0.7 em clearance."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    layer = QgsVectorLayer("Point?crs=EPSG:3857&field=name:string", "places", "memory")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Marketplace"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "places.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple(
+        {"name": "circle", "size": "1", "color": "255,255,255,0", "outline_style": "no"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.AroundPoint
+    settings.dist = 0
+    text_format = QgsTextFormat()
+    text_format.setSize(24)
+    text_format.setSizeUnit(Qgis.RenderUnit.Pixels)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    assert _compare(tmp_path, layer, metric="near") > 0.9
 
 
 def _feature_pattern(kind, tmp_path):
@@ -509,3 +983,26 @@ def test_overlapping_pattern_markers_stack_like_qgis(tmp_path, clip, metric, lim
             "shape": Qgis.MarkerClipMode.Shape}[clip]
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([_overlapping_squares(mode)])))
     assert _compare(tmp_path, layer, metric=metric) < limit
+
+
+def test_overlapping_features_of_different_rules_keep_qgis_order(tmp_path):
+    """Without symbol levels QGIS draws a categorized layer feature by
+    feature: forest B, drawn after conservation area C, covers it; forest
+    A, drawn before C, stays under it. The style drew every forest below
+    every conservation area (one style layer per category), so the overlap
+    of B and C was the wrong colour (10 % of the pixels)."""
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "landuse", "memory")
+    layer.dataProvider().addAttributes([QgsField("landuse", QVariant.String)])
+    layer.updateFields()
+    for use, low in (("forest", -130), ("conservation", -70), ("forest", -10)):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([use])
+        feature.setGeometry(QgsGeometry.fromRect(QgsRectangle(
+            CENTER[0] + low, CENTER[1] + low, CENTER[0] + low + 120, CENTER[1] + low + 120)))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "landuse.gpkg"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("landuse", [
+        QgsRendererCategory(value, QgsFillSymbol.createSimple(
+            {"color": color, "outline_style": "no"}), value)
+        for value, color in (("forest", "40,140,40"), ("conservation", "60,60,200"))]))
+    assert _compare(tmp_path, layer, metric="color") < 0.01

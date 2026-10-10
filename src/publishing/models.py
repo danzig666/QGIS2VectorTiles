@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 PROFILE_SCHEMA_VERSION = 1
 ARCHIVE_FORMATS = ("pmtiles", "mbtiles", "both")
-DESTINATION_KINDS = ("local", "r2", "s3")
+DESTINATION_KINDS = ("local", "r2", "s3", "ssh")
 LOCALES = ("en", "hu")
 FILTER_KINDS = ("values", "range", "text")
 FIELD_TYPES = ("string", "integer", "number", "boolean", "date", "url")
@@ -319,6 +319,13 @@ class DestinationConfig:
     credential_ref: str = ""           # QGIS auth configuration id (no secret)
     retention: int = 3                 # releases kept (current + previous)
     conditional_writes: bool = True    # provider supports If-Match/If-None-Match
+    # SSH / SFTP server ("ssh"): the site goes straight into one folder, not
+    # versioned; public_base_url is then that folder's address (optional).
+    host: str = ""
+    port: int = 22
+    user: str = ""                     # "" = the saved credentials' user, else ssh's default
+    remote_dir: str = ""               # absolute, or relative to the login's home folder
+    identity_file: str = ""            # private key file ("" = ssh-agent / default keys)
 
 
 @dataclass

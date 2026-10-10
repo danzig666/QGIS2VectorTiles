@@ -137,6 +137,11 @@ CODES: Dict[str, CodeInfo] = {
         "The ELSE condition uses sibling filters only."),
     "Q2VT_CALLOUT_APPROX": CodeInfo(
         Severity.WARNING, "Label callout exported as an approximate straight leader"),
+    "Q2VT_FEATURE_ORDER_ACROSS_RULES": CodeInfo(
+        Severity.WARNING, "Overlapping features of different rules are drawn in rule order",
+        "QGIS draws this layer feature by feature; the web map draws it rule by rule, so a later "
+        "rule covers earlier ones where features overlap. Turn on symbol levels if rule order "
+        "is intended."),
     "Q2VT_HYBRID_NOT_AVAILABLE": CodeInfo(
         Severity.WARNING, "Hybrid raster fallback is not implemented yet",
         "Unsupported components are reported instead of rasterized."),
@@ -149,6 +154,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_RULE_OUTPUT_EMPTY": CodeInfo(
         Severity.WARNING, "A rule matched features but its geometry step produced none",
         "Check the geometry generator / conversion of this rule; it is missing from the map."),
+    "Q2VT_STYLE_DUPLICATE_ID": CodeInfo(
+        Severity.ERROR, "Two style layers had the same id",
+        "An export bug: the repeat was renamed so the map still loads, but the two rules may "
+        "share a dataset. Please report it."),
     "Q2VT_RULE_EXPORT_FAILED": CodeInfo(
         Severity.ERROR, "A rule could not be exported",
         "It is missing from the map. Report this as a converter bug with the diagnostic detail."),

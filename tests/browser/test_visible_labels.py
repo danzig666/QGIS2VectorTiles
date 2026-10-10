@@ -240,6 +240,27 @@ def test_style_expressions_for_label_sizes():
     assert _js(f"m.evaluate(['step', ['zoom'], 1, 10, 2, 15, 3], 12)") == 2
 
 
+def test_label_boxes_use_each_characters_advance():
+    """The style's font metrics (one advance per character, as QGIS measures
+    the label) instead of the mean width: narrow letters make a shorter box."""
+    style = {"metadata": {"q2vt:font-metrics": {"F": {"chars": "il W", "advances": [222, 222, 278, 944],
+                                                     "height": 1.15}}}}
+    layout = {"text-field": ["get", "t"], "text-size": 10}
+    expr = (f"(() => {{ const f = m.fontMetrics({json.dumps(style)}).get('F'); "
+            f"const box = (t, metrics, layout = {json.dumps(layout)}) => "
+            f"m.layoutBoxes(layout, 15, 1, 0.5, metrics)({{t}}); "
+            f"return [box('ill', f), box('ill', null), box('W W', f), box('il', f, "
+            f"{{...{json.dumps(layout)}, 'text-letter-spacing': 0.1, 'text-transform': 'uppercase'}})]; }})()")
+    narrow, mean, wide, spaced = _js(expr)
+    # half width = width / 2 + 2 px margin; half height = height / 2 + 2 px.
+    assert narrow == pytest.approx([3 * 2.22 / 2 + 2, 11.5 / 2 + 2])
+    assert mean == pytest.approx([3 * 5 / 2 + 2, 12 / 2 + 2])
+    assert wide[0] == pytest.approx((9.44 * 2 + 2.78) / 2 + 2)
+    # "IL": unknown upper-case letters count as the mean (0.5 em), plus one
+    # letter spacing between them.
+    assert spaced[0] == pytest.approx((5 + 5 + 1) / 2 + 2)
+
+
 def _lines(lines, view, options, before=None):
     """labelPoints of line features [(id, [[x, y], ...] in z0 tile units)]
     with kind "line" and the rotation written to "rot"; ``before`` sets a
@@ -482,11 +503,37 @@ def test_around_point_tries_the_next_position_when_one_does_not_fit_or_is_taken(
     assert len(boxes) == 2 and not _overlaps(*boxes)
 
 
+def test_around_point_label_of_a_polygon_smaller_than_its_label():
+    # A building-sized polygon (0.01 across) with a long name (0.16 x 0.04):
+    # an "over the point" label needs the polygon to hold it (else the
+    # polygon counts as a sliver in view), an "around" label goes beside it.
+    squares = [(1, 0, 0, 0, (2028, 2028, 2068, 2068))]
+    box = [0.08, 0.02]
+    assert _points(squares, [0, 0, 1, 1], {"box": box}) == {}
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})[1]
+    assert x == pytest.approx(0.5) and y + box[1] == pytest.approx(0.5 - AROUND["distance"])
+
+
+def test_around_point_distance_is_measured_from_the_bare_text():
+    """QGIS keeps the label distance from the text itself: the box margin
+    and a background's padding do not push an around-point label further."""
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': ['literal', [3, 4, 3, 4]]}, 15, 1, 0.5)({t: 'abcd'});"
+            " return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert text == pytest.approx([10, 6]) and box == pytest.approx([16, 11])
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072))]
+    script_box = {"box": [0.08, 0.02]}
+    x, y = _points(squares, [0, 0, 1, 1], {**script_box, "around": AROUND})[1]
+    assert y + 0.02 == pytest.approx(0.5 - AROUND["distance"])
+
+
 def test_around_point_distance_in_map_units_follows_the_zoom():
     fixed = _js("m.aroundOption({px: 10, anchors: ['top']}, 16, 0.001)")
     assert fixed == {"anchors": ["top"], "distance": pytest.approx(0.01)}
     scaled = _js("m.aroundOption({px: 10, zoom: 14}, 16, 0.001)")
-    assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom"
+    # Without anchors: QGIS's first candidate, above right of the point.
+    assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom-left"
     assert _js("m.aroundOption(undefined, 16, 0.001)") is None
     candidates = _js("m.aroundCandidates([0.5, 0.5], [0.1, 0.02], "
                      "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
@@ -523,3 +570,165 @@ def test_free_angle_follows_qgis(size):
     for (box_angle, expected), angle in zip(_QGIS_FREE[size].items(), got):
         expected = -90 if expected == 90 else expected
         assert min(abs(angle - expected), abs(abs(angle - expected) - 180)) < 1, (box_angle, angle, expected)
+
+
+def test_label_boxes_read_plain_array_layout_values():
+    """The exporter writes text-offset and icon-text-fit-padding as plain
+    arrays, not expressions: they used to evaluate to nothing (a framed
+    label's box lost its padding)."""
+    assert _js("m.evaluate([0, -0.75], 15)") == [0, -0.75]
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': [3, 4, 3, 4]}, 15, 1, 0.5)({t: 'abcd'});"
+            " return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert box == pytest.approx([16, 11]) and text == pytest.approx([10, 6])
+
+
+def test_framed_label_box_is_the_frame_maplibre_draws():
+    """MapLibre fits a frame to its own line box (1.2 em a line); the
+    exporter's padding brings it out to the font's ascent and descent. The
+    box is that frame, not the font's height plus the padding once more."""
+    expr = ("(() => { const box = m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10, "
+            "'icon-text-fit': 'both', 'icon-text-fit-padding': [4.4, 4, 2.5, 4]}, 15, 1, 0.5, "
+            "{advance: new Map(), height: 1.362})({t: 'abcd'}); return [box, box.text]; })()")
+    box, text = _js(expr)
+    assert box == pytest.approx([16, (12 + 6.9) / 2 + 2])
+    assert text == pytest.approx([10, 6.81])  # the bare text keeps the font's height
+
+
+def test_rendered_label_boxes_follow_text_offset():
+    """A town name drawn 0.75 em above its dot: its box is where the text is."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 20,
+                                                          'text-offset': [0, -0.75]}};
+      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+        {layer: town, properties: {t: 'ABCD'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001);
+    })()"""
+    (box,) = _js(expr)
+    assert (box[1] + box[3]) / 2 == pytest.approx(0.485) and (box[0] + box[2]) / 2 == pytest.approx(0.5)
+
+
+def test_around_point_labels_keep_clear_of_maplibre_labels():
+    """Around-point labels avoid the point labels MapLibre draws itself (a
+    town name), like line labels; plain polygon labels only the viewer's."""
+    expr = """(() => {
+      let asked = 0; const others = () => { asked++; return [[9, 9, 10, 10]]; };
+      const a = m.avoidFor({around: {anchors: ['top']}}, [], others);
+      const b = m.avoidFor({kind: 'line'}, [], others);
+      const c = m.avoidFor({}, [[1, 1, 2, 2]], others);
+      return [a, b, c, asked];
+    })()"""
+    around, line, plain, asked = _js(expr)
+    assert around == [[9, 9, 10, 10]] and line == [[9, 9, 10, 10]] and plain == [[1, 1, 2, 2]] and asked == 2
+    qgis_order = {"anchors": ["bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right",
+                              "top-right"], "distance": 0.03}
+    squares = [(1, 0, 0, 0, (1024, 1024, 3072, 3072))]   # centroid (0.5, 0.5)
+    box = [0.08, 0.02]
+    first = _points(squares, [0, 0, 1, 1], {"box": box, "around": qgis_order})[1]
+    town = [first[0] - box[0], first[1] - box[1], first[0] + box[0], first[1] + box[1]]
+    x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": qgis_order, "avoid": [town]})[1]
+    assert not _overlaps([x - box[0], y - box[1], x + box[0], y + box[1]], town)
+
+
+def test_pole_labels_keep_clear_of_maplibre_labels():
+    """Horizontal / Free polygon labels ("pole") avoid the point labels
+    MapLibre draws itself too: QGIS places all labels together."""
+    expr = """(() => {
+      const others = () => [[9, 9, 10, 10]];
+      return [m.avoidFor({anchor: 'pole'}, [[1, 1, 2, 2]], others), m.avoidFor({}, [[1, 1, 2, 2]], others)];
+    })()"""
+    pole, plain = _js(expr)
+    assert pole == [[1, 1, 2, 2], [9, 9, 10, 10]] and plain == [[1, 1, 2, 2]]
+
+
+def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
+    """End to end on a stub map: a place name MapLibre draws (one em above its
+    dot) on the middle of a square park. The park's name (pole) used to go to
+    the middle anyway, drawn over the place name (text-overlap "always")."""
+    expr = """(() => {
+      const park = {id: 'park', type: 'symbol', source: 't', 'source-layer': 'parks',
+        layout: {'text-field': ['get', 'name'], 'text-size': 16},
+        metadata: {'q2vt:visible-polygons': 'parks', 'q2vt:label-anchor': 'pole'}};
+      const place = {id: 'place', type: 'symbol', source: 't', 'source-layer': 'places',
+        layout: {'text-field': ['get', 'name'], 'text-size': 16, 'text-offset': [0, -1]}};
+      const layers = [park, place], sources = {t: {type: 'vector', minzoom: 0, maxzoom: 14}}, out = {};
+      const ring = [[400, 400], [3696, 400], [3696, 3696], [400, 3696], [400, 400]].map(([x, y]) => ({x, y}));
+      const parkName = 'Greenfield Nature Reserve', placeName = 'Greenfield Visitor Centre and Shop';
+      const map = {
+        getStyle: () => ({sources, layers: layers.slice()}), getLayer: (id) => layers.find((l) => l.id === id),
+        addLayer: (l, before) => {
+          const i = layers.findIndex((x) => x.id === before);
+          if (i < 0) layers.push(l); else layers.splice(i, 0, l);
+        },
+        removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
+        addSource: (id, spec) => { sources[id] = spec; }, getSource: (id) => ({setData: (d) => { out[id] = d; }}),
+        getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},
+        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0,
+        getContainer: () => ({clientWidth: 1000}),
+        getBounds: () => ({getSouthWest: () => ({lng: 0, lat: 1}), getNorthEast: () => ({lng: 1, lat: 0})}),
+        querySourceFeatures: (s, {sourceLayer}) => sourceLayer !== 'parks' ? [] : [{_x: 0, _y: 0, _z: 0,
+          properties: {q2vt_orig_id: 1, name: parkName},
+          _vectorTileFeature: {extent: 4096, loadGeometry: () => [ring]}}],
+        queryRenderedFeatures: ({layers: wanted}) => !wanted.includes('place') ? [] : [{layer: place,
+          properties: {name: placeName}, geometry: {type: 'Point', coordinates: [0.5, 0.516]}}],
+      };
+      const maplibregl = {MercatorCoordinate: class {
+        constructor(x, y) { this.x = x; this.y = y; }
+        static fromLngLat(ll) { return Array.isArray(ll) ? new this(ll[0], ll[1]) : new this(ll.lng, ll.lat); }
+        toLngLat() { return {lng: this.x, lat: this.y}; } }};
+      m.enableVisibleLabels(map, maplibregl, 't');
+      const box = (layout, name, [x, y]) => {
+        const [w, h] = m.layoutBoxes(layout, 0, 0.001)({name});
+        return [x - w, y - h, x + w, y + h];
+      };
+      const at = out['q2vt_visible_parks'].features[0].geometry.coordinates;
+      return [box(park.layout, parkName, at), box(place.layout, placeName, [0.5, 0.516 - 0.016])];
+    })()"""
+    park, place = _js(expr)
+    assert not _overlaps(park, place)
+    # Still inside the park (0.098 .. 0.902 in both directions).
+    assert 0.098 < park[0] and park[2] < 0.902 and 0.098 < park[1] and park[3] < 0.902
+
+
+def test_rendered_labels_of_any_expression_are_measured():
+    """Basemap place names (text-field a "case" expression) and HTML labels
+    ("format"): the viewer's own small evaluator does not know these, so the
+    boxes come from MapLibre's evaluation of each rendered feature; labels
+    made from the style's definitions got no box and were overlapped."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {
+        'text-field': ['case', ['has', 'name'], ['get', 'name'], ''], 'text-size': 10}};
+      const html = {id: 'html', type: 'symbol', layout: {
+        'text-field': ['format', ['get', 'a'], {}, ['get', 'b'], {'font-scale': 0.8}], 'text-size': 10}};
+      const evaluated = (layer, t) => ({...layer, layout: {...layer.layout,
+        'text-field': {sections: [{text: t}], toString() { return t; }}}});
+      const map = {getStyle: () => ({layers: [town, html]}), queryRenderedFeatures: () => [
+        {layer: evaluated(town, 'Suburb'), properties: {name: 'Suburb'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
+        {layer: evaluated(html, 'AB12'), properties: {a: 'AB', b: '12'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001).map((b) => b[2] - b[0]);
+    })()"""
+    town_width, html_width = _js(expr)
+    assert town_width == pytest.approx((6 * 0.6 * 10 + 4) * 0.001)
+    assert html_width == pytest.approx((4 * 0.6 * 10 + 4) * 0.001)
+
+
+def test_rendered_label_boxes_measure_each_label_with_its_own_text():
+    """A rendered feature's ``layer.layout`` holds that feature's own
+    evaluated values (text-field: a Formatted of its text): each label is
+    measured with its own text, not every label of the layer with the first."""
+    expr = """(() => {
+      const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 10}};
+      const evaluated = (t) => ({...town, layout: {...town.layout,
+        'text-field': {sections: [{text: t}], toString() { return t; }}}});
+      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+        {layer: evaluated('ABCDEFGHIJ'), properties: {t: 'ABCDEFGHIJ'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
+        {layer: evaluated('AB'), properties: {t: 'AB'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
+      const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
+      return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001).map((b) => b[2] - b[0]);
+    })()"""
+    long_width, short_width = _js(expr)
+    assert long_width == pytest.approx((10 * 0.6 * 10 + 4) * 0.001)
+    assert short_width == pytest.approx((2 * 0.6 * 10 + 4) * 0.001)

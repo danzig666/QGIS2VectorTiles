@@ -12,6 +12,9 @@ a few hundred files to upload, not tens of thousands.
 <publication>/releases/<id>/    one immutable release, also openable directly
 ```
 
+An SSH / SFTP server gets no such layout: the release's own files go straight into one folder
+(see [below](#ssh--sftp-server-one-folder-not-versioned)).
+
 Share `…/<publication>/index.html` for "always the current map", or
 `…/releases/<id>/index.html` for "exactly this version". Object storage does not turn
 `/maps/name/` into `index.html` by itself; use the explicit `index.html` address unless
@@ -112,9 +115,104 @@ Choose *Other S3-compatible storage*, enter the S3 API endpoint, bucket, region 
 public base URL. Only enable *conditional writes* when the service supports `If-Match` /
 `If-None-Match` on PutObject; without it, activation is refused (share versioned links).
 
+## SSH / SFTP server (one folder, not versioned)
+
+For a web server you reach with SSH: a VPS, a company or municipal server, a hosting plan with
+SSH access. Choose *Destination → SSH / SFTP server* and enter:
+
+| Field | What to enter |
+|---|---|
+| *SSH server*, *Port* | The server's name or address, and its SSH port (22 unless told otherwise). Pasting `user@server:/folder`, `server:/folder`, `server:2222` or `sftp://user@server:2222/folder` fills the user, port and folder too; a plain name or IP address (IPv6 too) stays as typed. |
+| *User* | Your SSH login (empty: the user of the saved password below). |
+| *Folder on the server* | Where the map goes: absolute (`/var/www/html/map`) or relative to your home folder (`public_html/map`). Created if missing. Not the server's root (`/`). |
+| *Private key file* | Optional. Empty: ssh-agent or your default keys (`~/.ssh/id_ed25519`, …). The private key, not the `.pub` file next to it. |
+| *Public URL of the folder* | Optional: the folder's address on the web, e.g. `https://www.example.com/map` (without `index.html`; spaces and accented letters are fine). Used by *Open map*, *Copy link* and *Copy embed code*, and after each upload to check that it serves the new map (`index.html`, the modules, byte ranges of the archive). |
+
+The saved password and the public URL are not carried over when you switch between SSH and
+R2 / S3 (while the window is open, switching back brings them back). The settings keep one saved
+login and one public URL: those of the destination you save.
+
+**Key or password.** With a key without a passphrase, or one loaded in ssh-agent, nothing is
+asked. Otherwise type the password (or the key's passphrase) in *Or a password for this session
+only*, or keep it encrypted in QGIS (*Save in QGIS…*, or a *Basic* authentication configuration:
+user name = SSH user, password = the password or passphrase) and select it under *Saved
+password*. ssh gets the password through its askpass mechanism: never on a command line, in a
+file or a log, and never in the project or the settings file. The key file must be an OpenSSH
+key: a PuTTY `.ppk` key (from WinSCP, FileZilla, PuTTY) is converted in PuTTYgen (*Load*, then
+*Conversions → Export OpenSSH key*). ssh ignores a key file other users can read: `chmod 600` it
+(Linux, macOS), or on Windows leave only your user in its *Properties → Security → Advanced*.
+
+**One folder, no versions.** There are no `releases/<id>/` folders, no `current.json` and no
+rollback (*Releases to keep* and *Releases and rollback…* are hidden). The map's own files — the
+same as in the offline ZIP, with `index.html` at the top — go straight into the folder and
+replace the previous map. Each *Publish*:
+
+1. connects, creates the folder if needed, checks that it can write there, and lists it;
+2. uploads only new and changed files, each under a temporary name, then renames it over the
+   old file (atomic on OpenSSH servers), `index.html` last, so visitors never get a new page with
+   old data. A file that the last publish uploaded but that is missing on the server, or has
+   another size there, is uploaded again;
+3. deletes the files the previous map had and this one does not;
+4. writes `.q2vt-files.json` into the folder: what QWebMap uploaded there (path, SHA-256, size).
+   It is how the next publish knows what changed; it is public like the map itself. Deleting it
+   makes the next publish upload everything again.
+
+Only files listed in `.q2vt-files.json` are ever deleted: other pages and your own files in the
+folder stay. A file at the same path as one of the map's (e.g. your own `index.html`) is
+replaced, and the publish log says how many such files were replaced. A deletion that fails
+(e.g. no permission) is reported, stays listed, and the next publish tries again. If the upload
+fails or you cancel it, the previous map keeps working (only the files already renamed have
+changed) and the next *Publish* completes the folder. A folder that holds another QWebMap map
+(another publication, e.g. after importing settings as a new map) is taken over: that map's
+files count as QWebMap's, and the log says so. If the folder holds a file where the map needs a
+folder (e.g. a file named `data`), the publish stops before changing anything and names it.
+Files get mode 644 and the folders QWebMap creates 755, so the web server can read them whatever
+the server's umask; in a folder with group write (and setgid), as a team shares, new folders get
+them too (775 / 2775), so the others can publish there as well. Folders that already existed
+keep their mode.
+
+**Browser caches.** The map keeps the same addresses from one publish to the next
+(`index.html`, `style.json`, `data/…`), so a browser that cached the old files without asking
+the server can show the old map, or a mix, for a while. Let the server ask the browser to check
+for a newer version each time, e.g. with Apache an `.htaccess` file in the folder (QWebMap never
+touches it):
+
+```apache
+<IfModule mod_headers.c>
+  Header set Cache-Control "no-cache"
+</IfModule>
+```
+
+or with nginx `add_header Cache-Control "no-cache";` in the folder's `location`. Unchanged files
+are still not downloaded again (the server answers *304 Not Modified*).
+
+**Requirements.** The OpenSSH client (`sftp`, `ssh`) on this computer: built into macOS and
+most Linux systems (package `openssh-client`); on Windows *Settings → Apps → Optional features*
+(Windows 10) or *Settings → System → Optional features* (Windows 11) → *OpenSSH Client* (also
+found in `C:\Windows\System32\OpenSSH` when QGIS's PATH lacks it). No Python packages are
+needed. A password or passphrase needs OpenSSH 8.4 or newer on Windows (check with `ssh -V`;
+Windows 10's built-in client is older, and QWebMap says so): there, use a key without a
+passphrase or ssh-agent, or install a newer Win32-OpenSSH. On the server: SFTP (on by default
+with OpenSSH; scp-only accounts and some NAS or router systems lack it) and a web server for the
+folder that answers Range requests (see *Any static web server*). Your `~/.ssh/config`
+(aliases, ProxyJump, …) applies, also its `Port` for the host while *Port* is 22; connection
+sharing (`ControlMaster`) is not used.
+
+**Host keys.** The first connection accepts and remembers the server's host key (in
+`~/.ssh/known_hosts`). If it changes later, nothing is uploaded and the window says so: a
+reinstalled server — or someone intercepting the connection. Ask the server's administrator; if
+the change is expected, remove the old key with `ssh-keygen -R <server>` and publish again.
+
+*Test connection* logs in, creates the folder if needed, writes and deletes a test file, and
+tells whether files are replaced atomically. Errors name the cause: client missing or too old,
+login refused, key file not usable (PuTTY format, readable by others, the `.pub` file), server unreachable, host
+key changed, no SFTP on the server, permission denied; when the cause is less clear, ssh's own
+last lines are shown too.
+
 ## Any static web server
 
-Copy the publication folder to the server (e.g. with *Destination: Local* into a web root).
+Copy the publication folder to the server (e.g. with *Destination: Local only (no upload)* into a web root),
+or let *SSH / SFTP server* upload the map into a folder of it (above).
 The server must answer `Range` requests with `206 Partial Content`, must not gzip
 `.pmtiles` and `.pack` responses, and must serve `.mjs` as `text/javascript`. nginx and Apache
 do this by default for static files (add `types { text/javascript mjs; }` to old nginx versions).

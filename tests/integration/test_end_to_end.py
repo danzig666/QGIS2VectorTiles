@@ -133,7 +133,7 @@ def test_vector_first_export(export, tmp_path):
     assert width[0] == "case"  # zero width -> one-pixel hairline, as QGIS
     width = width[3]
     assert width[0] == "*" and width[1][0] == "to-number"
-    field = width[1][1][1]
+    field = width[1][1][1][1]
     assert field in archive["vector_layers"][outline["source-layer"]]["fields"]
 
     # Labels: glyphs generated for the exact text-font, including ő/ű.
@@ -464,6 +464,34 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     assert metadata["q2vt:label-orient"] == "free" and metadata["q2vt:label-anchor"] == "pole"
 
 
+def test_viewer_placed_labels_get_the_advance_of_each_character(export, tmp_path):
+    """Whether a label fits in its polygon depends on its length: the style
+    carries the label font's own advance per character (Qt's metrics, as
+    QGIS measures the label), not only a mean width."""
+    from qgis.PyQt.QtGui import QFontMetricsF
+    layer = zoning_layer(path=str(tmp_path / "metrics.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.placement = Qgis.LabelPlacement.Free
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    label = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+    font = label["metadata"]["q2vt:font"]
+    assert font == label["layout"]["text-font"][0]
+    entry = style["metadata"]["q2vt:font-metrics"][font]
+    advance = dict(zip(entry["chars"], entry["advances"]))
+    text = "t_felirat 1203/4 ő"
+    qt_font = settings.format().font()
+    qt_font.setPixelSize(1000)
+    expected = QFontMetricsF(qt_font).horizontalAdvance(text)
+    assert sum(advance[c] for c in text) == pytest.approx(expected, rel=0.02)
+    assert advance["i"] < advance["e"] < advance["W"]
+    assert 0.9 < entry["height"] < 1.5
+
+
 def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_path):
     """QGIS "Around point" on polygons: the label goes beside its point at
     the label distance (the viewer places it, see visible_labels.mjs), not
@@ -485,7 +513,7 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
 
     around = labels_for(Qgis.LabelPlacement.AroundPoint, "around")[0]["metadata"]["q2vt:label-around"]
     assert around["px"] == pytest.approx(3 * 96 / 25.4, rel=0.01) and "zoom" not in around
-    assert around["anchors"][0] == "bottom"  # first try: above the point, as QGIS
+    assert around["anchors"][0] == "bottom-left"  # first try: above right of the point, as QGIS
     over = labels_for(Qgis.LabelPlacement.OverPoint, "over")[0]["metadata"]
     assert "q2vt:visible-polygons" in over and "q2vt:label-around" not in over
 
@@ -557,6 +585,170 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
+def test_perimeter_labels_follow_the_polygon_outline(export, tmp_path):
+    """Polygon labels "Using perimeter (curved)" follow the outline. They
+    were exported at the polygon's centroid, a point MapLibre's line
+    placement has no line to put the label on: no label was drawn. Once per
+    feature, the label sits at the middle of the outline, along it (and the
+    viewer gets the outlines); repeated, the outlines are exported as lines."""
+    from osgeo import gdal, ogr  # pylint: disable=import-outside-toplevel
+
+    def labels_for(repeat, name):
+        layer = zoning_layer(path=str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "zone"
+        settings.placement = Qgis.LabelPlacement.PerimeterCurved
+        settings.repeatDistance = repeat
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        _, result = export(layer)
+        style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+        tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), gdal.OF_VECTOR,
+                            open_options=["ZOOM_LEVEL=14"])
+        kinds = {}
+        for i in range(tiles.GetLayerCount()):
+            for feature in tiles.GetLayer(i):
+                kinds.setdefault(tiles.GetLayer(i).GetName(), set()).add(
+                    ogr.GT_Flatten(feature.GetGeometryRef().GetGeometryType()))
+        return [l for l in style["layers"] if "text-field" in l.get("layout", {})], kinds
+
+    once, kinds = labels_for(0, "once")
+    assert once and once[0]["layout"]["symbol-placement"] == "point"
+    assert "labelrotation" in json.dumps(once[0]["layout"]["text-rotate"])
+    assert once[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert kinds[once[0]["source-layer"]] <= {ogr.wkbPoint, ogr.wkbMultiPoint}
+    assert kinds[once[0]["metadata"]["q2vt:visible-polygons"]] <= {ogr.wkbLineString,
+                                                                     ogr.wkbMultiLineString}
+    repeated, kinds = labels_for(20, "repeated")
+    assert repeated and repeated[0]["layout"]["symbol-placement"] == "line"
+    assert kinds[repeated[0]["source-layer"]] <= {ogr.wkbLineString, ogr.wkbMultiLineString}
+
+
+def _glyph_advances(path):
+    """{code point: advance} of a glyph PBF (24 px em)."""
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    advances = {}
+    for number, _, stack in mvt._fields(open(path, "rb").read()):  # pylint: disable=protected-access
+        if number != 1:
+            continue
+        for field, _, glyph in mvt._fields(stack):  # pylint: disable=protected-access
+            if field == 3:
+                values = {key: value for key, _, value in mvt._fields(glyph)}  # pylint: disable=protected-access
+                advances[values[1]] = values.get(7, 0)
+    return advances
+
+
+def test_upper_case_labels_have_their_glyphs(export, tmp_path):
+    """A label shown in capitals (QGIS "All uppercase", MapLibre
+    text-transform) of text stored in lower case: the glyphs of the capitals
+    are generated. Only the stored letters were, and MapLibre silently left
+    out every capital it had no glyph for."""
+    layer = zoning_layer(path=str(tmp_path / "caps.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "lower(zone) || ' ry'"
+    settings.isExpression = True
+    text_format = settings.format()
+    text_format.setCapitalization(Qgis.Capitalization.AllUppercase)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    layout = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]["layout"]
+    assert layout["text-transform"] == "uppercase"
+    glyphs = _glyph_advances(os.path.join(result, "style", "glyphs", layout["text-font"][0],
+                                           "0-255.pbf"))
+    assert {ord(c) for c in "KLRY"} <= set(glyphs)
+
+
+def test_curved_repeated_line_labels_are_placed_per_zoom(export, tmp_path):
+    """Swellendam rivers: a curved label repeated along a wiggly river (a
+    vertex every 60 m turning 30 degrees one way, then the other) is laid
+    out at export time per zoom, as QGIS lays it out: each label is a short
+    line inside one tile that MapLibre centres the label on ("line-center")
+    and accepts (its angle check, with the label's own glyph advances), one
+    per repeat part. MapLibre's line placement on the river itself found no
+    anchor at these zooms (the wiggles break its angle check)."""
+    import math  # pylint: disable=import-outside-toplevel
+    import sqlite3  # pylint: disable=import-outside-toplevel
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QFont  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "rivers", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    points = []  # a U: 3.4 km east, 1.5 km north, 3.4 km west
+    for (x0, y0), (x1, y1) in (((2119300, 6020000), (2122700, 6020000)),
+                               ((2122700, 6020000), (2122700, 6021500)),
+                               ((2122700, 6021500), (2119300, 6021500))):
+        direction = math.atan2(y1 - y0, x1 - x0)
+        x, y = x0, y0
+        for i in range(int(math.hypot(x1 - x0, y1 - y0) // 58)):
+            points.append(f"{x} {y}")
+            heading = direction + math.radians(15 if i % 2 else -15)
+            x, y = x + 60 * math.cos(heading), y + 60 * math.sin(heading)
+    points.append(f"{x} {y}")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Koornlands"])
+    feature.setGeometry(QgsGeometry.fromWkt(f"LineString ({', '.join(points)})"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "rivers.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Curved
+    settings.repeatDistance = 70
+    settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    font = fmt.font()
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+    fmt.setFont(font)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer, min_zoom=11, max_zoom=13)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert sorted(l["minzoom"] for l in labels) == [11, 12, 13]   # one layer per zoom
+    assert {l["layout"]["symbol-placement"] for l in labels} == {"line-center"}
+    assert labels[0]["layout"]["text-max-angle"] == 25
+
+    from q2vt_plugin.src.core import label_lines  # pylint: disable=import-error,import-outside-toplevel
+    layout = labels[0]["layout"]
+    glyphs = _glyph_advances(os.path.join(result, "style", "glyphs", layout["text-font"][0],
+                                          "0-255.pbf"))
+    size, spacing = layout["text-size"], layout["text-letter-spacing"]
+    label_px = sum(glyphs[ord(c)] for c in "Koornlands") * size / 24 + spacing * size * 9
+    placed = {}
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        for label in labels:
+            zoom = label["minzoom"]
+            for (data,) in conn.execute("SELECT tile_data FROM tiles WHERE zoom_level = ?", (zoom,)):
+                tile = mvt.decode(data, geometry=True).get(label["source-layer"])
+                for feature in (tile or {}).get("features", []):
+                    for line in mvt.lines(feature["geometry"]):
+                        scale = 8192 / tile["extent"]   # MapLibre's tile units
+                        line = [(px * scale, py * scale) for px, py in line]
+                        anchor = label_lines.center_anchor(line, label_px * 16, 0, 0)
+                        if not (0 <= anchor[0] < 8192 and 0 <= anchor[1] < 8192):
+                            continue  # a label of the next tile, in this one's buffer
+                        assert all(0 < px < 8192 and 0 < py < 8192 for px, py in line)
+                        assert label_lines.center_anchor(  # MapLibre draws the label
+                            line, label_px * 16, 0.6 * size * 16, math.radians(25)), line
+                        turns = label_lines.char_turns(line)  # QGIS's limit
+                        assert max(abs(t) for t in turns) <= math.radians(25.5), turns
+                        placed[zoom] = placed.get(zoom, 0) + 1
+    # 8.3 km of river, cut into parts of the repeat distance (70 mm as at
+    # zoom + 0.5: 187 px of the tile zoom): 224 px at zoom 11, 447 at 12,
+    # 895 at 13.
+    assert placed == {11: 1, 12: 2, 13: 4}
+
+
 def test_labels_avoid_each_other_and_overlap_only_if_required(export, tmp_path):
     """Every label avoids the others in MapLibre; those QGIS may overlap are
     marked for the viewer's fallback, and horizontal polygon labels can move
@@ -602,6 +794,29 @@ def test_properties_on_missing_fields_are_ignored_as_in_qgis(export, tmp_path):
     assert exporter.diagnostics.by_code("Q2VT_DDP_MISSING_FIELD")
     # Only the export's copy is changed, never the project's labels.
     assert not exporter.diagnostics.by_code("Q2VT_PROJECT_MUTATED")
+
+
+def test_layer_opacity_fades_the_symbols_not_the_labels(export, tmp_path):
+    """QGIS's layer opacity (Layer Rendering) was never exported: a layer at
+    50 % came out fully opaque on the web. Its symbols now get it; its labels
+    do not, as in QGIS."""
+    layer = zoning_layer(path=str(tmp_path / "op.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "255,0,0,200", "outline_color": "black", "outline_width": "0.5"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    layer.setOpacity(0.5)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    fills = [l for l in style["layers"] if l["type"] == "fill"]
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert fills and lines and labels
+    assert all(l["paint"]["fill-opacity"] == pytest.approx(0.5) for l in fills)
+    assert all(l["paint"]["line-opacity"] == pytest.approx(0.5) for l in lines)
+    assert all(l.get("paint", {}).get("text-opacity", 1) == 1 for l in labels)
 
 
 def test_source_without_prj_uses_the_project_crs(export, tmp_path):

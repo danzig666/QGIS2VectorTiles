@@ -1,11 +1,12 @@
 """Publish window: the extent from a layer (combo; follows the layer's
 extent), a fixed extent, a readable summary instead of raw coordinates, the
-setting saved in the profile; and room for the layer list on the
-Interaction tab."""
+setting saved in the profile; the extent drawn on the map canvas by clicking
+two corners; and room for the layer list on the Interaction tab."""
 
 import os
 import sys
 
+import pytest
 from qgis.core import QgsFeature, QgsGeometry
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -226,3 +227,526 @@ def test_web_basemap_table_lists_the_qgis_xyz_connections(plugin, monkeypatch, t
     finally:
         settings.remove("connections/xyz/items/QGIS ortó")
         settings.remove("connections/xyz/items/Régi http")
+
+
+# The extent drawn on the map canvas (ExtentTool), driven by synthetic
+# QgsMapMouseEvents on an offscreen canvas, and by mouse and key events sent
+# through the canvas itself (as Qt delivers them).
+
+def _drawing(previous=None, report=None):
+    """An offscreen canvas with the pan tool (or ``previous(canvas)``), the
+    extent tool on it, what it reported (``done``; or it calls ``report``),
+    what it told the user (``hints``) and the number of canvas items before
+    drawing."""
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle  # pylint: disable=import-outside-toplevel
+    from qgis.gui import QgsMapCanvas, QgsMapToolPan  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error,import-outside-toplevel
+    canvas = QgsMapCanvas()
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    canvas.resize(400, 300)
+    canvas.show()
+    canvas.setExtent(QgsRectangle(2100000, 6000000, 2140000, 6030000))
+    pan = (previous or QgsMapToolPan)(canvas)
+    canvas.setMapTool(pan)
+    done, hints = [], []
+    items = len(canvas.scene().items())
+    tool = ExtentTool(canvas, report or done.append, hints.append)
+    canvas.setMapTool(tool)
+    return canvas, pan, tool, done, hints, items
+
+
+def _recorder(canvas):
+    """A map tool that only notes the mouse events it gets."""
+    from qgis.gui import QgsMapTool  # pylint: disable=import-outside-toplevel
+
+    class Recorder(QgsMapTool):
+        def __init__(self, on):
+            super().__init__(on)
+            self.events = []
+
+        def canvasPressEvent(self, e): self.events.append("press")  # noqa: E704,N802
+        def canvasDoubleClickEvent(self, e): self.events.append("dblclick")  # noqa: E704,N802
+        def canvasReleaseEvent(self, e): self.events.append("release")  # noqa: E704,N802
+
+        def canvasMoveEvent(self, e):  # noqa: N802
+            if e.buttons():
+                self.events.append("drag")
+
+    return Recorder(canvas)
+
+
+def _send(canvas, kind, x, y, button=Qt.MouseButton.LeftButton, held=None):
+    """A mouse event sent to the canvas as Qt does: the canvas passes it to
+    the map tool of the moment. ``held``: the buttons down after it."""
+    from qgis.PyQt.QtCore import QEvent, QPointF  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QMouseEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtWidgets import QApplication  # pylint: disable=import-outside-toplevel
+    event_type = {"press": QEvent.Type.MouseButtonPress, "dblclick": QEvent.Type.MouseButtonDblClick,
+                  "move": QEvent.Type.MouseMove, "release": QEvent.Type.MouseButtonRelease}[kind]
+    if held is None:
+        held = Qt.MouseButton.NoButton if kind in ("release", "move") else button
+    if kind == "move":
+        button = Qt.MouseButton.NoButton
+    QApplication.sendEvent(canvas.viewport(), QMouseEvent(event_type, QPointF(x, y), button, held,
+                                                          Qt.KeyboardModifier.NoModifier))
+
+
+def _press_key(canvas, key=Qt.Key.Key_Escape, release=False):
+    from qgis.PyQt.QtCore import QEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QKeyEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtWidgets import QApplication  # pylint: disable=import-outside-toplevel
+    kind = QEvent.Type.KeyRelease if release else QEvent.Type.KeyPress
+    QApplication.sendEvent(canvas, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+
+
+def _sent_click(canvas, x, y, release_at=None):
+    _send(canvas, "press", x, y)
+    _send(canvas, "release", *(release_at or (x, y)))
+
+
+def _mouse(tool, kind, x, y, button=Qt.MouseButton.LeftButton, held=None):
+    """A QgsMapMouseEvent handed to the tool. ``held``: the buttons down
+    after it (none after a move or a release unless given)."""
+    from qgis.gui import QgsMapMouseEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QEvent, QPoint  # pylint: disable=import-outside-toplevel
+    kinds = {"press": (QEvent.Type.MouseButtonPress, tool.canvasPressEvent, button, button),
+             "move": (QEvent.Type.MouseMove, tool.canvasMoveEvent, Qt.MouseButton.NoButton,
+                      Qt.MouseButton.NoButton),
+             "release": (QEvent.Type.MouseButtonRelease, tool.canvasReleaseEvent, button,
+                         Qt.MouseButton.NoButton)}
+    event_type, handler, which, default = kinds[kind]
+    held = default if held is None else held
+    handler(QgsMapMouseEvent(tool.canvas(), event_type, QPoint(x, y), which, held,
+                             Qt.KeyboardModifier.NoModifier))
+
+
+def _click(tool, x, y, button=Qt.MouseButton.LeftButton):
+    _mouse(tool, "press", x, y, button)
+    _mouse(tool, "release", x, y, button)
+
+
+def _map_rect(canvas, x0, y0, x1, y1):
+    """The rectangle between two pixels, in map (canvas CRS) coordinates."""
+    from qgis.core import QgsRectangle  # pylint: disable=import-outside-toplevel
+    to_map = canvas.getCoordinateTransform()
+    return QgsRectangle(to_map.toMapCoordinates(x0, y0), to_map.toMapCoordinates(x1, y1))
+
+
+def _bands(canvas):
+    from qgis.gui import QgsRubberBand  # pylint: disable=import-outside-toplevel
+    return [item for item in canvas.scene().items() if isinstance(item, QgsRubberBand)]
+
+
+def _gone(canvas, tool):
+    """The extent tool deleted, and no other one left on the canvas."""
+    from qgis.PyQt import sip  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.gui.extent_tool import ExtentTool  # pylint: disable=import-error,import-outside-toplevel
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    return sip.isdeleted(tool) and not [c for c in canvas.children() if isinstance(c, ExtentTool)]
+
+
+def test_extent_drawn_by_clicking_two_corners(plugin):
+    canvas, pan, tool, done, hints, items = _drawing()
+    assert "first corner" in hints[-1]
+    _click(tool, 50, 40)
+    assert canvas.mapTool() is tool and done == []  # a click: one corner, not a rectangle
+    assert "opposite corner" in hints[-1]
+    _mouse(tool, "move", 250, 200)  # the rectangle follows the mouse
+    bands = _bands(canvas)
+    assert len(bands) == 1 and bands[0].asGeometry().boundingBox() == _map_rect(canvas, 50, 40, 250, 200)
+    _click(tool, 250, 200)
+    assert len(done) == 1 and done[0] == _map_rect(canvas, 50, 40, 250, 200)
+    assert done[0].width() > 0 and done[0].height() > 0
+    assert canvas.mapTool() is pan and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items  # nothing left on the canvas
+    from qgis.PyQt import sip  # pylint: disable=import-outside-toplevel
+    assert sip.isdeleted(bands[0])  # not just taken off the canvas: deleted
+
+
+def test_extent_drawn_by_dragging(plugin):
+    canvas, pan, tool, done, _hints, items = _drawing()
+    _mouse(tool, "press", 300, 220)
+    _mouse(tool, "move", 200, 150, held=Qt.MouseButton.LeftButton)
+    _mouse(tool, "move", 60, 30, held=Qt.MouseButton.LeftButton)
+    _mouse(tool, "release", 60, 30)
+    assert done == [_map_rect(canvas, 60, 30, 300, 220)]
+    assert canvas.mapTool() is pan and len(canvas.scene().items()) == items
+
+
+def test_extent_second_click_on_the_first_corner_is_ignored(plugin):
+    canvas, _pan, tool, done, hints, _items = _drawing()
+    _click(tool, 100, 100)
+    _click(tool, 101, 101)   # (almost) the same pixel
+    _click(tool, 300, 100)   # a line, no area
+    assert done == [] and canvas.mapTool() is tool and "opposite corner" in hints[-1]
+    assert len(_bands(canvas)) == 1
+    _click(tool, 300, 250)
+    assert done == [_map_rect(canvas, 100, 100, 300, 250)]  # from the first corner
+
+
+def test_extent_drawing_cancelled_by_right_click_esc_or_another_tool(plugin):
+    from qgis.gui import QgsMapToolZoom  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QEvent  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtGui import QKeyEvent  # pylint: disable=import-outside-toplevel
+    # Right click after the first corner.
+    canvas, pan, tool, done, hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    _click(tool, 200, 150, Qt.MouseButton.RightButton)
+    assert done == [None] and canvas.mapTool() is pan and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+    # Right click before any corner.
+    canvas, pan, tool, done, _hints, _items = _drawing()
+    _click(tool, 200, 150, Qt.MouseButton.RightButton)
+    assert done == [None] and canvas.mapTool() is pan
+    # Esc.
+    canvas, pan, tool, done, _hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    tool.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    assert done == [None] and canvas.mapTool() is pan
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+    # Another map tool chosen while drawing: that tool stays.
+    canvas, _pan, tool, done, hints, items = _drawing()
+    _click(tool, 50, 40)
+    _mouse(tool, "move", 200, 150)
+    zoom = QgsMapToolZoom(canvas, False)
+    canvas.setMapTool(zoom)
+    assert done == [None] and canvas.mapTool() is zoom and hints[-1] == ""
+    assert _bands(canvas) == [] and len(canvas.scene().items()) == items
+
+
+def test_extent_corners_snap_when_snapping_is_on(plugin):
+    from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                           QgsSnappingConfig, QgsSnappingUtils, QgsTolerance, QgsVectorLayer)
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "corners", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(2110000, 6020000)))
+    layer.dataProvider().addFeatures([feature])
+    canvas.setLayers([layer])
+    utils = QgsSnappingUtils(canvas)
+    utils.setIndexingStrategy(QgsSnappingUtils.IndexingStrategy.IndexAlwaysFull)
+    utils.setMapSettings(canvas.mapSettings())
+    config = QgsSnappingConfig()
+    config.setEnabled(True)
+    config.setMode(Qgis.SnappingMode.AllLayers)
+    config.setTypeFlag(Qgis.SnappingType.Vertex)
+    config.setTolerance(10)
+    config.setUnits(QgsTolerance.UnitType.Pixels)
+    utils.setConfig(config)
+    canvas.setSnappingUtils(utils)
+    vertex = canvas.getCoordinateTransform().transform(QgsPointXY(2110000, 6020000))
+    x, y = round(vertex.x()) + 4, round(vertex.y()) - 3  # near the point, not on it
+    _mouse(tool, "move", x, y)
+    _click(tool, x, y)
+    _click(tool, x + 150, y + 100)
+    corner = canvas.getCoordinateTransform().toMapCoordinates(x + 150, y + 100)
+    assert len(done) == 1
+    assert (done[0].xMinimum(), done[0].yMaximum()) == (2110000, 6020000)  # snapped
+    assert (done[0].xMaximum(), done[0].yMinimum()) == (corner.x(), corner.y())  # nothing to snap to
+
+
+def test_extent_double_click_on_the_last_corner_does_not_reach_the_next_tool(plugin):
+    """The drawing ends at the release of the last click; the rest of a
+    double click there (the double click and its release) goes nowhere: the
+    Pan tool would zoom in and re-centre the map."""
+    from qgis.PyQt.QtTest import QTest  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtWidgets import QApplication  # pylint: disable=import-outside-toplevel
+    canvas, pan, _tool, done, _hints, _items = _drawing()
+    before = canvas.extent()
+    expected = _map_rect(canvas, 50, 40, 250, 200)
+    _sent_click(canvas, 50, 40)
+    _sent_click(canvas, 250, 200)
+    _send(canvas, "dblclick", 250, 200)
+    _send(canvas, "release", 250, 200)
+    assert done == [expected] and canvas.mapTool() is pan
+    assert canvas.extent() == before
+    # Any tool: it gets nothing of the gesture, then the next click as usual.
+    canvas, recorder, _tool, done, _hints, _items = _drawing(_recorder)
+    _sent_click(canvas, 50, 40)
+    _sent_click(canvas, 250, 200)
+    _send(canvas, "dblclick", 250, 200)
+    _send(canvas, "move", 251, 200, held=Qt.MouseButton.LeftButton)
+    _send(canvas, "release", 251, 200)
+    assert len(done) == 1 and canvas.mapTool() is recorder and recorder.events == []
+    _sent_click(canvas, 120, 90)
+    assert recorder.events == ["press", "release"]
+    # A double click long after the drawing is the next tool's own.
+    canvas, recorder, _tool, done, _hints, _items = _drawing(_recorder)
+    _sent_click(canvas, 50, 40)
+    _sent_click(canvas, 250, 200)
+    QTest.qWait(QApplication.doubleClickInterval() + 100)
+    _send(canvas, "dblclick", 250, 200)
+    _send(canvas, "release", 250, 200)
+    assert recorder.events == ["dblclick", "release"]
+    # The double click's release lost (a mouse grab broken): the next click,
+    # or hovering the map first, is the next tool's again.
+    for hover in (False, True):
+        canvas, recorder, _tool, done, _hints, _items = _drawing(_recorder)
+        _sent_click(canvas, 50, 40)
+        _sent_click(canvas, 250, 200)
+        _send(canvas, "dblclick", 250, 200)
+        if hover:
+            _send(canvas, "move", 180, 120)
+        _sent_click(canvas, 120, 90)
+        assert len(done) == 1 and recorder.events == ["press", "release"], hover
+
+
+def test_extent_cancelled_while_dragging_ends_at_the_release(plugin):
+    """Right click or Esc with the left button still down cancels; the tool
+    goes once the button is up, so its release does not reach the next tool
+    (the Pan tool would re-centre the map on it)."""
+    for previous in (None, _recorder):
+        # Right click.
+        canvas, back, tool, done, hints, items = _drawing(previous)
+        before = canvas.extent()
+        _send(canvas, "press", 100, 100)
+        _send(canvas, "move", 200, 200, held=Qt.MouseButton.LeftButton)
+        _send(canvas, "press", 200, 200, Qt.MouseButton.RightButton,
+              held=Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
+        _send(canvas, "release", 200, 200, Qt.MouseButton.RightButton, held=Qt.MouseButton.LeftButton)
+        assert done == [] and canvas.mapTool() is tool and hints[-1] == ""
+        assert _bands(canvas) == []  # cancelled: nothing more to see
+        _send(canvas, "move", 220, 210, held=Qt.MouseButton.LeftButton)
+        _send(canvas, "release", 220, 210)
+        assert done == [None] and canvas.mapTool() is back and canvas.extent() == before
+        assert len(canvas.scene().items()) == items
+        if previous is not None:
+            assert back.events == []
+        # Esc: the canvas gives keys to its keyPressed signal only while a
+        # button is down.
+        canvas, back, tool, done, hints, items = _drawing(previous)
+        before = canvas.extent()
+        _send(canvas, "press", 100, 100)
+        _send(canvas, "move", 200, 200, held=Qt.MouseButton.LeftButton)
+        _press_key(canvas)
+        assert done == [] and canvas.mapTool() is tool and hints[-1] == ""
+        _send(canvas, "release", 200, 200)
+        assert done == [None] and canvas.mapTool() is back and canvas.extent() == before
+        if previous is not None:
+            assert back.events == []
+    # Esc with no button down: at once.
+    canvas, pan, _tool, done, _hints, _items = _drawing()
+    _sent_click(canvas, 100, 100)
+    _press_key(canvas)
+    assert done == [None] and canvas.mapTool() is pan
+    # Dragging, the right button pressed, the left one let go first: the
+    # right click on its way cancels; the left release is no corner.
+    left, right = Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
+    canvas, pan, tool, done, _hints, _items = _drawing()
+    _send(canvas, "press", 100, 100)
+    _send(canvas, "move", 200, 200, held=left)
+    _send(canvas, "press", 200, 200, right, held=left | right)
+    _send(canvas, "release", 200, 200, held=right)
+    assert done == [] and canvas.mapTool() is tool
+    _send(canvas, "release", 200, 200, right)
+    assert done == [None] and canvas.mapTool() is pan
+
+
+def test_extent_slips_of_the_mouse_are_not_an_extent(plugin):
+    """A click whose release lands a few pixels away (touchpads, pen
+    tablets; under 20 pixels across plus down, as for QGIS's zoom tool) is
+    one corner, not a tiny rectangle; nor is a second click that makes a
+    sliver one or two pixels high."""
+    for slip in ((102, 102), (105, 105), (106, 104), (109, 110)):
+        canvas, _pan, tool, done, hints, _items = _drawing()
+        _sent_click(canvas, 100, 100, release_at=slip)
+        assert done == [] and canvas.mapTool() is tool and "opposite corner" in hints[-1], slip
+    canvas, _pan, tool, done, hints, _items = _drawing()
+    _sent_click(canvas, 100, 100, release_at=(104, 101))
+    assert done == [] and canvas.mapTool() is tool and "opposite corner" in hints[-1]
+    _sent_click(canvas, 300, 101)                           # 200 x 1 pixels
+    _sent_click(canvas, 102, 250)                           # 2 x 150 pixels
+    assert done == [] and canvas.mapTool() is tool and len(_bands(canvas)) == 1
+    _sent_click(canvas, 300, 250)
+    assert done == [_map_rect(canvas, 100, 100, 300, 250)]
+    # A real drag still draws at once, also a short one.
+    for corner in ((180, 160), (112, 108)):
+        canvas, _pan, _tool, done, _hints, _items = _drawing()
+        _send(canvas, "press", 100, 100)
+        _send(canvas, "move", *corner, held=Qt.MouseButton.LeftButton)
+        _send(canvas, "release", *corner)
+        assert done == [_map_rect(canvas, 100, 100, *corner)]
+
+
+def test_extent_on_a_rotated_map_needs_an_area(plugin):
+    """On a rotated map the rectangle's sides do not run along the screen's:
+    a second corner on the same map y (or x) as the first is no area, and
+    the drawing goes on."""
+    from qgis.core import QgsPointXY  # pylint: disable=import-outside-toplevel
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    canvas.setRotation(45)
+    center, step = canvas.center(), 60 * canvas.mapUnitsPerPixel()
+
+    def pixel(right, up):
+        point = canvas.getCoordinateTransform().transform(
+            QgsPointXY(center.x() + right * step, center.y() + up * step))
+        return round(point.x()), round(point.y())
+
+    _sent_click(canvas, *pixel(-1, -1))
+    _sent_click(canvas, *pixel(1, -1))   # same map y: 120 pixels wide, no height
+    _sent_click(canvas, *pixel(-1, 1))   # same map x
+    assert done == [] and canvas.mapTool() is tool and len(_bands(canvas)) == 1
+    _sent_click(canvas, *pixel(1, 1))
+    assert done == [_map_rect(canvas, *pixel(-1, -1), *pixel(1, 1))]
+    assert done[0].width() > 100 * canvas.mapUnitsPerPixel() < done[0].height()
+
+
+def test_extent_snapped_corner_and_a_click_next_to_it(plugin):
+    """With snapping on, the first corner snaps to a point up to 10 pixels
+    away; a click a pixel away from where the user clicked (but outside the
+    snapping distance) is still a click on the first corner."""
+    from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsSnappingConfig,  # pylint: disable=import-outside-toplevel
+                           QgsSnappingUtils, QgsTolerance, QgsVectorLayer)
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    vertex = canvas.getCoordinateTransform().toMapCoordinates(200, 150)  # on a pixel
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "corners", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromPointXY(vertex))
+    layer.dataProvider().addFeatures([feature])
+    canvas.setLayers([layer])
+    utils = QgsSnappingUtils(canvas)
+    utils.setIndexingStrategy(QgsSnappingUtils.IndexingStrategy.IndexAlwaysFull)
+    utils.setMapSettings(canvas.mapSettings())
+    config = QgsSnappingConfig()
+    config.setEnabled(True)
+    config.setMode(Qgis.SnappingMode.AllLayers)
+    config.setTypeFlag(Qgis.SnappingType.Vertex)
+    config.setTolerance(10)
+    config.setUnits(QgsTolerance.UnitType.Pixels)
+    utils.setConfig(config)
+    canvas.setSnappingUtils(utils)
+    _sent_click(canvas, 207, 157, release_at=(208, 157))   # 9.9 px away: snaps; 10.6 px: does not
+    _sent_click(canvas, 208, 157)
+    _sent_click(canvas, 209, 158)
+    assert done == [] and canvas.mapTool() is tool
+    _sent_click(canvas, 350, 260)
+    assert len(done) == 1
+    assert (done[0].xMinimum(), done[0].yMaximum()) == (vertex.x(), vertex.y())  # snapped
+
+
+def test_extent_esc_while_a_button_is_still_down(plugin):
+    """Esc with a mouse button still down never brings the previous tool
+    back before that button's release (it would get the release: the Pan
+    tool re-centres the map)."""
+    left, right = Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
+    for previous in (None, _recorder):
+        # Dragging, a right click cancels (the left button still down),
+        # then Esc: the right release ended the canvas's "button down", so
+        # the key goes to keyPressEvent.
+        canvas, back, tool, done, _hints, _items = _drawing(previous)
+        before = canvas.extent()
+        _send(canvas, "press", 100, 100)
+        _send(canvas, "move", 200, 200, held=left)
+        _send(canvas, "press", 200, 200, right, held=left | right)
+        _send(canvas, "release", 200, 200, right, held=left)
+        _press_key(canvas)
+        assert done == [] and canvas.mapTool() is tool
+        _send(canvas, "move", 220, 210, held=left)
+        _send(canvas, "release", 220, 210)
+        assert done == [None] and canvas.mapTool() is back and canvas.extent() == before
+        if previous is not None:
+            assert back.events == []
+    # A left click with the right button held is no corner (the right click
+    # cancels); Esc then: the tool goes at the right release.
+    canvas, pan, tool, done, _hints, _items = _drawing()
+    _sent_click(canvas, 100, 100)
+    _send(canvas, "press", 250, 200, right, held=right)
+    _send(canvas, "press", 250, 200, held=left | right)
+    _send(canvas, "release", 250, 200, held=right)
+    assert done == [] and canvas.mapTool() is tool
+    _press_key(canvas)
+    assert done == [] and canvas.mapTool() is tool
+    _send(canvas, "release", 250, 200, right)
+    assert done == [None] and canvas.mapTool() is pan
+
+
+def test_extent_esc_while_the_map_is_panned(plugin):
+    """Esc cancels also while the map is panned with Space or the middle
+    button held (the canvas gives keys to its keyPressed signal only then)."""
+    canvas, pan, _tool, done, _hints, _items = _drawing()
+    _sent_click(canvas, 100, 100)
+    _press_key(canvas, Qt.Key.Key_Space)
+    _press_key(canvas)
+    assert done == [None] and canvas.mapTool() is pan
+    _press_key(canvas, Qt.Key.Key_Space, release=True)
+    canvas, pan, _tool, done, _hints, _items = _drawing()
+    _sent_click(canvas, 100, 100)
+    _send(canvas, "press", 150, 120, Qt.MouseButton.MiddleButton)
+    _press_key(canvas)
+    assert done == [None] and canvas.mapTool() is pan
+    _send(canvas, "release", 150, 120, Qt.MouseButton.MiddleButton)
+    assert canvas.mapTool() is pan
+
+
+def test_extent_double_click_whose_first_click_was_elsewhere(plugin):
+    """Draw… double-clicked: the window steps aside at the first click and
+    the second lands on the map as a double click with no press before it.
+    That is no corner: the drawing still waits for the first one. A double
+    click on the first corner itself is still that one corner."""
+    canvas, _pan, tool, done, hints, _items = _drawing()
+    _send(canvas, "dblclick", 300, 220)
+    _send(canvas, "release", 300, 220)
+    assert done == [] and canvas.mapTool() is tool and "first corner" in hints[-1]
+    assert _bands(canvas) == []
+    _sent_click(canvas, 60, 40)
+    assert done == [] and "opposite corner" in hints[-1]
+    _sent_click(canvas, 250, 200)
+    assert done == [_map_rect(canvas, 60, 40, 250, 200)]
+    canvas, _pan, tool, done, hints, _items = _drawing()
+    _sent_click(canvas, 100, 100)
+    _send(canvas, "dblclick", 100, 100)
+    _send(canvas, "release", 100, 100)
+    assert done == [] and canvas.mapTool() is tool and "opposite corner" in hints[-1]
+    _sent_click(canvas, 300, 250)
+    assert done == [_map_rect(canvas, 100, 100, 300, 250)]
+
+
+def test_extent_tool_is_deleted_when_done(plugin):
+    """Drawn, cancelled or replaced by another map tool, the extent tool
+    deletes itself: the canvas (its parent) would keep one per drawing, with
+    its snapping mark, and a right click in a transient map tool chosen
+    while drawing could bring it back."""
+    from qgis.gui import QgsMapToolPan  # pylint: disable=import-outside-toplevel
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    _sent_click(canvas, 50, 40)
+    _sent_click(canvas, 250, 200)
+    assert len(done) == 1 and _gone(canvas, tool)
+    canvas, _pan, tool, done, _hints, _items = _drawing()
+    _press_key(canvas)
+    assert done == [None] and _gone(canvas, tool)
+    canvas, _recording, tool, done, _hints, _items = _drawing(_recorder)
+    pan = QgsMapToolPan(canvas)
+    canvas.setMapTool(pan)
+    assert done == [None] and _gone(canvas, tool)
+    # (Sent without its press: the Pan tool opens the canvas menu on that.)
+    _send(canvas, "release", 100, 100, Qt.MouseButton.RightButton)
+    assert canvas.mapTool() is pan
+
+
+def test_extent_tool_cancel(plugin):
+    canvas, pan, tool, done, hints, items = _drawing()
+    _sent_click(canvas, 100, 100)
+    tool.cancel()
+    tool.cancel()  # once is enough
+    assert done == [None] and canvas.mapTool() is pan and hints[-1] == ""
+    assert len(canvas.scene().items()) == items
+
+
+def test_extent_tool_goes_also_when_done_fails(plugin):
+    """``done`` raising (the caller's error) still brings the previous tool
+    back and deletes the extent tool."""
+    def fails(_rect):
+        raise ValueError("the caller's error")
+
+    canvas, pan, tool, _done, _hints, items = _drawing(report=fails)
+    _click(tool, 50, 40)
+    with pytest.raises(ValueError):
+        _click(tool, 250, 200)
+    assert canvas.mapTool() is pan and _gone(canvas, tool) and len(canvas.scene().items()) == items
+    canvas, pan, tool, _done, _hints, _items = _drawing(report=fails)
+    with pytest.raises(ValueError):
+        tool.cancel()
+    assert canvas.mapTool() is pan and _gone(canvas, tool)

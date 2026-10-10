@@ -12,8 +12,10 @@ kept in the QGIS authentication database or only for this session.
   opens it in the web browser (no Node, no tile server).
 * Publish — uploads the validated release in a background task (files and
   network only), verifies it through the public URL and only then
-  activates it. The first publication and every change of what becomes
-  public need an explicit approval on the Review tab.
+  activates it. An SSH / SFTP server gets the site straight into one
+  folder instead (not versioned, folder_publish.py). The first publication
+  and every change of what becomes public need an explicit approval on the
+  Review tab.
 """
 
 import datetime as _dt
@@ -22,10 +24,10 @@ import traceback
 from urllib.parse import urlparse
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
-                       QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle, QgsSettings,
-                       QgsTask, QgsVectorLayer, QgsWkbTypes)
-from qgis.PyQt.QtCore import QCoreApplication, Qt, QUrl, pyqtSignal
+                       QgsCsException, QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer,
+                       QgsMessageLog, QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle,
+                       QgsSettings, QgsTask, QgsVectorLayer, QgsWkbTypes)
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                  QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
@@ -127,8 +129,9 @@ class DialogFeedback(QgsProcessingFeedback):
 
 
 class UploadTask(QgsTask):
-    """Upload, verify and activate a validated local release (no QGIS
-    project access: files and network only)."""
+    """Upload, verify and activate a validated local release, or write it
+    into an SSH server's folder (no QGIS project access: files and network
+    only)."""
 
     message = pyqtSignal(str)
 
@@ -149,6 +152,11 @@ class UploadTask(QgsTask):
             if text:
                 self.message.emit(text)
         try:
+            if self.provider.kind == "ssh":  # one folder, not versioned
+                from ..publishing.folder_publish import publish_folder  # pylint: disable=import-outside-toplevel
+                self.result = publish_folder(self.release, self.profile, self.provider, self.work_dir,
+                                             Progress(feedback, cancel=self.isCanceled), secrets=self.secrets)
+                return True
             self.result = publish(self.release, self.profile, self.provider, self.work_dir,
                                   Progress(feedback, cancel=self.isCanceled), secrets=self.secrets,
                                   activate_release=self.activate_release)
@@ -177,6 +185,13 @@ class PublishDialog(QDialog):
         self.session_credentials = None
         self.task = None
         self.feedback = None
+        self._extent_tool = None   # drawing the extent on the map canvas
+        self._draw_notice = None   # its message bar notice
+        self._draw_hint = ""       # its status bar text shown last
+        # Brings the window back after the drawing (see _extent_drawn).
+        self._back_timer = QTimer(self)
+        self._back_timer.setSingleShot(True)
+        self._back_timer.timeout.connect(self._back_from_drawing)
         self.profile = self._load_profile()
         self._build()
         self._populate(self.profile)
@@ -362,8 +377,8 @@ class PublishDialog(QDialog):
         extent_button.clicked.connect(lambda: self._use_canvas_extent())
         extent_button.setEnabled(self.iface is not None)
         draw_button = QPushButton(tr("Draw…"))
-        draw_button.setToolTip(tr("Draw the published area on the QGIS map: drag a rectangle "
-                                  "(Esc cancels)."))
+        draw_button.setToolTip(tr("Draw the published area on the QGIS map: click one corner, "
+                                  "then the opposite corner (right click or Esc cancels)."))
         draw_button.clicked.connect(self._draw_extent)
         draw_button.setEnabled(self.iface is not None)
         self.e_extent_layer.setMinimumContentsLength(12)
@@ -733,7 +748,13 @@ class PublishDialog(QDialog):
             self.e_logo.setText(path)
 
     def _use_canvas_extent(self, rect=None):
-        self.profile.view.extent = self._canvas_extent_3857(rect)
+        try:
+            extent = self._canvas_extent_3857(rect)
+        except QgsCsException:  # e.g. beyond the poles on a map in degrees
+            self.status.setText(tr("This area is outside what a web map can show (web maps end "
+                                   "short of the poles); the extent is unchanged."))
+            return
+        self.profile.view.extent = extent
         self.profile.view.extent_layer = ""
         self.e_extent_layer.blockSignals(True)
         self.e_extent_layer.setLayer(None)
@@ -742,23 +763,71 @@ class PublishDialog(QDialog):
 
     def _draw_extent(self):
         """The published area drawn on the map: this window steps aside
-        while the rectangle is dragged."""
+        while two opposite corners are clicked; the status bar says which
+        corner comes next."""
+        from qgis.gui import QgsMessageBarItem  # pylint: disable=import-outside-toplevel
         from .extent_tool import ExtentTool  # pylint: disable=import-outside-toplevel
         canvas = self.iface.mapCanvas()
-        self._extent_tool = ExtentTool(canvas, self._extent_drawn)
+        self._back_timer.stop()  # (it would cancel this drawing)
+        self._extent_tool = ExtentTool(canvas, self._extent_drawn, self._extent_hint)
         canvas.setMapTool(self._extent_tool)
         self.hide()
-        self.iface.messageBar().pushMessage(
-            tr("Web map"), tr("Drag a rectangle on the map: the published area. Esc cancels."),
+        canvas.setFocus()  # Esc reaches the tool before the map is clicked
+        # Removed again when the drawing ends (see _extent_drawn).
+        self._draw_notice = QgsMessageBarItem(
+            tr("Web map"), tr("Click two opposite corners of the published area on the map. "
+                              "Right click or Esc cancels."),
             Qgis.MessageLevel.Info, 8)
+        self.iface.messageBar().pushItem(self._draw_notice)
+
+    def _extent_hint(self, text):
+        bar = self.iface.statusBarIface()
+        if text:
+            if bar.currentMessage() != text:  # (again after a QGIS status tip replaced it)
+                bar.showMessage(text)
+        elif self._draw_hint and bar.currentMessage() == self._draw_hint:  # only our own
+            bar.clearMessage()
+        self._draw_hint = text
 
     def _extent_drawn(self, rect):
+        if self._extent_tool is None:  # given up by this window (shown again, closed)
+            return
         self._extent_tool = None
+        self._drop_draw_notice()
+        # Not at once: the window comes back over the map, and the rest of a
+        # double click on the last corner would click whatever is under the
+        # mouse there (Draw… again, Publish, a checkbox).
+        self._back_timer.start(QApplication.doubleClickInterval())
         if rect is not None:
             self._use_canvas_extent(rect)
+
+    def _back_from_drawing(self):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _drop_draw_notice(self):
+        notice, self._draw_notice = self._draw_notice, None
+        if notice is not None:
+            try:
+                self.iface.messageBar().popWidget(notice)
+            except RuntimeError:  # gone by itself already
+                pass
+
+    def _give_up_drawing(self):
+        """The window shown again (Web menu) or closed (also when the plugin
+        is unloaded) while the extent is being drawn: the drawing is given
+        up and the previous map tool comes back; the window is not brought
+        back by the drawing any more."""
+        self._back_timer.stop()
+        tool, self._extent_tool = self._extent_tool, None
+        if tool is None:
+            return
+        try:
+            tool.cancel()
+        except RuntimeError:  # the map canvas, and the tool with it, are gone
+            pass
+        self._drop_draw_notice()
 
     def _extent_layer_changed(self, layer):
         self.profile.view.extent_layer = layer.id() if layer is not None else ""
@@ -947,7 +1016,7 @@ class PublishDialog(QDialog):
                 ("labels_toggle", tr("Labels switch")), ("opacity_controls", tr("Opacity sliders")),
                 ("search", tr("Search")), ("filters", tr("Attribute filters")),
                 ("popups", tr("Popups")), ("permalinks", tr("Shareable links")),
-                ("coordinates", tr("Coordinates (WGS84 / EOV)")), ("measure", tr("Measurement")),
+                ("coordinates", tr("Coordinates (WGS 84 and the project CRS)")), ("measure", tr("Measurement")),
                 ("print", tr("Print")),
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
@@ -961,6 +1030,8 @@ class PublishDialog(QDialog):
         self.i_google_key.setPlaceholderText(tr("Google Maps API key (needed for Street View)"))
         self.i_google_key.setEnabled(False)
         self.i_flags["street_view"].toggled.connect(self.i_google_key.setEnabled)
+        self.i_flags["search"].setToolTip(tr(
+            "The found feature is zoomed to and marked, and its popup opened when Popups is on."))
         grid.addWidget(self.i_google_key, index // 3, index % 3 + 1, 1, 3 - index % 3 - 1 or 1)
         street_view_help = tr(
             "A Street View button on the map: tap a place to see it, the panorama looks toward the "
@@ -1294,11 +1365,8 @@ class PublishDialog(QDialog):
         self.t_exaggeration.setRange(1.0, 5.0)
         self.t_exaggeration.setSingleStep(0.5)
         self.t_exaggeration.setSuffix(" ×")
-        def terrain_chosen(layer):
-            self.t_hillshade.setEnabled(layer is not None)
-            self.t_exaggeration.setEnabled(layer is not None)
-        self.t_layer.layerChanged.connect(terrain_chosen)
-        terrain_chosen(self.t_layer.currentLayer())
+        self.t_layer.layerChanged.connect(self._terrain_chosen)
+        self._terrain_chosen(self.t_layer.currentLayer())
         relief_form.addRow(tr("Elevation layer (DEM)"), self.t_layer)
         relief_form.addRow("", self.t_hillshade)
         relief_form.addRow(tr("Height exaggeration in 3D"), self.t_exaggeration)
@@ -1495,6 +1563,23 @@ class PublishDialog(QDialog):
         table.setMinimumHeight(110)
         return table
 
+
+    # Layer combo boxes follow the project's layers and fire when it is
+    # cleared, also for a closed window; bound methods (not closures over
+    # self) let a closed window be freed with its combo boxes.
+    def _terrain_chosen(self, layer):
+        self.t_hillshade.setEnabled(layer is not None)
+        self.t_exaggeration.setEnabled(layer is not None)
+
+    def _parcel_layer_changed(self, layer):
+        self._fill_fields_table(self.p_fields, layer, [])
+
+    def _zoning_layer_changed(self, layer):
+        self._fill_fields_table(self.p_zone_fields, layer, [])
+
+    def _regulation_layer_changed(self, layer):
+        self._fill_fields_table(self.p_regulation_fields, layer, [])
+
     @staticmethod
     def _fill_fields_table(table, layer, chosen):
         chosen = {p.field: p for p in chosen}
@@ -1535,7 +1620,7 @@ class PublishDialog(QDialog):
         self.p_layer = self._layer_combo("polygon")
         self.p_key = self._field_combo(self.p_layer)
         self.p_fields = self._fields_table()
-        self.p_layer.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_fields, layer, []))
+        self.p_layer.layerChanged.connect(self._parcel_layer_changed)
         form.addRow(tr("Parcel layer"), self.p_layer)
         form.addRow(tr("Parcel id (unique, e.g. hrsz)"), self.p_key)
         form.addRow(tr("Parcel data shown"), self.p_fields)
@@ -1545,7 +1630,7 @@ class PublishDialog(QDialog):
         self.p_zoning = self._layer_combo("polygon")
         self.p_code = self._field_combo(self.p_zoning)
         self.p_zone_fields = self._fields_table()
-        self.p_zoning.layerChanged.connect(lambda layer: self._fill_fields_table(self.p_zone_fields, layer, []))
+        self.p_zoning.layerChanged.connect(self._zoning_layer_changed)
         self.p_zoning.layerChanged.connect(self._guess_zone_code)
         self.p_cuts = QListWidget()
         self.p_cuts.setMaximumHeight(90)
@@ -1578,8 +1663,7 @@ class PublishDialog(QDialog):
         self.p_regulation = self._layer_combo(None, allow_empty=True)
         self.p_regulation_code = self._field_combo(self.p_regulation, allow_empty=True)
         self.p_regulation_fields = self._fields_table()
-        self.p_regulation.layerChanged.connect(
-            lambda layer: self._fill_fields_table(self.p_regulation_fields, layer, []))
+        self.p_regulation.layerChanged.connect(self._regulation_layer_changed)
         self.p_regulation.layerChanged.connect(self._guess_regulation_code)
         form.addRow(tr("Table"), self.p_regulation)
         form.addRow(tr("Zone code field"), self.p_regulation_code)
@@ -1873,6 +1957,8 @@ class PublishDialog(QDialog):
         self.d_kind.addItem(tr("Local only (no upload)"), "local")
         self.d_kind.addItem(tr("Cloudflare R2"), "r2")
         self.d_kind.addItem(tr("Other S3-compatible storage"), "s3")
+        self.d_kind.addItem(tr("SSH / SFTP server (one folder, not versioned)"), "ssh")
+        self._dest_family, self._dest_other = None, {}  # see _destination_kind_changed
         self.d_account = QLineEdit()
         self.d_account.setPlaceholderText(tr("32 characters – or paste the S3 API URL / dashboard address"))
         self.d_endpoint = QLineEdit()
@@ -1886,6 +1972,51 @@ class PublishDialog(QDialog):
         for field, key in ((self.d_account, "account"), (self.d_endpoint, "endpoint"),
                            (self.d_bucket, "bucket"), (self.d_prefix, "prefix"), (self.d_public, "public")):
             field.setToolTip(tr(FIELD_HELP[key]))
+        # SSH / SFTP server: the site goes straight into one folder (no versions).
+        self.d_ssh_host = QLineEdit()
+        self.d_ssh_host.setPlaceholderText(tr("server name or address – or paste user@server:/folder"))
+        self.d_ssh_host.setToolTip(tr("The SSH server, e.g. www.example.com. Pasting user@server:/folder or "
+                                      "sftp://user@server:port/folder fills the user, port and folder too."))
+        self.d_ssh_host.editingFinished.connect(self._parse_ssh_target)
+        self.d_ssh_port = QSpinBox()
+        self.d_ssh_port.setRange(1, 65535)
+        self.d_ssh_port.setValue(22)
+        self.d_ssh_user = QLineEdit()
+        self.d_ssh_user.setPlaceholderText(tr("login name"))
+        self.d_ssh_user.setToolTip(tr("The SSH login. Empty: the user of the saved password below, "
+                                      "else your ssh settings' default."))
+        self.d_ssh_dir = QLineEdit()
+        self.d_ssh_dir.setPlaceholderText(tr("e.g. /var/www/html/map, or public_html/map in your home folder"))
+        self.d_ssh_dir.setToolTip(tr("The map's files go straight into this folder (created if missing) "
+                                     "and replace the previous map there; no versions are kept. Absolute, "
+                                     "or relative to the login's home folder. A file with the same name as "
+                                     "one of the map's (e.g. index.html) is replaced; only files QWebMap "
+                                     "uploaded before are ever deleted, your other files stay."))
+        self.d_ssh_key = QLineEdit()
+        self.d_ssh_key.setPlaceholderText(tr("optional – empty: ssh-agent or your default keys (~/.ssh)"))
+        self.d_ssh_key.setToolTip(tr("A private key file (OpenSSH format) on this computer. A key with a "
+                                     "passphrase: enter the passphrase as the password below."))
+        self.d_ssh_key_row = QWidget()
+        key_row = QHBoxLayout(self.d_ssh_key_row)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_browse = QPushButton(tr("Browse…"))
+        key_browse.clicked.connect(self._choose_ssh_key)
+        key_row.addWidget(self.d_ssh_key, 1)
+        key_row.addWidget(key_browse)
+        self.d_ssh_password = QLineEdit()
+        self.d_ssh_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.d_ssh_password.setPlaceholderText(tr("Password or key passphrase"))
+        self.d_ssh_password.setToolTip(tr("Used only while this window is open (not saved anywhere). Empty "
+                                          "with a key that needs no passphrase, or with ssh-agent."))
+        self.d_ssh_password_row = QWidget()
+        password_row = QHBoxLayout(self.d_ssh_password_row)
+        password_row.setContentsMargins(0, 0, 0, 0)
+        save_password = QPushButton(tr("Save in QGIS…"))
+        save_password.setToolTip(tr("Store the user and this password encrypted in QGIS and select "
+                                    "them above"))
+        save_password.clicked.connect(self.save_ssh_password)
+        password_row.addWidget(self.d_ssh_password, 1)
+        password_row.addWidget(save_password)
         # Pasted Cloudflare addresses: take the account id (and bucket) from them.
         self.d_account.editingFinished.connect(lambda: self._parse_pasted(self.d_account))
         self.d_endpoint.editingFinished.connect(lambda: self._parse_pasted(self.d_endpoint))
@@ -1911,6 +2042,7 @@ class PublishDialog(QDialog):
         guide = QPushButton(tr("Step-by-step: set up Cloudflare R2…"))
         guide.setToolTip(tr("Where to find each value in the Cloudflare dashboard"))
         guide.clicked.connect(self.show_r2_guide)
+        self.d_guide = guide
         help_row.addWidget(guide)
         help_row.addStretch(1)
         self.d_help_row = form.rowCount()
@@ -1923,11 +2055,19 @@ class PublishDialog(QDialog):
         self.d_rows["endpoint"] = self.d_endpoint
         form.addRow(tr("Bucket"), self.d_bucket)
         form.addRow(tr("Prefix in the bucket"), self.d_prefix)
+        form.addRow(tr("SSH server"), self.d_ssh_host)
+        form.addRow(tr("Port"), self.d_ssh_port)
+        form.addRow(tr("User"), self.d_ssh_user)
+        form.addRow(tr("Folder on the server"), self.d_ssh_dir)
+        form.addRow(tr("Private key file"), self.d_ssh_key_row)
         form.addRow(tr("Public base URL (custom domain)"), self.d_public)
         form.addRow(tr("Map address"), self.d_address)
         form.addRow(tr("Saved credentials (QGIS authentication: user = access key id, "
                        "password = secret)"), auth_row)
-        session = QHBoxLayout()
+        self.d_auth_label = form.labelForField(auth_row)
+        self.d_session_row = QWidget()
+        session = QHBoxLayout(self.d_session_row)
+        session.setContentsMargins(0, 0, 0, 0)
         self.d_session_key = QLineEdit()
         self.d_session_key.setPlaceholderText(tr("Access Key ID"))
         self.d_session_key.setToolTip(tr(FIELD_HELP["session"]))
@@ -1941,7 +2081,8 @@ class PublishDialog(QDialog):
         session.addWidget(self.d_session_key)
         session.addWidget(self.d_session_secret)
         session.addWidget(save_keys)
-        form.addRow(tr("Or keys for this session only"), session)
+        form.addRow(tr("Or keys for this session only"), self.d_session_row)
+        form.addRow(tr("Or a password for this session only"), self.d_ssh_password_row)
         form.addRow(tr("Releases to keep"), self.d_retention)
         form.addRow("", self.d_conditional)
         self.d_kind.currentIndexChanged.connect(self._destination_kind_changed)
@@ -1952,15 +2093,14 @@ class PublishDialog(QDialog):
         cors.clicked.connect(self.show_cors)
         history = QPushButton(tr("Releases and rollback…"))
         history.clicked.connect(self.show_history)
+        self.d_cors, self.d_history = cors, history
         buttons.addWidget(test)
         buttons.addWidget(cors)
         buttons.addWidget(history)
         buttons.addStretch(1)
         form.addRow("", buttons)
-        form.addRow("", _note(tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
-                                  "address: connect a custom domain to the bucket (r2.dev is rate "
-                                  "limited and meant for development). Nothing is created, made "
-                                  "public or deleted in your account automatically.")))
+        self.d_note = _note("")
+        form.addRow("", self.d_note)
         return widget
 
     def _review_tab(self):
@@ -2075,6 +2215,7 @@ class PublishDialog(QDialog):
         self.o_fast_markers.setChecked(profile.output.fast_markers)
         self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
+        self._dest_family, self._dest_other = None, {}  # the profile's own values, no swap
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
         self.d_account.setText(dest.account_id)
         self.d_endpoint.setText(dest.endpoint)
@@ -2083,7 +2224,12 @@ class PublishDialog(QDialog):
         self.d_public.setText(dest.public_base_url)
         self.d_retention.setValue(dest.retention)
         self.d_conditional.setChecked(dest.conditional_writes)
-        if self.d_auth is not None and dest.credential_ref:
+        self.d_ssh_host.setText(dest.host)
+        self.d_ssh_port.setValue(dest.port if 1 <= dest.port <= 65535 else 22)
+        self.d_ssh_user.setText(dest.user)
+        self.d_ssh_dir.setText(dest.remote_dir)
+        self.d_ssh_key.setText(dest.identity_file)
+        if self.d_auth is not None:
             self.d_auth.setConfigId(dest.credential_ref)
         self._destination_kind_changed()
         self._update_address()
@@ -2343,6 +2489,11 @@ class PublishDialog(QDialog):
         dest.public_base_url = self.d_public.text().strip().rstrip("/")
         dest.retention = self.d_retention.value()
         dest.conditional_writes = self.d_conditional.isChecked()
+        dest.host = self.d_ssh_host.text().strip()
+        dest.port = self.d_ssh_port.value()
+        dest.user = self.d_ssh_user.text().strip()
+        dest.remote_dir = self.d_ssh_dir.text().strip()
+        dest.identity_file = self.d_ssh_key.text().strip()
         dest.credential_ref = self.d_auth.configId() if self.d_auth is not None else ""
         return profile
 
@@ -2373,11 +2524,15 @@ class PublishDialog(QDialog):
             pass
 
     def save_settings(self, quiet=False) -> bool:
+        """``quiet`` (closing the window): no message, and settings with
+        problems are not saved, so the last valid ones stay (an invalid
+        profile would not load next time)."""
         profile = self.collect()
         self._save_xyz_connections()
         problems = validate(profile)
-        if problems and not quiet:
-            QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
+        if problems:
+            if not quiet:
+                QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
             return False
         store.save_profile(self.project, profile)
         self.status.setText(tr("Settings saved in the project (save the project file to keep them)."))
@@ -2399,16 +2554,19 @@ class PublishDialog(QDialog):
         except OSError as error:
             QMessageBox.warning(self, tr("Export settings"), str(error))
             return False
-        self.status.setText(
-            tr("Settings exported to {} with the object storage keys (secret included: keep the file "
-               "private).").format(path) if keys else
-            tr("Settings exported to {} (no object storage keys).").format(path))
+        if keys:
+            self.status.setText(tr("Settings exported to {} with the object storage keys (secret included: "
+                                   "keep the file private).").format(path))
+        elif profile.destination.kind == "ssh":
+            self.status.setText(tr("Settings exported to {} (without the SSH password).").format(path))
+        else:
+            self.status.setText(tr("Settings exported to {} (no object storage keys).").format(path))
         return True
 
     def _exportable_credentials(self, profile):
         """The destination's keys for the settings file (the owner wants them
         there): the pasted session keys, else the saved QGIS configuration."""
-        if profile.destination.kind == "local":
+        if profile.destination.kind in ("local", "ssh"):  # an SSH password never goes into a file
             return None
         from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
         key, secret = self.d_session_key.text().strip(), self.d_session_secret.text()
@@ -2575,8 +2733,11 @@ class PublishDialog(QDialog):
         url = self.public_url if self.public_url.startswith(("http://", "https://")) else \
             self._target_url(self.collect())
         if not url:
-            self.status.setText(tr("Publish the map online first (Destination tab): a local copy "
-                                   "cannot be shown in another web page."))
+            self.status.setText(
+                tr("Enter the public URL of the server folder (Destination tab): the embed code needs "
+                   "the map's web address.") if self.d_kind.currentData() == "ssh" else
+                tr("Publish the map online first (Destination tab): a local copy "
+                   "cannot be shown in another web page."))
             return ""
         code = embed_code(url, self.e_title.text().strip() or self.profile.title)
         QGuiApplication.clipboard().setText(code)
@@ -2586,6 +2747,13 @@ class PublishDialog(QDialog):
     def _credentials(self):
         from ..publishing.credentials import from_auth_config  # pylint: disable=import-outside-toplevel
         from ..publishing.providers.base import Credentials  # pylint: disable=import-outside-toplevel
+        if self.profile.destination.kind == "ssh":  # optional: keys and ssh-agent need none
+            if self.d_ssh_password.text():
+                return Credentials(self.d_ssh_user.text().strip(), self.d_ssh_password.text())
+            # Only a configuration selected while SSH was chosen (_destination_kind_changed).
+            if self.profile.destination.credential_ref:
+                return from_auth_config(self.profile.destination.credential_ref, ssh=True)
+            return None
         if self.d_session_key.text().strip() and self.d_session_secret.text():
             return Credentials(self.d_session_key.text().strip(), self.d_session_secret.text())
         return from_auth_config(self.profile.destination.credential_ref)
@@ -2593,7 +2761,8 @@ class PublishDialog(QDialog):
     def _provider(self):
         from ..publishing.providers import provider_for  # pylint: disable=import-outside-toplevel
         profile = self.profile
-        return provider_for(profile.destination, self._credentials(), publication_prefix(profile))
+        prefix = "" if profile.destination.kind == "ssh" else publication_prefix(profile)  # SSH: one folder
+        return provider_for(profile.destination, self._credentials(), prefix)
 
     def test_connection(self):
         profile = self.collect()
@@ -2601,7 +2770,12 @@ class PublishDialog(QDialog):
             QMessageBox.information(self, tr("Destination"), tr("Local only: nothing to test."))
             return
         try:
-            checks = self._provider().inspect()
+            provider = self._provider()  # may ask for the QGIS master password: normal cursor
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # an SSH login can take seconds
+            try:
+                checks = provider.inspect()
+            finally:
+                QApplication.restoreOverrideCursor()
         except PublishingError as error:
             self._fail(error.code, error.message, error.detail)
             return
@@ -2631,19 +2805,119 @@ class PublishDialog(QDialog):
             self.d_bucket.clear()
 
     def _destination_kind_changed(self, *_):
+        from .r2_guide import FIELD_HELP  # pylint: disable=import-outside-toplevel
         kind = self.d_kind.currentData()
-        for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, kind != "local")):
+        ssh, storage = kind == "ssh", kind in ("r2", "s3")
+        # SSH and object storage never share the saved login or the public URL: switching
+        # between them puts the other's values aside and brings back this one's (or none).
+        family = "ssh" if ssh else "storage"
+        if self._dest_family not in (None, family):
+            self._dest_other[self._dest_family] = (
+                self.d_public.text(), self.d_auth.configId() if self.d_auth is not None else "")
+            public, ref = self._dest_other.pop(family, ("", ""))
+            self.d_public.setText(public)
+            if self.d_auth is not None:
+                self.d_auth.setConfigId(ref)
+        self._dest_family = family
+        for widget, shown in ((self.d_account, kind == "r2"), (self.d_endpoint, storage),
+                              (self.d_bucket, not ssh), (self.d_prefix, not ssh),
+                              (self.d_session_row, not ssh), (self.d_retention, not ssh),
+                              (self.d_conditional, not ssh), (self.d_ssh_host, ssh), (self.d_ssh_port, ssh),
+                              (self.d_ssh_user, ssh), (self.d_ssh_dir, ssh), (self.d_ssh_key_row, ssh),
+                              (self.d_ssh_password_row, ssh)):
             widget.setVisible(shown)
             label = self.d_form.labelForField(widget)
             if label is not None:
                 label.setVisible(shown)
+        for widget in (self.d_guide, self.d_cors, self.d_history):  # releases, CORS: object storage only
+            widget.setVisible(not ssh)
         label = self.d_form.labelForField(self.d_endpoint)
         if label is not None:
             label.setText(tr("S3 API endpoint (optional)") if kind == "r2" else tr("S3 API endpoint"))
+        label = self.d_form.labelForField(self.d_public)
+        if label is not None:
+            label.setText(tr("Public URL of the folder (optional)") if ssh else tr("Public base URL (custom domain)"))
+        self.d_public.setPlaceholderText("https://www.example.com/map" if ssh else "https://maps.example.com")
+        self.d_public.setToolTip(tr("The address of the folder on the web, e.g. https://www.example.com/map. "
+                                    "Used for Open map / Copy link and to check that the new map is served "
+                                    "there. Empty: nothing is checked.") if ssh else tr(FIELD_HELP["public"]))
+        if self.d_auth_label is not None:
+            self.d_auth_label.setText(
+                tr("Saved password (QGIS authentication: user = SSH user, password = password or "
+                   "passphrase)") if ssh else
+                tr("Saved credentials (QGIS authentication: user = access key id, password = secret)"))
+        if self.d_auth is not None:
+            self.d_auth.setToolTip(
+                tr("A password (or key passphrase) saved encrypted in QGIS (protected by the QGIS master "
+                   "password): a Basic configuration with user name = SSH user and password. “Save in "
+                   "QGIS…” below makes one.") if ssh else tr(FIELD_HELP["auth"]))
+        self.d_note.setText(
+            tr("The map's files go straight into the folder and replace the previous map there (and any "
+               "file with the same name): no versions, no rollback. Unchanged files are not uploaded "
+               "again, index.html is replaced last, and only files QWebMap uploaded before are ever "
+               "deleted (listed in .q2vt-files.json in the folder). Uses the OpenSSH client (sftp) of this "
+               "computer. A new server's host key is accepted on first use; a changed one stops the "
+               "upload.") + (tr(" On Windows a password or passphrase needs OpenSSH 8.4 or newer (Windows "
+                                 "10's built-in client is older: use a key or ssh-agent there).")
+                              if os.name == "nt" else "") if ssh else
+            tr("Use bucket-scoped API tokens. The S3 API endpoint is not the public "
+               "address: connect a custom domain to the bucket (r2.dev is rate "
+               "limited and meant for development). Nothing is created, made "
+               "public or deleted in your account automatically."))
         self._update_address()
+
+    def _parse_ssh_target(self):
+        """``user@server:/folder`` (or an sftp:// address) pasted into the
+        server field: the user, port and folder taken from it."""
+        from ..publishing.providers.ssh import parse_target  # pylint: disable=import-outside-toplevel
+        found = parse_target(self.d_ssh_host.text())
+        if not found:  # a plain host name or address stays as typed
+            return
+        self.d_ssh_host.setText(str(found["host"]))
+        filled = []
+        for key, field, label in (("user", self.d_ssh_user, tr("user")),
+                                  ("remote_dir", self.d_ssh_dir, tr("folder"))):
+            if found.get(key) and field.text().strip() != found[key]:
+                field.setText(str(found[key]))
+                filled.append(f"{label} {found[key]}")
+        if found.get("port") and self.d_ssh_port.value() != found["port"]:
+            self.d_ssh_port.setValue(int(found["port"]))
+            filled.append(tr("port {}").format(found["port"]))
+        if filled:
+            self.status.setText(tr("Taken from the server address: {}.").format(", ".join(filled)))
+
+    def _choose_ssh_key(self):
+        start = self.d_ssh_key.text().strip() or os.path.join(os.path.expanduser("~"), ".ssh")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Private key file"), start)
+        if path:
+            self.d_ssh_key.setText(path)
+
+    def save_ssh_password(self):
+        """The SSH user and password, stored encrypted in the QGIS
+        authentication database (Basic configuration), then selected."""
+        from ..publishing.credentials import store_auth_config  # pylint: disable=import-outside-toplevel
+        user, password = self.d_ssh_user.text().strip(), self.d_ssh_password.text()
+        if not password:  # the user is optional, as in the User field (ssh's default user)
+            QMessageBox.information(self, tr("Password"), tr("Enter the password (or the key's passphrase) "
+                                                             "first."))
+            return
+        server = self.d_ssh_host.text().strip() or "server"
+        name = f"SSH {user}@{server} (QWebMap)" if user else f"SSH {server} (QWebMap)"
+        try:
+            config_id = store_auth_config(name, user, password)
+        except PublishingError as error:
+            self._fail(error.code, error.message, error.detail)
+            return
+        if self.d_auth is not None:
+            self.d_auth.setConfigId(config_id)
+        self.d_ssh_password.clear()
+        self.status.setText(tr("Password saved encrypted in QGIS as “{}” and selected.").format(name))
 
     def _update_address(self, *_):
         public = self.d_public.text().strip().rstrip("/")
+        if self.d_kind.currentData() == "ssh":
+            self.d_address.setText(f"{public}/" if public else tr("— (optional: enter the folder's public URL)"))
+            return
         if self.d_kind.currentData() == "local" or not public:
             self.d_address.setText(tr("— (enter the public base URL)") if self.d_kind.currentData() != "local"
                                    else tr("— (local only)"))
@@ -2711,7 +2985,12 @@ class PublishDialog(QDialog):
 
     def refresh_review(self):
         profile = self.collect()
-        lines = [tr("Target: ") + (self._target_url(profile) or tr("local folder only")), ""]
+        dest = profile.destination
+        server = f"{dest.user}@{dest.host}" if dest.user else dest.host
+        target = self._target_url(profile) or (
+            tr("{} (port {}), folder {}").format(server, dest.port, dest.remote_dir) if dest.kind == "ssh"
+            else tr("local folder only"))
+        lines = [tr("Target: ") + target, ""]
         for config in profile.layers:
             if not config.included:
                 continue
@@ -2817,6 +3096,9 @@ class PublishDialog(QDialog):
         if profile.destination.kind == "local" or not profile.destination.public_base_url:
             return ""
         from ..publishing.public_verify import join_url  # pylint: disable=import-outside-toplevel
+        if profile.destination.kind == "ssh":  # the folder itself (its address percent-encoded)
+            from ..publishing.folder_publish import folder_url  # pylint: disable=import-outside-toplevel
+            return folder_url(profile) + "index.html"
         return join_url(profile.destination.public_base_url, publication_prefix(profile), "index.html")
 
     def publish(self):
@@ -2848,7 +3130,7 @@ class PublishDialog(QDialog):
         from ..publishing.controller import publication_dirs  # pylint: disable=import-outside-toplevel
         _, work_dir = publication_dirs(profile)
         self.task = UploadTask(self.local_result.release, profile, provider, work_dir,
-                               credentials.secrets())
+                               credentials.secrets() if credentials is not None else [])
         self.task.progressChanged.connect(lambda value: self.progress.setValue(int(value)))
         self.task.message.connect(self.log)
         self.task.taskCompleted.connect(self._published)
@@ -2871,10 +3153,15 @@ class PublishDialog(QDialog):
         if result.state == ReleaseState.PUBLISHED:
             self.public_url = result.stable_url
             store.save_profile(self.project, self.profile)
-            self.btn_open.setEnabled(True)
-            self.btn_copy.setEnabled(True)
-            self.status.setText(tr("Published: {}\nThis version: {}").format(result.stable_url,
-                                                                             result.versioned_url))
+            self.btn_open.setEnabled(bool(self.public_url))
+            self.btn_copy.setEnabled(bool(self.public_url))
+            if result.versioned_url:
+                self.status.setText(tr("Published: {}\nThis version: {}").format(result.stable_url,
+                                                                                 result.versioned_url))
+            elif result.stable_url:  # one folder on an SSH server: no versions
+                self.status.setText(tr("Published: {}").format(result.stable_url))
+            else:
+                self.status.setText(result.message)
             for warning in result.warnings:
                 self.log(f"⚠ {warning}")
         else:
@@ -2904,11 +3191,16 @@ class PublishDialog(QDialog):
         except (TypeError, ValueError):
             pass
 
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._give_up_drawing()  # opened again (Web menu) while drawing
+
     def done(self, result):  # Escape / reject() close without a closeEvent
         self._save_geometry()
         super().done(result)
 
     def closeEvent(self, event):  # noqa: N802
+        self._give_up_drawing()  # closed (plugin unloaded) while drawing
         self._save_geometry()
         if self.task is not None:
             QMessageBox.information(self, tr("Web map"), tr("Publishing is still running in the "

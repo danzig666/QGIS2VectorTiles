@@ -33,7 +33,8 @@
 // that stretch and on the screen (sliding along the line, or to a shorter
 // visible stretch, to fit and to keep clear of other labels), as QGIS places
 // line labels inside the extent; clear also of the point labels MapLibre
-// draws itself (building numbers, names). No clear spot: no label.
+// draws itself (building numbers, names), as "around point" and "pole"
+// labels are (QGIS places all labels together). No clear spot: no label.
 // While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
@@ -84,6 +85,7 @@ const KEEP_PX = 24;     // a kept centroid label stays this close to the centroi
 export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", options = {}) {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
   const style = map.getStyle();
+  const fonts = fontMetrics(style);
   const tileSource = style.sources[sourceId] || {};
   style.layers.forEach((layer, index) => {
     const polygons = layer.metadata && layer.metadata["q2vt:visible-polygons"];
@@ -188,9 +190,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     });
     const placed = [];  // world boxes of the labels placed so far
     // Boxes of the labels MapLibre draws itself (building numbers, names...):
-    // line labels keep clear of them too. Only when a line group needs them.
+    // line, "around point" and "pole" labels keep clear of them too. Only
+    // when such a group needs them.
     let otherBoxes = null;
-    const others = () => (otherBoxes ??= renderedLabelBoxes(map, maplibregl, groups, zoom, perPx));
+    const others = () => (otherBoxes ??= renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts));
     const zoom = map.getZoom();
     for (const [polygons, group] of ranked) {
       if (!states.has(polygons)) states.set(polygons, newLabelState());
@@ -206,8 +209,11 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // Moving, or tiles still arriving (the visible part is not complete):
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
-        labelBox: labelBoxes(map, group, zoom, perPx),
-        avoid: group.kind === "line" ? placed.concat(others()) : placed.slice(),
+        labelBox: labelBoxes(map, group, zoom, perPx, fonts),
+        // Line, "around point" and "pole" labels keep clear of the point
+        // labels MapLibre draws itself (a town name): drawn with text-overlap
+        // "always", they would otherwise sit on top of them.
+        avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -449,7 +455,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     // "Always label": a polygon wholly on the screen keeps its label even
     // when it is smaller than the label (drawn smaller, see below).
     const whole = options.always && area(rings) >= 0.98 * area(loaded);
-    if (label && area(rings) < 4 * label[0] * label[1] && !whole) continue;  // only a sliver in view
+    // Only a sliver in view: no label. "Around point" labels go beside the
+    // polygon, so a polygon smaller than its label (a restaurant's building)
+    // keeps its label.
+    if (label && !options.around && area(rings) < 4 * label[0] * label[1] && !whole) continue;
     let scale = 1;
     if (pole) {
       const search = () => {
@@ -526,7 +535,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       // keeps clear of better-ranked labels; else the first that fits.
       const target = labelPoint(rings);
       if (!target) continue;
-      const candidates = aroundCandidates(target, half, options.around);
+      const candidates = aroundCandidates(target, label.text || half, options.around);
       const fits = (p) => fit(...p) >= 0;
       const free = (p) => fits(p) && clear(...p) >= 0;
       const kept = old && Number.isInteger(old.slot) && candidates[old.slot] && within(inner, old.point)
@@ -573,8 +582,9 @@ export function aroundOption(around, zoom, perPx) {
   if (!around) return null;
   let px = Number(around.px) || 0;
   if (Number.isFinite(Number(around.zoom))) px *= 2 ** (zoom - Number(around.zoom));  // map units
+  // QGIS's order (pal createCandidatesAroundPoint): top-right first.
   const anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
-    : ["bottom", "bottom-left", "bottom-right", "left", "right", "top", "top-left", "top-right"];
+    : ["bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right", "top-right"];
   return { anchors, distance: px * perPx };
 }
 
@@ -1146,6 +1156,9 @@ function rectDistance(x, y, [x0, y0, x1, y1]) {
 // forms give undefined.
 export function evaluate(expression, zoom, properties = {}) {
   if (!Array.isArray(expression)) return expression;
+  // A plain array value (text-offset [0, -1], icon-text-fit-padding
+  // [t, r, b, l]) is not an expression: expressions start with an operator.
+  if (typeof expression[0] !== "string") return expression;
   const [op, ...args] = expression;
   const ev = (value) => evaluate(value, zoom, properties);
   switch (op) {
@@ -1210,50 +1223,113 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
-function labelBoxes(map, group, zoom, perPx) {
+function labelBoxes(map, group, zoom, perPx, fonts) {
   const layer = activeLayer(group, zoom);
-  return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6);
+  return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6,
+                     fonts?.get(layer.metadata?.["q2vt:font"]) || null);
+}
+
+// The label fonts' advance per character and line height (em) measured at
+// export: style metadata["q2vt:font-metrics"] -> Map(font -> {advance:
+// Map(char -> em), height}); a style layer's metadata["q2vt:font"] names its font.
+export function fontMetrics(style) {
+  const fonts = new Map();
+  for (const [name, entry] of Object.entries(style?.metadata?.["q2vt:font-metrics"] || {})) {
+    if (typeof entry?.chars !== "string" || !Array.isArray(entry.advances)) continue;
+    const advance = new Map();
+    [...entry.chars].forEach((char, i) => {
+      if (Number.isFinite(entry.advances[i])) advance.set(char, entry.advances[i] / 1000);
+    });
+    fonts.set(name, { advance, height: Number(entry.height) || 1.2 });
+  }
+  return fonts;
 }
 
 // Half width / height (world units) of a label's box, with LABEL_MARGIN_PX
-// around it; ``charWidth``: the font's mean advance per character (em,
-// metadata["q2vt:char-width"] measured at export).
+// around it. ``metrics`` (fontMetrics): each character's own advance, as
+// QGIS measures the label - a label of narrow letters is up to a fifth
+// shorter than the mean width says, which decides whether it fits in its
+// polygon; ``charWidth``: the font's mean advance per character (em,
+// metadata["q2vt:char-width"]), for other characters or without metrics.
 const LABEL_MARGIN_PX = 2;
-function layoutBoxes(layout, zoom, perPx, charWidth = 0.6) {
+export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null) {
   return (properties) => {
-    const text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
+    let text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
     if (!text) return null;
     let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
     if (!Number.isFinite(size) || size <= 0) size = 16;
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
+    const transform = evaluate(layout["text-transform"], zoom, properties);
+    if (transform === "uppercase") text = text.toUpperCase();
+    else if (transform === "lowercase") text = text.toLowerCase();
     const lines = text.split("\n");
-    const width = Math.max(...lines.map((line) => line.length)) * charWidth * size + pad[1] + pad[3];
-    const height = lines.length * 1.2 * size + pad[0] + pad[2];
-    return [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
+    const lineHeight = Number(evaluate(layout["text-line-height"] ?? 1.2, zoom, properties)) || 1.2;
+    let width, height;
+    if (metrics) {
+      const spacing = Number(evaluate(layout["text-letter-spacing"] ?? 0, zoom, properties)) || 0;
+      const ems = (line) => {
+        const chars = [...line];
+        return chars.reduce((sum, char) => sum + (metrics.advance.get(char) ?? charWidth), 0)
+          + spacing * Math.max(0, chars.length - 1);
+      };
+      width = Math.max(...lines.map(ems)) * size;
+      height = (metrics.height + (lines.length - 1) * lineHeight) * size;
+    } else {
+      width = Math.max(...lines.map((line) => line.length)) * charWidth * size;
+      height = lines.length * 1.2 * size;
+    }
+    const bare = [width / 2 * perPx, height / 2 * perPx];
+    // MapLibre fits a frame to its own line box (text-line-height a line);
+    // the exporter's padding brings it out to QGIS's ascent and descent.
+    if (layout["icon-text-fit"]) height = lines.length * lineHeight * size;
+    width += pad[1] + pad[3];
+    height += pad[0] + pad[2];
+    const box = [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
+    box.text = bare;  // QGIS measures the "around point" distance from the bare text
+    return box;
   };
 }
 
+// The boxes a group's labels keep clear of: those placed before them and,
+// for line, "around point" and "pole" (Horizontal / Free) labels, the point
+// labels MapLibre draws (a park's name keeps clear of a place name in it).
+export function avoidFor(group, placed, others) {
+  return group.kind === "line" || group.around || group.anchor === "pole"
+    ? placed.concat(others()) : placed.slice();
+}
+
 // World boxes of the point labels MapLibre draws from the other symbol
-// layers (estimated from text and size at the anchor; rotation, offsets and
-// icons ignored).
-function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx) {
+// layers (estimated from text and size at the anchor, moved by text-offset;
+// rotation, variable anchors and icons ignored).
+export function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) {
   const ours = new Set();
   for (const group of groups.values()) {
     for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
   }
-  const layers = map.getStyle().layers.filter((l) => l.type === "symbol" && !ours.has(l.id)
-    && (l.layout || {})["text-field"] !== undefined).map((l) => l.id);
+  const defs = new Map(map.getStyle().layers.filter((l) => l.type === "symbol" && !ours.has(l.id)
+    && (l.layout || {})["text-field"] !== undefined).map((l) => [l.id, l]));
+  const layers = [...defs.keys()];
   if (!layers.length) return [];
   const boxes = [];
-  const sizes = new Map();
   for (const f of map.queryRenderedFeatures({ layers })) {
     if (f.geometry.type !== "Point") continue;  // labels along lines: their position is unknown here
-    if (!sizes.has(f.layer.id)) sizes.set(f.layer.id, layoutBoxes(f.layer.layout || {}, zoom, perPx));
-    const half = sizes.get(f.layer.id)(f.properties);
+    // A rendered feature's ``layer.layout`` is MapLibre's evaluation for
+    // that feature (its own text, size and offset, whatever the expression:
+    // case, format...): each label is measured on its own. The metadata
+    // (the font's widths) comes from the style's definition.
+    const layout = f.layer.layout || {};
+    const metadata = (defs.get(f.layer.id) || f.layer).metadata || {};
+    const half = layoutBoxes(layout, zoom, perPx, Number(metadata["q2vt:char-width"]) || 0.6,
+      fonts?.get(metadata["q2vt:font"]) || null)(f.properties);
     if (!half) continue;
     const p = maplibregl.MercatorCoordinate.fromLngLat(f.geometry.coordinates);
-    boxes.push([p.x - half[0], p.y - half[1], p.x + half[0], p.y + half[1]]);
+    // text-offset (ems of the text size): the label is drawn off its point
+    // (a town name 4 mm above its dot).
+    const offset = layout["text-variable-anchor"] ? null : evaluate(layout["text-offset"], zoom, f.properties);
+    const em = Number(evaluate(layout["text-size"] ?? 16, zoom, f.properties)) || 16;
+    const [dx, dy] = Array.isArray(offset) ? offset.map((v) => (Number(v) || 0) * em * perPx) : [0, 0];
+    boxes.push([p.x + dx - half[0], p.y + dy - half[1], p.x + dx + half[0], p.y + dy + half[1]]);
   }
   return boxes;
 }

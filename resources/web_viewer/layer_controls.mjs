@@ -73,15 +73,20 @@ export class LayerControls {
 
   render() {
     const top = el("div", "q2vt-pane-head");
-    const labels = el("div", "q2vt-row q2vt-row-labels");
-    const { wrap, input } = toggle(t("app.labels"), (checked) => this.state.set({ labels: checked }));
-    this.labelsInput = input;
-    const labelName = el("span", "q2vt-name");
-    labelName.append(icon("tag", 18), el("span", "q2vt-title", t("app.labels")));
-    labels.append(wrap, labelName);
+    // Interaction -> Viewer -> Labels switch: without it, labels stay on.
+    this.labelsAllowed = this.manifest.interaction?.labelsToggle !== false;
+    if (this.labelsAllowed) {
+      const labels = el("div", "q2vt-row q2vt-row-labels");
+      const { wrap, input } = toggle(t("app.labels"), (checked) => this.state.set({ labels: checked }));
+      this.labelsInput = input;
+      const labelName = el("span", "q2vt-name");
+      labelName.append(icon("tag", 18), el("span", "q2vt-title", t("app.labels")));
+      labels.append(wrap, labelName);
+      top.append(labels);
+    }
     const reset = button("q2vt-chip q2vt-chip-ghost", t("app.reset"), "reset", { text: t("app.resetShort") });
     reset.addEventListener("click", () => this.state.reset());
-    top.append(labels, reset);
+    top.append(reset);
     const root = el("ul", "q2vt-tree");
     root.setAttribute("role", "tree");
     root.setAttribute("aria-label", t("app.layers"));
@@ -170,7 +175,11 @@ export class LayerControls {
 
   sync() {
     const state = this.state.value;
-    this.labelsInput.checked = state.labels;
+    if (!this.labelsAllowed && state.labels === false) {
+      this.state.set({ labels: true }); // a remembered or linked "off" has no switch to undo it
+      return;
+    }
+    if (this.labelsInput) this.labelsInput.checked = state.labels;
     for (const [id, input] of this.inputs.layers) input.checked = state.layers[id] !== false;
     for (const [id, input] of this.inputs.rules) input.checked = state.rules[id] !== false;
     for (const [id, input] of this.inputs.opacity) {

@@ -50,7 +50,6 @@
   "search.coverage": "{n} searchable features",
   "search.unavailable": "Search is not available.",
   "feature.notFound": "The linked feature was not found in this version of the map.",
-  "feature.exportScoped": "Feature links of this layer only work in this version of the map.",
   "filter.all": "All",
   "filter.min": "Min",
   "filter.max": "Max",

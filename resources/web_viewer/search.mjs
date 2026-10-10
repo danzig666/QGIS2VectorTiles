@@ -155,7 +155,9 @@ export class Search {
     this.input.value = result.label || result.key;
     await goTo(this.map, result);
     this.marker(result.anchor);
-    if (result.layerId !== STREETS && result.layerId !== ADDRESSES) this.identify.open(result.layerId, result.key, result.anchor);
+    if (this.identify && result.layerId !== STREETS && result.layerId !== ADDRESSES) {
+      this.identify.open(result.layerId, result.key, result.anchor);
+    }
   }
 }
 

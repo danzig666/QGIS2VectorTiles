@@ -340,9 +340,38 @@ class GDALTilesGenerator:
     def _cpu_num(self) -> int:
         return max(1, int((cpu_count() or 1) * self.cpu_percent / 100))
 
+    # The MVT writer keeps geometry this far outside a tile (tile units, 4096
+    # a tile; 80 = 10 CSS px is its default).
+    _MIN_BUFFER, _MAX_BUFFER = 80, 1024
+
+    def _buffer(self, members: Optional[List[QgsVectorLayer]] = None) -> int:
+        """Clip buffer for the datasets ``members`` (all without): a line is
+        cut that far outside the tile, so a wide line (map units at the last
+        tile zoom, square caps) needs about its width there, or both edges of
+        the band step where it crosses a tile edge."""
+        from .fidelity import expressions as ex  # pylint: disable=import-outside-toplevel
+        members = self.layers if members is None else members
+        top = {self._layer_name(m): self._layer_zoom_range(m)[1] for m in members}
+        widest = 0.0
+        for layer in self.style.get("layers", []) if isinstance(self.style, dict) else []:
+            if layer.get("type") != "line" or layer.get("source-layer") not in top:
+                continue
+            paint, zoom = layer.get("paint") or {}, top[layer["source-layer"]]
+            try:
+                values = [ex.evaluate_zoom_curve(paint.get(name, default), zoom)
+                          for name, default in (("line-width", 1), ("line-gap-width", 0),
+                                                ("line-offset", 0))]
+            except (ex.ExpressionError, TypeError, IndexError):
+                continue  # feature-dependent: unknown
+            width, gap, offset = (float(v) for v in values)
+            widest = max(widest, width + 2 * gap + abs(offset))
+        units = math.ceil(widest * 8) + 8  # 8 tile units a CSS px (512 px tiles)
+        return max(self._MIN_BUFFER, min(self._MAX_BUFFER, units))
+
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
                          conf_path: Optional[str] = None,
-                         top_simplification: float = _SIMPLIFICATION_MAX_ZOOM) -> List[str]:
+                         top_simplification: float = _SIMPLIFICATION_MAX_ZOOM,
+                         buffer: int = _MIN_BUFFER) -> List[str]:
         """``top_simplification``: of each dataset's last zoom (its CONF
         maxzoom), as the writer applies SIMPLIFICATION_MAX_ZOOM."""
         cmd = [
@@ -354,6 +383,7 @@ class GDALTilesGenerator:
             "-dsco", "MAX_FEATURES=2000000",
             "-dsco", f"SIMPLIFICATION={_SIMPLIFICATION}",
             "-dsco", f"SIMPLIFICATION_MAX_ZOOM={top_simplification}",
+            "-dsco", f"BUFFER={buffer}",
         ]
         if conf_path:
             cmd += ["-dsco", f"CONF={conf_path}"]
@@ -373,7 +403,8 @@ class GDALTilesGenerator:
         """Execute ogr2ogr to convert the VRT to MBTiles."""
         env = os.environ.copy()
         env["GDAL_NUM_THREADS"] = str(self._cpu_num())
-        cmd = self._ogr2ogr_command(vrt_path, output, min_zoom, max_zoom, conf_path)
+        cmd = self._ogr2ogr_command(vrt_path, output, min_zoom, max_zoom, conf_path,
+                                    buffer=self._buffer())
 
         startupinfo = None
         creationflags = 0
@@ -468,7 +499,8 @@ class GDALTilesGenerator:
                 parts.append([name, key, list(self._layer_zoom_range(layer)),
                               self._dataset_fields(layer)])
             out.append((owner_id, export_cache.make_key("tiles", self._zooms, parts,
-                                                        _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM)
+                                                        _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM,
+                                                        self._buffer(members))
                         if parts is not None else None, members))
         return out
 
@@ -501,8 +533,10 @@ class GDALTilesGenerator:
         jobs = []  # (group index, piece file, command, cost, owner)
         for index, (key, target, vrt, conf, members, owner) in enumerate(groups):
             pieces = self._pieces(members, target_cost) if cpu > 1 else [(min_zoom, max_zoom, 0.0)]
+            buffer = self._buffer(members)
             if len(pieces) == 1:
-                jobs.append((index, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf),
+                jobs.append((index, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf,
+                                                                  buffer=buffer),
                              pieces[0][2] or self._job_cost(members), owner))
                 continue
             number = 0
@@ -523,7 +557,7 @@ class GDALTilesGenerator:
                     self._build_vrt(piece_vrt, part)
                     self._write_layer_conf(piece_conf, part, (low, high))
                     command = self._ogr2ogr_command(piece_vrt, piece, low, high, piece_conf,
-                                                    top_simplification=top)
+                                                    top_simplification=top, buffer=buffer)
                     jobs.append((index, piece, command, cost * len(part) / max(1, len(inside)), owner))
         self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
         for index, (key, target, *_rest) in enumerate(groups):

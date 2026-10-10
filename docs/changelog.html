@@ -449,6 +449,21 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 
   <div class="cl-entry featured latest">
     <div class="cl-header">
+      <div class="cl-version">v4.31.0</div>
+      <div class="cl-date">10 Oct 2026</div>
+    </div>
+    <div class="cl-body">
+      <div class="cl-item"><div class="cl-item-dot"></div><span><em>SSH / SFTP server</em> destination (<em>Destination</em> tab): the map goes straight into the folder you give on your own server, not versioned; only new and changed files are uploaded, renamed into place with <code>index.html</code> last; files with the same names are replaced, other files stay. Key, ssh-agent or password login (typed for the session or saved encrypted in QGIS); <em>Test connection</em>.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span><em>Draw…</em> (extent): click one corner, then the opposite one, like QGIS's rectangle tools (dragging still works); snapping, status bar hints, right click or Esc cancels.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Fixed: rules dropped when their expression failed on one feature; nested rule-based renderers that stopped the web map from loading; features and labels lost on non-numeric data-defined values or positions; NULL data-defined label sizes, colours and texts (static value used, as in QGIS).</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Drawing: QGIS's feature order across rules and categories, Qt brush fills drawn as patterns, layer opacity, outline bands and fill offsets, wide map-unit lines at tile edges, closed-line joins, zero-length dashes, arrow fill outlines, marker angles and stacking order.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Labels: <em>Using perimeter</em> polygon labels, upper-case labels, frames wrapping the text like QGIS, around-point distance and positions, line labels beside the line, one label per feature drawn by two rules, DemiBold/Medium/Light faces.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Viewer: search works without popups; a shared link shows what its sender saw; the Labels switch setting is honoured; the 'feature links only work in this version' note is gone from popups.</span></div>
+    </div>
+  </div>
+
+  <div class="cl-entry">
+    <div class="cl-header">
       <div class="cl-version">v4.30.1</div>
       <div class="cl-date">09 Oct 2026</div>
     </div>

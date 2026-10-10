@@ -94,15 +94,102 @@ def test_label_show_property_filters_labels(tmp_path, plugin):
     layer = zoning_layer(path=str(tmp_path / "z.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
     settings = QgsPalLayerSettings()
-    settings.fieldName = "zone"
+    settings.fieldName = "coalesce(\"zone\", 'none')"
+    settings.isExpression = True
     settings.setFormat(QgsTextFormat())
     settings.dataDefinedProperties().setProperty(
         QgsPalLayerSettings.Property.Show, QgsProperty.fromExpression("\"zone\" <> 'K2'"))
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
+    # NULL zone: `NULL <> 'K2'` is NULL -> shown (QGIS default); K2 hidden.
+    assert _labels(tmp_path, layer) == ["K1", "Lk", "none"]
+
+
+def _labels(tmp_path, layer):
     layers, rules = _export(tmp_path, layer, QgsRectangle(2119000, 6019000, 2123000, 6023000))
     label_layer = [l for l, r in zip(layers, rules) if r.get_attr("t") == 1]
     label_layer = label_layer or [l for l in layers if "q2vt_label" in l.fields().names()]
-    labels = sorted(str(f["q2vt_label"]) for f in label_layer[0].getFeatures())
-    # NULL zone: `NULL <> 'K2'` is NULL -> shown (QGIS default); K2 hidden.
-    assert "K2" not in labels and "K1" in labels and len(labels) == 3, labels
+    return sorted(str(f["q2vt_label"]) for f in label_layer[0].getFeatures())
+
+
+@pytest.mark.parametrize("text", ['"zone"', "CASE WHEN \"zone\" = 'K2' THEN '' ELSE \"zone\" END"])
+def test_labels_with_null_or_empty_text_are_left_out(tmp_path, plugin, text):
+    """QGIS draws nothing for a NULL or empty label text, not even the
+    background shape; MapLibre would draw the shape alone."""
+    layer = zoning_layer(path=str(tmp_path / "z.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = text
+    settings.isExpression = text != '"zone"'
+    if not settings.isExpression:
+        settings.fieldName = "zone"
+    text_format = QgsTextFormat()
+    background = text_format.background()
+    background.setEnabled(True)
+    text_format.setBackground(background)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    expected = ["K1", "K2", "Lk"] if not settings.isExpression else ["K1", "Lk"]
+    assert _labels(tmp_path, layer) == expected
+
+
+def test_a_value_a_numeric_property_cannot_hold_keeps_its_label(tmp_path, plugin):
+    """A label rotation read from a text field: QGIS draws the labels whose
+    value is not a number unrotated. The export wrote the rotation into a
+    numeric field, and the writer dropped every such feature (half the
+    labels of a layer were missing)."""
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    layer.dataProvider().addAttributes([QgsField("angle", QVariant.String), QgsField("name", QVariant.String)])
+    layer.updateFields()
+    for i, (angle, name) in enumerate((("30", "a"), ("north", "b"), ("", "c"), ("-15.5", "d"))):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([angle, name])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({2120000 + 100 * i} 6020000)"))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "r.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({"name": "circle", "size": "2"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.setFormat(QgsTextFormat())
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.LabelRotation, QgsProperty.fromField("angle"))
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    layers, rules = _export(tmp_path, layer, QgsRectangle(2119000, 6019000, 2123000, 6023000))
+    labels = [l for l, r in zip(layers, rules) if r.get_attr("t") == 1]
+    assert sorted(str(f["q2vt_label"]) for f in labels[0].getFeatures()) == ["a", "b", "c", "d"]
+
+
+def test_an_expression_failing_on_one_feature_does_not_drop_the_layer(tmp_path, plugin):
+    """Text in a field a numeric expression reads: QGIS skips the failing
+    value (default size, no match, no label) and draws the rest; the
+    export used to abort the whole rule."""
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    layer.dataProvider().addAttributes([QgsField("size", QVariant.String), QgsField("name", QVariant.String)])
+    layer.updateFields()
+    for i, (size, name) in enumerate((("3", "a"), ("not a number", "b"), ("5", "c"))):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([size, name])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({2120000 + 100 * i} 6020000)"))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "p.gpkg"))
+    symbol = QgsMarkerSymbol.createSimple({"name": "circle", "size": "2"})
+    symbol.symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertySize, QgsProperty.fromExpression('1.3 * "size"'))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "\"name\" || ' ' || (\"size\" * 2)"
+    settings.isExpression = True
+    settings.setFormat(QgsTextFormat())
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    layers, rules = _export(tmp_path, layer, QgsRectangle(2119000, 6019000, 2123000, 6023000))
+    symbols = [l for l, r in zip(layers, rules) if r.get_attr("t") == 0]
+    field = next(name for name in symbols[0].fields().names() if name.startswith("q2vt_property_size"))
+    values = [f[field] for f in symbols[0].getFeatures()]
+    sizes = sorted(v for v in values if isinstance(v, float))
+    # The failing feature keeps the symbol's own size (the style's default).
+    assert len(values) == 3 and sizes == pytest.approx([3.9, 6.5]), values
+    labels = [l for l, r in zip(layers, rules) if r.get_attr("t") == 1]
+    assert sorted(str(f["q2vt_label"]) for f in labels[0].getFeatures()) == ["a 6", "c 10"]

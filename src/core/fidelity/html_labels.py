@@ -20,6 +20,8 @@ import html
 import re
 from typing import List, Tuple
 
+from . import expressions as ex
+
 MAX_SECTIONS = 6
 TEXT_FIELD = "q2vt_label_h{}"
 SCALE_FIELD = "q2vt_label_s{}"
@@ -91,7 +93,7 @@ def format_expression(scale_is_field: bool = True) -> list:
     expression: list = ["format"]
     for index in range(MAX_SECTIONS):
         expression += [["coalesce", ["get", TEXT_FIELD.format(index)], ""],
-                       {"font-scale": ["to-number", ["get", SCALE_FIELD.format(index)], 1]}]
+                       {"font-scale": ex.to_number(["get", SCALE_FIELD.format(index)], 1)}]
     return expression
 
 

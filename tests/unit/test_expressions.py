@@ -13,7 +13,24 @@ def test_mul_constant_folds_numbers():
 def test_mul_never_uses_python_list_arithmetic():
     # Regression: icon-size used `list / number` and raised TypeError.
     expr = ex.div(ex.to_number(ex.get("q2vt_size"), 1), 3)
-    assert expr == ["*", ["to-number", ["get", "q2vt_size"], 1], 1.0 / 3]
+    assert expr == ["*", ["to-number", ["coalesce", ["get", "q2vt_size"], 1], 1], 1.0 / 3]
+
+
+def test_to_string_and_to_boolean_fall_back_on_null():
+    """MapLibre's to-string turns null into '' and to-boolean into false: a
+    data-defined character or flag without a value lost its static one."""
+    assert ex.to_string(ex.get("c"), "A") == ["to-string", ["coalesce", ["get", "c"], "A"]]
+    assert ex.to_string("left") == "left"
+    assert ex.to_boolean(ex.get("b"), True) == ["to-boolean", ["coalesce", ["get", "b"], True]]
+    assert ex.to_boolean(False) is False
+
+
+def test_to_number_falls_back_on_null():
+    """MapLibre's to-number turns null (a feature without the property) into
+    0, not into its next argument: a null data-defined size drew labels at
+    size 0. The fallback is put in place of null first."""
+    assert ex.to_number(ex.get("size"), 9) == \
+        ["to-number", ["coalesce", ["get", "size"], 9], 9]
 
 
 def test_zero_divisor_returns_fallback():
@@ -59,7 +76,16 @@ def test_referenced_fields():
 def test_clamp_inside_zoom_curve():
     curve = ex.exponential_zoom_curve([(0, 0.5), (10, 512.0)])
     clamped = ex.clamp(curve, 1, 100)
-    assert clamped[4] == 1 and clamped[6] == 100
+    assert clamped[4] == 1 and clamped[-1] == 100
+    # The curve is cut where it crosses the bounds, not bent: clamping a stop
+    # output alone changed the whole segment (a map-unit spacing of 0.0001 px
+    # at z0 raised to 1 px was about 1 px too large at z14).
+    for zoom in (0, 1, 3, 5.5, 8, 9.9, 10):
+        expected = min(max(ex.evaluate_zoom_curve(curve, zoom), 1), 100)
+        assert ex.evaluate_zoom_curve(clamped, zoom) == pytest.approx(expected, rel=1e-9)
+    map_units = ex.exponential_zoom_curve([(0, 0.00255), (24, 42869.3)])
+    assert ex.evaluate_zoom_curve(ex.clamp(map_units, 1.0), 14) == pytest.approx(
+        ex.evaluate_zoom_curve(map_units, 14), rel=1e-9)
 
 
 def test_camera_only_detection():
