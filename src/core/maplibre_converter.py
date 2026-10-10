@@ -4183,7 +4183,7 @@ class QgisMapLibreStyleExporter:
 
         layer_def["layout"].update({
             "icon-anchor": IconPropertyExtractor.get_icon_anchor(),
-            "icon-rotate": IconPropertyExtractor.get_icon_rotate(background=background),
+            "icon-rotate": self._background_rotate(background, layer_def["layout"], layer_def),
             "icon-padding": IconPropertyExtractor.get_icon_padding(),
             "icon-rotation-alignment": IconPropertyExtractor.get_icon_rotation_alignment(),
             "icon-pitch-alignment": IconPropertyExtractor.get_icon_pitch_alignment(),
@@ -4298,6 +4298,25 @@ class QgisMapLibreStyleExporter:
         top = (ascent - half - _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
         bottom = (descent - half + _MAPLIBRE_BASELINE_BELOW_MIDDLE_EM) * size
         return [round(padding[0] + top, 4), padding[1], round(padding[2] + bottom, 4), padding[3]]
+
+    @staticmethod
+    def _background_rotate(background, layout: dict, layer_def: dict):
+        """``icon-rotate`` of a label background: QGIS turns it with the
+        label (*Sync with label*), by its own angle on top (*Offset of
+        label*) or only by its own angle (*Fixed*). A turning background
+        is marked for the viewer, which sets the angle of Free labels."""
+        own = IconPropertyExtractor.get_icon_rotate(background=background)
+        kind = _enum_int(background.rotationType(), 0)
+        if kind == 2:
+            return own
+        layer_def.setdefault("metadata", {})["q2vt:icon-follows-text"] = \
+            own if kind == 1 and ex.is_number(own) else 0
+        text = layout.get("text-rotate", 0)
+        if kind == 0 or not own:
+            return text
+        if ex.is_number(text):
+            return text + own
+        return ["+", text, own]
 
     @staticmethod
     def _label_rotated(label_settings) -> bool:

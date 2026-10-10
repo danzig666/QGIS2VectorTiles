@@ -155,7 +155,14 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       delete moved.layout["text-allow-overlap"];
       delete moved.layout["icon-allow-overlap"];
       // Free (angled) placement: the angle is computed here per label.
-      if (group.orient === "free") moved.layout["text-rotate"] = ["to-number", ["get", FREE_ROTATION], 0];
+      if (group.orient === "free") {
+        moved.layout["text-rotate"] = ["to-number", ["get", FREE_ROTATION], 0];
+        // A frame turns with its label (QGIS "Sync with label" / "Offset of label").
+        const follows = (moved.metadata || {})["q2vt:icon-follows-text"];
+        if (moved.layout["icon-image"] !== undefined && typeof follows === "number") {
+          moved.layout["icon-rotate"] = follows ? ["+", moved.layout["text-rotate"], follows] : moved.layout["text-rotate"];
+        }
+      }
       map.addLayer(moved, before && map.getLayer(before) ? before : undefined);
     }
   }
