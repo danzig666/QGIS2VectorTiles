@@ -586,17 +586,18 @@ class PublishDialog(QDialog):
 
     def apply_zoom_limits(self, chosen) -> int:
         """Set {layer id: (min scale or None, labels min scale or None)} in
-        the Scales column (None: that limit stays); returns the rows changed."""
+        the Scales column (None: that limit stays, 0: no limit); returns the
+        rows changed."""
         changed = 0
         for item in self._tree_items():
             limits = chosen.get(item.data(0, LAYER_ROLE))
             if not limits:
                 continue
             low, high, labels_low = self._item_scales(item)
-            new_low, new_labels = limits
-            if new_low and not (high and high >= new_low):
+            new_low, new_labels = limits  # None: stays; 0: no limit
+            if new_low is not None and not (new_low and high and high >= new_low):
                 low = new_low
-            if new_labels:
+            if new_labels is not None:
                 labels_low = new_labels
             self._set_item_scales(item, low, high, labels_low)
             changed += 1

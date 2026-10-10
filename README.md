@@ -286,6 +286,8 @@ into a public, self-contained web map. The window title shows the plugin version
   their groups, and *Only published layers* hides the rest. The *Interaction* tab lists the
   published layers by name, with a find box when there are more than 10. Every layer drop-down
   (extent, house numbers, parcel report, terrain, WMS) takes typing and lists the matching layers.
+- **Zoomed-out load…** (*Map* tab): every layer's zooms, of its features and of its labels, can be
+  changed by hand, not only the suggested ones; the lowest zoom removes a limit.
 - **Many layers at once:** select rows (Ctrl/Shift + click), then *Selected layers* or right-click.
   *Publish the visible layers* publishes exactly what the QGIS Layers panel shows.
 - **Map themes** (*Map* tab): *Publish its layers* adds a theme's layers (several themes add up),

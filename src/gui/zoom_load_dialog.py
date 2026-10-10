@@ -34,7 +34,9 @@ def count_text(value: float) -> str:
 
 
 class _ZoomPick(QWidget):
-    """A checkbox and a zoom: "☑ z14 (1:34 000)"."""
+    """A checkbox and an editable zoom: "☑ z14 (1:34 000)". Changing the
+    zoom ticks the box; the lowest zoom means no limit (shown from the
+    web map's first zoom)."""
 
     def __init__(self, zoom: int, low: int, high: int, factor: float, checked: bool, on_change):
         super().__init__()
@@ -47,7 +49,9 @@ class _ZoomPick(QWidget):
         self.spin.setRange(low, high)
         self.spin.setPrefix("z")
         self.spin.setValue(zoom)
+        self.spin.setToolTip(tr("From which zoom it is drawn; the lowest zoom: no limit"))
         self.spin.valueChanged.connect(self._show_scale)
+        self.spin.valueChanged.connect(lambda *_: self.check.setChecked(True))
         self.check.toggled.connect(lambda *_: on_change())
         self.spin.valueChanged.connect(lambda *_: on_change())
         layout.addWidget(self.check)
@@ -55,9 +59,15 @@ class _ZoomPick(QWidget):
         self._show_scale()
 
     def _show_scale(self, *_):
-        self.spin.setSuffix(f"  ({scale_text(self.scale())})")
+        if self.spin.value() <= self.spin.minimum():
+            self.spin.setSuffix("  " + tr("(no limit)"))
+        else:
+            self.spin.setSuffix(f"  ({scale_text(self.scale())})")
 
     def scale(self) -> float:
+        """The minimum scale of the zoom; 0 at the lowest zoom (no limit)."""
+        if self.spin.value() <= self.spin.minimum():
+            return 0.0
         return zoom_load.scale_for_zoom(self.factor, self.spin.value())
 
     def chosen(self):
@@ -77,9 +87,10 @@ class ZoomLoadDialog(QDialog):
         intro = QLabel(tr(
             "Estimated from a sample of each layer's features in the export extent. Zoomed out, one "
             "tile holds a whole area: every feature in it is loaded and drawn, even when it is "
-            "smaller than a pixel, and every label is laid out though few of them fit. The checked "
-            "suggestions hide the features, or only the labels, when zoomed out beyond the zoom "
-            "shown; they are not tiled there either. Only the web map changes, not the QGIS project."))
+            "smaller than a pixel, and every label is laid out though few of them fit. The ticked "
+            "zooms hide the features, or only the labels, when zoomed out beyond them; they are not "
+            "tiled there either. Every zoom can be changed by hand (changing it ticks it); the lowest "
+            "zoom removes a limit. Only the web map changes, not the QGIS project."))
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.find = QLineEdit()
@@ -166,13 +177,19 @@ class ZoomLoadDialog(QDialog):
         self._item(row, COL_NOW, text, tr("Shown now from zoom {} on").format(start)
                    + (tr("\nHeavy: slows the map down") if load.heavy(start) else ""))
         picks = {}
-        if load.draws_features and load.suggested_from is not None:
-            picks["features"] = _ZoomPick(load.suggested_from, start + 1, high, self.factor, True,
-                                          self._update_summary)
+        low = self.zooms[0]
+        # Every layer's zooms can be set by hand: a suggestion is ticked, else
+        # the zoom it is shown from now is offered unticked.
+        if load.draws_features:
+            suggested = load.suggested_from is not None
+            picks["features"] = _ZoomPick(load.suggested_from if suggested else start, low, high,
+                                          self.factor, suggested, self._update_summary)
+            if not suggested:
+                picks["features"].setToolTip(tr("Light enough") if not load.heavy(start)
+                                             else tr("Visible there"))
             self.table.setCellWidget(row, COL_FROM, picks["features"])
         else:
-            reason = tr("Light enough") if not load.heavy(start) else tr("Visible there")
-            self._item(row, COL_FROM, "—", reason)
+            self._item(row, COL_FROM, "—", tr("Labels only"))
         if load.labels and load.label_share > 0:
             begin = load.labels_from
             labels = load.tile_features.get(begin, 0) * load.label_share
@@ -180,12 +197,12 @@ class ZoomLoadDialog(QDialog):
             self._item(row, COL_LABELS_NOW, tr("z{}: {} labels, ~{}% fit").format(
                 begin, count_text(labels), max(1, int(round(placed * 100))) if labels else 0),
                 tr("Shown now from zoom {} on").format(begin))
-            if load.suggested_labels_from is not None:
-                picks["labels"] = _ZoomPick(load.suggested_labels_from, begin + 1, high, self.factor,
-                                            True, self._update_summary)
-                self.table.setCellWidget(row, COL_LABELS_FROM, picks["labels"])
-            else:
-                self._item(row, COL_LABELS_FROM, "—", tr("Most labels fit there"))
+            suggested = load.suggested_labels_from is not None
+            picks["labels"] = _ZoomPick(load.suggested_labels_from if suggested else begin, low, high,
+                                        self.factor, suggested, self._update_summary)
+            if not suggested:
+                picks["labels"].setToolTip(tr("Most labels fit there"))
+            self.table.setCellWidget(row, COL_LABELS_FROM, picks["labels"])
         else:
             self._item(row, COL_LABELS_NOW, tr("no labels") if not load.labels else tr("no label texts"))
             self._item(row, COL_LABELS_FROM, "")
@@ -197,8 +214,8 @@ class ZoomLoadDialog(QDialog):
         picks = self.picks.get(load.layer_id, {})
         features = picks["features"].chosen() if "features" in picks else None
         labels = picks["labels"].chosen() if "labels" in picks else None
-        start = max(load.shown_from, features or 0)
-        return start, max(start, load.labels_from, labels or 0)
+        start = load.shown_from if features is None else features
+        return start, max(start, load.labels_from if labels is None else labels)
 
     def _tile_bytes(self, zoom: int, after: bool) -> float:
         total = 0.0
@@ -224,7 +241,7 @@ class ZoomLoadDialog(QDialog):
 
     def chosen(self):
         """{layer id: (min scale or None, labels min scale or None)} of the
-        checked suggestions (layers without one are left out)."""
+        ticked zooms (layers without one are left out); 0: no limit."""
         result = {}
         for load in self.loads:
             picks = self.picks.get(load.layer_id, {})
@@ -235,6 +252,6 @@ class ZoomLoadDialog(QDialog):
             if labels is not None and features is not None and labels <= features:
                 labels = None  # the layer is hidden there anyway
             result[load.layer_id] = (
-                zoom_load.scale_for_zoom(self.factor, features) if features is not None else None,
-                zoom_load.scale_for_zoom(self.factor, labels) if labels is not None else None)
+                picks["features"].scale() if features is not None else None,
+                picks["labels"].scale() if labels is not None else None)
         return result

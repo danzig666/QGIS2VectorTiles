@@ -348,3 +348,37 @@ def test_zoomed_out_load_window_finds_layers(plugin):
     window.find.clear()
     assert not any(window.table.isRowHidden(row) for row in range(3))
     window.close()
+
+
+def test_zoomed_out_load_zooms_can_be_edited_for_every_layer(many_layers):
+    """Not only the suggestions: every layer's feature and label zooms can
+    be set by hand, the lowest zoom removes a limit, and the result goes to
+    the Scales column."""
+    from q2vt_plugin.src.gui.zoom_load_dialog import ZoomLoadDialog  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing import zoom_load  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.zoom_load import LayerLoad  # pylint: disable=import-error
+    dialog, layers = many_layers
+    rivers, lakes = layers["Rivers"], layers["Lakes"]
+    light = LayerLoad(rivers.id(), "Rivers", "line", 10, 11)  # no suggestion at all
+    light.labels, light.label_share, light.labels_from = True, 1.0, 11
+    limited = LayerLoad(lakes.id(), "Lakes", "polygon", 10, 13)  # limited now: shown from z13
+    window = ZoomLoadDialog(None, [light, limited], 1.1e8, (11, 16))
+    features, labels = window.picks[rivers.id()]["features"], window.picks[rivers.id()]["labels"]
+    assert not features.check.isChecked() and features.spin.value() == 11
+    assert window.chosen() == {}  # nothing ticked, nothing changes
+    features.spin.setValue(14)  # editing ticks the box
+    labels.spin.setValue(15)
+    lakes_pick = window.picks[lakes.id()]["features"]
+    assert lakes_pick.spin.value() == 13
+    lakes_pick.spin.setValue(11)  # the lowest zoom: the limit goes
+    assert "no limit" in lakes_pick.spin.suffix()
+    chosen = window.chosen()
+    assert chosen[rivers.id()] == (zoom_load.scale_for_zoom(1.1e8, 14), zoom_load.scale_for_zoom(1.1e8, 15))
+    assert chosen[lakes.id()] == (0.0, None)
+    items = _items(dialog)
+    dialog._set_item_scales(items[lakes.id()], 50000.0, 0.0)  # pylint: disable=protected-access
+    assert dialog.apply_zoom_limits(chosen) == 2
+    assert dialog._item_scales(items[lakes.id()])[0] == 0.0  # pylint: disable=protected-access
+    low, _high, labels_low = dialog._item_scales(items[rivers.id()])  # pylint: disable=protected-access
+    assert (low, labels_low) == (zoom_load.scale_for_zoom(1.1e8, 14), zoom_load.scale_for_zoom(1.1e8, 15))
+    window.close()
