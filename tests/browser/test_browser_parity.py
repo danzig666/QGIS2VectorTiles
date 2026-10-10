@@ -1024,6 +1024,22 @@ def _red_axis_degrees(path):
     return math.degrees(math.atan2(vy, vx)) % 180
 
 
+def _red_overlap(path_a, path_b):
+    """Overlap (intersection over union) of the red pixels of two images,
+    centred on each other."""
+    import numpy as np
+    from PIL import Image
+    masks = []
+    for path in (path_a, path_b):
+        rgb = np.asarray(Image.open(path).convert("RGB")).astype(int)
+        mask = rgb[..., 0] - np.maximum(rgb[..., 1], rgb[..., 2]) > 60
+        ys, xs = np.nonzero(mask)
+        masks.append((mask, int(round(xs.mean())), int(round(ys.mean()))))
+    (a, ax, ay), (b, bx, by) = masks
+    b = np.roll(np.roll(b, ax - bx, axis=1), ay - by, axis=0)
+    return (a & b).sum() / (a | b).sum()
+
+
 def test_free_label_frame_turns_with_its_label(tmp_path):
     """A Free (angled) polygon label turned along a narrow tilted polygon,
     with a frame turning with the label (QGIS "Sync with label"): the frame
@@ -1061,13 +1077,16 @@ def test_free_label_frame_turns_with_its_label(tmp_path):
     frame.setRotationType(QgsTextBackgroundSettings.RotationType.RotationSync)
     frame.setFillColor(QColor(255, 255, 255, 80))
     frame.setStrokeColor(QColor(255, 25, 25))
-    frame.setStrokeWidth(0.3)
+    frame.setStrokeWidth(1)
     frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
     fmt.setBackground(frame)
     settings.setFormat(fmt)
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
     _compare(tmp_path, layer, metric="shape")
+    # The border and corners (the frame image's fixed parts) turn too: they
+    # stuck out of the turned frame.
+    assert _red_overlap(str(tmp_path / "v_qgis.png"), str(tmp_path / "v_browser.png")) > 0.72
     qgis = _red_axis_degrees(str(tmp_path / "v_qgis.png"))
     browser = _red_axis_degrees(str(tmp_path / "v_browser.png"))
     assert qgis == pytest.approx(30, abs=6)
