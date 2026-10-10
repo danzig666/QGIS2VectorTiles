@@ -42,7 +42,18 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.31.0**. Newest first:
+This README describes QWebMap **4.32.0**. Newest first:
+
+**4.32.0** — finding layers in big projects, editable zoomed-out limits
+- **Finding layers:** the *Map* tab's layer list has a filter box (part of the name, upper or
+  lower case, accents not needed) and *Only published layers*; the *Interaction* tab lists the
+  layers by name with a find box; every layer drop-down takes typing.
+- **Zoomed-out load…:** every layer's feature and label zooms can be changed by hand; the lowest
+  zoom removes a limit.
+- **Fixes:** map-unit pattern fills of maps exported from zoom 0 showed only their outline
+  (hatched areas); dimension labels longer than their line are drawn level at the line, as QGIS
+  does with *Allow degraded placement*; line labels overlap where QGIS allows it; label frames
+  turn with their label (corners included); Free polygon labels sit in the middle of long strips.
 
 **4.31.0** — SSH / SFTP publishing, click-to-draw extent, fidelity fixes
 - **No more missing rules or blank maps:** a rule whose expression fails on one feature (for
