@@ -215,3 +215,136 @@ def test_raster_sharpest_detail_in_metres(setup):
     dialog.layer_configs[ortho.id()].raster_hidpi = True
     dialog.i_layers.setCurrentRow(rows.index(ortho.id()))
     assert dialog.r_detail.currentData() == 17  # kept although finer than the list
+
+
+@pytest.fixture
+def many_layers(plugin, monkeypatch):
+    """Twelve layers in two groups (more than the Interaction tab lists
+    without a find box)."""
+    from qgis.core import QgsVectorLayer
+    for name in ("warning", "information", "critical"):
+        monkeypatch.setattr(QMessageBox, name, lambda *a, **k: None)
+    project = reset_project()
+    root = project.layerTreeRoot()
+    water, roads = root.addGroup("Water"), root.addGroup("Transport")
+    names = {water: ["Rivers", "Lakes", "Wells", "Canals", "Springs", "Ponds"],
+             roads: ["Main roads", "Side roads", "Railway", "Bus stops", "Bridges", "Ötödik út"]}
+    layers = {}
+    for group, group_names in names.items():
+        for name in group_names:
+            layer = QgsVectorLayer("Point?crs=EPSG:3857&field=n:string", name, "memory")
+            project.addMapLayer(layer, False)
+            group.addLayer(layer)
+            layers[name] = layer
+    from q2vt_plugin.src.gui.publish_dialog import PublishDialog  # pylint: disable=import-error
+    dialog = PublishDialog(iface=None)
+    yield dialog, layers
+    dialog.close()
+
+
+def _shown(dialog):
+    return sorted(item.text(0) for item in dialog._tree_items() if not item.isHidden())  # pylint: disable=protected-access
+
+
+def test_map_tab_filter_finds_layers_by_part_of_their_name(many_layers):
+    dialog, layers = many_layers
+    items = _items(dialog)
+    dialog.tree_filter.setText("ROAD")  # upper case finds lower case, a part of the name
+    assert _shown(dialog) == ["Main roads", "Side roads"]
+    groups = _groups(dialog)
+    assert groups[("Water",)].isHidden() and not groups[("Transport",)].isHidden()
+    dialog.tree_filter.setText("otod")  # accents not needed
+    assert _shown(dialog) == ["Ötödik út"]
+    dialog.tree_filter.setText("water")  # a group's name shows its whole group
+    assert len(_shown(dialog)) == 6 and "Rivers" in _shown(dialog)
+    # Rows that are filtered away keep their settings and leave the selection.
+    items[layers["Rivers"].id()].setCheckState(1, CHECKED)
+    items[layers["Rivers"].id()].setSelected(True)
+    dialog.tree_filter.setText("lakes")
+    assert _shown(dialog) == ["Lakes"]
+    assert not items[layers["Rivers"].id()].isSelected()
+    assert items[layers["Rivers"].id()].checkState(1) == CHECKED
+    dialog.tree_filter.clear()
+    assert len(_shown(dialog)) == 12
+
+
+def test_map_tab_shows_only_published_layers(many_layers):
+    dialog, layers = many_layers
+    items = _items(dialog)
+    for layer in layers.values():
+        items[layer.id()].setCheckState(1, CHECKED if layer.name() in ("Rivers", "Railway") else UNCHECKED)
+    dialog.tree_published_only.setChecked(True)
+    assert _shown(dialog) == ["Railway", "Rivers"]
+    dialog.tree_filter.setText("riv")  # both filters at once
+    assert _shown(dialog) == ["Rivers"]
+    dialog.tree_published_only.setChecked(False)
+    dialog.tree_filter.clear()
+    assert len(_shown(dialog)) == 12
+    assert sorted(c.layer_id for c in dialog.collect().layers if c.included) == \
+        sorted([layers["Rivers"].id(), layers["Railway"].id()])
+
+
+def test_interaction_tab_lists_layers_by_name_with_a_find_box(many_layers):
+    dialog, layers = many_layers
+    for item in _items(dialog).values():
+        item.setCheckState(1, CHECKED)
+    dialog._fill_interaction_layers()  # pylint: disable=protected-access
+    names = [dialog.i_layers.item(row).text() for row in range(dialog.i_layers.count())]
+    assert names == ["Bridges", "Bus stops", "Canals", "Lakes", "Main roads", "Ötödik út", "Ponds",
+                     "Railway", "Rivers", "Side roads", "Springs", "Wells"]
+    assert dialog.current_layer_id == layers["Bridges"].id()
+    assert not dialog.i_layers_filter.isHidden()  # 12 layers: a find box
+    dialog.i_layers_filter.setText("S ST")
+    shown = [dialog.i_layers.item(row).text() for row in range(dialog.i_layers.count())
+             if not dialog.i_layers.item(row).isHidden()]
+    assert shown == ["Bus stops"]
+    # Few layers: no find box.
+    items = _items(dialog)
+    for name in ("Rivers", "Lakes", "Wells", "Canals", "Springs", "Ponds"):
+        items[layers[name].id()].setCheckState(1, UNCHECKED)
+    dialog._fill_interaction_layers()  # pylint: disable=protected-access
+    assert dialog.i_layers.count() == 6
+    assert dialog.i_layers_filter.isHidden() and not dialog.i_layers_filter.text()
+    assert all(not dialog.i_layers.item(row).isHidden() for row in range(6))
+
+
+def test_layer_drop_downs_find_layers_by_part_of_their_name(many_layers):
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtWidgets import QApplication
+    dialog, layers = many_layers
+    combo = dialog.i_address_layer  # every layer drop-down of the window works the same way
+    assert combo.isEditable()
+    combo.setLayer(layers["Rivers"])
+    completer = combo.completer()
+    completer.setCompletionPrefix("ROAD")  # what typing does: upper case, a part of the name
+    found = []
+    for row in range(completer.completionCount()):
+        completer.setCurrentRow(row)
+        found.append(completer.currentCompletion())
+    assert sorted(found) == ["Main roads", "Side roads"]
+    assert combo.currentLayer() is layers["Rivers"]  # typing alone does not change the layer
+    completer.activated[str].emit("Side roads")  # picked from the list
+    assert combo.currentLayer() is layers["Side roads"]
+    # Text that names no layer is undone; the chosen layer stays.
+    combo.lineEdit().setText("no such layer")
+    combo.lineEdit().editingFinished.emit()
+    assert combo.currentText() == "Side roads" and combo.currentLayer() is layers["Side roads"]
+    # Typing a whole name and Enter selects it.
+    combo.lineEdit().setText("Wells")
+    combo.lineEdit().editingFinished.emit()
+    assert combo.currentLayer() is layers["Wells"]
+    QApplication.processEvents()
+    assert QgsProject.instance().mapLayer(layers["Wells"].id()) is not None
+
+
+def test_zoomed_out_load_window_finds_layers(plugin):
+    from q2vt_plugin.src.gui.zoom_load_dialog import ZoomLoadDialog  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.zoom_load import LayerLoad  # pylint: disable=import-error
+    loads = [LayerLoad(f"id{i}", name, "polygon", 10, 11)
+             for i, name in enumerate(["Main roads", "Ötödik út", "Rivers"])]
+    window = ZoomLoadDialog(None, loads, 1.1e8, (11, 16))
+    window.find.setText("UT")
+    assert [window.table.isRowHidden(row) for row in range(3)] == [True, False, True]
+    window.find.clear()
+    assert not any(window.table.isRowHidden(row) for row in range(3))
+    window.close()

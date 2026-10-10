@@ -9,10 +9,11 @@ visible scales (the Scales column) with one click.
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
-                                 QHBoxLayout, QHeaderView, QLabel, QSpinBox, QTableWidget,
+                                 QHBoxLayout, QHeaderView, QLabel, QLineEdit, QSpinBox, QTableWidget,
                                  QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..publishing import zoom_load
+from .layer_search import matches
 from .scale_range import scale_text
 
 COL_LAYER, COL_COUNT, COL_NOW, COL_FROM, COL_LABELS_NOW, COL_LABELS_FROM = range(6)
@@ -81,6 +82,13 @@ class ZoomLoadDialog(QDialog):
             "shown; they are not tiled there either. Only the web map changes, not the QGIS project."))
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        self.find = QLineEdit()
+        self.find.setClearButtonEnabled(True)
+        self.find.setPlaceholderText(tr("Find a layer…"))
+        self.find.setToolTip(tr("Shows the layers whose name contains this text (upper or lower case, "
+                                "accents not needed); hidden rows keep their ticks"))
+        self.find.textChanged.connect(self._filter_rows)
+        layout.addWidget(self.find)
         self.table = QTableWidget(len(self.loads), 6)
         self.table.setHorizontalHeaderLabels([
             tr("Layer"), tr("Features"), tr("Busiest tile, zoomed out"), tr("Features from"),
@@ -126,6 +134,11 @@ class ZoomLoadDialog(QDialog):
         if screen is not None:
             width = min(width, screen.availableGeometry().width() - 40)
         self.resize(max(self.width(), width), self.height())
+
+    def _filter_rows(self, text: str) -> None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, COL_LAYER)
+            self.table.setRowHidden(row, bool(text) and not matches(item.text() if item else "", text))
 
     # ------------------------------------------------------------------ rows
     def _item(self, row: int, column: int, text: str, tip: str = "") -> QTableWidgetItem:

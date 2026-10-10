@@ -281,6 +281,11 @@ into a public, self-contained web map. The window title shows the plugin version
 - **Layers** (*Map* tab): per layer or group, *Publish*, *At start* (visible when the map opens)
   and *Switchable* (untick it to make a layer or group always shown); per layer, *Legend*.
   Publishing never changes the project's own layer visibility.
+- **Finding layers** in projects with hundreds of them: the *Map* tab's filter box shows, as you
+  type, the layers whose name contains the text (upper or lower case, accents not needed) with
+  their groups, and *Only published layers* hides the rest. The *Interaction* tab lists the
+  published layers by name, with a find box when there are more than 10. Every layer drop-down
+  (extent, house numbers, parcel report, terrain, WMS) takes typing and lists the matching layers.
 - **Many layers at once:** select rows (Ctrl/Shift + click), then *Selected layers* or right-click.
   *Publish the visible layers* publishes exactly what the QGIS Layers panel shows.
 - **Map themes** (*Map* tab): *Publish its layers* adds a theme's layers (several themes add up),

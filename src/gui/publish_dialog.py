@@ -43,6 +43,7 @@ from ..publishing.models import (XyzBasemap, BASEMAP_FLAVORS, FIELD_TYPES, CutLi
                                  RestrictionConfig, slugify)
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
 from . import publication_profiles as store
+from .layer_search import fold as _fold, searchable
 
 TAG = "QWebMap"
 CHECKED = Qt.CheckState.Checked
@@ -100,6 +101,10 @@ def _note(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
     return label
+
+
+# The Interaction tab's layer list gets a find box with more layers than this.
+LAYER_FILTER_FROM = 10
 
 
 def _check(value: bool):
@@ -436,6 +441,20 @@ class PublishDialog(QDialog):
         zoom_load_button.clicked.connect(lambda: self.analyse_zoom_load())
         bulk_row.addWidget(zoom_load_button)
         layers_layout.addLayout(bulk_row)
+        filter_row = QHBoxLayout()
+        self.tree_filter = QLineEdit()
+        self.tree_filter.setClearButtonEnabled(True)
+        self.tree_filter.setPlaceholderText(tr("Filter layers by name…"))
+        self.tree_filter.setToolTip(tr("Shows the layers whose name contains this text (upper or lower "
+                                       "case, accents not needed) and the groups that hold them; a "
+                                       "group's name shows its whole group"))
+        self.tree_filter.textChanged.connect(self._filter_tree)
+        self.tree_published_only = QCheckBox(tr("Only published layers"))
+        self.tree_published_only.setToolTip(tr("Hide the layers that are not published"))
+        self.tree_published_only.toggled.connect(self._filter_tree)
+        filter_row.addWidget(self.tree_filter, 1)
+        filter_row.addWidget(self.tree_published_only)
+        layers_layout.addLayout(filter_row)
         self.tree = QTreeWidget()
         # Short headers (the layer names need the room); the meaning in tooltips.
         self.tree.setHeaderLabels([tr("Layer"), tr("Publish"), tr("At start"), tr("Switchable"),
@@ -921,6 +940,37 @@ class PublishDialog(QDialog):
         add(self.project.layerTreeRoot(), self.tree.invisibleRootItem(), ())
         self._sync_group_publish(self.tree.invisibleRootItem())
         self.tree.blockSignals(False)
+        self._filter_tree()
+
+    def _filter_tree(self, *_):
+        """Show the layers matching the filter text (and, with *Only
+        published layers*, published) and the groups that hold them. A
+        group whose name matches shows all its (published) layers. The
+        rows only hide: settings of hidden rows stay as they are."""
+        text = _fold(self.tree_filter.text())
+        published_only = self.tree_published_only.isChecked()
+
+        def visit(item, group_matches):
+            shown = False
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child.data(0, GROUP_ROLE):
+                    matches = group_matches or (bool(text) and text in _fold(child.text(0)))
+                    show = visit(child, matches)
+                    if text and show:
+                        child.setExpanded(True)
+                elif child.data(0, LAYER_ROLE):
+                    show = (not text or group_matches or text in _fold(child.text(0))) and \
+                        (not published_only or child.checkState(COL_PUBLISH) == CHECKED)
+                else:
+                    show = True
+                child.setHidden(not show)
+                if not show and child.isSelected():
+                    child.setSelected(False)  # bulk changes act on what is seen
+                shown = shown or show
+            return shown
+
+        visit(self.tree.invisibleRootItem(), False)
 
     def _sync_group_publish(self, item):
         """Group "Publish" boxes show their layers: all, some or none."""
@@ -1078,7 +1128,18 @@ class PublishDialog(QDialog):
         self.i_layers.setWordWrap(True)
         self.i_layers.setSpacing(2)
         self.i_layers.currentItemChanged.connect(self._interaction_layer_changed)
-        split.addWidget(self.i_layers)
+        self.i_layers_filter = QLineEdit()
+        self.i_layers_filter.setClearButtonEnabled(True)
+        self.i_layers_filter.setPlaceholderText(tr("Find a layer…"))
+        self.i_layers_filter.setToolTip(tr("Shows the layers whose name contains this text (upper or "
+                                           "lower case, accents not needed)"))
+        self.i_layers_filter.textChanged.connect(self._filter_interaction_layers)
+        layer_list = QWidget()
+        layer_list_layout = QVBoxLayout(layer_list)
+        layer_list_layout.setContentsMargins(0, 0, 0, 0)
+        layer_list_layout.addWidget(self.i_layers_filter)
+        layer_list_layout.addWidget(self.i_layers, 1)
+        split.addWidget(layer_list)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         form = QFormLayout()
@@ -1359,6 +1420,7 @@ class PublishDialog(QDialog):
         # Heights are read from a file (GDAL): online services are not offered.
         self.t_layer.setExcludedProviders(["wms", "wcs", "arcgismapserver", "arcgisfeatureserver",
                                            "virtualraster", "postgresraster"])
+        searchable(self.t_layer)
         self.t_layer.setToolTip(tr("A raster layer of ground heights in metres (DEM, DTM), read from its file."))
         self.t_hillshade = QCheckBox(tr("Hillshade: shaded relief drawn above the basemap (also in 2D)"))
         self.t_exaggeration = QDoubleSpinBox()
@@ -1413,6 +1475,7 @@ class PublishDialog(QDialog):
         source.addItem(tr("(type the address below)"), None)
         for item in project_layers:
             source.addItem(item[0], item)
+        searchable(source)
         title, url, layers, attribution = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
         url.setPlaceholderText("https://…/wms")
         layers.setPlaceholderText(tr("layer names, comma separated"))
@@ -1532,7 +1595,7 @@ class PublishDialog(QDialog):
         else:
             combo.setAllowEmptyLayer(allow_empty)
         combo.setProject(self.project)
-        return combo
+        return searchable(combo)
 
     def _guess_address_number(self, layer):
         """A field named like a house number, else none (the user picks it)."""
@@ -2248,10 +2311,12 @@ class PublishDialog(QDialog):
         self._store_layer_fields()
         self.i_layers.blockSignals(True)
         self.i_layers.clear()
-        for layer_id in self._included_ids():
-            layer = self.project.mapLayer(layer_id)
-            if layer is None:  # removed from the project while the window is open
-                continue
+        layers = [self.project.mapLayer(layer_id) for layer_id in self._included_ids()]
+        # Removed from the project while the window is open: skipped.
+        layers = sorted((layer for layer in layers if layer is not None),
+                        key=lambda layer: (_fold(layer.name()), layer.name()))
+        for layer in layers:
+            layer_id = layer.id()
             item = QListWidgetItem(layer.name())
             item.setData(Qt.ItemDataRole.UserRole, layer_id)
             item.setToolTip(layer.name())
@@ -2261,9 +2326,23 @@ class PublishDialog(QDialog):
                 pass
             self.i_layers.addItem(item)
         self.i_layers.blockSignals(False)
+        # A find box only where the list is long.
+        long_list = self.i_layers.count() > LAYER_FILTER_FROM
+        self.i_layers_filter.setVisible(long_list)
+        if not long_list:
+            self.i_layers_filter.clear()
+        self._filter_interaction_layers()
         self.current_layer_id = None
-        if self.i_layers.count():
-            self.i_layers.setCurrentRow(0)
+        first = next((row for row in range(self.i_layers.count())
+                      if not self.i_layers.item(row).isHidden()), None)
+        if first is not None:
+            self.i_layers.setCurrentRow(first)
+
+    def _filter_interaction_layers(self, *_):
+        text = _fold(self.i_layers_filter.text())
+        for row in range(self.i_layers.count()):
+            item = self.i_layers.item(row)
+            item.setHidden(bool(text) and text not in _fold(item.text()))
 
     def _interaction_layer_changed(self, current, previous):
         self._store_layer_fields()
