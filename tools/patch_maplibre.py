@@ -272,11 +272,55 @@ def _closed_line_patch(text: str) -> str:
         f"{m.group(3)}===`miter`)"), text)
 
 
+ROTATED_MARK = "/*q2vt-rotated-stretch*/"
+# fy(): pixelOffsetTL:ie,pixelOffsetBR:ae,minFontScaleX:C/o/O,minFontScaleY:...
+QUAD_RETURN = re.compile(r"pixelOffsetTL:(\w+),pixelOffsetBR:(\w+),minFontScaleX:(\w+)/(\w+)/(\w+),")
+QUAD_ANGLE = re.compile(r"(\w+)=(\w+)\*Math\.PI/180;if\(\1\)\{let (\w+)=Math\.sin\(\1\)")
+SYMBOL_QUAD = re.compile(r"let\{tl:\w+,tr:\w+,bl:\w+,br:\w+,tex:\w+,pixelOffsetTL:(\w+),pixelOffsetBR:(\w+),")
+
+
+def _rotated_stretch_patch(text: str) -> str:
+    """Shared bundle: a stretchable icon (a label frame fitted to its text
+    with ``icon-text-fit``) turned by ``icon-rotate`` had only its stretched
+    parts turned. Its fixed parts (the frame's border and corners) are moved
+    by pixel offsets, which stock MapLibre added unturned: the corners stuck
+    out of a turned frame. The offsets of each corner are turned with it."""
+    returns = list(QUAD_RETURN.finditer(text))
+    if len(returns) != 1:
+        raise SystemExit(f"icon quad pixel offsets: {len(returns)} matches (expected 1)")
+    ret = returns[0]
+    angles = [m for m in QUAD_ANGLE.finditer(text, 0, ret.start()) if ret.start() - m.start() < 1500]
+    if len(angles) != 1:
+        raise SystemExit("icon quad angle: expected exactly one match before the quad")
+    angle = angles[0].group(1)
+    tl, br = ret.group(1), ret.group(2)
+    text = (text[:ret.start()] + f"pixelOffsetTL:{tl},pixelOffsetBR:{br},{ROTATED_MARK}q2px:{angle}?"
+            f"[[{tl}.x,{tl}.y],[{br}.x,{tl}.y],[{tl}.x,{br}.y],[{br}.x,{br}.y]].map(([x,y])=>"
+            f"[Math.cos({angle})*x-Math.sin({angle})*y,Math.sin({angle})*x+Math.cos({angle})*y]):void 0,"
+            + text[ret.end() - len(f"minFontScaleX:{ret.group(3)}/{ret.group(4)}/{ret.group(5)},"):])
+    quads = list(SYMBOL_QUAD.finditer(text))
+    if len(quads) != 1:
+        raise SystemExit(f"symbol quad loop: {len(quads)} matches (expected 1)")
+    q = quads[0]
+    tl, br = q.group(1), q.group(2)
+    end = text.index("emplaceBack", q.end())
+    segment = text[q.end():end]
+    corners = [(f"{tl}.x,{tl}.y,", 0), (f"{br}.x,{tl}.y,", 1), (f"{tl}.x,{br}.y,", 2), (f"{br}.x,{br}.y,", 3)]
+    for old, index in corners:
+        if segment.count(old) != 1:
+            raise SystemExit(f"symbol quad corner offsets: {old} not found exactly once")
+        segment = segment.replace(old, f"q2Q?q2Q[{index}][0]:{old.split(',')[0]},"
+                                       f"q2Q?q2Q[{index}][1]:{old.split(',')[1]},")
+    return text[:q.end()] + "q2px:q2Q," + segment + text[end:]
+
+
 def _shared_patch(text: str) -> str:
     if BUCKET_MARK not in text:
         text = _bucket_patch(text)
     if CLOSED_MARK not in text:
         text = _closed_line_patch(text)
+    if ROTATED_MARK not in text:
+        text = _rotated_stretch_patch(text)
     return text
 
 
@@ -325,7 +369,8 @@ def main() -> int:
         shared = handle.read()
     if "--check" in sys.argv:
         done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK)) \
-            and BUCKET_MARK in shared and CLOSED_MARK in shared
+            and BUCKET_MARK in shared and CLOSED_MARK in shared \
+            and ROTATED_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
     for path, old, new in ((BUNDLE, text, patch(text)),

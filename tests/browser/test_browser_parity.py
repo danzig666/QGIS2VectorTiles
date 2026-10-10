@@ -1006,3 +1006,88 @@ def test_overlapping_features_of_different_rules_keep_qgis_order(tmp_path):
             {"color": color, "outline_style": "no"}), value)
         for value, color in (("forest", "40,140,40"), ("conservation", "60,60,200"))]))
     assert _compare(tmp_path, layer, metric="color") < 0.01
+
+
+def _red_axis_degrees(path):
+    """Direction (degrees, 0 = horizontal, counter-clockwise) of the long
+    axis of the red pixels (a label frame's border)."""
+    import math
+    import numpy as np
+    from PIL import Image
+    rgb = np.asarray(Image.open(path).convert("RGB")).astype(int)
+    ys, xs = np.nonzero((rgb[..., 0] > 180) & (rgb[..., 1] < 90) & (rgb[..., 2] < 90))
+    assert len(xs) > 30, "no frame drawn"
+    xs, ys = xs - xs.mean(), -(ys - ys.mean())
+    cov = np.cov(np.vstack([xs, ys]))
+    values, vectors = np.linalg.eigh(cov)
+    vx, vy = vectors[:, int(np.argmax(values))]
+    return math.degrees(math.atan2(vy, vx)) % 180
+
+
+def _red_overlap(path_a, path_b):
+    """Overlap (intersection over union) of the red pixels of two images,
+    centred on each other."""
+    import numpy as np
+    from PIL import Image
+    masks = []
+    for path in (path_a, path_b):
+        rgb = np.asarray(Image.open(path).convert("RGB")).astype(int)
+        mask = rgb[..., 0] - np.maximum(rgb[..., 1], rgb[..., 2]) > 60
+        ys, xs = np.nonzero(mask)
+        masks.append((mask, int(round(xs.mean())), int(round(ys.mean()))))
+    (a, ax, ay), (b, bx, by) = masks
+    b = np.roll(np.roll(b, ax - bx, axis=1), ay - by, axis=0)
+    return (a & b).sum() / (a | b).sum()
+
+
+def test_free_label_frame_turns_with_its_label(tmp_path):
+    """A Free (angled) polygon label turned along a narrow tilted polygon,
+    with a frame turning with the label (QGIS "Sync with label"): the frame
+    was drawn level around the turned text."""
+    import math
+    from qgis.core import (QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QSizeF
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Polygon?crs=EPSG:3857&field=t:string", "zones", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["Ln-4"])
+    angle = math.radians(30)
+    corners = [(-110, -9), (110, -9), (110, 9), (-110, 9), (-110, -9)]
+    ring = ", ".join(f"{CENTER[0] + x * math.cos(angle) - y * math.sin(angle)} "
+                     f"{CENTER[1] + x * math.sin(angle) + y * math.cos(angle)}" for x, y in corners)
+    feature.setGeometry(QgsGeometry.fromWkt(f"POLYGON(({ring}))"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "zones.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "160,225,180", "outline_style": "no"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.Free
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeBuffer)
+    frame.setSize(QSizeF(2.4, 0.1))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setRotationType(QgsTextBackgroundSettings.RotationType.RotationSync)
+    frame.setFillColor(QColor(255, 255, 255, 80))
+    frame.setStrokeColor(QColor(255, 25, 25))
+    frame.setStrokeWidth(1)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape")
+    # The border and corners (the frame image's fixed parts) turn too: they
+    # stuck out of the turned frame.
+    assert _red_overlap(str(tmp_path / "v_qgis.png"), str(tmp_path / "v_browser.png")) > 0.72
+    qgis = _red_axis_degrees(str(tmp_path / "v_qgis.png"))
+    browser = _red_axis_degrees(str(tmp_path / "v_browser.png"))
+    assert qgis == pytest.approx(30, abs=6)
+    assert browser == pytest.approx(qgis, abs=6)
