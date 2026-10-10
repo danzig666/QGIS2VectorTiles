@@ -396,6 +396,18 @@ def _strip(cx, cy, length, width, a):
             for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
 
 
+def test_turned_label_on_an_even_strip_sits_at_its_centroid():
+    """Along a long strip of even width every spot has the same room: QGIS
+    then takes the one nearest the polygon's centroid. The roomiest point
+    found by the search lay anywhere along the strip."""
+    for angle, cx, length in ((-30, 2048, 2600), (20, 2600, 3200), (-10, 1500, 3200)):
+        a = math.radians(angle)
+        points = _free([(1, _strip(cx, 2048, length, 150, a))], [0, 0, 1, 1], [0.03, 0.012])
+        x, y = points[1][0] * 4096, points[1][1] * 4096
+        along = (x - cx) * math.cos(a) + (y - 2048) * math.sin(a)
+        assert abs(along) < 0.03 * 4096 / 3 + 1, (angle, along)  # within one grid step (was up to 1464)
+
+
 def test_turned_labels_stay_inside_and_centred():
     # Streets rising at 30°, 300 units wide (the label is 2 × 0.012 × 4096 ≈ 98 high):
     # the label sits on the street's centre line, wholly inside.

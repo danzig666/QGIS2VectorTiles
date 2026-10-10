@@ -505,8 +505,11 @@ export function labelPoints(features, view, maplibregl, options = {}) {
               return { point: best.point, angle: 0 };
             }
           }
-          return placeTurned(rings, angle, box, view, avoid, best.point, oldScale === scale ? old : null,
-                             field, options.precision);
+          // Equally roomy spots: the one nearest the centroid wins (QGIS's
+          // polygon candidate costs), not the arbitrary roomiest point along
+          // a long, even strip.
+          return placeTurned(rings, angle, box, view, avoid, labelPoint(rings) || best.point,
+                             oldScale === scale ? old : null, field, options.precision);
         };
         let placed = place(label, true);
         if (!placed && options.always) {
