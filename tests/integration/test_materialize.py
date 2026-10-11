@@ -410,9 +410,11 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == list(range(15, 23))
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
-    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag);
-    # they start at each feature's anchor ("Align pattern to: Feature").
-    assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature"}
+    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag),
+    # scaled with the map above the last one; they start at each feature's
+    # anchor ("Align pattern to: Feature").
+    assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature",
+                                                       exporter.PATTERN_ZOOM_FLAG: 22}
 
 
 def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plugin, tmp_path):
@@ -541,35 +543,47 @@ def test_patterns_with_any_map_unit_part_get_a_texture_per_zoom(plugin, make):
     sub-symbol layer mixing units): the pattern became one screen texture
     with its map-unit parts drawn at the style's first zoom, 0 from the
     Publish window - map-unit markers 2e-5 px (an empty texture), a viewport
-    hatch a fixed cropped preview, a hatch width a constant hairline."""
+    hatch a fixed cropped preview, a hatch width a constant hairline.
+    A map-unit spacing scales with the map (and above its last texture);
+    a screen-unit spacing stays exact, only the marker or line width steps
+    per zoom (drawn for the middle of the zoom)."""
     from q2vt_plugin.src.core import maplibre_converter as mc
     exporter = _style_exporter(mc)
     layer = make()
     kind = layer.layerType()
+    screen_spacing = layer.distanceUnit() == MM if kind == "LinePatternFill" else True
     assert exporter._pattern_uses_map_units(layer)
     symbol = QgsFillSymbol([layer])
     exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
     layer_def = exporter.style["layers"][0]
     pattern = layer_def["paint"]["fill-pattern"]
     assert pattern[:2] == ["step", ["zoom"]] and pattern[-2] == 22
-    assert exporter.SCREEN_PATTERN_FLAG not in layer_def.get("metadata", {})
+    metadata = layer_def.get("metadata", {})
+    if screen_spacing:
+        assert metadata.get(exporter.SCREEN_PATTERN_FLAG) is True
+        assert exporter.PATTERN_ZOOM_FLAG not in metadata
+    else:
+        assert exporter.SCREEN_PATTERN_FLAG not in metadata
+        assert metadata[exporter.PATTERN_ZOOM_FLAG] == 22
     assert not exporter.context.diagnostics.by_code("Q2VT_PATTERN_APPROXIMATE")
     names = dict(zip(pattern[3::2], pattern[4::2]))
-    # The texture of zoom 18 draws the map-unit parts at zoom 18.
     alpha = exporter.pattern_images[names[18]].img_1x.getchannel("A")
     assert alpha.getextrema()[1] > 200
     if kind == "PointPatternFill":
-        # Dots 1.5 m wide at zoom 18 in a 4 mm grid (drawn at 1/sqrt(2)).
+        # Dots 1.5 m wide at zoom 18.5 (the middle of the texture's zoom) in
+        # an exact 4 mm grid.
         coverage = sum(1 for a in alpha.getdata() if a > 128) / (alpha.width * alpha.height)
-        dot = 1.5 * 512 * 2 ** 18 / 40075016.69
-        grid = 4 * 96 / 25.4 * exporter.TEXTURE_SCREEN_SCALE
-        assert coverage == pytest.approx(math.pi / 4 * dot ** 2 / grid ** 2, rel=0.5)
+        dot = 1.5 * 512 * 2 ** 18.5 / 40075016.69
+        grid = 4 * 96 / 25.4
+        assert coverage == pytest.approx(math.pi / 4 * dot ** 2 / grid ** 2, rel=0.25)
+        assert alpha.width == pytest.approx(grid, abs=1)
 
 
 def test_map_unit_pattern_textures_stop_at_the_view_zoom_and_the_size_budget(plugin):
     """The last texture is the view's last zoom (Publish: Max view zoom);
-    a texture larger than MAX_PATTERN_TEXTURE_PX is not made, the one below
-    serves the zooms above."""
+    a texture larger than MAX_PATTERN_TEXTURE_PX is not made: the one below
+    serves the zooms above, and the layer's PATTERN_ZOOM_FLAG has the patched
+    MapLibre scale it with the map there."""
     from q2vt_plugin.src.core import maplibre_converter as mc
     from qgis.core import QgsPointPatternFillSymbolLayer
     pp = QgsPointPatternFillSymbolLayer()
@@ -580,14 +594,18 @@ def test_map_unit_pattern_textures_stop_at_the_view_zoom_and_the_size_budget(plu
         getattr(pp, f"set{name}")(40)
         getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
     symbol = QgsFillSymbol([pp])
-    exporter = _style_exporter(mc, view_max_zoom=20.0)
+    exporter = _style_exporter(mc, view_max_zoom=19.0)
     exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
-    assert exporter.style["layers"][0]["paint"]["fill-pattern"][-2] == 20
+    assert exporter.style["layers"][0]["paint"]["fill-pattern"][-2] == 19
+    assert exporter.style["layers"][0]["metadata"][exporter.PATTERN_ZOOM_FLAG] == 19
     exporter = _style_exporter(mc, view_max_zoom=22.0)
     exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
-    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
-    # Two 40 m cells: 1073 px at zoom 21, 2147 px at zoom 22.
-    assert pattern[-2] == 21
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    # Two 40 m cells: 536 px at zoom 20, 1073 px at zoom 21.
+    assert pattern[-2] == 20
+    assert layer_def["metadata"][exporter.PATTERN_ZOOM_FLAG] == 20
+    assert exporter.MAX_PATTERN_TEXTURE_PX <= 1024  # 2048 px in the 2x sprite
     assert max(exporter.pattern_images[pattern[-1]].img_1x.size) <= exporter.MAX_PATTERN_TEXTURE_PX
     assert len(exporter.pattern_images) == len(pattern[2::2])
 

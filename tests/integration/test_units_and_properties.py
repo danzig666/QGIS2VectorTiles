@@ -403,15 +403,31 @@ def _dashed_line(width, width_unit, dashes, dash_unit, cap=Qt.PenCapStyle.FlatCa
     return line
 
 
+def _line_style_exporter(mc):
+    """A style converter for one symbol of a map exported from zoom 0 (the
+    Publish window's default) to 16."""
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    return exporter
+
+
 def test_screen_dashes_on_a_map_unit_width_follow_the_zoom(mc):
     """MapLibre multiplies line-dasharray by the line width. A 1 m wide line
     with 3/2 mm dashes: the ratio was computed once with the width at the
     style's first zoom (1.3e-5 px from zoom 0), so the dashes were a million
     widths long and the line solid at every zoom. QGIS keeps 3 mm dashes."""
+    from qgis.core import QgsLineSymbol
     line = _dashed_line(1.0, Qgis.RenderUnit.MapUnits, [3.0, 2.0], Qgis.RenderUnit.Millimeters)
-    mc.PropertyExtractor.context.reference_zoom = 0
-    width = mc.LinePropertyExtractor.get_line_width(line)
-    dasharray = mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 24)
+    exporter = _line_style_exporter(mc)
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    width, dasharray = paint["line-width"], paint["line-dasharray"]
     assert dasharray[:2] == ["step", ["zoom"]]
     for zoom in (14.0, 16.0, 17.5, 18.0):
         dash, gap = _dash_at(dasharray, zoom)
@@ -426,18 +442,11 @@ def test_map_unit_dashes_with_corner_tweak_follow_the_zoom(mc):
     are not cut into dash geometry: the native dasharray took the dash
     length at the style's first zoom (1e-4 px from zoom 0) and, with the
     square cap, became [1.0001, 0] - a solid line at every zoom."""
-    from fidelity.diagnostics import DiagnosticCollector
     from qgis.core import QgsLineSymbol
     line = _dashed_line(0.5, Qgis.RenderUnit.Millimeters, [10.0, 10.0],
                         Qgis.RenderUnit.MapUnits, Qt.PenCapStyle.SquareCap)
     line.setTweakDashPatternOnCorners(True)
-    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
-    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
-    exporter.profile = mc.ExportProfile()
-    exporter.context = mc.ConversionContext(DiagnosticCollector())
-    exporter.style, exporter.maxzoom = {"layers": []}, 16
-    mc.PropertyExtractor.context = exporter.context
-    exporter.context.reference_zoom = 0
+    exporter = _line_style_exporter(mc)
     exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 24)
     paint = exporter.style["layers"][0]["paint"]
     width = paint["line-width"]

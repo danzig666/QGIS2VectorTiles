@@ -44,6 +44,16 @@ a double-size copy after every whole zoom. The patch:
    a closed path, instead of drawing two caps there; a ring's dashes start
    at its first vertex (stock MapLibre counted the closing segment first).
 
+7. fill patterns of style layers flagged ``metadata: {"q2vt:pattern-zoom": z}``
+   (map-unit textures, the last one rendered for zoom ``z``) keep growing
+   with the map above zoom ``z``: they are scaled with that zoom instead of
+   the tile's integer zoom, without the double-size cross-fade copy;
+
+8. the line atlas holding dash patterns (512 rows; a round-cap pattern takes
+   15) grows to 4096 rows when full, then starts over, instead of returning
+   no pattern, which threw and stopped the whole map from drawing (a dash
+   array per zoom of a few layers fills it within a session).
+
 Idempotent; run after updating MapLibre:
 
     python3 tools/patch_maplibre.py [--check]
@@ -155,6 +165,61 @@ def _fill_patch(text: str) -> str:
     if text.count(draw) != 1:
         raise SystemExit("fill draw: expected exactly one match")
     return text.replace(draw, "S.layoutVertexBuffer,g,_,n.paint,e.transform.zoom,w,d&&S.q2anchorBuffer||void 0)")
+
+
+PATTERN_ZOOM_MARK = "/*q2vt-pattern-zoom*/"
+
+
+def _pattern_zoom_patch(text: str) -> str:
+    """Main bundle, after ``_fill_patch``: map-unit fill textures flagged
+    ``q2vt:pattern-zoom`` scale with that zoom above it (a texture pixel is a
+    pixel of that zoom, so the pattern grows with the map like QGIS map
+    units), and both cross-fade sides there are the same image."""
+    zoom = re.compile(r"q2z=q2s\?(\w+)\.transform\.zoom:\1\.transform\.tileZoom,")
+    found = zoom.findall(text)
+    if len(found) != 1:
+        raise SystemExit(f"fill pattern zoom: {len(found)} matches (expected 1)")
+    painter = found[0]
+    text = zoom.sub(lambda m: (
+        f"q2P=q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-zoom\"],{PATTERN_ZOOM_MARK}"
+        f"q2O=!q2s&&typeof q2P==\"number\"&&{painter}.transform.tileZoom>q2P,"
+        f"q2z=q2s?{painter}.transform.zoom:q2O?q2P:{painter}.transform.tileZoom,"), text)
+    scale = re.compile(r"u_scale:\[(\w+),q2s\?(\w+)\.toScale:\2\.fromScale,\2\.toScale\]")
+    if len(scale.findall(text)) != 1:
+        raise SystemExit("fill pattern scale: expected exactly one match")
+    return scale.sub(lambda m: f"u_scale:[{m.group(1)},q2s||q2O?{m.group(2)}.toScale:"
+                               f"{m.group(2)}.fromScale,{m.group(2)}.toScale]", text)
+
+
+ATLAS_MARK = "/*q2vt-line-atlas*/"
+ATLAS_ADD = re.compile(r"addDash\((\w),(\w)\)\{let (\w)=\2\?7:0,(\w)=2\*\3\+1;"
+                       r"if\(this\.nextRow\+\4>this\.height\)return")
+ATLAS_BIND = "bind(e){let t=e.gl;this.texture?(t.bindTexture(t.TEXTURE_2D,this.texture),this.dirty"
+ATLAS_DRAW = re.compile(r"(\w)=(\w)\.lineAtlas\.getDash\((\w)\.to,(\w)\),(\w)=\2\.lineAtlas\.getDash\(\3\.from,\4\);")
+
+
+def _line_atlas_patch(text: str) -> str:
+    """Main bundle: the dash atlas grows (up to 4096 rows), then starts over,
+    instead of running out of space (a null pattern threw in the draw)."""
+    if len(ATLAS_ADD.findall(text)) != 1 or text.count(ATLAS_BIND) != 1 \
+            or len(ATLAS_DRAW.findall(text)) != 1:
+        raise SystemExit("line atlas: expected exactly one addDash, bind and draw lookup")
+    text = ATLAS_ADD.sub(lambda m: (
+        f"q2grow(){{{ATLAS_MARK}if(this.height<4096){{let e=new Uint8Array(this.width*this.height*2);"
+        f"e.set(this.data),this.data=e,this.height*=2}}else{{this.data.fill(0),this.nextRow=0;"
+        f"for(let e in this.dashEntry)delete this.dashEntry[e]}}this.q2resize=!0,this.dirty=!0}}"
+        f"addDash({m.group(1)},{m.group(2)}){{let {m.group(3)}={m.group(2)}?7:0,{m.group(4)}=2*{m.group(3)}+1;"
+        f"if(this.nextRow+{m.group(4)}>this.height&&this.q2grow(),this.nextRow+{m.group(4)}>this.height)return"),
+        text)
+    # A larger atlas is a new texture.
+    text = text.replace(ATLAS_BIND, "bind(e){let t=e.gl;this.q2resize&&this.texture&&(t.deleteTexture("
+                        "this.texture),this.texture=null),this.q2resize=!1;" + ATLAS_BIND[len("bind(e){let t=e.gl;"):])
+    # Starting over may drop the pattern looked up just before: the "from"
+    # side is looked up again after the "to" side.
+    return ATLAS_DRAW.sub(lambda m: (
+        f"{m.group(1)}=({m.group(2)}.lineAtlas.getDash({m.group(3)}.from,{m.group(4)}),"
+        f"{m.group(2)}.lineAtlas.getDash({m.group(3)}.to,{m.group(4)})),"
+        f"{m.group(5)}={m.group(2)}.lineAtlas.getDash({m.group(3)}.from,{m.group(4)});"), text)
 
 
 ANCHOR_MARK = "/*q2vt-feature-anchor*/"
@@ -327,6 +392,10 @@ def _shared_patch(text: str) -> str:
 def patch(text: str) -> str:
     if FILL_MARK not in text:
         text = _fill_patch(text)
+    if PATTERN_ZOOM_MARK not in text:
+        text = _pattern_zoom_patch(text)
+    if ATLAS_MARK not in text:
+        text = _line_atlas_patch(text)
     if ANCHOR_MARK not in text:
         text = _anchor_patch(text)
     if WIDTH_MARK not in text:
@@ -368,7 +437,8 @@ def main() -> int:
     with open(SHARED, encoding="utf-8") as handle:
         shared = handle.read()
     if "--check" in sys.argv:
-        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK)) \
+        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK,
+                                             PATTERN_ZOOM_MARK, ATLAS_MARK)) \
             and BUCKET_MARK in shared and CLOSED_MARK in shared \
             and ROTATED_MARK in shared
         print("patched" if done else "NOT patched")

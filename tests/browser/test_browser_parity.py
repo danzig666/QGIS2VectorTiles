@@ -53,8 +53,11 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None):
-    zoom_range = zooms or zoom_range  # (min zoom, max zoom) of the export
+def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None,
+             before=()):
+    """``zooms`` (or ``zoom_range``): the export's (min zoom, max zoom);
+    ``before``: view zooms shown first in the same page (one session)."""
+    zoom_range = zooms or zoom_range
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
@@ -70,8 +73,10 @@ def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17),
                                     QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
     point = to_wgs.transform(*center)
     views = tmp_path / "views.json"
-    views.write_text(json.dumps([{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": ZOOM,
-                                  "width": SIZE, "height": SIZE}]))
+    views.write_text(json.dumps([{"id": f"before{i}", "lon": point.x(), "lat": point.y(), "zoom": z,
+                                  "width": SIZE, "height": SIZE} for i, z in enumerate(before)]
+                                + [{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": ZOOM,
+                                    "width": SIZE, "height": SIZE}]))
     qgis_png = str(tmp_path / "v_qgis.png")
     gallery.qgis_render(layer, center, ZOOM, SIZE, qgis_png)
     server = _serve(export_dir)
@@ -80,6 +85,7 @@ def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17),
                               str(server.port), str(views), str(tmp_path)],
                              capture_output=True, text=True, cwd=HERE, timeout=120)
         assert run.returncode == 0, run.stderr
+        assert not json.loads(run.stdout.strip().splitlines()[-1]).get("timeouts"), run.stdout
     finally:
         server.kill()
     browser_png = str(tmp_path / "v_browser.png")
@@ -765,6 +771,97 @@ def test_map_unit_patterns_keep_growing_on_overzoomed_tiles(tmp_path, monkeypatc
     _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser == pytest.approx(qgis, rel=0.12), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [20.5, 21.5])
+def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, zoom):
+    """Large map-unit cells stop getting textures at MAX_PATTERN_TEXTURE_PX
+    (here lowered: 3 m cells stop at zoom 19). The last texture stayed at its
+    pixel size above it (2x too small one zoom deeper); flagged with its
+    zoom, the patched MapLibre scales it with the map."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter  # pylint: disable=import-error
+    monkeypatch.setattr(QgisMapLibreStyleExporter, "MAX_PATTERN_TEXTURE_PX", 32)
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 1.2)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(3.0)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 19
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.05), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 17.5, 19.0])
+def test_map_unit_markers_in_a_screen_unit_grid(tmp_path, monkeypatch, zoom):
+    """1.5 m markers 4 mm apart, exported from zoom 0: the map-unit marker
+    was drawn at zoom 0 (an empty texture), then the whole texture scaled
+    with the map (the 4 mm grid off by up to sqrt(2), the dots merging).
+    The grid is exact at every zoom; the dots are sized for the middle of
+    the zoom (exact there, within sqrt(2) at its ends)."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1.5)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(4.0)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    qgis_ink, browser_ink = _compare(tmp_path, layer, metric="darkness", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.03), (qgis, browser)
+    if zoom % 1:  # the middle of the zoom
+        assert browser_ink == pytest.approx(qgis_ink, rel=0.15), (qgis_ink, browser_ink)
+    else:  # dot area 2x at most
+        assert qgis_ink < browser_ink < 2.2 * qgis_ink, (qgis_ink, browser_ink)
+
+
+def test_dash_arrays_of_every_zoom_fit_the_line_atlas(tmp_path, monkeypatch):
+    """Round-cap mm dashes on map-unit lines get a dash array per zoom; each
+    takes 15 rows of MapLibre's 512-row line atlas, never cleared. Zooming
+    in one page through 12-22 with a few such lines filled it: no dash
+    pattern was returned, the draw threw and the map stopped drawing."""
+    from qgis.PyQt.QtCore import Qt
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 21.0)
+    source = QgsVectorLayer("LineString?crs=EPSG:3857", "dashes", "memory")
+    source.dataProvider().addAttributes([QgsField("v", QVariant.Int)])
+    source.updateFields()
+    patterns = [[3.0, 2.0], [2.0, 2.0], [4.0, 1.0], [1.0, 3.0]]
+    categories = []
+    for i, dashes in enumerate(patterns):
+        feature = QgsFeature(source.fields())
+        feature.setGeometry(QgsGeometry.fromWkt(
+            f"LINESTRING({CENTER[0] - 150} {CENTER[1] - 3 + 2 * i}, "
+            f"{CENTER[0] + 150} {CENTER[1] - 3 + 2 * i})"))
+        feature.setAttributes([i])
+        source.dataProvider().addFeature(feature)
+        line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector(dashes)
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Millimeters)
+        categories.append(QgsRendererCategory(i, QgsLineSymbol([line]), str(i)))
+    layer = to_geopackage(source, str(tmp_path / "dashes.gpkg"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("v", categories))
+    qgis, browser = _compare(tmp_path, layer, metric="ink", zooms=(0, 16),
+                             before=list(range(12, 23)))
+    assert browser == pytest.approx(qgis, rel=0.15), (qgis, browser)
 
 
 @pytest.mark.parametrize("case", ["map_dash_tweak", "mm_dash_map_width"])
