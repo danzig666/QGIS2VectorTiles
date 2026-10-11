@@ -469,6 +469,13 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   const tolerance = (options.precision || 0) + 1e-12;
   const points = new Map();
   const avoid = (options.avoid || []).slice();
+  // The same boxes in a grid: each polygon looks up only those near it (a
+  // scan of all of them per polygon grew with the square of the labels).
+  const avoidIndex = boxIndex(avoid.map((bounds) => ({ bounds })), view);
+  const keepClear = (box) => {
+    avoid.push(box);
+    avoidIndex.add({ bounds: box });
+  };
   const boxes = [];
   // Bigger polygons first: they get the middle, smaller neighbours keep clear.
   const area = (rings) => Math.abs(rings.reduce((sum, ring) => sum + ring.reduce((a, [x1, y1], i) => {
@@ -529,7 +536,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const [hx, hy] = envelope([label[0] * scale, label[1] * scale], angle);
         const box = [old.point[0] - hx, old.point[1] - hy, old.point[0] + hx, old.point[1] + hy];
         boxes.push(box);
-        avoid.push(box);
+        keepClear(box);
       }
       continue;
     }
@@ -543,7 +550,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         points.set(key + PART_SEPARATOR + k, { ...placed, orig });
         if (placed.box) {
           boxes.push(placed.box);
-          avoid.push(placed.box);
+          keepClear(placed.box);
         }
       });
       continue;
@@ -554,7 +561,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         points.set(key, { ...placed, orig });
         if (placed.box) {
           boxes.push(placed.box);
-          avoid.push(placed.box);
+          keepClear(placed.box);
         }
       }
       continue;
@@ -587,7 +594,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const reachBox = intersect(grow(bounds(outside ? loaded : rings), 2 * (half ? half[0] : 0) + extra,
                                     2 * (half ? half[1] : 0) + extra), view);
     if (half && avoid.length && overlap !== "always" && reachBox) {
-      near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
+      near = avoidIndex.query(reachBox).map(({ bounds }) => grow(bounds, half[0], half[1]));
     }
     const clear = (x, y) => {
       let min = Infinity;
@@ -614,7 +621,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       if (options.orient === "free" && options.rotationField) properties[options.rotationField] = angle * 180 / Math.PI;
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
       boxes.push(box);
-      avoid.push(box);
+      keepClear(box);
       points.set(key, { point, properties, orig });
       continue;
     }
@@ -720,7 +727,21 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       // the label may overlap. "Outside polygons": beside the polygon's
       // edge, the candidate nearest its centroid first.
       let candidates;
-      if (outside) {
+      const fits = (p) => fit(...p) >= 0;
+      const free = (p) => fits(p) && clear(...p) >= 0;
+      const bare = (p) => fits(p) && bareClear(...p);
+      // A kept "outside" label that is still fine beside the polygon, near
+      // its edge (no farther than a candidate it was kept near can be):
+      // kept without building the candidates (64 samples tested against the
+      // polygon and its neighbours, only to find one near it).
+      const text = label.text || half;
+      const keptOutside = outside && old && Number.isInteger(old.slot) && within(inner, old.point)
+        && bare(old.point) && besidePolygon(loaded, old.point, text, options.around.distance, options.precision)
+        && edgeDistance(loaded, old.point) <= (options.keepDistance ?? Infinity)
+          + Math.hypot(options.around.distance + text[0], options.around.distance + text[1]);
+      if (keptOutside) {
+        candidates = [];
+      } else if (outside) {
         // Only the neighbours a label beside this polygon can reach.
         const others = reachBox ? obstacles.query(reachBox).filter((other) => other.key !== key) : [];
         candidates = outsideCandidates(loaded, rings, label.text || half, half, options.around.distance,
@@ -730,13 +751,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         if (!target) continue;
         candidates = aroundCandidates(target, label.text || half, options.around);
       }
-      const fits = (p) => fit(...p) >= 0;
-      const free = (p) => fits(p) && clear(...p) >= 0;
-      const bare = (p) => fits(p) && bareClear(...p);
       // A kept label stays near its candidate (at the label distance from
       // the polygon at this zoom; "outside": near any of them).
       const nearby = (p) => Math.hypot(old.point[0] - p[0], old.point[1] - p[1]) <= (options.keepDistance ?? Infinity);
-      const kept = old && Number.isInteger(old.slot) && within(inner, old.point) && (outside
+      const kept = keptOutside || old && Number.isInteger(old.slot) && within(inner, old.point) && (outside
         ? candidates.some(nearby) && bare(old.point)
           && besidePolygon(loaded, old.point, label.text || half, options.around.distance, options.precision)
         : candidates[old.slot] && nearby(candidates[old.slot])
@@ -760,7 +778,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     if (half) {
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
       boxes.push(box);
-      avoid.push(box);
+      keepClear(box);
     }
     // The precision of the point: its data's, and the roomiest point search's.
     const placed = { point, properties, orig, unit: dataUnit, prec: pole ? options.precision : 0 };
@@ -839,21 +857,34 @@ const OUTSIDE_CANDIDATES = 64;
 const SIDE_TOLERANCE = Math.sin(5 * Math.PI / 180);  // QGIS: within 5° of an axis
 export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0, obstacles = [],
                                   view = null) {
-  const edges = realEdges(loaded);
-  const total = edges.reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
+  const byRing = loaded.map((ring) => realEdges([ring])).filter((edges) => edges.length);
+  const total = byRing.flat().reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
   if (!(total > 0)) return [];
   const step = Math.max(total / OUTSIDE_CANDIDATES, precision);
   const eps = Math.max(precision, total * 1e-6);
   const centre = centroidOf(rings) || labelPoint(rings);
   const out = [];
+  // A ring keeps the polygon on one side all along: one even-odd test (at
+  // its longest edge) for the whole ring, not one per edge.
+  const edges = [];
+  for (const ringEdges of byRing) {
+    let longest = ringEdges[0], most = -1;
+    for (const [a, b] of ringEdges) {
+      const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (length > most) [longest, most] = [[a, b], length];
+    }
+    const [a, b] = longest;
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const flip = most > 0 && inside(loaded, [mid[0] + (b[1] - a[1]) / most * eps, mid[1] - (b[0] - a[0]) / most * eps]);
+    for (const [a2, b2] of ringEdges) edges.push([a2, b2, flip]);
+  }
   let offset = step / 2;  // distance along the edges to the next sample
-  for (const [a, b] of edges) {
+  for (const [a, b, flip] of edges) {
     const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
     if (!length) continue;
     // The edge's normal pointing out of the polygon.
     let [nx, ny] = [(b[1] - a[1]) / length, -(b[0] - a[0]) / length];
-    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-    if (inside(loaded, [mid[0] + nx * eps, mid[1] + ny * eps])) [nx, ny] = [-nx, -ny];
+    if (flip) [nx, ny] = [-nx, -ny];
     const sx = Math.abs(nx) < SIDE_TOLERANCE ? 0 : Math.sign(nx);
     const sy = Math.abs(ny) < SIDE_TOLERANCE ? 0 : Math.sign(ny);
     const d = sx && sy ? distance * Math.SQRT1_2 : distance;
@@ -882,9 +913,17 @@ function besidePolygon(rings, point, [tx, ty], distance, slack = 0) {
                                  point[0] + tx + reach, point[1] + ty + reach]);
 }
 
+// The distance from ``point`` to the polygon's nearest edge (tile cuts are
+// not edges).
+function edgeDistance(rings, [x, y]) {
+  let min = Infinity;
+  for (const [a, b] of realEdges(rings)) min = Math.min(min, segmentDistance(x, y, a, b));
+  return min;
+}
+
 // Items ({bounds}) in a grid over ``view`` (those off it are dropped):
 // query(box) gives the items whose bounds meet the box, without testing
-// every item for every query.
+// every item for every query; add(item) adds one.
 const INDEX_CELLS = 32;
 function boxIndex(items, view) {
   const cells = new Map();
@@ -896,9 +935,9 @@ function boxIndex(items, view) {
     const cell = (v, origin, size) => Math.max(0, Math.min(INDEX_CELLS - 1, Math.floor((v - origin) / size)));
     return [cell(part[0], vx, sx), cell(part[1], vy, sy), cell(part[2], vx, sx), cell(part[3], vy, sy)];
   };
-  for (const item of items) {
+  const add = (item) => {
     const range = span(item.bounds);
-    if (!range) continue;
+    if (!range) return;
     for (let i = range[0]; i <= range[2]; i++) {
       for (let j = range[1]; j <= range[3]; j++) {
         const id = j * INDEX_CELLS + i;
@@ -906,8 +945,10 @@ function boxIndex(items, view) {
         cells.get(id).push(item);
       }
     }
-  }
+  };
+  for (const item of items) add(item);
   return {
+    add,
     query(box) {
       const range = span(box);
       const found = new Set();

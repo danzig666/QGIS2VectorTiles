@@ -1317,3 +1317,51 @@ def test_small_polygon_label_labelled_zoomed_out_stays_centred_zooming_in(anchor
     if anchor[0] == "centroid":
         for zoom, (dx, dy) in zip([13, 15, 16.5, 18], _zoom_chain(anchor, [13, 15, 16.5, 18], triangle)):
             assert math.hypot(dx, dy) < 1.5, (zoom, dx, dy)
+
+
+def test_outside_polygons_update_keeping_every_label_skips_the_candidates():
+    """An update that keeps every "Outside polygons" label (the view did not
+    change) checked each label against all its 64 candidates (each tested
+    against the polygon and its neighbours) only to find one near it: as
+    slow as placing them anew (about a second for 2000 polygons). Kept
+    labels are now checked on their own, and the labels placed so far are
+    looked up in a grid instead of a scan per polygon."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const perPx = 1 / 1024, n = 45, cell = 4096 / n, features = [];
+for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {{
+  const x0 = c * cell + cell * 0.5, y0 = r * cell + cell * 0.5, s = cell * 0.2;
+  const ring = Array.from({{ length: 40 }}, (_, k) => ({{ x: x0 + s * Math.cos(Math.PI * k / 20),
+                                                       y: y0 + s * Math.sin(Math.PI * k / 20) }}));
+  features.push({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: r * n + c }},
+    _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring] }} }});
+}}
+const box = [14 * perPx, 6 * perPx];
+box.text = [12 * perPx, 4 * perPx];
+const options = {{ precision: perPx, keepDistance: 24 * perPx, labelBox: () => box,
+                  around: {{ anchors: [], distance: 2 * perPx, outside: true }} }};
+const where = (out) => JSON.stringify(out.features.map((f) => [f.id, ...f.geometry.coordinates]));
+let first = Infinity, kept = Infinity, same = true, count = 0;
+for (let run = 0; run < 3; run++) {{
+  const state = newLabelState();
+  let t = performance.now();
+  const a = labelPoints(features, [0, 0, 1, 1], maplibregl, {{ ...options, state }});
+  first = Math.min(first, performance.now() - t);
+  t = performance.now();
+  const b = labelPoints(features, [0, 0, 1, 1], maplibregl, {{ ...options, state }});
+  kept = Math.min(kept, performance.now() - t);
+  same = same && where(a) === where(b);
+  count = a.features.length;
+}}
+console.log(JSON.stringify({{ first, kept, same, count }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    assert result["same"] and result["count"] > 1500
+    # Placing builds the candidates; keeping them all must cost much less
+    # (it cost as much as placing them; now about a third).
+    assert result["kept"] < 0.6 * result["first"], result
