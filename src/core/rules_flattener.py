@@ -685,9 +685,14 @@ class RulesFlattener:
                 break
         unit = renderer.radiusUnit()
         screen = normalize_unit(unit) != "map" and _to_mm(1.0, unit) is not None
-        # Intensity per zoom up to the last zoom the browser shows on its own
-        # (the tiles of the last zoom): MapLibre keeps the last stop beyond.
-        zooms = list(range(int(self.min_zoom), int(self.overzoom_top) + 1))
+        # Intensity per zoom up to the style's last zoom (24) while the
+        # browser overzooms the last tiles: above the last stop MapLibre keeps
+        # its maximum, of a radius many times larger in map units (a pale
+        # heatmap when zoomed in past the tiles). Up to the last tile zoom
+        # when the map stops there.
+        top = self.overzoom_top if self.overzoom == OverzoomPolicy.STOP else \
+            max(int(self.overzoom_top), 24)
+        zooms = list(range(int(self.min_zoom), int(top) + 1))
         if crs.isGeographic():
             self.diagnostics.add("Q2VT_HEATMAP_APPROXIMATE",
                                  "Heatmap in a geographic project CRS: map-unit radius and density "

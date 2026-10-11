@@ -810,8 +810,9 @@ def test_zoom_level_variables_are_the_zoom_of_the_map_scale(flattener):
 
 
 def test_heatmap_intensity_goes_on_beyond_the_last_tile_zoom(flattener):
-    """An automatic-maximum heatmap is rescaled per zoom up to zoom 22 (its
-    stops ended at the last tile zoom: washed out when zoomed in)."""
+    """An automatic-maximum heatmap is rescaled per zoom up to the style's
+    last zoom, 24 (its stops ended at the last tile zoom: washed out when
+    zoomed in)."""
     from qgis.core import Qgis, QgsFeature, QgsGeometry, QgsHeatmapRenderer, QgsVectorLayer
     layer = QgsVectorLayer("Point?crs=EPSG:3857", "pts", "memory")
     for x in range(5):
@@ -825,7 +826,7 @@ def test_heatmap_intensity_goes_on_beyond_the_last_tile_zoom(flattener):
     reset_project(layer)
     rules, _ = flattener(10, 16)
     stops = dict(rules[0].heatmap["intensity_stops"])
-    assert min(stops) == 10 and max(stops) == 22
+    assert min(stops) == 10 and max(stops) == 24
 
 
 def test_scale_switched_marker_interval_switches_beyond_the_last_tile_zoom(flattener):

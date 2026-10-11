@@ -2796,6 +2796,10 @@ class QgisMapLibreStyleExporter:
         # Large enough that the repetition is not obvious: 128 px, or a few
         # dozen markers for sparse fills (at most 512 px).
         cell = int(min(512, max(128, math.ceil(math.sqrt(40 / per_px)))))
+        if per_px * cell * cell > self.RANDOM_MAX_MARKERS:
+            # Over a marker per pixel (a density in map units zoomed out:
+            # billions of markers per cell): QGIS draws a uniform speckle.
+            return self._random_tint(marker, per_px)
         count = max(1, round(per_px * cell * cell))
         rng = random.Random(int(layer.seed()) or 1)
         positions = [(rng.uniform(0, cell), rng.uniform(0, cell)) for _ in range(count)]
@@ -2804,6 +2808,47 @@ class QgisMapLibreStyleExporter:
                  tile_markers(two, 2 * cell, 2 * cell, [(2 * x, 2 * y) for x, y in positions])]
         error = abs(count - per_px * cell * cell) / (per_px * cell * cell)
         return self._textures(cells[0], cells[1], error, "Random marker fill")
+
+    # Markers in one random fill texture cell; denser fills are a tint.
+    RANDOM_MAX_MARKERS = 20000
+
+    def _random_tint(self, marker, per_px: float) -> str:
+        """Uniform texture of a random marker fill with ``per_px`` markers
+        per texture pixel: the marker's average colour, covering
+        ``1 - exp(-per_px * ink)`` of the area (``ink``: the marker's alpha
+        summed over its pixels; the expected cover of randomly placed
+        markers). A marker of a pixel or less is measured enlarged, where
+        its antialiased ink is its true area."""
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SpriteRenderError, SymbolImage  # pylint: disable=import-outside-toplevel
+        scale = self._screen_scale()
+        reference = self._reference_map_units_per_px() * scale
+        magnify, ink, color = 1.0, 0.0, (0.0, 0.0, 0.0)
+        while True:
+            try:
+                image = SymbolImage(marker, "pattern-marker", scale * magnify, True, reference).img
+            except SpriteRenderError:
+                break
+            sums = [0.0, 0.0, 0.0, 0.0]
+            for red, green, blue, alpha in image.getdata():
+                if alpha:
+                    sums[0] += red * alpha
+                    sums[1] += green * alpha
+                    sums[2] += blue * alpha
+                    sums[3] += alpha
+            if sums[3]:
+                ink = sums[3] / 255.0 / magnify ** 2
+                color = (sums[0] / sums[3], sums[1] / sums[3], sums[2] / sums[3])
+            if sums[3] / 255.0 >= 64 or magnify >= 4096:
+                break
+            magnify *= 16 if not sums[3] else min(16.0, max(2.0, math.sqrt(64 * 255.0 / sums[3])))
+        alpha = round(255 * (1.0 - math.exp(-per_px * ink)))
+        rgba = tuple(round(c) for c in color) + (alpha,)
+        self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                            "Random marker fill with more than one marker per pixel drawn as "
+                            "the markers' average colour.", strategy=Strategy.APPROXIMATE.value)
+        return self._textures(Image.new("RGBA", (8, 8), rgba),
+                              Image.new("RGBA", (16, 16), rgba), 0.0, "Random marker fill")
 
     def _pattern_offset_px(self, value, unit, cell_px: float) -> float:
         if not value:

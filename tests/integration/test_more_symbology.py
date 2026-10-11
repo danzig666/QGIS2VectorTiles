@@ -237,6 +237,37 @@ def test_heatmap_becomes_a_maplibre_heatmap(plugin, tmp_path):
     assert paint["heatmap-radius"] == pytest.approx(10 * 96 / 25.4 * 1.33, rel=0.01)
 
 
+def test_heatmap_intensity_follows_the_overzoomed_map(plugin, tmp_path):
+    """Exported 0-16 and viewed up to zoom 22: QGIS scales the screen-radius
+    kernel to the densest spot at every zoom. The intensity stops ended at
+    the max tile zoom, so zoomed in past it MapLibre kept zoom 16's maximum
+    (a kernel 64 times wider in map units at zoom 22): a pale heatmap."""
+    from qgis.core import QgsGradientColorRamp, QgsHeatmapRenderer, QgsProcessingFeedback
+    from qgis.PyQt.QtGui import QColor
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from fidelity.heatmap import GAUSS, max_density, map_units_per_css_px
+    from q2vt_fixtures import reset_project
+    layer = _layer("Point", POINTS, str(tmp_path / "hm.gpkg"))
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setColorRamp(QgsGradientColorRamp(QColor(0, 0, 255, 0), QColor("red")))
+    heatmap.setRadius(10)
+    heatmap.setRadiusUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(heatmap)
+    reset_project(layer)
+    rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           extent=EXTENT).flatten_all_rules()
+    stops = dict(rules[0].heatmap["intensity_stops"])
+    assert sorted(stops) == list(range(0, 25))
+    points = [(f.geometry().asPoint().x(), f.geometry().asPoint().y(), 1.0)
+              for f in layer.getFeatures()]
+    for zoom in (17, 20, 22):
+        radius = 10 * 96 / 25.4 * map_units_per_css_px(zoom)
+        assert stops[zoom] == pytest.approx(1 / (GAUSS * max_density(points, radius)), rel=1e-4)
+    # Zoomed in, points stop overlapping: the maximum falls towards one point.
+    assert stops[22] > stops[16] * 1.5
+
+
 @pytest.mark.parametrize("weight,expected", [('w', [2.0, 0.0, 0.0]), ('"w"', [2.0, 0.0, 0.0]),
                                               ('"w" * 1', [2.0, None, 0.0])])
 def test_heatmap_null_weight_follows_qgis(plugin, tmp_path, weight, expected):
@@ -307,6 +338,43 @@ def test_lineburst_is_a_line_pattern_with_colour_one_on_the_left(plugin):
     # colour 2 first, colour 1 (QGIS: the left edge) last.
     top, bottom = image.getpixel((0, 0)), image.getpixel((0, image.height - 1))
     assert top[2] < 30 and top[0] > 220 and bottom[2] > 220 and bottom[0] < 30
+
+
+def test_random_fill_in_map_units_from_zoom_0_is_a_tint_when_dense(plugin):
+    """Ten markers per 400 map units², 4 map units wide, exported from zoom
+    0: zoomed out, a texture cell held up to billions of markers (the export
+    ran out of memory). Over a marker per pixel it is a uniform tint, as
+    dense as the scattered markers of the zooms above it."""
+    import time
+    from qgis.core import QgsFillSymbol, QgsRandomMarkerFillSymbolLayer
+    exporter = _converter()
+    exporter.maxzoom = 16
+    exporter.context.reference_zoom = 0  # the rule's min zoom
+    random_fill = QgsRandomMarkerFillSymbolLayer(10, Qgis.PointCountMethod.DensityBased, 400, 3)
+    random_fill.setDensityAreaUnit(Qgis.RenderUnit.MapUnits)
+    random_fill.setSubSymbol(QgsMarkerSymbol.createSimple(
+        {"size": "4", "size_unit": "MapUnit", "color": "255,0,0", "outline_style": "no"}))
+    started = time.time()
+    exporter._convert_symbol(QgsFillSymbol([random_fill]), "s", "src", "q2vt", 0, 16)
+    assert time.time() - started < 30
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]]
+    names = [pattern[2]] + pattern[4::2]
+
+    def cover(image):
+        alpha = image.getchannel("A")
+        return sum(alpha.getdata()) / 255 / (image.width * image.height)
+
+    tints, scattered = [], []
+    for name in names:
+        image = exporter.pattern_images[name].img_1x
+        assert image.width <= 512 and image.height <= 512
+        (tints if image.width <= 16 else scattered).append(cover(image))
+    assert tints and scattered
+    # The expected cover of the markers (1 - exp(-density * marker area)).
+    expected = 1 - math.exp(-10 / 400 * math.pi * 2 ** 2)
+    assert all(t == pytest.approx(expected, abs=0.03) for t in tints)
+    assert scattered[0] == pytest.approx(tints[-1], abs=0.04)
 
 
 def test_raster_line_repeats_like_qgis(plugin, tmp_path):
