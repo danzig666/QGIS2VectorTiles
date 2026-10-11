@@ -1695,6 +1695,10 @@ class RulesExporter:
                                               grp.data_max_zoom)
             if current_input is None:
                 return None
+        elif grp.recipe is not None and grp.recipe.kind == "inside_band":
+            current_input = self._inside_bands(current_input, grp.recipe)
+            if current_input is None:
+                return None  # every ring's band collapsed: QGIS draws nothing
         elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
             current_input = self._interpolated_segments(current_input, grp.recipe)
             if current_input is None:
@@ -1866,9 +1870,10 @@ class RulesExporter:
         recipe = grp.recipe
         if recipe is None:
             return False
-        if recipe.kind == "marker_points":
-            # Positions are computed before the extent clip (and an empty
-            # result is dropped silently there): only the clip emptied them.
+        if recipe.kind in ("marker_points", "inside_band"):
+            # Positions and bands are computed before the extent clip (and
+            # an empty result is dropped silently there): only the clip
+            # emptied them.
             return True
         if recipe.kind != "line_offset" and recipe.kind != "polygon_offset":
             return False
@@ -2025,6 +2030,58 @@ class RulesExporter:
             for out_feature in features:
                 writer.addFeature(out_feature)
                 written += 1
+        del writer
+        return out if written else None
+
+    def _inside_bands(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: the band of an outline drawn only inside its polygon, per
+        feature (mat.inside_band_geometry, built in the recipe's CRS); None
+        when no feature's band is drawn."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeature, QgsFields, QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        layer = self._open(source, "inside_src")
+        if not layer.isValid():
+            return None
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        crs = recipe.param("crs") or export_crs
+        to_crs = from_crs = None
+        if crs != export_crs:
+            context = QgsProject.instance().transformContext()
+            to_crs = QgsCoordinateTransform(QgsCoordinateReferenceSystem(export_crs),
+                                            QgsCoordinateReferenceSystem(crs), context)
+            from_crs = QgsCoordinateTransform(QgsCoordinateReferenceSystem(crs),
+                                              QgsCoordinateReferenceSystem(export_crs), context)
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        out = self._temp_path("inside")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            if to_crs is not None:
+                geometry.transform(to_crs)
+            band = mat.inside_band_geometry(recipe, geometry)
+            if band is None:
+                continue
+            if from_crs is not None:
+                band.transform(from_crs)
+            out_feature = QgsFeature(fields)
+            for field in fields:
+                out_feature[field.name()] = feature[field.name()]
+            out_feature.setGeometry(band)
+            writer.addFeature(out_feature)
+            written += 1
         del writer
         return out if written else None
 
@@ -3649,7 +3706,7 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "inside_band":
-            return [2, mat.inside_band_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            return [2, "@geometry"]  # bands already materialized (_inside_bands)
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":

@@ -1382,18 +1382,14 @@ def test_line_drawn_inside_polygon_keeps_only_polygons(plugin):
     """Where a band piece touches the part along an edge, the intersection is
     a collection with lines, which the tiles dropped: the feature lost its
     whole band at that zoom."""
-    from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature, QgsGeometry, QgsWkbTypes
+    from qgis.core import QgsGeometry, QgsWkbTypes
     from fidelity import materialize as mat
-    feature = QgsFeature()
-    feature.setGeometry(QgsGeometry.fromWkt(
+    geometry = QgsGeometry.fromWkt(
         "POLYGON((-160 -100, -20 -100, -20 -20, -90 -20, -90 90, -160 90, -160 -100),"
-        "(-140 -80, -110 -80, -110 40, -140 40, -140 -80))"))
-    context = QgsExpressionContext()
-    context.setFeature(feature)
+        "(-140 -80, -110 -80, -110 40, -140 40, -140 -80))")
     width = 2.420816752525332  # a quarter of it outside the rings
-    expr = QgsExpression(mat.inside_band_expression(mat.inside_band(
-        -0.75 * width, 0.25 * width, 0, "bevel", "EPSG:3857")))
-    result = expr.evaluate(context)
+    result = mat.inside_band_geometry(mat.inside_band(
+        -0.75 * width, 0.25 * width, 0, "bevel", "EPSG:3857"), geometry)
     assert QgsWkbTypes.geometryType(result.wkbType()) == Qgis.GeometryType.Polygon
     assert result.area() == pytest.approx(width / 4 * 2 * (140 + 190 + 30 + 120), rel=0.02)
 
@@ -1466,6 +1462,46 @@ def test_screen_line_drawn_inside_polygon_with_an_offset_is_reported_beyond_the_
     assert (line.width(), line.offset()) == (3.5, 1.75)
     assert line.penJoinStyle() == Qt.PenJoinStyle.MiterJoin
     assert any("beyond zoom" in d.message for d in diags.by_code("Q2VT_SYMBOL_APPROXIMATE"))
+
+
+def test_screen_line_drawn_inside_polygon_with_an_offset_exports_quickly(plugin, tmp_path):
+    """With an offset each band (eight per zoom) was one geometry expression
+    nested twenty function calls deep, which QGIS's parser reads in time
+    exponential in the depth: half a second per parse, three parses per
+    band, a minute for a few polygons over zooms 0-16. The bands are
+    computed directly and still match QGIS."""
+    import time
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "it.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 3.0)])))
+    zoom, size = 16.4375, 300  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    start = time.monotonic()
+    outputs, rules, _ = _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+    assert time.monotonic() - start < 20  # about 2 s; it took 40 s and more
+    bands = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"]
+    assert len(bands) > 16  # zooms 13-16 (narrower polygons than the offset before)
+    shown = [(o, r) for o, r in bands if r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.05
+
+
+def test_screen_line_drawn_inside_polygon_reports_no_empty_bands(plugin, tmp_path):
+    """Where the inner edge of an inward band (offset - width / 2) is wider
+    than the polygons, every ring's offset ring collapses and QGIS draws
+    nothing: such a band was reported as Q2VT_RULE_OUTPUT_EMPTY, eight times
+    a zoom, which failed a strict export."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "ie.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 3.0)])))
+    _, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+    assert any(r.recipe.kind == "inside_band" for r in rules)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
 
 
 def test_dashed_line_drawn_inside_polygon_keeps_its_dash_lengths(plugin, tmp_path):

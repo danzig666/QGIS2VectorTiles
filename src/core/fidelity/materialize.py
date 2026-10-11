@@ -806,67 +806,85 @@ def inside_band(inner: float, outer: float, ring_filter: int, join: str, crs: st
         ("join", join), ("crs", crs)))
 
 
-def inside_band_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+def inside_band_geometry(recipe: Recipe, geometry):
     """Polygons of an outline stroke with "Draw line only inside polygon"
-    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``): QGIS offsets every
-    stroked ring by o (positive inwards; ``QgsSymbolLayerUtils::offsetLine``
-    buffers the ring as its own polygon, mitred with limit 2, holes the
-    other way), strokes each ring of that offset polygon with width w and
-    the pen's join, and clips the strokes to the polygon part, holes left
-    out. All rings are stroked, or the exterior only for ``ring_filter`` 1.
-    Every stroked ring is its own piece, so a translucent stroke darkens
-    where the bands of the exterior and a hole overlap, as in QGIS. With
-    o = 0 the band is the part's points within w/2 of a ring, its corners
-    sharp; with o > 0 the pen's join cuts the offset ring's corners and a
-    ring whose offset collapses (parts narrower than 2o) draws nothing."""
+    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``) for one feature's
+    (multi)polygon in the recipe's CRS: QGIS offsets every stroked ring by o
+    (positive inwards; ``QgsSymbolLayerUtils::offsetLine`` buffers the ring
+    as its own polygon, mitred with limit 2, holes the other way), strokes
+    each ring of that offset polygon with width w and the pen's join, and
+    clips the strokes to the polygon part, holes left out. All rings are
+    stroked, or the exterior only for ``ring_filter`` 1. Every stroked ring
+    is its own piece, so a translucent stroke darkens where the bands of the
+    exterior and a hole overlap, as in QGIS. With o = 0 the band is the
+    part's points within w/2 of a ring, its corners sharp; with o > 0 the
+    pen's join cuts the offset ring's corners and a ring whose offset
+    collapses (parts narrower than 2o) draws nothing. Computed with GEOS
+    directly: the same steps as one geometry expression nest too deeply
+    for QGIS's parser, which took half a second per band to read it.
+    A MultiPolygon, or None when nothing is drawn."""
+    from qgis.core import Qgis, QgsGeometry, QgsPolygon, QgsWkbTypes  # pylint: disable=import-outside-toplevel
     inner = float(recipe.param("inner"))
     outer = float(recipe.param("outer"))
     offset, half = (inner + outer) / 2.0, (outer - inner) / 2.0
     ring_filter = int(recipe.param("ring_filter", 0) or 0)
-    join = recipe.param("join", "bevel")
-    crs = recipe.param("crs") or export_crs
+    join = {"bevel": Qgis.JoinStyle.Bevel, "round": Qgis.JoinStyle.Round}.get(
+        recipe.param("join", "bevel"), Qgis.JoinStyle.Miter)
+    flat = Qgis.EndCapStyle.Flat
 
-    def grown(polygon, distance):
-        return f"buffer({polygon}, {distance!r}, 8, 'flat', '{join}', 2)"
+    def usable(piece) -> bool:
+        return piece is not None and not piece.isNull() and not piece.isEmpty()
 
-    def strokes(ring_polygon, distance):
+    def grown(shape, distance):
+        return shape.buffer(distance, 8, flat, join, 2)
+
+    def strokes(part, ring_polygon, distance):
         """The clipped strokes of the rings of one ring's offset polygon."""
-        shifted = (f"buffer({ring_polygon}, {distance!r}, 8, 'flat', 'miter', 2)"
-                   if distance else ring_polygon)
+        shifted = ring_polygon.buffer(distance, 8, flat, Qgis.JoinStyle.Miter, 2)
+        if not usable(shifted):
+            return []
         # A closed line's buffer is the ring's stroke, joined at its start.
         # buffer 0: only the polygons of an intersection that also touches
         # along edges or at points (a collection, dropped from the tiles).
-        ring = "if(is_multipart(@q2vt_b), geometry_n(@q2vt_b, @element), @q2vt_b)"
-        piece = f"buffer(intersection(@q2vt_part, {grown(ring, half)}), 0)"
-        return (f"with_variable('q2vt_b', boundary({shifted}), if(@q2vt_b IS NULL OR "
-                f"is_empty(@q2vt_b), NULL, collect_geometries(array_filter(array_foreach("
-                f"generate_series(1, num_geometries(@q2vt_b)), {piece}), "
-                f"@element IS NOT NULL AND NOT is_empty(@element)))))")
+        boundary = QgsGeometry(shifted.constGet().boundary())
+        return [part.intersection(grown(ring, half)).buffer(0, 8)
+                for ring in boundary.asGeometryCollection()]
+
+    def ring_polygon(ring):
+        shape = QgsPolygon()
+        shape.setExteriorRing(ring.clone())
+        return QgsGeometry(shape)
 
     def band(part):
-        exterior = f"make_polygon(exterior_ring({part}))"
+        polygon = part.constGet()
+        exterior = ring_polygon(polygon.exteriorRing())
         if offset:
-            pieces = f"array({strokes(exterior, -offset)})"
+            pieces = strokes(part, exterior, -offset)
         else:  # the same, cheaper: within w/2 of the ring, inside the part
-            pieces = f"array(difference({part}, {grown(exterior, -half)}))"
+            pieces = [part.difference(grown(exterior, -half))]
         if ring_filter != 1:
-            hole = f"make_polygon(interior_ring_n({part}, @element))"
-            hole = (strokes(hole, offset) if offset else
-                    f"buffer(intersection({part}, {grown(hole, half)}), 0)")
-            pieces = (f"array_cat({pieces}, if(num_interior_rings({part}) > 0, array_foreach("
-                      f"generate_series(1, num_interior_rings({part})), {hole}), array()))")
-        return (f"collect_geometries(array_filter({pieces}, "
-                f"@element IS NOT NULL AND NOT is_empty(@element)))")
+            for index in range(polygon.numInteriorRings()):
+                hole = ring_polygon(polygon.interiorRing(index))
+                pieces += strokes(part, hole, offset) if offset else \
+                    [part.intersection(grown(hole, half)).buffer(0, 8)]
+        return pieces
 
-    def body(geom):
-        return (f"collect_geometries(array_filter(array_foreach(generate_series(1, "
-                f"num_geometries({geom})), with_variable('q2vt_part', if(is_multipart({geom}), "
-                f"geometry_n({geom}, @element), {geom}), {band('@q2vt_part')})), "
-                f"@element IS NOT NULL AND NOT is_empty(@element)))")
-    if crs == export_crs:
-        return body("@geometry")
-    return (f"transform(with_variable('q2vt_poly', transform(@geometry, '{export_crs}', '{crs}'), "
-            f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
+    if geometry is None or geometry.isEmpty():
+        return None
+    if geometry.constGet().hasCurvedSegments():
+        geometry = QgsGeometry(geometry.constGet().segmentize())
+    pieces = []
+    for part in geometry.asGeometryCollection():
+        if QgsWkbTypes.geometryType(part.wkbType()) == QgsWkbTypes.PolygonGeometry:
+            pieces += [piece for piece in band(part) if usable(piece)]
+    polygons = [p for piece in pieces for p in piece.asGeometryCollection()
+                if QgsWkbTypes.geometryType(p.wkbType()) == QgsWkbTypes.PolygonGeometry
+                and not p.isEmpty()]
+    if not polygons:
+        return None
+    result = QgsGeometry.collectGeometry(polygons)
+    result.convertToMultiType()
+    return result
 
 
 def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:
