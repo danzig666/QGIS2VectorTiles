@@ -400,3 +400,28 @@ def test_raster_line_repeats_like_qgis(plugin, tmp_path):
     assert period == pytest.approx(round(width_px * 3), rel=0.004)
     # QGIS draws the image's top on the left of the line: flipped for MapLibre.
     assert one.getpixel((one.width // 2, one.height - 1))[0] > 200
+
+
+def test_marker_line_with_map_unit_details_gets_a_sprite_per_zoom(plugin):
+    """A screen-size marker with a map-unit outline along a map-unit
+    interval (the native part of a map exported from zoom 0): one sprite per
+    zoom, drawn at that zoom's scale. One sprite drawn at the style's first
+    zoom had an outline of 1e-5 px there, transparent at every zoom."""
+    from qgis.core import QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsSimpleMarkerSymbolLayer
+    from q2vt_plugin.src.core.maplibre_converter import PropertyExtractor
+    exporter = _converter()
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 3)
+    marker.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    marker.setStrokeWidth(2)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    line = QgsMarkerLineSymbolLayer(True, 20)
+    line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    line.setSubSymbol(QgsMarkerSymbol([marker]))
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 15)
+    layers = {layer["id"]: layer for layer in exporter.style["layers"]}
+    assert {"s_z0", "s_z12", "s_z14"} <= set(layers)
+    assert (layers["s_z12"]["minzoom"], layers["s_z12"]["maxzoom"]) == (12, 13)
+    for zoom in (12, 13, 14):
+        request = exporter.marker_symbols[layers[f"s_z{zoom}"]["layout"]["icon-image"]]
+        assert request.map_units_per_pixel == pytest.approx(
+            1.0 / PropertyExtractor.static_pixels(1.0, "map", zoom), rel=1e-6)

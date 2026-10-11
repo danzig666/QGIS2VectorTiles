@@ -46,7 +46,7 @@ from qgis.PyQt.QtGui import QColor
 from ..utils.config import Qt
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
-from .fidelity.model import ZoomInterval
+from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
@@ -176,14 +176,23 @@ def svg_fill_draws(layer) -> bool:
 class SymbolMaterializer:
     """Rewrite flattened rules into materialized or simplified components."""
 
+    # The browser's default zoom limit (MapLibre's maxZoom; the Publish
+    # window's default too): overzoomed tiles are shown up to it.
+    VIEW_MAX_ZOOM = 22
+
     def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24,
                  fast_markers: bool = False, min_zoom: int = 0,
-                 overzoom_top: Optional[int] = None):
+                 overzoom_top: Optional[int] = None, overzoom_to: Optional[int] = None):
         self.diagnostics = diagnostics
         self.max_zoom = max_zoom
-        # Last zoom evaluated on its own beyond the archive's last zoom (the
-        # browser draws that zoom's tiles there); max_zoom: none.
-        self.overzoom_top = max_zoom if overzoom_top is None else max(max_zoom, overzoom_top)
+        # The last zoom the map is viewed at (the browser overzooms the last
+        # tiles up to it; max_zoom when the map stops there): rules evaluated
+        # per zoom (scale-dependent values, screen sizes held in map units)
+        # go on past max_zoom on the last tiles' data up to it, so they keep
+        # their size while overzooming. ``overzoom_to`` is the same value.
+        top = overzoom_top if overzoom_top is not None else overzoom_to
+        top = self.VIEW_MAX_ZOOM if top is None else top
+        self.overzoom_top = int(min(max(max_zoom, top), MAX_STYLE_ZOOM))
         # The export's first zoom: rules are materialized before the flattener
         # clamps their zoom range, so a rule without a scale limit still
         # starts at zoom 0 here (see _zoom_range).
@@ -506,15 +515,23 @@ class SymbolMaterializer:
             else max(first.max_zoom, second.max_zoom)
         return ZoomInterval(min(first.min_zoom, second.min_zoom), high)
 
+    @property
+    def overzoom_to(self) -> int:
+        """The last zoom the map is viewed at (see ``overzoom_top``)."""
+        return self.overzoom_top
+
     def _per_zoom(self, flat_rule: FlattenedRule, overzoom: bool = False) -> List[FlattenedRule]:
         """One rule per zoom of ``flat_rule``; the last keeps its overzoom.
 
         ``overzoom``: also one per zoom beyond the archive's last zoom, up to
-        ``overzoom_top`` (then open), drawn from that zoom's tiles; their
-        ``scale_zoom`` is the zoom they are shown at."""
+        ``overzoom_top`` (then open), drawn from that zoom's tiles: attribute
+        "v" (a dataset of its own) and ``scale_zoom`` are the zoom they are
+        shown at (see rule_zoom), for scale-dependent values and screen
+        sizes held in map units."""
         low, high = self._zoom_range(flat_rule)
         if low > high:
             return [flat_rule]
+        over = self._overzoom_zooms(flat_rule) if overzoom else []
         if low == high and (flat_rule.get_attr("o"), flat_rule.get_attr("i")) == (low, high):
             rules = [flat_rule]
         else:
@@ -527,18 +544,19 @@ class SymbolMaterializer:
                     rule.visibility = flat_rule.visibility.intersect(
                         ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
                 rules.append(rule)
-        if not overzoom or high < self.max_zoom or self.overzoom_top <= self.max_zoom:
+        if not over:
             return rules
         visible = rules[-1].visibility or ZoomInterval(float(high), None)
         beyond = []
-        for zoom in range(high + 1, self.overzoom_top + 1):
+        for zoom in over:
             interval = visible.intersect(ZoomInterval(
-                float(zoom), None if zoom == self.overzoom_top else float(zoom + 1)))
+                float(zoom), None if zoom == over[-1] else float(zoom + 1)))
             if interval.is_empty:
                 continue
             rule = flat_rule.derive()
             rule.set_attr("o", high)
             rule.set_attr("i", high)
+            rule.set_attr("v", zoom)
             rule.visibility = interval
             rule.scale_zoom = float(zoom)
             beyond.append(rule)
@@ -552,6 +570,28 @@ class SymbolMaterializer:
         rules.extend(beyond)
         self.distinguish(rules)
         return rules
+
+    def _overzoom_zooms(self, flat_rule: FlattenedRule) -> List[int]:
+        """Whole zooms past the export's last tile zoom (up to overzoom_to)
+        where ``flat_rule`` is visible: the browser overzooms the last tiles
+        there."""
+        low, high = self._zoom_range(flat_rule)
+        visible = flat_rule.visibility
+        if low > high or high < self.max_zoom or visible is None:
+            return []  # no exact visibility: drawn up to its last tile zoom
+        return [zoom for zoom in range(high + 1, self.overzoom_to + 1)
+                if not visible.intersect(ZoomInterval(float(zoom), float(zoom + 1))).is_empty]
+
+    @staticmethod
+    def rule_zoom(rule: FlattenedRule) -> int:
+        """The zoom a per-zoom rule is drawn at: its tile zoom, or ("v") the
+        overzoom it was made for (its data are in the last tiles)."""
+        view = rule.get_attr("v")
+        if view is not None:
+            return view
+        if rule.scale_zoom is not None:  # a piece beyond the last tiles (scale split)
+            return int(math.floor(rule.scale_zoom + 1e-9))
+        return rule.get_attr("o")
 
     @staticmethod
     def _setter(layer, key):
@@ -1300,7 +1340,7 @@ class SymbolMaterializer:
         length = self._layer_totals(flat_rule.layer)[1]  # lines, or polygon perimeters
         return self._dense_split(flat_rule, period, dashes, min_px=self.DASH_MIN_PERIOD_PX,
                                  elements=length / period * max(1, len(pattern) // 2),
-                                 what="Dash pattern")
+                                 what="Dash pattern", overzoom=True)
 
     # A map-unit grid becomes point features only from the zoom where its
     # spacing reaches this many CSS px; below that it is a per-zoom texture
@@ -1325,6 +1365,8 @@ class SymbolMaterializer:
             return 0.0
         low = rule.get_attr("o")
         span = max(0, min(rule.get_attr("i"), low + 3) - low) + 1
+        if rule.get_attr("v") is not None:  # an overzoom's rule: that zoom
+            low, span = SymbolMaterializer.rule_zoom(rule), 1
         return mm * ZoomLevels.map_units_per_mm(low + span / 2.0)
 
     # Interval markers along a line are few per tile even when close together.
@@ -1425,15 +1467,19 @@ class SymbolMaterializer:
 
     def _dense_split(self, flat_rule: FlattenedRule, spacing: float, materialize,
                      min_px: Optional[float] = None, elements: float = 0.0,
-                     what: str = "Pattern"):
+                     what: str = "Pattern", overzoom: bool = False):
         """Texture for the zooms where a map-unit grid is dense, materialized
         points for the zooms where its spacing is large on screen. ``elements``
-        estimates the features the materialized part would create."""
+        estimates the features the materialized part would create.
+        ``overzoom``: a pattern along lines (a tile holds a few of them per
+        line) is also materialized when it is large enough only past the last
+        tile zoom, drawn from the last tiles."""
         if self._over_budget(flat_rule, elements, what):
             return None
         low, high = self._zoom_range(flat_rule)
         switch = None
-        for zoom in range(low, high + 1):
+        zooms = list(range(low, high + 1)) + (self._overzoom_zooms(flat_rule) if overzoom else [])
+        for zoom in zooms:
             px = spacing * 96.0 / (25.4 * ZoomLevels.map_units_per_mm(zoom))
             if px >= (self.GRID_MIN_SPACING_PX if min_px is None else min_px):
                 switch = zoom
@@ -1442,10 +1488,14 @@ class SymbolMaterializer:
             return materialize(flat_rule)
         texture = flat_rule.derive()
         if switch is None:
-            return None  # dense at every exported zoom: texture only
-        texture.set_attr("i", switch - 1)
+            return None  # dense at every zoom it is viewed at: texture only
         grid = flat_rule.derive()
-        grid.set_attr("o", switch)
+        if switch > high:  # on the last tiles, from an overzoom on
+            grid.set_attr("o", high)
+            grid.set_attr("v", switch)
+        else:
+            texture.set_attr("i", switch - 1)
+            grid.set_attr("o", switch)
         if flat_rule.visibility is not None:
             texture.visibility = flat_rule.visibility.intersect(
                 ZoomInterval(0.0, float(switch)))
@@ -1652,7 +1702,7 @@ class SymbolMaterializer:
         symbol = inherit_opacity(flat_rule.rule.symbol(), marker.clone())
         rules = []
         visibility = flat_rule.visibility
-        if visibility is None or visibility.max_zoom is None or visibility.max_zoom > high + 1:
+        if self._overzoom_zooms(flat_rule):
             # Beyond the archive's last zoom the pattern stays a (true size)
             # texture: the last band's map spacing spread the markers apart
             # as the map overzoomed.
@@ -2010,7 +2060,7 @@ class SymbolMaterializer:
             last.visibility = (last.visibility or ZoomInterval(float(high), None)).intersect(
                 ZoomInterval(float(high), float(high + 1)))
             if not over.visibility.is_empty:
-                rules.append(over)
+                rules.extend(self._native_interval_bands(over, 8))
         for index, zoom_rule in enumerate(zoom_rules):
             for rule, zoom in self._sub_zoom_bands(zoom_rule, steps, index == len(zoom_rules) - 1):
                 recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
@@ -2026,12 +2076,37 @@ class SymbolMaterializer:
                 rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
         return rules
 
-    @staticmethod
-    def _sub_zoom_bands(rule: FlattenedRule, steps: int, last: bool):
-        """[(rule, middle zoom)]: ``rule`` (one zoom) split into ``steps``
-        equal zoom bands (attribute "b"); the last band of an open-ended last
-        zoom stays visible when overzooming."""
-        low = float(rule.get_attr("o"))
+    def _native_interval_bands(self, over: FlattenedRule, steps: int) -> List[FlattenedRule]:
+        """Native screen-spaced interval markers past the last tiles, one
+        style per ``steps``-th of a zoom on the same dataset: MapLibre lays
+        line symbols out once per whole zoom and scales them up to the next,
+        so a band's spacing is laid out for its middle (the converter, see
+        LinePropertyExtractor.get_marker_line_spacing), within +-4 % of
+        QGIS's with eight bands. Zooms past overzoom_to (the viewer's limit)
+        are not drawn."""
+        visible = over.visibility
+        first = int(math.floor(visible.min_zoom + 1e-9))
+        steps = max(steps, 1)
+        bands = []
+        for zoom in range(first, max(first, self.overzoom_to) + 1):
+            for step in range(steps):
+                interval = visible.intersect(ZoomInterval(zoom + step / steps,
+                                                          zoom + (step + 1) / steps))
+                if interval.is_empty:
+                    continue
+                band = over.derive()
+                band.set_attr("v", zoom)
+                band.set_attr("b", step)
+                band.visibility = interval
+                band.output_dataset = over.output_dataset  # the same lines
+                bands.append(band)
+        return bands
+
+    def _sub_zoom_bands(self, rule: FlattenedRule, steps: int, last: bool):
+        """[(rule, middle zoom)]: ``rule`` (one zoom, see rule_zoom) split
+        into ``steps`` equal zoom bands (attribute "b"); the last band of an
+        open-ended last zoom stays visible when overzooming."""
+        low = float(self.rule_zoom(rule))
         visible = rule.visibility or ZoomInterval(low, None if last else low + 1.0)
         if steps <= 1:
             return [(rule, low + 0.5)]
@@ -2102,7 +2177,7 @@ class SymbolMaterializer:
 
         def zoom_offset(rule):
             """The screen offset in map units at the middle of ``rule``'s zoom."""
-            return zoom_offset_mm * ZoomLevels.map_units_per_mm(rule.get_attr("o")) / math.sqrt(2)
+            return zoom_offset_mm * ZoomLevels.map_units_per_mm(self.rule_zoom(rule)) / math.sqrt(2)
 
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, offset,
                                             offset_unit, flat_rule)
@@ -2125,7 +2200,8 @@ class SymbolMaterializer:
             if zoom_offset_mm is None:
                 rules.append(placed(flat_rule, line_offset))
             else:
-                rules.extend(placed(rule, zoom_offset(rule)) for rule in self._per_zoom(flat_rule))
+                rules.extend(placed(rule, zoom_offset(rule))
+                             for rule in self._per_zoom(flat_rule, overzoom=True))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
@@ -2154,12 +2230,12 @@ class SymbolMaterializer:
                         return [one(rule)]
                     # A screen averaging length covers less of the line as the
                     # map zooms in: the same positions, one angle per zoom.
-                    return [one(zoom_rule) for zoom_rule in self._per_zoom(rule)]
+                    return [one(zoom_rule) for zoom_rule in self._per_zoom(rule, overzoom=True)]
                 split = self._dense_split(native, layer.interval(), exact,
                                           elements=self._layer_totals(flat_rule.layer)[1] /
                                           max(layer.interval(), 1e-9),
                                           what="Marker line",
-                                          min_px=self.INTERVAL_MIN_SPACING_PX)
+                                          min_px=self.INTERVAL_MIN_SPACING_PX, overzoom=True)
                 rules.extend(split if split is not None else [native])
             elif zoom_interval:
                 per_zoom = self._screen_interval_rules(native, layer, sub, crs)
@@ -2263,16 +2339,29 @@ class SymbolMaterializer:
                          f"Paint effects {', '.join(sorted(set(other)))} are not drawn.", flat_rule)
         opacity = flat_rule.rule.symbol().opacity()
         width_px = width_mm * 96.0 / 25.4
+        world = 2 * math.pi * 6378137.0
+        # Geometry grid of the last tiles (4096 units per 512 px tile).
+        quantum = world / (512.0 * 2.0 ** self._zoom_range(flat_rule)[1]) / 8.0
+
+        def zoom_rules(size_px):
+            """[(rule, size)]: ``size_px`` in EPSG:3857 metres (MapLibre's
+            512 px tiles) at the middle of every zoom the map is viewed at;
+            past the last tiles one rule per zoom while the size is coarser
+            than their geometry grid, then one rule from there on."""
+            out = []
+            for rule in self._per_zoom(flat_rule, overzoom=True):
+                size = size_px * world / (512.0 * 2.0 ** (self.rule_zoom(rule) + 0.5))
+                out.append((rule, size))
+                if rule.get_attr("v") is not None and size < quantum:
+                    rule.visibility = flat_rule.visibility.intersect(
+                        ZoomInterval(rule.visibility.min_zoom, None))
+                    break
+            return out
         rules = []
         if outer:
             reach = fx.outer_extent_px(layer, to_px)
             tolerance_px = max(0.5, reach / 8.0)
-            world = 2 * math.pi * 6378137.0
-            zoom_rules = self._per_zoom(flat_rule)
-            for rule in zoom_rules:
-                zoom = rule.get_attr("o") + 0.5
-                # EPSG:3857 metres per MapLibre pixel (512 px tiles).
-                tolerance = tolerance_px * world / (512.0 * 2.0 ** zoom)
+            for rule, tolerance in zoom_rules(tolerance_px):
                 symbol = QgsLineSymbol([fx.with_effects(layer, fx.OUTER_EFFECTS)])
                 symbol.setOpacity(opacity)
                 derived = self._with_symbol(rule, symbol, 1, 1, mat.Recipe(
@@ -2290,12 +2379,10 @@ class SymbolMaterializer:
             spec["opacity"] = opacity
             spec["cap"] = {Qt.PenCapStyle.FlatCap: "butt", Qt.PenCapStyle.SquareCap: "square"
                            }.get(layer.penCapStyle(), "round")
-            world = 2 * math.pi * 6378137.0
-            for rule in self._per_zoom(flat_rule):
-                # The direction is taken over one line width at the zoom (a
-                # line zigzagging within its own width is shaded as QGIS
-                # shades it: as a straight band).
-                window = width_px * world / (512.0 * 2.0 ** (rule.get_attr("o") + 0.5))
+            # The direction is taken over one line width at the zoom (a line
+            # zigzagging within its own width is shaded as QGIS shades it: as
+            # a straight band).
+            for rule, window in zoom_rules(width_px):
                 symbol = QgsLineSymbol([fx.with_effects(layer, ())])
                 strips = self._with_symbol(rule, symbol, 1, 3, mat.Recipe(
                     "direction_runs", params=(("buckets", spec["buckets"]), ("window", window))))
@@ -2377,19 +2464,57 @@ class SymbolMaterializer:
 
         low, high = self._zoom_range(flat_rule)
         if screen and low <= high:
+            # Every zoom the map is viewed at, overzoom included: one set of
+            # arrows sized for each.
+            zoom_rules = self._per_zoom(flat_rule, overzoom=True)
             features = self._layer_totals(flat_rule.layer)[2]
-            arrows = features * (10 if layer.isRepeated() else 1)
-            zoom_rules = self._per_zoom(flat_rule)
-            steps = self._zoom_steps({rule.get_attr("o"): arrows for rule in zoom_rules},
+            per_set = features * (10 if layer.isRepeated() else 1)
+            # The exported zooms get the budget first (the last ones finest);
+            # the zooms past the last tiles share what is left.
+            over = [rule for rule in zoom_rules if rule.get_attr("v") is not None]
+            zoom_rules = zoom_rules[:len(zoom_rules) - len(over)]
+            steps = self._zoom_steps({rule.get_attr("o"): per_set for rule in zoom_rules},
                                      self.ARROW_BAND_STEPS, 1)
+            left = self.MAX_PATTERN_ELEMENTS - sum(per_set * n for n in steps.values())
+            top = steps[zoom_rules[-1].get_attr("o")] if zoom_rules else self.ARROW_BAND_STEPS[0]
+            over_steps = next((n for n in self.ARROW_BAND_STEPS
+                               if n <= top and per_set * len(over) * n <= left), 1)
             bands = [band for index, rule in enumerate(zoom_rules)
                      for band in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
-                                                      index == len(zoom_rules) - 1)]
+                                                      not over and index == len(zoom_rules) - 1)]
+            bands += [band for index, rule in enumerate(over)
+                      for band in self._sub_zoom_bands(rule, over_steps, index == len(over) - 1)]
         else:
-            # Map units: one dataset; arcs flattened at the finest zoom.
-            bands = [(flat_rule, max(low, high) + 0.5)]
+            # Map units: one dataset; arcs flattened at the finest zoom it is
+            # viewed at (overzoom included).
+            bands = [(flat_rule, max([low, high] + self._overzoom_zooms(flat_rule)) + 0.5)]
 
         rules = []
+        # Far past the last tiles an arrow is narrower than their geometry
+        # grid (4096 units a tile: 8 px at 6 zooms over) and its polygons
+        # collapse: from there on its body is a native line.
+        quantum = self._map_units_per_mm(flat_rule, high) * 25.4 / 96.0 / 8.0
+        for index, (band_rule, zoom) in enumerate(bands):
+            per_mm = self._map_units_per_mm(flat_rule, zoom)
+            widths = [to_map(v, u, per_mm) for v, u in values[:2] if abs(v or 0.0) > 1e-12]
+            if band_rule.get_attr("v") is not None and widths and min(widths) < 2 * quantum:
+                body = QgsSimpleLineSymbolLayer(fill.color(), layer.arrowWidth(),
+                                                Qt.PenStyle.SolidLine)
+                body.setWidthUnit(layer.arrowWidthUnit())
+                body.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                body.setOffset(layer.offset())
+                body.setOffsetUnit(layer.offsetUnit())
+                symbol = QgsLineSymbol([body])
+                symbol.setOpacity(fill.opacity())
+                native = self._with_symbol(band_rule, symbol, 1, 1 + len(fill_layers))
+                native.visibility = flat_rule.visibility.intersect(
+                    ZoomInterval(band_rule.visibility.min_zoom, None))
+                rules.append(native)
+                self._report("Q2VT_SYMBOL_APPROXIMATE",
+                             "Arrows narrower than the last tiles' geometry grid (far past the "
+                             "last tile zoom) are drawn as a line without the head.", flat_rule)
+                bands = bands[:index]
+                break
         for copy, fill_layer in enumerate(fill_layers):
             fill_layer = fill_layer.clone()
             translate = outline = None
@@ -2657,9 +2782,19 @@ class SymbolMaterializer:
             are empty (a feature a few pixels wide has one band)."""
             width = mm * self._map_units_per_mm(flat_rule, zoom + 1.0) / count
             return sum(min(count, int(radius / width) + 1) for radius in radii)
-        zoom_rules = self._per_zoom(flat_rule)
+        # Every zoom the map is viewed at, overzoom included: the exported
+        # zooms get the budget first (the last ones finest), the zooms past
+        # the last tiles share what is left.
+        zoom_rules = self._per_zoom(flat_rule, overzoom=True)
+        over = [rule for rule in zoom_rules if rule.get_attr("v") is not None]
+        zoom_rules = zoom_rules[:len(zoom_rules) - len(over)]
         steps = self._zoom_steps({rule.get_attr("o"): cost(rule.get_attr("o")) for rule in zoom_rules},
                                  self.SHAPEBURST_ZOOM_STEPS, 1)
+        left = self.MAX_PATTERN_ELEMENTS - sum(cost(zoom) * n for zoom, n in steps.items())
+        top = steps[zoom_rules[-1].get_attr("o")] if zoom_rules else self.SHAPEBURST_ZOOM_STEPS[0]
+        over_cost = sum(cost(self.rule_zoom(rule)) for rule in over)
+        over_steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
+                           if n <= min(top, 2) and over_cost * n <= left), 1)
         coarse = sorted((zoom for zoom, n in steps.items() if n < self.SHAPEBURST_ZOOM_STEPS[0]),
                         reverse=True)
         if coarse:
@@ -2675,7 +2810,10 @@ class SymbolMaterializer:
         rules = []
         for index, rule in enumerate(zoom_rules):
             for band_rule, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
-                                                        index == len(zoom_rules) - 1):
+                                                        not over and index == len(zoom_rules) - 1):
+                rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
+        for index, rule in enumerate(over):
+            for band_rule, zoom in self._sub_zoom_bands(rule, over_steps, index == len(over) - 1):
                 rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
         return rules
 

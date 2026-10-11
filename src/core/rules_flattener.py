@@ -93,15 +93,21 @@ class RulesFlattener:
                  diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
                  scale_limits=None, extent=None, fast_markers: bool = False,
                  lengths: Optional[LengthConverter] = None,
-                 overzoom: OverzoomPolicy = OverzoomPolicy.PERSIST):
+                 overzoom: OverzoomPolicy = OverzoomPolicy.PERSIST,
+                 overzoom_to: Optional[int] = None):
+        """``overzoom_to``: the last zoom the map is viewed at (the browser
+        overzooms the max_zoom tiles up to it; None: MapLibre's 22)."""
         self.min_zoom = min_zoom
         # Beyond the archive's last zoom the browser keeps drawing its tiles
         # (PERSIST, the viewer zooms in to 22 by default): rules that start
         # there are drawn from them, and values that depend on the scale are
         # evaluated per zoom up to this zoom (the last one stays open).
         self.overzoom = OverzoomPolicy(overzoom)
+        # The one overzoom top of the export: the viewer's last zoom
+        # (overzoom_to, MapLibre's 22 by default), the last tile zoom when
+        # the map stops there.
         self.overzoom_top = max_zoom if self.overzoom == OverzoomPolicy.STOP else \
-            max(max_zoom, fidelity_zoom.MAX_TILE_ZOOM)
+            max(max_zoom, fidelity_zoom.MAX_TILE_ZOOM if overzoom_to is None else int(overzoom_to))
         # Unit converter of the style (map-unit context of the project): the
         # pixel sizes of labels laid out at export time.
         self.lengths = lengths or LengthConverter()
@@ -1542,8 +1548,9 @@ class RulesFlattener:
         if normalize_unit(unit) == "map" or _to_mm(1.0, unit) is None:
             return self._generated_line_rules(flat_rule, generator(scale), layer_idx)
         rules = []
-        for rule in self.materializer._per_zoom(flat_rule):  # pylint: disable=protected-access
-            zoom = rule.get_attr("o")
+        # Every zoom the map is viewed at, overzoom included (on the last tiles).
+        for rule in self.materializer._per_zoom(flat_rule, overzoom=True):  # pylint: disable=protected-access
+            zoom = self.materializer.rule_zoom(rule)
             factor = scale * _to_mm(1.0, unit) * ZoomLevels.map_units_per_mm(zoom) / math.sqrt(2)
             rules.extend(self._generated_line_rules(rule, generator(factor), layer_idx))
         return rules

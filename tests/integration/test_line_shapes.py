@@ -197,8 +197,9 @@ def test_inner_shadow_line_exports_strips_by_direction(plugin, tmp_path):
     lines = [l for l in style["layers"] if l["type"] == "line"]
     ends = [l for l in lines if l["id"].endswith("_ends")]
     strips = [l for l in lines if re.search(r"_in\d+$", l["id"])]
-    assert len(ends) == 2  # one per zoom
-    assert len(strips) == 2 * math.ceil(3.6 * 96 / 25.4)
+    tiles = [l for l in ends if l["minzoom"] < 17]  # (and per overzoom from 17)
+    assert len(tiles) == 2 and len(ends) > 2  # one per zoom
+    assert len(strips) == len(ends) * math.ceil(3.6 * 96 / 25.4)
     assert all(s["paint"]["line-color"][0] == "match" for s in strips)
     assert {s["paint"].get("line-offset", 0) for s in strips} != {0}
     report = json.load(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8"))

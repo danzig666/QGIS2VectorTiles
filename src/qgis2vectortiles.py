@@ -203,7 +203,9 @@ class QGIS2VectorTiles:
         the tile processes are started; finish_tiles() waits for them and
         completes the export (the publishing workflow goes on meanwhile).
         ``view_max_zoom``: the highest zoom the web map shows, overzooming
-        the last tiles (map-unit pattern textures are made up to it)."""
+        the last tiles: map-unit pattern textures are made up to it, and
+        screen-size symbols drawn as geometry (and values that depend on the
+        scale) keep following the zoom up to it."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -246,6 +248,9 @@ class QGIS2VectorTiles:
             reference_latitude=self._reference_latitude(),
             view_max_zoom=float(max(view_max_zoom - viewer, self.max_zoom)),
         )
+        # Overzoom stopped: nothing is drawn past the last tile zoom.
+        self.view_max_zoom = self.max_zoom if self.profile.overzoom == OverzoomPolicy.STOP \
+            else int(self.profile.view_max_zoom)
         self.lengths = self._length_converter()
         # zoom <-> scale: QGIS's scale for the browser's ground resolution in
         # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.;
@@ -570,6 +575,7 @@ class QGIS2VectorTiles:
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
             fast_markers=self.fast_markers, lengths=self.lengths, overzoom=self.profile.overzoom,
+            overzoom_to=self.view_max_zoom,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).

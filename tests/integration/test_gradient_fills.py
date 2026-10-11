@@ -306,9 +306,11 @@ def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
     lines = [l for l in style["layers"] if l["type"] == "line"]
     # Shadow and glow per zoom (from a copy simplified at the effect's size,
-    # zooms 12-14), then the line itself without effects.
+    # zooms 12-14 and the overzoom from 15), then the line itself without
+    # effects.
     effects, main_def = lines[:-1], lines[-1]
-    assert len(effects) == 6 and all(l["id"].endswith(("_fx0", "_fx1")) for l in effects)
+    assert len([l for l in effects if l["minzoom"] < 15]) == 6 and len(effects) > 6
+    assert all(l["id"].endswith(("_fx0", "_fx1")) for l in effects)
     assert not main_def["id"].endswith(("_fx0", "_fx1"))
     assert main_def["source-layer"] not in {l["source-layer"] for l in effects}
     main = main_def["paint"]
@@ -341,7 +343,7 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     assert {r.rule.symbol().symbolLayer(0).color().name() for r in shadow_rules} == {"#000000"}
     assert all(r.translate is None for r in fills if r not in shadow_rules)
     # The fills' default outline is a line on each copy, shifted with it.
-    outlines = [r for r in rules if r.get_attr("c") == 1]
+    outlines = [r for r in rules if r.get_attr("c") == 1 and r.recipe is not None]
     assert {r.get_attr("m") for r in outlines} == {1, 2}
     assert all(r.translate == ((-1.2, 1.4, "MM") if r.get_attr("m") == 1 else None)
                for r in outlines)
@@ -367,13 +369,14 @@ def test_screen_unit_shapeburst_distance_follows_the_zoom(plugin, tmp_path):
     diags = DiagnosticCollector()
     rules = RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     bands = [r for r in rules if r.recipe is not None and r.recipe.kind == "color_bands"]
-    assert len(bands) == 8
+    # (and four per zoom past zoom 15, drawn from the zoom-15 tiles)
+    assert len(bands) == 8 + 4 * (22 - 15)
     for band in bands:
         middle = band.visibility.min_zoom + 0.125
         distance = dict(dict(band.recipe.params)["bands"][1].params)["distance"]
         expected = 2.2 * 96 / 25.4 * 40075016.68557849 / (512 * 2 ** middle)
         assert distance == pytest.approx(expected, rel=1e-3), middle
-    assert sorted(b.visibility.min_zoom for b in bands) == [14 + i / 4 for i in range(8)]
+    assert sorted(b.visibility.min_zoom for b in bands) == [14 + i / 4 for i in range(36)]
     assert not any("fixed at zoom" in d.message for d in diags.items)
 
 

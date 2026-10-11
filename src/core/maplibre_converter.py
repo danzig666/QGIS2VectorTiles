@@ -722,11 +722,13 @@ class LinePropertyExtractor:
         return "line"
 
     @staticmethod
-    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer) -> Union[float, List]:
+    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer,
+                                zooms: Optional[Tuple[float, float]] = None) -> Union[float, List]:
         """Return ``symbol-spacing`` in CSS px from the marker-line interval.
 
         Map-unit intervals become zoom curves; a data-defined interval that
         depends only on ``@map_scale`` has been resolved per zoom band.
+        ``zooms``: the style layer's (minzoom, maxzoom).
         """
         placements = LinePropertyExtractor.marker_line_placements(symbol_layer)
         try:
@@ -746,9 +748,15 @@ class LinePropertyExtractor:
                 # MapLibre lays line symbols out once per tile, at the tile's
                 # integer zoom, so a screen-size spacing grows up to 2x until
                 # the next zoom. Laying out at s/sqrt(2) centres that error
-                # (0.71x-1.41x of QGIS instead of 1x-2x). Map-unit spacings
-                # grow with the map like QGIS and need no correction.
-                spacing = ex.mul(spacing, 1.0 / math.sqrt(2.0))
+                # (0.71x-1.41x of QGIS instead of 1x-2x). A layer shown
+                # within one whole zoom (bands past the last tiles) is laid
+                # out for the middle of its zooms. Map-unit spacings grow
+                # with the map like QGIS and need no correction.
+                factor = 1.0 / math.sqrt(2.0)
+                if zooms is not None and zooms[0] is not None and zooms[1] is not None \
+                        and 0 <= zooms[0] < zooms[1] <= math.floor(zooms[0]) + 1.0 + 1e-9:
+                    factor = 2.0 ** (math.floor(zooms[0]) - (zooms[0] + zooms[1]) / 2.0)
+                spacing = ex.mul(spacing, factor)
             return ex.clamp(spacing, 1.0, None)
 
         # Vertex-type placements have no MapLibre equivalent; a small spacing
@@ -3788,7 +3796,38 @@ class QgisMapLibreStyleExporter:
             pass
         if sub_symbol is None or sub_symbol.symbolLayerCount() == 0:
             return
+        if not IconPropertyExtractor.uses_map_units(sub_symbol):
+            self._marker_line_layer(symbol_layer, sub_symbol, style_name, source_layer_name,
+                                    source_name, min_zoom, max_zoom)
+            return
+        # Map-unit details (size, stroke): one sprite per zoom band, drawn at
+        # the band's scale, as for point markers (_convert_marker_symbol); a
+        # single sprite drawn at the style's first zoom (zoom 0 in a map from
+        # zoom 0) lost them.
+        context = self.context
+        saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
+        try:
+            bands = self._sprite_bands(min_zoom, max_zoom)
+            growth, extent = IconPropertyExtractor.map_growth(sub_symbol)
+            for index, (low, high, quality) in enumerate(bands):
+                if growth > 1.7 and index < len(bands) - 1 and extent * \
+                        PropertyExtractor.static_pixels(1.0, "map", low) > self.MAX_BAND_SPRITE_PX:
+                    high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
+                    bands = bands[:index + 1]
+                context.reference_zoom, context.reference_zoom_span = low, high - low
+                context.sprite_oversampling = quality
+                self._marker_line_layer(symbol_layer, sub_symbol, f"{style_name}_z{int(low)}",
+                                        source_layer_name, source_name, low, high)
+                if index == len(bands) - 1:
+                    break
+        finally:
+            context.reference_zoom, context.reference_zoom_span, \
+                context.sprite_oversampling = saved
 
+    def _marker_line_layer(self, symbol_layer, sub_symbol, style_name: str,
+                           source_layer_name: str, source_name: str,
+                           min_zoom: float = -1, max_zoom: float = -1):
+        """One MapLibre ``symbol`` layer (and its sprite) of a marker line."""
         layer_def = self._base_layer_def(
             "symbol", style_name, source_layer_name, source_name, min_zoom, max_zoom
         )
@@ -3823,7 +3862,8 @@ class QgisMapLibreStyleExporter:
             "icon-optional": IconPropertyExtractor.get_icon_optional(),
             "icon-keep-upright": False,
             "symbol-placement": LinePropertyExtractor.get_marker_line_symbol_placement(symbol_layer),
-            "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(symbol_layer),
+            "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(
+                symbol_layer, (min_zoom, max_zoom)),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
             "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,

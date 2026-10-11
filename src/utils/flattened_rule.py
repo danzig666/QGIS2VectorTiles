@@ -105,7 +105,10 @@ class FlattenedRule:
 
     def evaluation_zoom(self) -> float:
         """The zoom whose map scale this rule's scale-dependent values use."""
-        return float(self.scale_zoom if self.scale_zoom is not None else self.get_attr("o"))
+        if self.scale_zoom is not None:
+            return float(self.scale_zoom)
+        view = self.get_attr("v")  # a rule made for a zoom past the last tiles
+        return float(view if view is not None else self.get_attr("o"))
 
     def renderer_filter(self) -> str:
         """The rule's filter, @map_scale unbound (see ``unbound_filter``)."""
