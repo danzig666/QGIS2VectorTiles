@@ -123,6 +123,77 @@ def test_hash_line_converted_to_markers(plugin, tmp_path):
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.08
 
 
+def _hash_line(placements):
+    hl = QgsHashedLineSymbolLayer()
+    hl.setPlacements(placements)
+    hl.setHashLength(14)
+    hl.setHashLengthUnit(Qgis.RenderUnit.Pixels)
+    hl.subSymbol().symbolLayer(0).setColor(QColor("black"))
+    hl.subSymbol().symbolLayer(0).setWidth(2)
+    hl.subSymbol().symbolLayer(0).setWidthUnit(Qgis.RenderUnit.Pixels)
+    return hl
+
+
+def test_hash_line_keeps_a_data_defined_hash_angle_and_length(plugin, tmp_path):
+    """Hash angle and length read from a field were replaced by the static
+    values when the hashed line became a marker line."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "hd.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Interval)
+    hl.setInterval(25)
+    hl.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineAngle,
+                              QgsProperty.fromExpression('"id" * 20 + 40'))
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineDistance,
+                              QgsProperty.fromExpression('"id" * 6 + 22'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hl])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert exact and all(r.recipe.kind == "marker_points" for _, r in exact)
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1
+
+
+def test_hash_line_keeps_a_data_defined_interval(plugin, tmp_path):
+    """A data-defined interval on a hashed line was placed exactly at the
+    static interval, without a report; it now takes the marker line's path
+    for data-defined intervals (browser spacing, reported)."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "hi.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Interval)
+    hl.setInterval(3)
+    hl.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval,
+                              QgsProperty.fromExpression('"id" + 7'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hl])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    assert any("Data-defined interval" in d.message for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+    converted = rules[0].rule.symbol().symbolLayer(0)
+    assert converted.layerType() == "MarkerLine"
+    assert converted.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyInterval)
+
+
+@pytest.mark.parametrize("ring_filter", [1, 2])
+def test_hash_line_vertices_keep_the_ring_filter(plugin, tmp_path, ring_filter):
+    """Vertex hashes on the exterior ring only (or the holes only) were
+    drawn on every ring."""
+    from qgis.core import QgsLineSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83),"
+                               "(-40 -40, 10 -40, 10 10, -40 10, -40 -40))"],
+                   str(tmp_path / "hr.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Vertex)
+    hl.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([hl])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert exact and all(r.recipe.param("ring_filter") == ring_filter for _, r in exact)
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1
+
+
 @pytest.mark.parametrize("angle,offset", [(0, 0), (0, 3), (90, 2)])
 def test_map_unit_hatch_matches_qgis(plugin, tmp_path, angle, offset):
     layer = _layer("Polygon", [

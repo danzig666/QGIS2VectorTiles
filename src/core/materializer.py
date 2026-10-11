@@ -31,6 +31,7 @@ from qgis.core import (
     QgsMarkerSymbol,
     QgsProject,
     QgsProperty,
+    QgsPropertyCollection,
     QgsSimpleLineSymbolLayer,
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleMarkerSymbolLayerBase,
@@ -1707,10 +1708,20 @@ class SymbolMaterializer:
         for index in range(symbol.symbolLayerCount()):
             marker = symbol.symbolLayer(index)
             if rotate:
+                # QGIS adds the line's angle to the marker's own angle, a
+                # data-defined one included (hash angles from a field).
+                own = marker.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyAngle)
+                own_text = own.asExpression() if own is not None and own.isActive() else ""
+                rotation = mat.marker_rotation_expression(marker.angle() + extra_angle)
+                if own_text:
+                    rotation = (f"{mat.marker_rotation_expression(extra_angle)} + "
+                                f"coalesce(({own_text}), {float(marker.angle())!r})")
+                elif own is not None and own.isActive():
+                    self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                                 "Data-defined marker angle on a marker line: the static "
+                                 "angle is used.", flat_rule)
                 marker.setDataDefinedProperty(
-                    QgsSymbolLayer.Property.PropertyAngle,
-                    QgsProperty.fromExpression(
-                        mat.marker_rotation_expression(marker.angle() + extra_angle)))
+                    QgsSymbolLayer.Property.PropertyAngle, QgsProperty.fromExpression(rotation))
             elif extra_angle:
                 marker.setAngle(marker.angle() + extra_angle)
             if offset:
@@ -2003,19 +2014,48 @@ class SymbolMaterializer:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Only the first layer of a multi-layer hash symbol is kept.",
                              flat_rule)
+            marker.setStrokeWidthMapUnitScale(line.widthMapUnitScale())
+            # The hash line's own data-defined colour and width: the same keys
+            # on a line marker.
+            line_props = line.dataDefinedProperties()
+            for key in (QgsSymbolLayer.Property.PropertyStrokeColor,
+                        QgsSymbolLayer.Property.PropertyStrokeWidth):
+                if line_props.isActive(key):
+                    marker.setDataDefinedProperty(key, QgsProperty(line_props.property(key)))
         else:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                          "Hash sub-symbol is not a simple line; drawn as a thin line.", flat_rule)
+        # Every layer setting that QgsTemplatedLineSymbolLayerBase shares with
+        # a marker line (data-defined interval, offsets, placement, averaging,
+        # ring filter); the hash's own angle and length (evaluated per hash,
+        # relative to the line) become the line marker's angle and size.
+        props = QgsPropertyCollection(layer.dataDefinedProperties())
+        for key, marker_key in ((QgsSymbolLayer.Property.PropertyLineAngle,
+                                 QgsSymbolLayer.Property.PropertyAngle),
+                                (QgsSymbolLayer.Property.PropertyLineDistance,
+                                 QgsSymbolLayer.Property.PropertySize)):
+            if props.isActive(key):
+                marker.setDataDefinedProperty(marker_key, QgsProperty(props.property(key)))
+            props.setProperty(key, QgsProperty())
         marker_symbol = QgsMarkerSymbol([marker])
         if hash_symbol is not None:
             marker_symbol.setOpacity(hash_symbol.opacity())
         converted = QgsMarkerLineSymbolLayer(layer.rotateSymbols(), layer.interval())
         converted.setPlacements(layer.placements())
         converted.setIntervalUnit(layer.intervalUnit())
+        converted.setIntervalMapUnitScale(layer.intervalMapUnitScale())
         converted.setOffset(layer.offset())
         converted.setOffsetUnit(layer.offsetUnit())
+        converted.setOffsetMapUnitScale(layer.offsetMapUnitScale())
         converted.setOffsetAlongLine(layer.offsetAlongLine())
         converted.setOffsetAlongLineUnit(layer.offsetAlongLineUnit())
+        converted.setOffsetAlongLineMapUnitScale(layer.offsetAlongLineMapUnitScale())
+        converted.setAverageAngleLength(layer.averageAngleLength())
+        converted.setAverageAngleUnit(layer.averageAngleUnit())
+        converted.setAverageAngleMapUnitScale(layer.averageAngleMapUnitScale())
+        converted.setPlaceOnEveryPart(layer.placeOnEveryPart())
+        converted.setRingFilter(layer.ringFilter())
+        converted.setDataDefinedProperties(props)
         converted.setSubSymbol(marker_symbol)
         return converted
 
