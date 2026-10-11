@@ -342,3 +342,48 @@ def test_screen_offset_is_the_qgis_offset_curve_per_band(plugin, tmp_path):
         reference = ink_mask(render([layer], view, (240, 240)))
         ours = ink_mask(render([out], view, (240, 240)))
         assert mask_difference(reference, ours) < 0.08, zoom
+
+
+@pytest.mark.parametrize("kind", ["LineString", "Polygon"])
+def test_screen_offsets_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
+    """Exported from zoom 0 (the Publish defaults), a 1.5 mm offset is
+    hundreds of km at the first zooms: offset curves there lay outside the
+    4 km export extent and every eighth-of-a-zoom band reported a rule
+    missing from the map (Strict mode failed). Those zooms are drawn with
+    the browser's line offset, mitred like QGIS's offset curve; the offset
+    curves start where the offset fits in the extent."""
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    cx, cy = 2121000.0, 6021000.0
+    shape = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
+    if kind == "Polygon":
+        shape += [(300, 200), (-300, 200), (-300, -100)]
+    coords = ", ".join(f"{cx + x} {cy + y}" for x, y in shape)
+    wkt = f"POLYGON(({coords}))" if kind == "Polygon" else f"LINESTRING({coords})"
+    layer = _layer(kind, [wkt], str(tmp_path / "offset.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("red"), 0.6)
+    line.setOffset(1.5)
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol([line]) if kind == "Polygon" else QgsLineSymbol([line])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    extent = QgsRectangle(cx - 2000, cy - 2000, cx + 2000, cy + 2000)
+    exporter = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=extent, output_dir=str(out),
+                                feedback=QgsProcessingFeedback(), serve=False, fidelity_mode=1)
+    export_dir = exporter.convert_project_to_vector_tiles()  # Strict: raises on a loss
+    assert not [d for d in exporter.diagnostics.items if d.code == "Q2VT_RULE_OUTPUT_EMPTY"]
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        style = json.load(handle)
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    native = [l for l in lines if "line-offset" in l["paint"]]
+    bands = [l for l in lines if "line-offset" not in l["paint"]]
+    # 1.5 mm = 5.67 px is at most half the 4 km extent from zoom 8 on.
+    first = math.ceil(math.log2(1.5 * 96 / 25.4 * WORLD / 512 / 2000))
+    assert first == 8
+    assert min(l.get("minzoom", 0) for l in native) == 0
+    if kind == "LineString":
+        assert min(l["minzoom"] for l in bands) == first
+    else:  # the rings buffered inwards to nothing below 11.75 (QGIS draws none)
+        assert min(l["minzoom"] for l in bands) == 11.75
+    assert {l["layout"]["line-join"] for l in native} == {"miter"}

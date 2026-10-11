@@ -1832,6 +1832,11 @@ class RulesExporter:
         return out
 
     def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
+        if grp.recipe is not None and grp.recipe.kind == "polygon_offset" and \
+                grp.recipe.param("offset"):
+            # Rings buffered to nothing (an inward offset wider than the
+            # polygons at this zoom): QGIS's offsetLine draws nothing either.
+            return
         matched = self._open(source, "matched")
         count = matched.featureCount() if matched.isValid() else 0
         if count > 0:

@@ -54,13 +54,15 @@ def _polygon_layer(path, clockwise):
 
 
 def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None,
-             before=()):
-    """``zooms`` (or ``zoom_range``): the export's (min zoom, max zoom);
-    ``before``: view zooms shown first in the same page (one session)."""
+             before=(), zoom=ZOOM, prepare=None):
+    """Export ``layer`` with tile zooms ``zooms`` (or ``zoom_range``) and
+    capture QGIS and the browser at ``zoom`` (``prepare(export_dir)``
+    first, when given); ``before``: view zooms shown first in the same page
+    (one session)."""
     zoom_range = zooms or zoom_range
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
-    half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
+    half = SIZE / 2 * gallery.EARTH / (512 * 2 ** zoom)
     extent = QgsRectangle(center[0] - 2 * half, center[1] - 2 * half,
                           center[0] + 2 * half, center[1] + 2 * half)
     out = tmp_path / "out"
@@ -75,10 +77,12 @@ def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17),
     views = tmp_path / "views.json"
     views.write_text(json.dumps([{"id": f"before{i}", "lon": point.x(), "lat": point.y(), "zoom": z,
                                   "width": SIZE, "height": SIZE} for i, z in enumerate(before)]
-                                + [{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": ZOOM,
+                                + [{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": zoom,
                                     "width": SIZE, "height": SIZE}]))
     qgis_png = str(tmp_path / "v_qgis.png")
-    gallery.qgis_render(layer, center, ZOOM, SIZE, qgis_png)
+    gallery.qgis_render(layer, center, zoom, SIZE, qgis_png)
+    if prepare is not None:
+        prepare(export_dir)
     server = _serve(export_dir)
     try:
         run = subprocess.run(["node", os.path.join(HERE, "gallery_capture.mjs"), export_dir,
@@ -422,6 +426,29 @@ def test_overlapping_markers_stack_in_feature_order(tmp_path):
     colours = [Image.open(str(tmp_path / f"v_{n}.png")).convert("RGB").getpixel((middle, middle))
                for n in ("qgis", "browser")]
     assert colours[0][2] > 200 and colours[1][2] > 200, colours  # blue (the later one) on top
+
+
+@pytest.mark.parametrize("zoom", [16.0, 18.0])
+@pytest.mark.parametrize("width,offset", [(2.0, 6.0), (0.5, 1.5)])
+def test_screen_offset_lines_keep_their_width_at_turns(tmp_path, width, offset, zoom):
+    """A millimetre offset three times the line width, default bevel join,
+    on a line turning about 45 degrees, exported 0-16 (the Publish
+    defaults) and seen at and above the last tile zoom: the browser's bevel
+    join tapered the offset line to a sliver at the vertex (25-45 % less ink
+    than QGIS), a mitred join draws QGIS's mitred offset curve."""
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "bend", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 150} {CENTER[1] - 30}, {CENTER[0]} {CENTER[1] + 30}, "
+        f"{CENTER[0] + 150} {CENTER[1] - 20})"))
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "bend.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), width)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    qgis, browser = _compare(tmp_path, layer, metric="darkness", zoom=zoom, zooms=(0, 16))
+    assert browser == pytest.approx(qgis, rel=0.06)
 
 
 def _black_box(tmp_path, name):

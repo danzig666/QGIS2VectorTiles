@@ -131,7 +131,7 @@ class RulesFlattener:
         self._rule_systems: list = []
         self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom,
                                                fast_markers=fast_markers, min_zoom=min_zoom,
-                                               overzoom_top=self.overzoom_top)
+                                               overzoom_top=self.overzoom_top, extent=extent)
         # Depth -> first rule number of the next parent's children: rule
         # numbers ("r") are unique per depth within a (layer, rule type) pass.
         self._child_base = {}

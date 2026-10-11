@@ -182,7 +182,8 @@ class SymbolMaterializer:
 
     def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24,
                  fast_markers: bool = False, min_zoom: int = 0,
-                 overzoom_top: Optional[int] = None, overzoom_to: Optional[int] = None):
+                 overzoom_top: Optional[int] = None, overzoom_to: Optional[int] = None,
+                 extent=None):
         self.diagnostics = diagnostics
         self.max_zoom = max_zoom
         # The last zoom the map is viewed at (the browser overzooms the last
@@ -200,6 +201,9 @@ class SymbolMaterializer:
         # Screen-size interval markers placed by the browser (no per-zoom
         # positions): the publishing "fast marker lines" option.
         self.fast_markers = fast_markers
+        # Export extent (EPSG:3857, None: unknown): screen-unit offsets are
+        # not materialized at zooms where they reach beyond it.
+        self.extent = extent
         crs = QgsProject.instance().crs()
         self.project_crs = crs.authid() if crs.isValid() else ""
 
@@ -798,9 +802,10 @@ class SymbolMaterializer:
         if offset_mm is None or (props is not None and props.isActive(QgsSymbolLayer.Property.PropertyOffset)):
             return None
         low, high = self._zoom_range(flat_rule)
-        if low > high:
+        first = max(low, self._offset_in_extent_zoom(offset_mm * 96.0 / 25.4))
+        if first > high:
             return None
-        zoom_rules = self._per_zoom(flat_rule)
+        zoom_rules = [r for r in self._per_zoom(flat_rule) if r.get_attr("o") >= first]
         costs = {rule.get_attr("o"): self._polygon_offset_cost(flat_rule, layer, offset_mm,
                                                                 rule.get_attr("o"))
                  for rule in zoom_rules}
@@ -814,6 +819,11 @@ class SymbolMaterializer:
         rules = []
         visible = flat_rule.visibility or ZoomInterval(float(low), None)
         overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
+        early = self._offset_beyond_extent(flat_rule, visible, low, first)
+        if early is not None:  # native, right-hand-rule rings
+            early.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
+            early.set_attr("m", 1)
+            rules.append(early)
         if native_zooms:  # the budget ends below the last zooms: native there
             cut = max(native_zooms) + 1
             if exact:
@@ -1176,6 +1186,35 @@ class SymbolMaterializer:
         cache[key] = zooms
         return zooms
 
+    def _offset_in_extent_zoom(self, offset_px: float) -> int:
+        """First zoom at which a screen offset of ``offset_px`` CSS pixels is
+        at most half the export extent's shorter side. Below it an offset
+        geometry ends up mostly outside the extent (the exporter's clip
+        leaves nothing: hundreds of km at zoom 0), while the whole extent is
+        a few pixels wide on screen: the browser's line-offset draws it."""
+        if self.extent is None or not offset_px:
+            return -1
+        side = min(self.extent.width(), self.extent.height())
+        if side <= 0:
+            return -1
+        metres_at_zero = abs(offset_px) * 40075016.68557849 / 512.0
+        return int(math.ceil(math.log2(max(metres_at_zero / (0.5 * side), 1.0))))
+
+    @staticmethod
+    def _offset_beyond_extent(flat_rule: FlattenedRule, visible: ZoomInterval, low: int,
+                              first: int) -> Optional[FlattenedRule]:
+        """The rule drawn with the browser's line-offset for the zooms
+        [low, first) where its screen offset reaches beyond the export
+        extent (see _offset_in_extent_zoom); None when there are none."""
+        part = visible.intersect(ZoomInterval(float(low), float(first)))
+        if first <= low or part.is_empty:
+            return None
+        early = flat_rule.derive()
+        early.set_attr("o", low)
+        early.set_attr("i", first - 1)
+        early.visibility = part
+        return early
+
     def _screen_offset_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
         """A screen-unit line offset as QGIS draws it, a mitred offset curve
         of the line in painter pixels (QgsSymbolLayerUtils::offsetLine), for
@@ -1192,10 +1231,11 @@ class SymbolMaterializer:
         quantile = zooms[min(len(zooms) - 1, int(len(zooms) * self.OFFSET_LOOP_QUANTILE))]
         loop_zoom = quantile + math.log2(abs(offset_px))
         cut = min(high + 1, int(math.ceil(loop_zoom)))  # native from this zoom
-        if cut <= low:
+        first = max(low, self._offset_in_extent_zoom(offset_px))
+        if cut <= first:
             return None
         vertices = len(zooms) * 2 + self._layer_totals(flat_rule.layer)[2] * 2
-        zoom_rules = [r for r in self._per_zoom(flat_rule) if r.get_attr("o") < cut]
+        zoom_rules = [r for r in self._per_zoom(flat_rule) if first <= r.get_attr("o") < cut]
         steps = self._zoom_steps({rule.get_attr("o"): vertices for rule in zoom_rules},
                                  (8, 4, 2, 1))
         exact = [rule for rule in zoom_rules if steps[rule.get_attr("o")]]
@@ -1206,17 +1246,19 @@ class SymbolMaterializer:
             return None
         crs = self.project_crs or flat_rule.layer.crs().authid()
         offset_mm = _to_mm(layer.offset(), layer.offsetUnit())
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
         rules = []
-        first = exact[0].get_attr("o")
-        if first > low:  # the budget ends below the last zooms: native there
+        # Native (the browser's line offset) below the exact zooms: where
+        # the offset reaches beyond the export extent (below ``first``) and
+        # where the budget ends.
+        start = exact[0].get_attr("o")
+        if start > first:
             self._report("Q2VT_PATTERN_BUDGET",
-                         f"Line offset curves below zoom {first} would exceed the output "
+                         f"Line offset curves below zoom {start} would exceed the output "
                          "budget; drawn there with the browser's line offset.", flat_rule)
-            below = flat_rule.derive()
-            below.set_attr("i", first - 1)
-            below.visibility = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
-                ZoomInterval(0.0, float(first)))
-            rules.append(below)
+        early = self._offset_beyond_extent(flat_rule, visible, low, start)
+        if early is not None:
+            rules.append(early)
         for rule in exact:
             start = float(rule.get_attr("o"))
             for band, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")], False):
@@ -1228,7 +1270,6 @@ class SymbolMaterializer:
                     ("offset", offset_mm * self._map_units_per_mm(flat_rule, zoom)), ("crs", crs)))
                 derived.set_attr("m", 1)
                 rules.append(derived)
-        visible = flat_rule.visibility or ZoomInterval(float(low), None)
         native_part = visible.intersect(ZoomInterval(float(cut), None))
         if not native_part.is_empty:
             native = flat_rule.derive()

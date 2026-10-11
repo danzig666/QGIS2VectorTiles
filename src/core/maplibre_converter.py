@@ -3929,6 +3929,17 @@ class QgisMapLibreStyleExporter:
             out.extend([zoom, ["literal", [0, item]]])
         return out
 
+    @staticmethod
+    def _offset_join(layer_def: dict) -> None:
+        """A line drawn with ``line-offset`` joins mitred, limit 2: QGIS
+        strokes the offset curve GEOS builds mitred with that limit
+        (QgsSymbolLayerUtils::offsetLine). MapLibre's bevel and round joins
+        move the offset vertex at a 35-120 degree turn only part of the way,
+        so an offset several times the width tapers to a sliver there."""
+        if "line-offset" in layer_def["paint"]:
+            layer_def["layout"]["line-join"] = "miter"
+            layer_def["layout"]["line-miter-limit"] = 2.0
+
     def _convert_simple_or_pattern_line_symbol_layer(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -3982,6 +3993,7 @@ class QgisMapLibreStyleExporter:
                 "line-round-limit": LinePropertyExtractor.get_line_round_limit(),
                 "visibility": "visible",
             })
+            self._offset_join(layer_def)
         elif symbol_layer.layerType() in ("RasterLine", "Lineburst") and \
                 (raster_pattern := (self._register_raster_line(symbol_layer)
                                     if symbol_layer.layerType() == "RasterLine"
@@ -4002,6 +4014,7 @@ class QgisMapLibreStyleExporter:
                 "line-join": LinePropertyExtractor.get_line_join(symbol_layer),
                 "visibility": "visible",
             })
+            self._offset_join(layer_def)
         elif LinePropertyExtractor.is_pattern_line(symbol_layer):
             self.context.report("Q2VT_PATTERN_APPROXIMATE",
                                 f"{symbol_layer.layerType()} exported from a symbol preview.",
