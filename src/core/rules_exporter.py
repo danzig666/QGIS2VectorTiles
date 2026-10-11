@@ -226,6 +226,9 @@ _EXPRESSION_PARAMETERS = {"fieldcalculator": "FORMULA", "extractbyexpression": "
 # (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
 # cannot fit there at once instead of searching (a narrow or tiny parcel).
 LABEL_ANCHOR_MARKER = "q2vt:label-anchor"
+# The single part of a feature a visible-label polygon / line is (unique per
+# part; read by resources/ml_viewer/visible_labels.mjs).
+PART_FIELD = "q2vt_part"
 _POLE = "pole_of_inaccessibility($geometry, 0.2)"
 LABEL_ANCHOR_FIELDS = [
     (6, f"round(x({_POLE}), 2)", "q2vt_pole_x"),
@@ -2683,6 +2686,11 @@ class RulesExporter:
         mapping.append(
             (6, f'"{_FIELD_PREFIX}_orig_id"', f"{_FIELD_PREFIX}_orig_id")
         )
+        if grp.visible_polygons:
+            # Each part of a multi-part feature (the base datasets are single
+            # parts): the viewer labels every part ("Label every part") or
+            # only the biggest, and joins only the tile pieces of one part.
+            mapping.append((4, "$id", PART_FIELD))
         source_fields = self._open(current_input, "fields").fields()
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))

@@ -1625,6 +1625,18 @@ class TextPropertyExtractor:
         return _enum_int(handling, 0) != 0  # Qgis.LabelOverlapHandling.PreventOverlap
 
     @staticmethod
+    def overlap_at_no_cost(label_settings: QgsPalLayerSettings = None) -> bool:
+        """True for QGIS labels placed whatever they overlap ("Allow overlap
+        at no cost"): not moved aside for other labels."""
+        if label_settings is None:
+            return False
+        try:
+            handling = label_settings.placementSettings().overlapHandling()
+        except AttributeError:  # QGIS < 3.26
+            return False
+        return _enum_int(handling, 0) == 2  # Qgis.LabelOverlapHandling.AllowOverlapAtNoCost
+
+    @staticmethod
     def get_text_ignore_placement() -> bool:
         """Return ``text-ignore-placement`` (MapLibre default: ``False``)."""
         return False
@@ -4096,6 +4108,9 @@ class QgisMapLibreStyleExporter:
                 # "line": a line label put at the middle of the line's visible part.
                 "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
+            if not pinned and TextPropertyExtractor.overlap_at_no_cost(label_settings):
+                # Placed by the viewer at its best spot whatever it overlaps.
+                layer_def["metadata"]["q2vt:overlap-at-no-cost"] = True
             if layer_def["metadata"]["q2vt:visible-kind"] == "line" and self._allow_degraded(label_settings):
                 # A line too short for its label: QGIS draws it level at a
                 # point of the line ("Allow degraded placement").
@@ -4126,16 +4141,23 @@ class QgisMapLibreStyleExporter:
         """For an "around point" polygon label placed by the viewer: the
         candidate positions (MapLibre anchor names, in QGIS's order) and the
         QGIS label distance from the point, in pixels at ``zoom`` (map-unit
-        distances scale with the zoom; otherwise the size is fixed)."""
-        if placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
+        distances scale with the zoom; otherwise the size is fixed). "Outside
+        polygons" (``outside``): the same distance from the polygon's edge."""
+        if placement not in ("AroundPoint", "OrderedPositionsAroundPoint", "OutsidePolygons"):
             return None
-        anchors = TextPropertyExtractor.get_text_variable_anchor(label_settings)
+        outside = placement == "OutsidePolygons"
+        # "Outside polygons" (pal createCandidatesOutsidePolygon): beside the
+        # polygon's edge, on whichever side the edge faces.
+        anchors = list(TextPropertyExtractor.AROUND_POINT_ANCHORS) if outside else \
+            TextPropertyExtractor.get_text_variable_anchor(label_settings)
         try:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):
             distance = 0.0
         pixels = PropertyExtractor.length(distance, label_settings.distUnits) if distance else 0.0
         around = {"anchors": anchors}
+        if outside:
+            around["outside"] = True
         if ex.is_number(pixels):
             around["px"] = round(max(0.0, float(pixels)), 3)
         else:

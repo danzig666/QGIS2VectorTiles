@@ -21,9 +21,15 @@
 // and a kept centroid label must stay near the centroid, so after a pan
 // labels sit in the middle of what is visible, not at an old edge spot.
 // A label is only shown where its whole box fits on the screen (QGIS
-// drops candidates outside the map extent), and only when the visible part
-// of its polygon is at least as large as the label's box: a polygon with a
-// sliver in view gets no label at the edge. Groups are placed by QGIS label priority
+// drops candidates outside the map extent). A polygon wholly on the screen
+// is labelled however small it is (QGIS: the label's centre inside, Free
+// labels turned along the polygon sticking out of it where they cannot fit
+// inside); a polygon cut by the screen edge only when the visible part is at
+// least as large as the label's box: a sliver in view gets no label at the
+// edge. A multi-part feature (metadata["q2vt:label-per-part"]) gets a label
+// on every part, else on its biggest part only. "Outside polygons" labels
+// (q2vt:label-around.outside) go beside the polygon's edge, never on it.
+// Groups are placed by QGIS label priority
 // and z-index (metadata["q2vt:label-rank"]); later ones keep clear of the
 // boxes already placed (a zone code and the parcel number of the same
 // parcel do not compete for one point).
@@ -44,12 +50,13 @@
 // already placed instead of waiting for a new round.
 //
 // MapLibre draws these labels exactly where they are put (text-overlap
-// "always"): the placement above keeps them clear of each other where it
-// can, and a label with no free spot overlaps rather than disappearing -
-// labels that never blink while the map moves matter more than a rare
-// overlap. Other label layers QGIS may overlap "if required"
-// (metadata["q2vt:overlap"]) use MapLibre's cooperative overlap
-// (enableOverlapFallback).
+// "always", so they never blink while the map moves): the placement above
+// keeps them clear of each other, and a label with no free spot is left out
+// (QGIS "Never overlap", the default), drawn overlapping where QGIS allows
+// it (metadata["q2vt:overlap"] "if-required"; with
+// "q2vt:overlap-at-no-cost" at its best spot whatever it overlaps). Other
+// label layers QGIS may overlap "if required" use MapLibre's cooperative
+// overlap (enableOverlapFallback).
 
 const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
@@ -104,7 +111,14 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:label-anchor"] === "pole") groups.get(polygons).anchor = "pole";
     if (layer.metadata["q2vt:visible-kind"] === "line") groups.get(polygons).kind = "line";
     if (layer.metadata["q2vt:line-degraded"]) groups.get(polygons).degraded = true;
-    if (layer.metadata["q2vt:overlap"] === "if-required") groups.get(polygons).overlap = true;
+    // QGIS overlap handling: "Never overlap" (none), "Allow overlap if
+    // required" (a free spot first), "Allow overlap at no cost" (anywhere).
+    if (layer.metadata["q2vt:overlap"] === "if-required") {
+      groups.get(polygons).overlap = layer.metadata["q2vt:overlap-at-no-cost"] ? "always" : "if-required";
+    }
+    // "Label every part of multi-part features": one label per part, else
+    // only on the biggest part (QGIS).
+    if (layer.metadata["q2vt:label-per-part"]) groups.get(polygons).perPart = true;
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
     // "Around point" (QGIS): beside the point at the label distance, not on it.
     if (layer.metadata["q2vt:label-around"]) groups.get(polygons).around = layer.metadata["q2vt:label-around"];
@@ -232,7 +246,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // "always", they would otherwise sit on top of them.
         avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
-        degraded: Boolean(group.degraded), overlap: Boolean(group.overlap),
+        degraded: Boolean(group.degraded), overlap: group.overlap || null, perPart: Boolean(group.perPart),
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -372,8 +386,11 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const clip = intersect(reach, [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z]);
     if (!clip) continue;
     const rings = [];
+    const tileRect = [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z];
+    let extent = null;  // of the piece in its own tile (not cut to reach)
     for (const ring of tile.loadGeometry()) {
       const world = ring.map((p) => [ox + p.x * scale, oy + p.y * scale]);
+      extent = union(extent, intersect(bounds([world]), tileRect));
       if (options.kind === "line") {  // polylines, cut to the tile
         rings.push(...clipLine(world, clip));
         continue;
@@ -383,14 +400,25 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       if (clipped.length >= 3) rings.push(clipped);
     }
     if (!rings.length) continue;
-    // A plain copy: tile feature properties have no prototype, which
+    // The parts of a multi-part feature (q2vt_part) stay apart; the pieces
+    // of one part in several tiles are joined. A plain copy of the
+    // properties: tile feature properties have no prototype, which
     // MapLibre's worker serializer rejects ("_classRegistryKey").
-    if (!byFeature.has(key)) byFeature.set(key, { properties: { ...f.properties }, rings: [] });
-    byFeature.get(key).rings.push(...rings);
+    if (!byFeature.has(key)) byFeature.set(key, new Map());
+    const parts = byFeature.get(key);
+    const part = String(f.properties.q2vt_part ?? "");
+    if (!parts.has(part)) parts.set(part, { properties: { ...f.properties }, rings: [], extent: null });
+    const entry = parts.get(part);
+    entry.rings.push(...rings);
+    entry.extent = union(entry.extent, extent);
   }
   // A kept point on a tile still loading cannot be checked: keep it.
   const unchecked = (point) => !loaded.has(
     `${Math.floor(point[0] * 2 ** deepest)}/${Math.floor(point[1] * 2 ** deepest)}`);
+  // QGIS overlap handling: "never" (the default: a label with no free spot
+  // is not drawn), "if-required" (a free spot first) or "always" (at no cost).
+  const overlap = options.overlap === true ? "if-required" : (options.overlap || "never");
+  const tolerance = (options.precision || 0) + 1e-12;
   const points = new Map();
   const avoid = (options.avoid || []).slice();
   const boxes = [];
@@ -399,18 +427,40 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const [x2, y2] = ring[(i + 1) % ring.length];
     return a + x1 * y2 - x2 * y1;
   }, 0), 0));
-  const ordered = [...byFeature].map(([key, value]) => [key, value, area(value.rings)])
+  // QGIS "Label every part": a label per part; else only the biggest part
+  // (area, or length for lines, of what is in the map extent) gets one.
+  const length = (pieces) => pieces.reduce((sum, piece) => sum + chainLength(piece), 0);
+  const visibleSize = (rings) => (options.kind === "line"
+    ? length(rings.flatMap((piece) => clipLine(piece, view)))
+    : area(rings.map((ring) => clipRing(ring, view)).filter((ring) => ring.length >= 3)));
+  const entries = [];
+  for (const [key, parts] of byFeature) {
+    if (parts.size === 1) {
+      entries.push([key, parts.values().next().value, key]);
+    } else if (!options.perPart) {
+      let best = null, most = -Infinity;
+      for (const entry of parts.values()) {
+        // Nothing on the screen: the biggest loaded part (labelled in advance).
+        const size = visibleSize(entry.rings) || 1e-9 * (options.kind === "line" ? length(entry.rings) : area(entry.rings));
+        if (size > most) [best, most] = [entry, size];
+      }
+      entries.push([key, best, key]);
+    } else {
+      for (const [part, entry] of parts) entries.push([`${key}#${part}`, entry, key]);
+    }
+  }
+  const ordered = entries.map(([key, value, orig]) => [key, value, area(value.rings), orig])
     .sort((a, b) => b[2] - a[2]);
-  for (let [key, { properties, rings: loaded }] of ordered) {
+  for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
-      points.set(key, { point: old.point, properties: old.properties || properties });
+      points.set(key, { point: old.point, properties: old.properties || properties, orig });
       continue;
     }
     if (options.kind === "line") {
       const placed = placeOnLine(loaded, properties, old, view, guarded, avoid, options);
       if (placed) {
-        points.set(key, placed);
+        points.set(key, { ...placed, orig });
         if (placed.box) {
           boxes.push(placed.box);
           avoid.push(placed.box);
@@ -424,23 +474,26 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       return clipped;
     }).filter((ring) => ring.length >= 3);
     const pole = options.anchor === "pole";
+    const outside = Boolean(options.around && options.around.outside);
     if (!rings.length) {  // off the screen: in advance, away from the screen edge
+      if (outside) continue;  // beside the polygon: placed once it is in view
       const point = pole ? roomiestPoint(loaded, options.precision).point : labelPoint(loaded);
-      if (point && !within(guarded, point)) points.set(key, { point, properties });
+      if (point && !within(guarded, point)) points.set(key, { point, properties, orig });
       continue;
     }
     // The label's box (half width/height, world units): it must fit on the
-    // screen and should keep clear of the boxes of better-ranked labels.
+    // screen and keep clear of the boxes of better-ranked labels.
     const label = options.labelBox ? options.labelBox(properties) : null;
     let half = label;
     const fit = (x, y) => (half ? Math.min(x - view[0] - half[0], view[2] - half[0] - x,
                                            y - view[1] - half[1], view[3] - half[1] - y) : Infinity);
-    // Only boxes that can matter: within a label's size of the visible part.
+    // Only boxes that can matter: within a label's size of the visible part
+    // ("outside polygons" labels go anywhere round the polygon: all).
     let near = [];
     const nearBoxes = () => {
       near = [];
-      if (half && avoid.length) {
-        const extent = bounds(rings);
+      if (half && avoid.length && overlap !== "always") {
+        const extent = outside ? view : bounds(rings);
         const extra = options.around ? options.around.distance : 0;
         const reachBox = grow(extent, 2 * half[0] + extra, 2 * half[1] + extra);
         near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
@@ -468,39 +521,47 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
       boxes.push(box);
       avoid.push(box);
-      points.set(key, { point, properties });
+      points.set(key, { point, properties, orig });
       continue;
     }
-    // "Always label": a polygon wholly on the screen keeps its label even
-    // when it is smaller than the label (drawn smaller, see below).
-    const whole = options.always && area(rings) >= 0.98 * area(loaded);
-    // Only a sliver in view: no label. "Around point" labels go beside the
-    // polygon, so a polygon smaller than its label (a restaurant's building)
-    // keeps its label.
-    if (label && !options.around && area(rings) < 4 * label[0] * label[1] && !whole) continue;
+    // The polygon wholly on the screen (not cut by its edge). QGIS labels it
+    // however small: Over point at its centroid, Horizontal / Free with the
+    // label's centre inside it (no "fit in polygon" by default).
+    const whole = extent ? extent[0] >= view[0] - tolerance && extent[1] >= view[1] - tolerance
+      && extent[2] <= view[2] + tolerance && extent[3] <= view[3] + tolerance
+      : area(rings) >= 0.98 * area(loaded);
+    // "Always label": such a polygon keeps its label whatever overlaps it.
+    const forced = options.always && whole;
+    // A label may overlap others: QGIS's overlap setting, or "Always label".
+    const mayOverlap = overlap !== "never" || forced;
+    // Only a sliver of a polygon cut by the screen edge in view: no label.
+    // "Around point" labels go beside the polygon (a restaurant's building).
+    if (label && !options.around && !whole && area(rings) < 4 * label[0] * label[1]) continue;
     let scale = 1;
     if (pole) {
       const search = () => {
         const room = (extra) => roomiestPoint(rings, options.precision, extra);
         let score = (x, y) => Math.min(fit(x, y), clear(x, y));
         let best = room(score);
-        if (!(best.room > 0)) {  // no free spot: the best spot that fits (overlapping)
+        if (!(best.room > 0) && mayOverlap) {  // no free spot: the best spot that fits (overlapping)
           score = fit;
           best = room(score);
         }
-        if (!(best.room > 0) && whole) {  // too small for the label: the roomiest point
+        if (!(best.room > 0) && forced) {  // too small for the label: the roomiest point
           score = () => Infinity;
           best = room(null);
         }
         return { best, score };
       };
       let { best, score } = search();
-      if (!(best.room > 0)) continue;  // only a sliver in view: no label (as QGIS)
+      // No free spot of the polygon on the screen: no label (QGIS "Never overlap").
+      if (!(best.room > 0)) continue;
       const free = options.orient === "free" && options.rotationField && label;
       if (free) {
         // Free (angled), as QGIS: horizontal where the label fits inside the
         // polygon, else turned along the polygon (a street name along its
-        // street) - always wholly inside the polygon, else no label.
+        // street): wholly inside where it fits, else with its centre inside
+        // (QGIS only requires that without "fit in polygon").
         const field = options.rotationField;
         const fine = (p) => Math.min(fit(...p), clear(...p)) >= 0;
         const flatOld = old && !Number(old.properties?.[field]) && within(inner, old.point)
@@ -509,9 +570,9 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const oldScale = Number(old?.properties?.[LABEL_SCALE]) || 1;
         // QGIS decides the angle from the label's own size (no margin).
         const bare = (box) => box.map((h) => Math.max(h - LABEL_MARGIN_PX * (options.precision || 0), h / 2));
-        const place = (box, keepOld) => {
+        const place = (box, keepOld, loose = false) => {
           const angle = freeAngle(rings, bare(box));
-          if (!angle) {
+          if (!angle && !loose) {
             if (keepOld && flatOld) return { point: old.point, angle: 0 };
             if (fitsFlat(rings, best.point, best.room, box) && fit(...best.point) >= 0) {
               return { point: best.point, angle: 0 };
@@ -521,7 +582,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           // polygon candidate costs), not the arbitrary roomiest point along
           // a long, even strip.
           return placeTurned(rings, angle, box, view, avoid, labelPoint(rings) || best.point,
-                             oldScale === scale ? old : null, field, options.precision);
+                             oldScale === scale ? old : null, field, options.precision,
+                             { overlap: mayOverlap, loose });
         };
         let placed = place(label, true);
         if (!placed && options.always) {
@@ -540,6 +602,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
             placed = { point: best.point, angle };
           }
         }
+        // Nowhere wholly inside: centred inside, sticking out (QGIS).
+        if (!placed) placed = place(label, false, true);
         if (!placed) continue;
         point = placed.point;
         half = envelope([label[0] * scale, label[1] * scale], placed.angle);
@@ -554,18 +618,31 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     } else if (options.around && half) {
       // "Around point" (QGIS): beside the point at the label distance, the
       // first candidate position (QGIS order) that fits on the screen and
-      // keeps clear of better-ranked labels; else the first that fits.
-      const target = labelPoint(rings);
-      if (!target) continue;
-      const candidates = aroundCandidates(target, label.text || half, options.around);
+      // keeps clear of better-ranked labels; else the first that fits, if
+      // the label may overlap. "Outside polygons": beside the polygon's
+      // edge, the candidate nearest its centroid first.
+      let candidates;
+      if (outside) {
+        candidates = outsideCandidates(loaded, rings, label.text || half, half, options.around.distance,
+                                       options.precision);
+      } else {
+        const target = labelPoint(rings);
+        if (!target) continue;
+        candidates = aroundCandidates(target, label.text || half, options.around);
+      }
       const fits = (p) => fit(...p) >= 0;
       const free = (p) => fits(p) && clear(...p) >= 0;
-      const kept = old && Number.isInteger(old.slot) && candidates[old.slot] && within(inner, old.point)
-        && Math.hypot(old.point[0] - candidates[old.slot][0], old.point[1] - candidates[old.slot][1])
-          <= (options.keepDistance ?? Infinity)
-        && (unchecked(old.point) || free(old.point));
+      // A kept label stays near its candidate (at the label distance from
+      // the polygon at this zoom; "outside": near any of them).
+      const nearby = (p) => Math.hypot(old.point[0] - p[0], old.point[1] - p[1]) <= (options.keepDistance ?? Infinity);
+      const kept = old && Number.isInteger(old.slot) && within(inner, old.point) && (outside
+        ? candidates.some(nearby) && free(old.point)
+          && !boxHitsPolygon(loaded, [old.point[0] - half[0], old.point[1] - half[1],
+                                      old.point[0] + half[0], old.point[1] + half[1]])
+        : candidates[old.slot] && nearby(candidates[old.slot])
+          && (unchecked(old.point) || free(old.point)));
       slot = kept ? old.slot : candidates.findIndex(free);
-      if (slot < 0) slot = candidates.findIndex(fits);
+      if (slot < 0 && mayOverlap) slot = candidates.findIndex(fits);
       if (slot < 0) continue;
       point = kept ? old.point : candidates[slot];
     } else {
@@ -573,7 +650,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       if (!target || fit(...target) < 0) continue;
       const near = (p) => Math.hypot(p[0] - target[0], p[1] - target[1]) <= (options.keepDistance ?? Infinity);
       const keep = old && within(inner, old.point) && fit(...old.point) >= 0 && (unchecked(old.point)
-        || (inside(rings, old.point) && near(old.point)));
+        || (inside(rings, old.point) && near(old.point) && (mayOverlap || clear(...old.point) >= 0)));
+      // Over point (QGIS): its one candidate, dropped where it would overlap
+      // a label placed before it ("Never overlap").
+      if (!keep && !mayOverlap && clear(...target) < 0) continue;
       point = keep ? old.point : target;
     }
     if (half) {
@@ -581,11 +661,11 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       boxes.push(box);
       avoid.push(box);
     }
-    points.set(key, slot === undefined ? { point, properties } : { point, properties, slot });
+    points.set(key, slot === undefined ? { point, properties, orig } : { point, properties, slot, orig });
   }
   for (const [key, old] of state.points) {
-    if (!points.has(key) && !excluded.has(key) && (options.freeze || within(inner, old.point)) && unchecked(old.point)
-        && (!options.eligible || options.eligible(old.properties))) points.set(key, old);
+    if (!points.has(key) && !excluded.has(old.orig ?? key) && (options.freeze || within(inner, old.point))
+        && unchecked(old.point) && (!options.eligible || options.eligible(old.properties))) points.set(key, old);
   }
   state.points = points;
   const out = [];
@@ -605,9 +685,12 @@ export function aroundOption(around, zoom, perPx) {
   let px = Number(around.px) || 0;
   if (Number.isFinite(Number(around.zoom))) px *= 2 ** (zoom - Number(around.zoom));  // map units
   // QGIS's order (pal createCandidatesAroundPoint): top-right first.
-  const anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
+  let anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
     : ["bottom-left", "left", "bottom", "top-left", "bottom-right", "top", "right", "top-right"];
-  return { anchors, distance: px * perPx };
+  // No distance: QGIS tries the label centred on the point first.
+  if (!px && !around.outside && !anchors.includes("center")) anchors = ["center", ...anchors];
+  // "Outside polygons": beside the polygon's edge instead of its centroid.
+  return around.outside ? { anchors, distance: px * perPx, outside: true } : { anchors, distance: px * perPx };
 }
 
 // Label centres around a point (world units, y down), one per anchor: the
@@ -624,6 +707,73 @@ export function aroundCandidates(point, [hx, hy], { anchors, distance }) {
     const d = sx && sy ? distance * Math.SQRT1_2 : distance;
     return [point[0] + sx * (d + hx), point[1] + sy * (d + hy)];
   });
+}
+
+// QGIS "Outside polygons" (pal createCandidatesOutsidePolygon): label centres
+// at points spaced evenly along the polygon's edges (``loaded``: tile cuts
+// are not edges), on the outer side of each edge at the label distance from
+// it, horizontal; a box (``half``) that reaches the polygon (or nearer to
+// it than half the distance) is no candidate. Cheapest first: the nearest
+// to the centroid of the visible part (``rings``). ``text``: the bare text's
+// half size, from which the distance is measured.
+const OUTSIDE_CANDIDATES = 64;
+const SIDE_TOLERANCE = Math.sin(5 * Math.PI / 180);  // QGIS: within 5° of an axis
+export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0) {
+  const edges = realEdges(loaded);
+  const total = edges.reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
+  if (!(total > 0)) return [];
+  const step = Math.max(total / OUTSIDE_CANDIDATES, precision);
+  const eps = Math.max(precision, total * 1e-6);
+  const centre = centroidOf(rings) || labelPoint(rings);
+  const out = [];
+  let offset = step / 2;  // distance along the edges to the next sample
+  for (const [a, b] of edges) {
+    const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!length) continue;
+    // The edge's normal pointing out of the polygon.
+    let [nx, ny] = [(b[1] - a[1]) / length, -(b[0] - a[0]) / length];
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    if (inside(loaded, [mid[0] + nx * eps, mid[1] + ny * eps])) [nx, ny] = [-nx, -ny];
+    const sx = Math.abs(nx) < SIDE_TOLERANCE ? 0 : Math.sign(nx);
+    const sy = Math.abs(ny) < SIDE_TOLERANCE ? 0 : Math.sign(ny);
+    const d = sx && sy ? distance * Math.SQRT1_2 : distance;
+    for (; offset <= length; offset += step) {
+      const t = offset / length;
+      const [px, py] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      const p = [px + sx * (d + tx), py + sy * (d + ty)];
+      const box = [p[0] - half[0], p[1] - half[1], p[0] + half[0], p[1] + half[1]];
+      if (boxHitsPolygon(loaded, grow(box, distance / 2 - precision, distance / 2 - precision))) continue;
+      out.push({ p, cost: centre ? Math.max(0, rectDistance(centre[0], centre[1], box)) : 0 });
+    }
+    offset -= length;
+  }
+  return out.sort((x, y) => x.cost - y.cost).map(({ p }) => p);
+}
+
+// Does a box touch the polygon (a corner inside it, an edge across it)?
+function boxHitsPolygon(rings, box) {
+  const [x0, y0, x1, y1] = box;
+  if (!(x0 < x1 && y0 < y1)) return false;
+  for (const corner of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) if (inside(rings, corner)) return true;
+  for (const ring of rings) {
+    for (let i = 0, n = ring.length; i < n; i++) {
+      if (clipLine([ring[i], ring[(i + 1) % n]], box).length) return true;
+    }
+  }
+  return false;
+}
+
+// Centroid of the rings' area (holes subtract), inside or not.
+function centroidOf(rings) {
+  let area = 0, cx = 0, cy = 0;
+  for (const ring of rings) {
+    for (let i = 0, n = ring.length; i < n; i++) {
+      const [x1, y1] = ring[i], [x2, y2] = ring[(i + 1) % n];
+      const cross = x1 * y2 - x2 * y1;
+      area += cross; cx += (x1 + x2) * cross; cy += (y1 + y2) * cross;
+    }
+  }
+  return Math.abs(area) < 1e-22 ? null : [cx / (3 * area), cy / (3 * area)];
 }
 
 // The export's pole of inaccessibility (EPSG:3857 metres, ``q2vt_pole_*``)
@@ -699,14 +849,17 @@ function boxInside(rings, [x, y], [hx, hy]) {
   return !realEdges(rings).some(([a, b]) => clipLine([a, b], box).length);
 }
 
-// A label turned by ``angle`` placed wholly inside the polygon (QGIS drops
-// polygon label candidates that stick out), on the screen and clear of
-// ``avoid``: candidate spots on a grid along the turned axes (anchored to
-// the world, so the same spots after a pan); the best centred one wins (most
-// room to the polygon's edges), then the one nearest ``target``. A kept spot
-// at the same angle stays while it is still fine and nearly as centred.
+// A label turned by ``angle`` placed wholly inside the polygon, on the
+// screen and clear of ``avoid``: candidate spots on a grid along the turned
+// axes (anchored to the world, so the same spots after a pan); the best
+// centred one wins (most room to the polygon's edges), then the one nearest
+// ``target``. A kept spot at the same angle stays while it is still fine and
+// nearly as centred. ``loose``: only the label's centre must be inside (QGIS
+// without "fit in polygon": a label wider than a narrow strip sticks out of
+// it). ``overlap``: with no spot clear of ``avoid``, the best one anyway.
 // Returns {point, angle} or null.
-function placeTurned(rings, angle, label, view, avoid, target, old, field, precision = 0) {
+function placeTurned(rings, angle, label, view, avoid, target, old, field, precision = 0,
+                     { overlap = true, loose = false } = {}) {
   const [hx, hy] = label;
   const c = Math.cos(angle), s = Math.sin(angle);
   const toFrame = ([x, y]) => [x * c + y * s, -x * s + y * c];
@@ -730,6 +883,7 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
     if (Math.min(x - view[0] - ex, view[2] - ex - x, y - view[1] - ey, view[3] - ey - y) < 0) return false;
     const [u, v] = toFrame(p);
     if (clearOf.some((other) => overlaps(p, [u, v], other))) return false;
+    if (loose) return inside(rings, p);
     const rect = [u - hx, v - hy, u + hx, v + hy];
     for (const corner of [[rect[0], rect[1]], [rect[2], rect[1]], [rect[2], rect[3]], [rect[0], rect[3]]]) {
       if (!inside(rings, fromFrame(corner))) return false;
@@ -745,8 +899,12 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
     }
   }
   // Longer or taller than the polygon along the label: it cannot fit.
-  if (u1 - u0 < 2 * hx || v1 - v0 < 2 * hy) return null;
+  if (!loose && (u1 - u0 < 2 * hx || v1 - v0 < 2 * hy)) return null;
   let du = Math.max(hx / 3, precision), dv = Math.max(hy / 2, precision);
+  if (loose) {  // a polygon smaller than the label: a few spots across it
+    du = Math.max(Math.min(du, (u1 - u0) / 4), precision);
+    dv = Math.max(Math.min(dv, (v1 - v0) / 4), precision);
+  }
   const cells = ((u1 - u0) / du) * ((v1 - v0) / dv);
   if (cells > 800) {  // a big polygon: coarser grid
     const k = Math.sqrt(cells / 800);
@@ -758,9 +916,10 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
     for (let v = Math.floor(v0 / dv) * dv; v <= v1; v += dv) {
       const p = fromFrame([u, v]);
       const room = roomAt(rings, p);
-      if (room >= hy) candidates.push({ p, room });  // at least the label's height across
+      if (loose ? room > 0 : room >= hy) candidates.push({ p, room });  // at least the label's height across
     }
   }
+  if (loose && roomAt(rings, target) > 0) candidates.push({ p: target, room: roomAt(rings, target) });
   const bin = Math.max(dv, precision) / 2;  // rooms within half a step count as equal
   candidates.sort((a, b) => (Math.round(b.room / bin) - Math.round(a.room / bin))
     || (Math.hypot(a.p[0] - target[0], a.p[1] - target[1]) - Math.hypot(b.p[0] - target[0], b.p[1] - target[1])));
@@ -768,9 +927,9 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
   for (let i = 0; i < candidates.length && i < 400 && !found; i++) {
     if (ok(candidates[i].p)) found = candidates[i];
   }
-  // Nothing clear of the other labels: the best spot inside anyway (MapLibre
-  // and the overlap setting decide, as for horizontal labels) - never outside.
-  for (let i = 0; i < candidates.length && i < 400 && !found; i++) {
+  // Nothing clear of the other labels: the best spot inside anyway, if the
+  // label may overlap (QGIS overlap setting) - never outside.
+  for (let i = 0; i < candidates.length && i < 400 && !found && overlap; i++) {
     if (ok(candidates[i].p, [])) found = candidates[i];
   }
   if (!found) return null;
@@ -1271,6 +1430,13 @@ export function evaluate(expression, zoom, properties = {}) {
       }
       return ev(stops[stops.length - 1]);
     }
+    case "format": {  // the sections' text (their options left out)
+      let text = "";
+      for (const value of args) {
+        if (!(value && typeof value === "object" && !Array.isArray(value))) text += String(ev(value) ?? "");
+      }
+      return text;
+    }
     default: return undefined;
   }
 }
@@ -1320,41 +1486,79 @@ export function fontMetrics(style) {
 const LABEL_MARGIN_PX = 2;
 export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null) {
   return (properties) => {
-    let text = String(evaluate(layout["text-field"], zoom, properties) ?? "");
-    if (!text) return null;
+    let sections = textSections(layout["text-field"], zoom, properties);
+    if (!sections.some(({ text }) => text)) return null;
     let size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
     if (!Number.isFinite(size) || size <= 0) size = 16;
     let pad = evaluate(layout["icon-text-fit-padding"], zoom, properties);
     pad = Array.isArray(pad) && pad.length === 4 && layout["icon-text-fit"] ? pad.map(Number) : [0, 0, 0, 0];
     const transform = evaluate(layout["text-transform"], zoom, properties);
-    if (transform === "uppercase") text = text.toUpperCase();
-    else if (transform === "lowercase") text = text.toLowerCase();
-    const lines = text.split("\n");
+    if (transform === "uppercase") sections = sections.map((p) => ({ ...p, text: p.text.toUpperCase() }));
+    else if (transform === "lowercase") sections = sections.map((p) => ({ ...p, text: p.text.toLowerCase() }));
+    // Lines of [text, scale] pieces (an HTML label's sections each have
+    // their own font scale).
+    const lines = [[]];
+    for (const { text, scale } of sections) {
+      text.split("\n").forEach((piece, i) => {
+        if (i) lines.push([]);
+        lines[lines.length - 1].push([piece, scale]);
+      });
+    }
+    // A line is as tall as its biggest piece (an empty line: as its text).
+    const lineScale = (line) => Math.max(...line.map(([piece, scale]) => (piece || line.length === 1 ? scale : 0)));
     const lineHeight = Number(evaluate(layout["text-line-height"] ?? 1.2, zoom, properties)) || 1.2;
+    const scales = lines.map(lineScale);
     let width, height;
     if (metrics) {
       const spacing = Number(evaluate(layout["text-letter-spacing"] ?? 0, zoom, properties)) || 0;
-      const ems = (line) => {
-        const chars = [...line];
-        return chars.reduce((sum, char) => sum + (metrics.advance.get(char) ?? charWidth), 0)
-          + spacing * Math.max(0, chars.length - 1);
-      };
+      const ems = (line) => line.reduce((sum, [piece, scale]) => {
+        const chars = [...piece];
+        return sum + scale * (chars.reduce((total, char) => total + (metrics.advance.get(char) ?? charWidth), 0)
+          + spacing * Math.max(0, chars.length - 1));
+      }, 0);
       width = Math.max(...lines.map(ems)) * size;
-      height = (metrics.height + (lines.length - 1) * lineHeight) * size;
+      height = (metrics.height * scales[0] + scales.slice(1).reduce((sum, k) => sum + k * lineHeight, 0)) * size;
     } else {
-      width = Math.max(...lines.map((line) => line.length)) * charWidth * size;
-      height = lines.length * 1.2 * size;
+      const ems = (line) => line.reduce((sum, [piece, scale]) => sum + piece.length * scale, 0);
+      width = Math.max(...lines.map(ems)) * charWidth * size;
+      height = scales.reduce((sum, k) => sum + k * 1.2, 0) * size;
     }
     const bare = [width / 2 * perPx, height / 2 * perPx];
     // MapLibre fits a frame to its own line box (text-line-height a line);
     // the exporter's padding brings it out to QGIS's ascent and descent.
-    if (layout["icon-text-fit"]) height = lines.length * lineHeight * size;
+    if (layout["icon-text-fit"]) height = scales.reduce((sum, k) => sum + k * lineHeight, 0) * size;
     width += pad[1] + pad[3];
     height += pad[0] + pad[2];
     const box = [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
     box.text = bare;  // QGIS measures the "around point" distance from the bare text
     return box;
   };
+}
+
+// A text-field's text as [{text, scale}] sections: plain text one section;
+// "format" (HTML labels) each section with its font-scale; MapLibre's own
+// evaluation (a Formatted, from rendered features) likewise.
+function textSections(field, zoom, properties) {
+  if (Array.isArray(field) && field[0] === "format") {
+    const sections = [];
+    for (const item of field.slice(1)) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        if (sections.length && item["font-scale"] !== undefined) {
+          const scale = Number(evaluate(item["font-scale"], zoom, properties));
+          sections[sections.length - 1].scale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+        }
+        continue;
+      }
+      sections.push({ text: String(evaluate(item, zoom, properties) ?? ""), scale: 1 });
+    }
+    return sections;
+  }
+  const value = evaluate(field, zoom, properties);
+  if (value && typeof value === "object" && Array.isArray(value.sections)) {
+    return value.sections.map((section) => ({ text: String(section.text ?? ""),
+                                             scale: Number(section.scale) > 0 ? Number(section.scale) : 1 }));
+  }
+  return [{ text: String(value ?? ""), scale: 1 }];
 }
 
 // The boxes a group's labels keep clear of: those placed before them and,
@@ -1411,6 +1615,11 @@ function within([x0, y0, x1, y1], [x, y]) {
 function intersect(a, b) {
   const r = [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
   return r[0] < r[2] && r[1] < r[3] ? r : null;
+}
+
+function union(a, b) {
+  if (!a || !b) return a || b;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
 }
 
 // Sutherland–Hodgman against an axis-aligned rectangle.
