@@ -2821,14 +2821,26 @@ class QgisMapLibreStyleExporter:
         return seen
 
     def _variant_images(self, fields: List[str], combos: list, make_name) -> list:
-        """``["match", key, value, name, ..., default]`` pieces for combos."""
-        key = ex.get(fields[0]) if len(fields) == 1 else \
+        """``["match", key, value, name, ..., default]`` pieces for combos.
+        Numbers are matched as the viewer writes them (``to-string``): a
+        tile carries 4.0 as the integer 4, never the text "4.0"."""
+        def text(value):
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value)
+        numeric = any(isinstance(v, (int, float)) and not isinstance(v, bool)
+                      for combo in combos for v in combo)
+        key = (["to-string", ex.get(fields[0])] if numeric else ex.get(fields[0])) \
+            if len(fields) == 1 else \
             ["concat"] + sum(([["to-string", ex.get(f)], "|"] for f in fields), [])[:-1]
-        cases = []
+        cases, seen = [], set()
         for combo in combos:
             if any(v is None for v in combo):
                 continue
-            value = str(combo[0]) if len(fields) == 1 else "|".join(str(v) for v in combo)
+            value = "|".join(text(v) for v in combo)
+            if value in seen:
+                continue
+            seen.add(value)
             cases += [value, make_name(combo)]
         return key, cases
 
@@ -3639,8 +3651,41 @@ class QgisMapLibreStyleExporter:
 
     _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "layerenabled"})
 
+    def _stroke_sized(self, symbol, symbol_layer, source_layer):
+        """``(symbol, symbol layer, sprite-independent properties)`` that
+        size the icon. A line marker (a hash) with a data-defined size: QGIS
+        draws each length with the same pen width, which scaling one image
+        by the length would widen (an 8 mm hash of a 3 mm image drawn 2.7
+        times as wide), so each distinct length is its own sprite, scaled
+        with the map only. Over the variant budget the image is scaled
+        (reported)."""
+        if symbol.symbolLayerCount() != 1:
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        layer = symbol.symbolLayer(0)
+        size_key = QgsSymbolLayer.Property.PropertySize
+        try:
+            line = layer.layerType() == "SimpleMarker" and layer.shape() == Qgis.MarkerShape.Line
+        except (AttributeError, RuntimeError):
+            line = False
+        prop = layer.dataDefinedProperties().property(size_key)
+        if not line or prop is None or not prop.isActive() or ex.is_number(
+                PropertyExtractor.get_value_or_expression(layer.size(), prop, "number")):
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        independent = self._SPRITE_INDEPENDENT - {"size"}
+        fields = self._variant_fields(layer, independent)
+        if not fields or self._distinct_values(source_layer, fields) is None:
+            self.context.report(
+                "Q2VT_MARKER_PLACEMENT_APPROX",
+                f"Data-defined hash length: more than {self.MAX_VARIANTS} distinct lengths, so "
+                "the browser scales the hash's image and its stroke width changes with the "
+                "length.")
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        static = symbol.clone()
+        static.symbolLayer(0).setDataDefinedProperty(size_key, QgsProperty())
+        return static, static.symbolLayer(0), independent
+
     def _marker_variants(self, symbol, marker_name, source_layer, map_units_per_pixel,
-                         oversampling):
+                         oversampling, independent=_SPRITE_INDEPENDENT):
         """``icon-image``: one sprite per distinct data-defined appearance.
 
         Size, angle and opacity are applied by the style; every other
@@ -3652,9 +3697,9 @@ class QgisMapLibreStyleExporter:
         several = symbol.symbolLayerCount() > 1
         fields = sorted({f for i in range(symbol.symbolLayerCount())
                          for f in self._variant_fields(
-                             symbol.symbolLayer(i), self._SPRITE_INDEPENDENT - {"opacity"}
+                             symbol.symbolLayer(i), independent - {"opacity"}
                              if several and symbol.symbolLayer(i).layerType() == "RasterMarker"
-                             else self._SPRITE_INDEPENDENT)})
+                             else independent)})
         if not fields:
             return marker_name
         combos = self._distinct_values(source_layer, fields)
@@ -3898,14 +3943,16 @@ class QgisMapLibreStyleExporter:
 
         marker_name = self._next_name("marker")
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
+        scaled_symbol, scaled_layer, independent = self._stroke_sized(
+            symbol, symbol_layer, source_layer_name)
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
-            symbol, symbol_layer)
+            scaled_symbol, scaled_layer)
         sprite_symbol, icon_opacity = self._marker_opacity(symbol)
         self.marker_symbols[marker_name] = SpriteRequest(
             sprite_symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
         icon_image = self._marker_variants(sprite_symbol, marker_name, source_layer_name,
-                                           map_units_per_pixel, oversampling)
+                                           map_units_per_pixel, oversampling, independent)
         if icon_image == marker_name:
             icon_image = marker_name = self._shared_sprite(marker_name)
 

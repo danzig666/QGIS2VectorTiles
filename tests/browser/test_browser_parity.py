@@ -194,6 +194,36 @@ def test_a_line_drawn_only_inside_polygons_stays_inside(tmp_path, monkeypatch, z
     assert browser == pytest.approx(qgis, rel=0.15)
 
 
+@pytest.mark.parametrize("zoom", [16.0, 18.0])
+def test_data_defined_hash_lengths_keep_the_stroke_width(tmp_path, zoom):
+    """Hashes 2, 4 and 8 m long on three lines (a 3 m static length, a
+    0.6 mm pen): the browser scaled one hash image by length / 3, so the
+    8 m hashes were drawn 2.7 times as wide as QGIS's (2.4 times its ink at
+    zoom 18). A map from zoom 0 with tiles to 16, inside the tiles and
+    overzoomed."""
+    from qgis.core import QgsHashedLineSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857&field=len:double", "hashes", "memory")
+    for (y0, y1), length in (((-40, -40), 4.0), ((0, 30), 8.0), ((40, 45), 2.0)):
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(QgsGeometry.fromWkt(
+            f"LINESTRING({CENTER[0] - 60} {CENTER[1] + y0}, {CENTER[0] + 60} {CENTER[1] + y1})"))
+        feature["len"] = length
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "hashes.gpkg"))
+    hashes = QgsHashedLineSymbolLayer()
+    hashes.setInterval(6)
+    hashes.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hashes.setHashLength(3)
+    hashes.setHashLengthUnit(Qgis.RenderUnit.MapUnits)
+    hashes.subSymbol().setColor(QColor(200, 0, 0))
+    hashes.subSymbol().setWidth(0.6)
+    hashes.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineDistance,
+                                  QgsProperty.fromExpression('"len"'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hashes])))
+    qgis, browser = _compare(tmp_path, layer, "ink", zoom_range=(0, 16), zoom=zoom)
+    assert browser == pytest.approx(qgis, rel=0.25)
+
+
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])
 @pytest.mark.parametrize("pattern", ["custom", "custom_empty_dash", "dash", "dashdot"])
 def test_dash_patterns_follow_qt(tmp_path, cap, pattern):

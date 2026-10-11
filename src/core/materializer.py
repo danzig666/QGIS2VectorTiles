@@ -2607,7 +2607,8 @@ class SymbolMaterializer:
         # Every layer setting that QgsTemplatedLineSymbolLayerBase shares with
         # a marker line (data-defined interval, offsets, placement, averaging,
         # ring filter); the hash's own angle and length (evaluated per hash,
-        # relative to the line) become the line marker's angle and size.
+        # relative to the line) become the line marker's angle and size (a
+        # sprite per length, see MapLibreConverter._stroke_sized).
         props = QgsPropertyCollection(layer.dataDefinedProperties())
         for key, marker_key in ((QgsSymbolLayer.Property.PropertyLineAngle,
                                  QgsSymbolLayer.Property.PropertyAngle),
@@ -2616,10 +2617,6 @@ class SymbolMaterializer:
             if props.isActive(key):
                 marker.setDataDefinedProperty(marker_key, QgsProperty(props.property(key)))
             props.setProperty(key, QgsProperty())
-        if marker.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertySize):
-            self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                         "Data-defined hash length: the browser scales the hash's image, so its "
-                         "stroke width changes with the length.", flat_rule)
         marker_symbol = QgsMarkerSymbol([marker])
         if hash_symbol is not None:
             marker_symbol.setOpacity(hash_symbol.opacity())

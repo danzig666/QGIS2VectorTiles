@@ -237,3 +237,50 @@ def test_data_defined_raster_marker_opacity_is_the_icon_opacity(exporter, tmp_pa
     layer = _convert(exporter, two)[0]
     assert asked == [["q2vt_property_alpha_35_00"]]  # its values are sprite variants
     assert layer["paint"]["icon-opacity"] == 1.0
+
+
+def _hash_marker():
+    layer = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 3.0)
+    layer.setStrokeColor(QColor("#c80000"))
+    layer.setStrokeWidth(0.6)
+    layer.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertySize,
+                                 QgsProperty.fromField("q2vt_property_size_0_00"))
+    return QgsMarkerSymbol([layer])
+
+
+def test_data_defined_hash_length_keeps_the_stroke_width(exporter, monkeypatch):
+    """A hash (line marker) with a data-defined length: QGIS draws every
+    length with the same pen, but the one image scaled by length / static
+    length drew an 8 mm hash of a 3 mm image 2.7 times as wide. Each length
+    is its own sprite now, the icon scaled with the map only (a tile holds
+    the length 4.0 as the number 4)."""
+    from q2vt_plugin.src.core.sprite_generator import SymbolImage  # pylint: disable=import-error
+    monkeypatch.setattr(exporter, "_distinct_values",
+                        lambda _source, _fields: [(4.0,), (8.0,), (2.5,)])
+    layer = _convert(exporter, _hash_marker())[0]
+    image = layer["layout"]["icon-image"]
+    assert image[:2] == ["match", ["to-string", ["get", "q2vt_property_size_0_00"]]]
+    assert image[2:8:2] == ["4", "8", "2.5"]
+    assert not ex.referenced_fields(layer["layout"]["icon-size"])
+    sizes = []
+    for name in image[3::2] + image[-1:]:  # the variants, then the static image
+        request = exporter.marker_symbols[name]
+        sprite = SymbolImage(request.symbol, name, 1, False, request.map_units_per_pixel,
+                             request.attributes)
+        sizes.append((sprite.width, sprite.height))
+    widths = [width for width, _ in sizes]
+    assert max(widths) - min(widths) <= 1  # the same stroke width (antialiased)
+    heights = [height for _, height in sizes]  # 4, 8, 2.5 mm and the static 3 mm
+    assert heights[1] > heights[0] > heights[3] > heights[2]
+    assert heights[1] - heights[0] == pytest.approx(4 * MM, abs=2)
+    assert not exporter.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+
+
+def test_data_defined_hash_length_over_the_variant_budget_is_reported(exporter, monkeypatch):
+    """More lengths than sprite variants: the image is scaled, reported."""
+    monkeypatch.setattr(exporter, "_distinct_values", lambda _source, _fields: None)
+    layer = _convert(exporter, _hash_marker())[0]
+    assert ex.referenced_fields(layer["layout"]["icon-size"]) == {"q2vt_property_size_0_00"}
+    assert any("Data-defined hash length" in d.message
+               for d in exporter.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
