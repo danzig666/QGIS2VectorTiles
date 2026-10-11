@@ -306,6 +306,34 @@ def test_marker_generator_on_points_keeps_the_source_points_with_publish_zooms(e
     assert set(sources) <= found
 
 
+def test_marker_generator_ignores_a_data_defined_parent_opacity(export, tmp_path):
+    """QGIS evaluates a symbol's data-defined opacity only for the symbol
+    itself; the generator's marker is drawn opaque. Its style layer took
+    the parent's 40 % opacity."""
+    from qgis.core import (QgsGeometryGeneratorSymbolLayer, QgsMarkerSymbol, QgsProperty,
+                           QgsSimpleMarkerSymbolLayer, QgsSymbol, QgsVectorLayer)
+    from q2vt_fixtures import to_geopackage
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({EXTENT.center().x()} "
+                                            f"{EXTENT.center().y()})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 30, 0)", "SymbolType": "Marker"})
+    generator.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"}))
+    symbol = QgsMarkerSymbol([
+        QgsSimpleMarkerSymbolLayer.create({"name": "circle", "color": "255,0,0"}), generator])
+    symbol.setDataDefinedProperty(QgsSymbol.Property.PropertyOpacity, QgsProperty.fromExpression("40"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    opacities = {l["source-layer"][-3:]: l["paint"].get("icon-opacity", 1)
+                 for l in style["layers"] if l.get("source-layer")}
+    # s00: the circle (40 %); s01: the generator's square (opaque).
+    assert opacities == {"s00": pytest.approx(0.4), "s01": 1}, opacities
+
+
 def test_geometry_generator_uses_layer_crs_for_both_geometry_spellings(plugin):
     from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
 

@@ -147,8 +147,10 @@ class TilesStyler:
             new_symbol = symbol  # already converted (materialized component)
         elif sub_symbol and symbol_layer.layerType() == "GeometryGenerator":
             # The exported geometry is the generator's output (whatever its
-            # type); it is drawn with the generator's sub-symbol.
-            self._copy_data_driven_properties(symbol, sub_symbol)
+            # type); it is drawn with the generator's sub-symbol, which never
+            # sees the parent's (data-defined) opacity in QGIS.
+            from .materializer import _SYMBOL_OPACITY_KEY  # pylint: disable=import-outside-toplevel
+            self._copy_data_driven_properties(symbol, sub_symbol, skip=(_SYMBOL_OPACITY_KEY,))
             self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
             new_symbol = sub_symbol
         elif source_geom != target_geom:
@@ -160,7 +162,8 @@ class TilesStyler:
                 self._copy_data_driven_properties(symbol, new_symbol, skip=(_SYMBOL_OPACITY_KEY,))
                 self._copy_data_driven_properties(symbol_layer, new_symbol.symbolLayers()[-1])
             elif sub_symbol and symbol_layer.layerType() == "GeometryGenerator":
-                self._copy_data_driven_properties(symbol, sub_symbol)
+                from .materializer import _SYMBOL_OPACITY_KEY  # pylint: disable=import-outside-toplevel
+                self._copy_data_driven_properties(symbol, sub_symbol, skip=(_SYMBOL_OPACITY_KEY,))
                 self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
                 new_symbol = sub_symbol
             else:
