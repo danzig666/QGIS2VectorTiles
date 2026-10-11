@@ -1253,11 +1253,17 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     from fidelity.zoom import zoom_to_scale
     top = max(zooms)
     assert len([r for r in placed if r.get_attr("o") == top]) == 8
+    longest = max(QgsGeometry.fromWkt(wkt).length() for wkt in LINES)
     for rule in placed:
         band = rule.visibility
         if band.max_zoom is None:
             continue
         middle = (band.min_zoom + band.max_zoom) / 2
+        if band.max_zoom - band.min_zoom == 1.0:
+            # No line is 4 mm long, even at the zoom's end: one marker a
+            # line at its start, one placement for the zoom.
+            assert longest < 0.004 * zoom_to_scale(band.max_zoom)
+            continue
         assert band.max_zoom - band.min_zoom == pytest.approx(1 / 8)
         assert rule.recipe.param("interval") == pytest.approx(0.004 * zoom_to_scale(middle), rel=1e-6)
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
@@ -2241,6 +2247,13 @@ def _limited_spacing(plugin, layer, recipe_param, getter, zooms, kind, out_dir):
                    and (r.recipe is None or r.recipe.param(recipe_param) is not None)]
         assert len(visible) == 1, (zoom, [r.output_dataset for r in visible])
         rule = visible[0]
+        if rule.recipe is not None and recipe_param == "interval" and \
+                rule.visibility.max_zoom - rule.visibility.min_zoom == 1.0 and \
+                max(f.geometry().length() for f in layer.getFeatures()) < \
+                rule.recipe.param("interval") / 2 ** 0.5:
+            # One placement a zoom where no line is an interval long (at the
+            # zoom's end too): one marker a line, whatever the spacing.
+            continue
         if rule.recipe is not None:
             drawn = rule.recipe.param(recipe_param) * 512 * 2 ** zoom / 40075016.68557849
         else:

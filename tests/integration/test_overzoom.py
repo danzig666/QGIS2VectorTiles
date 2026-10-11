@@ -63,6 +63,11 @@ def _per_mm(zoom):
     return zoom_to_scale(zoom) / 1000.0
 
 
+def _total_overzoom(rules, cost):
+    """Summed ``cost(rule)`` of the overzoom copies (attribute "v")."""
+    return sum(cost(rule) for rule in rules if rule.get_attr("v") is not None)
+
+
 def test_screen_unit_arrows_keep_their_width_past_the_last_tiles(plugin, tmp_path):
     arrow = QgsArrowSymbolLayer()
     arrow.setIsCurved(False)
@@ -440,3 +445,191 @@ def test_point_clusters_past_the_last_tiles_merge_zooms_that_group_alike(plugin,
     assert drawn(19.5) is drawn(21.0) is split and 18.0 < split.visibility.min_zoom < 19.0
     assert drawn(18.0) is not split
     assert not [r for r in members if (r.get_attr("v") or 0) > 18]
+
+
+def test_map_unit_markers_past_the_last_tiles_keep_an_image_that_fits(plugin, tmp_path):
+    """Rotated map-unit markers along a line (arrowheads 100-120 map units
+    off each 10 m marker, every 150 m) exported 0-16: their averaged angles
+    are kept per zoom past the last tiles, one style a zoom. Drawn at its
+    own zoom, the image doubled at every zoom and outgrew the sprite canvas
+    from zoom 19: those styles were dropped and the markers vanished. Past
+    the zoom where the marker got large, the copies share that zoom's image,
+    scaled up with the map like the one image of a style drawn on."""
+    import json
+    import os
+    from qgis.core import QgsRectangle
+    from qgis.PyQt.QtCore import QPointF
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles
+    marker = []
+    for offset in (-120, -100, 100, 120):
+        head = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.ArrowHeadFilled, 10)
+        head.setSizeUnit(Qgis.RenderUnit.MapUnits)
+        head.setOffset(QPointF(offset, 0))
+        head.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+        marker.append(head)
+    line = QgsMarkerLineSymbolLayer(True, 150)
+    line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    line.setSubSymbol(QgsMarkerSymbol(marker))
+    layer = _layer("LineString", f"LINESTRING({X} {Y}, {X + 700} {Y + 80}, {X + 1500} {Y})",
+                   str(tmp_path / "mu.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    extent = QgsRectangle(X - 300, Y - 300, X + 1800, Y + 400)
+    result = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=extent, output_dir=str(out),
+                              serve=False).convert_project_to_vector_tiles()
+    with open(os.path.join(result, "fidelity_report.json"), encoding="utf-8") as handle:
+        report = json.load(handle)
+    assert not [d for d in report["diagnostics"] if d["code"] == "Q2VT_SPRITE_RENDER_FAILED"]
+    with open(os.path.join(result, "style", "style.json"), encoding="utf-8") as handle:
+        style = json.load(handle)
+    markers = [l for l in style["layers"] if l["type"] == "symbol"
+               and "icon-image" in l.get("layout", {})]
+
+    def drawn(zoom):
+        return [l for l in markers if l.get("minzoom", 0) <= zoom < l.get("maxzoom", 24)]
+    for zoom in (16.5, 17.5, 19.5, 20.5, 22.0, 23.5):
+        assert len(drawn(zoom)) == 1, zoom
+    over = [l for l in markers if l["minzoom"] >= 18]
+    assert len(over) == 5  # one style a zoom (its averaged angles), 18-22
+    assert len({l["layout"]["icon-image"] for l in over}) == 1
+    with open(os.path.join(result, "style", "sprite", "sprite@2x.json"), encoding="utf-8") as handle:
+        image = json.load(handle)[over[0]["layout"]["icon-image"]]
+    assert max(image["width"], image["height"]) < 4096
+    # The image grows with the map from the zoom it was drawn at.
+    assert over[-1]["layout"]["icon-size"][:3] == ["interpolate", ["exponential", 2], ["zoom"]]
+
+
+def test_scale_dependent_interval_copies_share_the_last_tiles_budget(plugin, tmp_path):
+    """A marker-line interval that keeps shrinking with the map scale
+    (``@map_scale / 200``) doubles the markers of every zoom past the last
+    tiles. Exported 0-10, all of those copies are written into the zoom-10
+    tiles: they stop within the last tiles' budget, the last one kept
+    serves the zooms above (a hashed line too)."""
+    from qgis.core import QgsHashedLineSymbolLayer, QgsProperty, QgsSymbolLayer
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    wkts = [f"LINESTRING({X} {Y + 40 * k}, {X + 1000} {Y + 40 * k})" for k in range(20)]
+    budget = SymbolMaterializer.OVERZOOM_TILE_ELEMENTS
+
+    def flatten(kind, *zooms):
+        line = QgsMarkerLineSymbolLayer() if kind == "marker" else QgsHashedLineSymbolLayer()
+        if kind == "marker":
+            dot = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1)
+            dot.setSizeUnit(MM)
+            line.setSubSymbol(QgsMarkerSymbol([dot]))
+        line.setPlacements(Qgis.MarkerLinePlacement.Interval)
+        line.setInterval(10)
+        line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval,
+                                    QgsProperty.fromExpression("@map_scale / 200"))
+        layer = _layer("LineString", wkts, str(tmp_path / f"{kind}{len(zooms)}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+        return _flatten(tmp_path, layer, *zooms)
+    for kind in ("marker", "hash"):
+        rules, diags = flatten(kind, 0, 10)
+        placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+        copies = sorted(r.get_attr("v") for r in placed if r.get_attr("v") is not None)
+        # 20 km of lines: about 15 markers at zoom 11, 30 000 at zoom 21.
+        assert copies and copies == list(range(11, copies[-1] + 1)) and copies[-1] < 21
+        assert _total_overzoom(placed, lambda r: 20000 / r.recipe.param("interval")) <= budget
+        last = _at(placed, 22.0)
+        assert len(last) == 1 and last[0].get_attr("v") == copies[-1]
+        assert last[0].visibility.max_zoom is None
+        assert diags.by_code("Q2VT_PATTERN_BUDGET")
+    # Exported 14-19, the copies go on to the last zoom (within the budget).
+    rules, _ = flatten("marker", 14, 19)
+    assert sorted(r.get_attr("v") for r in rules if r.get_attr("v") is not None) == [20, 21, 22]
+
+
+def test_arrow_and_shapeburst_copies_stay_within_the_last_tiles_budget(
+        plugin, tmp_path, monkeypatch):
+    """Arrows and shapeburst bands past the last tiles are written into the
+    last tiles like every overzoom copy: they stop at the last tiles'
+    budget and the last zoom written serves the zooms above."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    monkeypatch.setattr(SymbolMaterializer, "OVERZOOM_TILE_ELEMENTS", 400)
+    arrow = QgsArrowSymbolLayer()
+    arrow.setIsCurved(False)
+    arrow.setIsRepeated(False)
+    for setter in ("setArrowWidth", "setArrowStartWidth"):
+        getattr(arrow, setter)(1)
+        getattr(arrow, setter + "Unit")(MM)
+    # 20 arrows in one zoom-10 tile: 20 polygons a band.
+    layer = _layer("LineString", [f"LINESTRING({X} {Y + 40 * k}, {X + 300} {Y + 40 * k})"
+                                  for k in range(20)], str(tmp_path / "arrows.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    rules, diags = _flatten(tmp_path, layer, 0, 10)
+    over = [r for r in rules if r.get_attr("v") is not None]
+    zooms = sorted({r.get_attr("v") for r in over})
+    assert over and len(over) * 20 <= 400 and zooms == list(range(11, zooms[-1] + 1))
+    last = _at(rules, 22.0)
+    assert last and {r.get_attr("v") for r in last} == {zooms[-1]}
+    assert all(r.visibility.max_zoom is None for r in last)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+    burst = QgsShapeburstFillSymbolLayer()
+    burst.setUseWholeShape(False)
+    burst.setMaxDistance(3)
+    burst.setDistanceUnit(MM)
+    monkeypatch.setattr(SymbolMaterializer, "_band_count", classmethod(lambda cls, colors: 1))
+    squares = [f"POLYGON(({X + 50 * k} {Y}, {X + 50 * k + 40} {Y}, {X + 50 * k + 40} {Y + 40}, "
+               f"{X + 50 * k} {Y + 40}, {X + 50 * k} {Y}))" for k in range(100)]
+    layer = _layer("Polygon", squares, str(tmp_path / "bursts.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst])))
+    rules, diags = _flatten(tmp_path, layer, 0, 10)
+    # 100 polygons a band set, two sets a zoom: two zooms at most.
+    over = [r for r in rules if r.get_attr("v") is not None]
+    assert len(over) * 100 <= 400
+    last = _at(rules, 22.0)
+    assert len(last) == 1 and last[0].visibility.max_zoom is None
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_overzoom_budget_is_shared_by_every_rule_of_the_last_tiles(plugin, tmp_path, monkeypatch):
+    """Three vector field symbol layers on the same points: their overzoom
+    copies go into the same last tiles, so they share one budget (each got
+    its own, three times what a tile was meant to take)."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    fields = []
+    for scale in (4, 6, 8):
+        field = QgsVectorFieldSymbolLayer()
+        field.setXAttribute("dx")
+        field.setYAttribute("dy")
+        field.setScale(scale)
+        field.setDistanceUnit(MM)
+        fields.append(field)
+    points = [f"POINT({X + 10 * k} {Y})" for k in range(3)]
+    layer = _layer("Point", points, str(tmp_path / "fields.gpkg"), ["dx", "dy"], [3.0, 2.0])
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol(fields)))
+    monkeypatch.setattr(SymbolMaterializer, "OVERZOOM_TILE_ELEMENTS", 3 * 4)
+    rules, diags = _flatten(tmp_path, layer)
+    # Three lines a copy, all in one zoom-16 tile: four copies in all.
+    assert len([r for r in rules if r.get_attr("v") is not None]) == 4
+    drawn = _at(rules, 22.0)
+    assert len(drawn) == 3 and all(r.visibility.max_zoom is None for r in drawn)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_screen_interval_markers_get_sub_zoom_bands_where_lines_hold_several(plugin, tmp_path):
+    """Screen-unit interval markers are placed per eighth of a zoom (their
+    map spacing halves within a zoom). Where no ring is an interval long,
+    every polygon has one marker, at its offset along the ring: one
+    placement a zoom, not eight copies of the layer."""
+    from fidelity.model import ZoomInterval
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1)
+    marker.setSizeUnit(MM)
+    line = QgsMarkerLineSymbolLayer(True, 4)
+    line.setIntervalUnit(MM)
+    line.setSubSymbol(QgsMarkerSymbol([marker]))
+    layer = _layer("Polygon", SQUARE, str(tmp_path / "rings.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    rules, _ = _flatten(tmp_path, layer)
+    placed = [r for r in rules if r.recipe is not None]
+
+    def bands(zoom):
+        return [r for r in placed if r.get_attr("o") == zoom and r.get_attr("v") is None]
+    # The 160 m ring is shorter than 4 mm up to zoom 11 (at its end).
+    for zoom in range(0, 12):
+        assert [r.visibility for r in bands(zoom)] == [ZoomInterval(float(zoom), zoom + 1.0)]
+    for zoom in range(12, 17):
+        assert len(bands(zoom)) == 8

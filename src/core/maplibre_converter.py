@@ -2553,6 +2553,24 @@ class QgisMapLibreStyleExporter:
         self.marker_counter += 1
         return name
 
+    def _shared_sprite(self, name: str) -> str:
+        """``name``, or the name of an image registered before with the same
+        request (symbol, scale, oversampling): style layers that differ only
+        in their data or zooms (copies of a rule past the last tile zoom)
+        share one image, which is dropped from ``marker_symbols``."""
+        request = self.marker_symbols[name]
+        if request.attributes:
+            return name
+        key = (QgsSymbolLayerUtils.symbolProperties(request.symbol), request.bake_rotation,
+               repr(request.map_units_per_pixel), repr(request.oversampling))
+        shared = self.__dict__.setdefault("_sprite_requests", {})
+        known = shared.get(key)
+        if known is not None and known in self.marker_symbols:
+            del self.marker_symbols[name]
+            return known
+        shared[key] = name
+        return name
+
     def _register_pattern(self, symbol_or_layer) -> str:
         """Register a pattern preview (symbol or symbol layer) in the sprite registry.
 
@@ -3781,6 +3799,46 @@ class QgisMapLibreStyleExporter:
             bands.append((zoom, high, self.SPRITE_OVERZOOM_OVERSAMPLING))
         return bands
 
+    # Largest logical size of a map-unit marker image drawn at the zoom a
+    # style past the last tiles starts at (overzoom copies, one style a
+    # zoom): the sprite renderer's canvas (sprite_generator._MAX_CANVAS_PX)
+    # must hold it oversampled at 2x.
+    MAX_OVERZOOM_SPRITE_PX = 512.0
+
+    def _map_unit_sprite_bands(self, symbol: QgsSymbol, min_zoom: float, max_zoom: float):
+        """``[(low, high, oversampling, reference zoom)]``: the style layers of
+        a marker sized in map units (_sprite_bands), each image drawn at its
+        reference zoom and scaled from there with the map (icon-size). Once
+        the marker is large (MAX_BAND_SPRITE_PX), one last image is scaled
+        up from there on. A style past the last tile zoom where the marker
+        is large already (an overzoom copy of a rule: one style a zoom) draws
+        its image at the zoom it got large at, past the last tiles, like
+        the one image of a rule drawn on to the last zoom: an image drawn at
+        its own zoom doubles at every zoom and outgrows the sprite."""
+        bands = self._sprite_bands(min_zoom, max_zoom)
+        growth, extent = IconPropertyExtractor.map_growth(symbol)
+        px0 = extent * PropertyExtractor.static_pixels(1.0, "map", 0.0)
+        if growth <= 1.7 or px0 <= 0:
+            return [(low, high, quality, low) for low, high, quality in bands]
+        out = []
+        for index, (low, high, quality) in enumerate(bands):
+            if extent * PropertyExtractor.static_pixels(1.0, "map", low) <= self.MAX_BAND_SPRITE_PX:
+                out.append((low, high, quality, low))
+                continue
+            if index < len(bands) - 1:
+                # Large already: one last image, scaled up from here on.
+                out.append((low, bands[-1][1], self.SPRITE_BAND_OVERSAMPLING, low))
+                break
+            reference = low
+            if low > self.maxzoom + 1e-9:
+                large = math.floor(math.log2(self.MAX_BAND_SPRITE_PX / px0)) + 1.0
+                fits = math.floor(math.log2(self.MAX_OVERZOOM_SPRITE_PX / px0))
+                reference = min(low, max(large, float(self.maxzoom + 1)), fits)
+                if reference < low:
+                    quality = self.SPRITE_BAND_OVERSAMPLING
+            out.append((low, high, quality, reference))
+        return out
+
     def _convert_marker_symbol(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -3800,20 +3858,12 @@ class QgisMapLibreStyleExporter:
         context = self.context
         saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
         try:
-            bands = self._sprite_bands(min_zoom, max_zoom)
-            growth, extent = IconPropertyExtractor.map_growth(symbol)
-            for index, (low, high, quality) in enumerate(bands):
-                if growth > 1.7 and index < len(bands) - 1 and extent * \
-                        PropertyExtractor.static_pixels(1.0, "map", low) > self.MAX_BAND_SPRITE_PX:
-                    # Large already: one last image, scaled up from here on.
-                    high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
-                    bands = bands[:index + 1]
-                context.reference_zoom, context.reference_zoom_span = low, high - low
+            for low, high, quality, reference in self._map_unit_sprite_bands(
+                    symbol, min_zoom, max_zoom):
+                context.reference_zoom, context.reference_zoom_span = reference, high - reference
                 context.sprite_oversampling = quality
                 self._marker_layer(symbol_layer, symbol, f"{style_name}_z{int(low)}",
                                    source_layer_name, source_name, low, high)
-                if index == len(bands) - 1:
-                    break
         finally:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved
@@ -3856,6 +3906,8 @@ class QgisMapLibreStyleExporter:
             oversampling=oversampling)
         icon_image = self._marker_variants(sprite_symbol, marker_name, source_layer_name,
                                            map_units_per_pixel, oversampling)
+        if icon_image == marker_name:
+            icon_image = marker_name = self._shared_sprite(marker_name)
 
         layer_def["layout"].update({
             "icon-image": icon_image,
@@ -4000,19 +4052,12 @@ class QgisMapLibreStyleExporter:
         context = self.context
         saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
         try:
-            bands = self._sprite_bands(min_zoom, max_zoom)
-            growth, extent = IconPropertyExtractor.map_growth(sub_symbol)
-            for index, (low, high, quality) in enumerate(bands):
-                if growth > 1.7 and index < len(bands) - 1 and extent * \
-                        PropertyExtractor.static_pixels(1.0, "map", low) > self.MAX_BAND_SPRITE_PX:
-                    high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
-                    bands = bands[:index + 1]
-                context.reference_zoom, context.reference_zoom_span = low, high - low
+            for low, high, quality, reference in self._map_unit_sprite_bands(
+                    sub_symbol, min_zoom, max_zoom):
+                context.reference_zoom, context.reference_zoom_span = reference, high - reference
                 context.sprite_oversampling = quality
                 self._marker_line_layer(symbol_layer, sub_symbol, f"{style_name}_z{int(low)}",
                                         source_layer_name, source_name, low, high, symbol)
-                if index == len(bands) - 1:
-                    break
         finally:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved
@@ -4036,6 +4081,7 @@ class QgisMapLibreStyleExporter:
         self.marker_symbols[marker_name] = SpriteRequest(
             sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
+        marker_name = self._shared_sprite(marker_name)
         rotate_with_line = LinePropertyExtractor.get_marker_line_rotate_symbols(symbol_layer)
         offset_px = LinePropertyExtractor.get_marker_line_offset(symbol_layer)
 

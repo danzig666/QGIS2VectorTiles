@@ -592,7 +592,6 @@ class RulesFlattener:
                 tolerance = dict(self._point_group_params(
                     renderer, layer, float(over[0].get_attr("v"))))["tolerance"]
                 grouped = len(points) - len(pg.isolated(points, tolerance))
-                capacity = self.materializer._overzoom_capacity(flat_rule, grouped)  # pylint: disable=protected-access
             previous = None  # (rule, groups, moves) of the last band written
             for index, rule in enumerate(per_zoom):
                 zoom = int(rule.evaluation_zoom())
@@ -609,8 +608,9 @@ class RulesFlattener:
                                                           visible.max_zoom)
                     continue
                 if overzoom:
-                    capacity -= len(bands[zoom])  # a copy of the grouped points per band
-                    if capacity < 0:
+                    # A copy of the grouped points per band, in the last tiles' budget.
+                    if not self.materializer._overzoom_take(  # pylint: disable=protected-access
+                            flat_rule, [grouped * len(bands[zoom])], report=False):
                         self.materializer._report_overzoom_budget(  # pylint: disable=protected-access
                             flat_rule, zoom - self.materializer.max_zoom - 1)
                         if previous is not None:
