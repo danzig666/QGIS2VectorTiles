@@ -11,7 +11,7 @@ from qgis.core import (Qgis, QgsFeature, QgsField, QgsFillSymbol, QgsGeometry,
                        QgsMarkerLineSymbolLayer, QgsMarkerSymbol, QgsProcessingFeedback,
                        QgsRectangle, QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer,
                        QgsVectorLayer, QgsSimpleLineSymbolLayer, QgsLineSymbolLayer)
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant, Qt
 from qgis.PyQt.QtGui import QColor
 
 from q2vt_fixtures import reset_project, to_geopackage
@@ -847,6 +847,84 @@ def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):
     # Markers: QGIS averages corner angles over a screen length (4 mm), which a
     # multi-zoom point dataset reproduces at one zoom only.
     assert mask_difference(reference, ours) < (0.06 if kind == "line" else 0.1)
+
+
+# Two polygons sharing an edge, the first with a hole near its side.
+INSIDE_POLYGONS = ["POLYGON((-100 -70, 0 -70, 0 60, -100 60, -100 -70),"
+                   "(-80 -30, -30 -30, -30 20, -80 20, -80 -30))",
+                   "POLYGON((0 -70, 90 -70, 90 60, 0 60, 0 -70))"]
+
+
+def _inside_line(width, unit, offset=0.0, ring_filter=0, pen=None):
+    from qgis.core import QgsLineSymbolLayer
+    line = QgsSimpleLineSymbolLayer(QColor(0, 0, 255, 140), width)
+    line.setWidthUnit(unit)
+    line.setOffset(offset)
+    line.setOffsetUnit(unit)
+    line.setDrawInsidePolygon(True)
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    if pen is not None:
+        line.setPenStyle(pen)
+    return line
+
+
+@pytest.mark.parametrize("offset,ring_filter", [(0.0, 0), (5.0, 0), (-3.0, 0), (0.0, 1)])
+def test_map_unit_line_drawn_inside_polygon_matches_qgis(plugin, tmp_path, offset, ring_filter):
+    """"Draw line only inside polygon": QGIS clips the stroke to the polygon,
+    so only the band inside it shows, sharp at the corners. The whole stroke
+    was drawn, half of it over the neighbouring polygon."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "in.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(16, Qgis.RenderUnit.MapUnits, offset, ring_filter)])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["inside_band"]
+    for output, rule in zip(outputs, rules):
+        output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.03
+
+
+def test_screen_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path):
+    """A 4 mm stroke drawn only inside the polygon: its 2 mm inner band, as
+    polygons per eighth of a zoom (QGIS-rendered here at one band's zoom),
+    and beyond the last tiles a 2 mm line 1 mm inside the rings."""
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "is.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters)])))
+    zoom, size = 17.4375, 300  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    bands = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"]
+    top = max(r.get_attr("o") for _, r in bands)
+    assert top > 17 and {r.get_attr("o") for _, r in bands} == set(range(0, top + 1))
+    shown = [(o, r) for o, r in bands
+             if r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.05
+    over = [r for r in rules if r.recipe.kind == "polygon_offset"]
+    assert len(over) == 1 and over[0].visibility.min_zoom == top + 1 and over[0].recipe.param("rhr")
+    line = over[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.offset(), line.drawInsidePolygon()) == (2.0, 1.0, False)
+
+
+def test_dashed_line_drawn_inside_polygon_keeps_its_dash_lengths(plugin, tmp_path):
+    """Dashes stay a line: the band's half width at its middle, with Qt's
+    dash pattern (multiples of the pen width) kept at the full width's
+    lengths."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "id.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, pen=Qt.PenStyle.DashLine)])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules and all(r.recipe.kind == "polygon_offset" for r in rules)
+    line = rules[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.drawInsidePolygon(), line.useCustomDashPattern()) == (2.0, False, True)
+    assert list(line.customDashVector()) == [16.0, 8.0]
 
 
 @pytest.mark.parametrize("shape,size,angle,dx,clip", [

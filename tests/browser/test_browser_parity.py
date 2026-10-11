@@ -53,7 +53,7 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer, metric="near", center=CENTER):
+def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17)):
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
@@ -61,7 +61,8 @@ def _compare(tmp_path, layer, metric="near", center=CENTER):
                           center[0] + 2 * half, center[1] + 2 * half)
     out = tmp_path / "out"
     out.mkdir()
-    export_dir = QGIS2VectorTiles(min_zoom=15, max_zoom=17, extent=extent, output_dir=str(out),
+    export_dir = QGIS2VectorTiles(min_zoom=zoom_range[0], max_zoom=zoom_range[1], extent=extent,
+                                  output_dir=str(out),
                                   feedback=QgsProcessingFeedback(), serve=False,
                                   background_type=2).convert_project_to_vector_tiles()
     to_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
@@ -149,6 +150,36 @@ def test_polygon_outline_screen_offsets_follow_qgis(tmp_path, clockwise, offset)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
     # The wrong side is 6 mm (about 22 px) away from QGIS's outline.
     assert _compare(tmp_path, layer) > 0.95
+
+
+@pytest.mark.parametrize("zoom", [15.5, 18.5])
+def test_a_line_drawn_only_inside_polygons_stays_inside(tmp_path, monkeypatch, zoom):
+    """"Draw line only inside polygon" (a translucent 4 mm band): QGIS shows
+    the inner half of the stroke, the browser drew all of it, half over the
+    neighbour. A map from zoom 0 with tiles to 16, inside the tiles and
+    overzoomed."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+
+    def polygon(*rings):
+        return "POLYGON(" + ", ".join("(" + ", ".join(
+            f"{CENTER[0] + x} {CENTER[1] + y}" for x, y in ring + ring[:1]) + ")"
+            for ring in rings) + ")"
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "inside", "memory")
+    for wkt in (polygon([(-150, -90), (0, -90), (0, 80), (-150, 80)],
+                        [(-110, -40), (-40, -40), (-40, 30), (-110, 30)]),
+                polygon([(0, -90), (150, -90), (150, 80), (0, 80)])):
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(wkt))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "inside.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor(0, 0, 255, 140), 4.0)
+    line.setDrawInsidePolygon(True)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    qgis, browser = _compare(tmp_path, layer, "darkness", zoom_range=(0, 16))
+    # The whole stroke had about 1.5x the ink at zoom 15.5; MapLibre's
+    # antialiased edge of a translucent fill adds a darker pixel around the
+    # band (about 9 % at zoom 15.5).
+    assert browser == pytest.approx(qgis, rel=0.15)
 
 
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])

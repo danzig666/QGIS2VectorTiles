@@ -3522,6 +3522,8 @@ class RulesExporter:
             return [0, "@geometry"]  # points already materialized (_random_points)
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "inside_band":
+            return [2, mat.inside_band_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":

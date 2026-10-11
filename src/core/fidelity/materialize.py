@@ -781,6 +781,60 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
             f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
 
 
+def inside_band(inner: float, outer: float, ring_filter: int, join: str, crs: str) -> Recipe:
+    """The visible part of a polygon outline drawn only inside the polygon:
+    between ``inner`` and ``outer`` map units inwards from its rings."""
+    return Recipe("inside_band", params=(
+        ("inner", float(inner)), ("outer", float(outer)), ("ring_filter", int(ring_filter)),
+        ("join", join), ("crs", crs)))
+
+
+def inside_band_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Polygons of an outline stroke with "Draw line only inside polygon"
+    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``): QGIS clips the
+    stroke to each polygon part, holes left out, so of a stroke of width w
+    at offset o (positive inwards) the points of the part between o - w/2
+    and o + w/2 from a stroked ring remain. Every ring is stroked on its
+    own (all rings, or the exterior only for ``ring_filter`` 1): one piece
+    per ring, so a translucent stroke darkens where the bands of the
+    exterior and a hole overlap, as in QGIS. The stroke's join shapes the
+    band's inner edge at the polygon's reflex corners; its own corners stay
+    sharp, and a part narrower than the band is filled whole."""
+    inner = float(recipe.param("inner"))
+    outer = float(recipe.param("outer"))
+    ring_filter = int(recipe.param("ring_filter", 0) or 0)
+    join = recipe.param("join", "bevel")
+    crs = recipe.param("crs") or export_crs
+
+    def grown(polygon, distance):
+        return f"buffer({polygon}, {distance!r}, 8, 'flat', '{join}', 2)"
+
+    def band(part):
+        exterior = f"make_polygon(exterior_ring({part}))"
+        keep = f"intersection({part}, {grown(exterior, -inner)})" if inner > 0 else part
+        pieces = f"array(difference({keep}, {grown(exterior, -outer)}))"
+        if ring_filter != 1:
+            # A hole's band lies outside it, within the part.
+            hole = f"make_polygon(interior_ring_n({part}, @element))"
+            ring = f"intersection({part}, {grown(hole, outer)})"
+            if inner > 0:
+                ring = f"difference({ring}, {grown(hole, inner)})"
+            pieces = (f"array_cat({pieces}, if(num_interior_rings({part}) > 0, array_foreach("
+                      f"generate_series(1, num_interior_rings({part})), {ring}), array()))")
+        return (f"collect_geometries(array_filter({pieces}, "
+                f"@element IS NOT NULL AND NOT is_empty(@element)))")
+
+    def body(geom):
+        return (f"collect_geometries(array_filter(array_foreach(generate_series(1, "
+                f"num_geometries({geom})), with_variable('q2vt_part', if(is_multipart({geom}), "
+                f"geometry_n({geom}, @element), {geom}), {band('@q2vt_part')})), "
+                f"@element IS NOT NULL AND NOT is_empty(@element)))")
+    if crs == export_crs:
+        return body("@geometry")
+    return (f"transform(with_variable('q2vt_poly', transform(@geometry, '{export_crs}', '{crs}'), "
+            f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
+
+
 
 
 def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:

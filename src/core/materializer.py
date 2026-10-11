@@ -256,6 +256,9 @@ class SymbolMaterializer:
         if kind == "FontMarker":
             return self._glyph_marker(flat_rule, layer)
         if kind == "SimpleLine":
+            inside = self._inside_polygon(flat_rule, layer)
+            if inside is not None:
+                return inside
             effects = self._line_effects(flat_rule, layer)
             if effects is not None:
                 return effects
@@ -829,6 +832,123 @@ class SymbolMaterializer:
             result[exterior] = ([radius for radius, _ in rows], vertices_from)
         cache[layer.id()] = result
         return result
+
+
+    # Qt's dash patterns in multiples of the pen width.
+    _QT_DASHES = {Qt.PenStyle.DashLine: (4, 2), Qt.PenStyle.DotLine: (1, 2),
+                  Qt.PenStyle.DashDotLine: (4, 2, 1, 2), Qt.PenStyle.DashDotDotLine: (4, 2, 1, 2, 1, 2)}
+
+    def _inside_polygon(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """"Draw line only inside polygon": QGIS clips the outline stroke to
+        the polygon, holes left out (renderPolygonStroke; not for interior
+        rings only), so of a stroke of width w at offset o (inwards) the band
+        from o - w/2 to o + w/2 inside the polygon shows. A solid stroke is
+        that band's polygons (fidelity inside_band_expression: the polygon's
+        corners sharp, narrow parts filled whole), per eighth of a zoom for
+        screen units; the browser draws the band as a line of its width at
+        its middle beyond the last tiles, for dashes and over the output
+        budget. None when the option does not apply."""
+        if flat_rule.get_attr("g") != 2 or not layer.drawInsidePolygon() or _ring_filter(layer) == 2:
+            return None
+        P = QgsSymbolLayer.Property
+        props = layer.dataDefinedProperties()
+        width, unit = float(layer.width()), layer.widthUnit()
+        offset = float(layer.offset()) if abs(layer.offset()) > 1e-9 else 0.0
+        if offset and normalize_unit(layer.offsetUnit()) != normalize_unit(unit):
+            offset_mm, unit_mm = _to_mm(offset, layer.offsetUnit()), _to_mm(1.0, unit)
+            if offset_mm is None or not unit_mm:
+                self._report("Q2VT_SYMBOL_APPROXIMATE",
+                             "Draw line only inside polygon: the offset and the width are in "
+                             "different units; the whole stroke is drawn.", flat_rule)
+                return None
+            offset = offset_mm / unit_mm
+        if width <= 0 or layer.penStyle() == Qt.PenStyle.NoPen:
+            return None  # a hairline (or nothing): the clip is not visible
+        if any(props.isActive(k) for k in (P.PropertyStrokeWidth, P.PropertyOffset)):
+            self._report("Q2VT_SYMBOL_APPROXIMATE",
+                         "Draw line only inside polygon: the band uses the static width and "
+                         "offset, not the data-defined ones.", flat_rule)
+        inner, outer = offset - width / 2.0, offset + width / 2.0
+        if outer <= 0:
+            return []  # the whole stroke lies outside the polygon
+        low_edge = max(inner, 0.0)
+        # The band as a line, for the browser: its width at its middle,
+        # mitred (the clip leaves the polygon's corners sharp); Qt's dash
+        # patterns keep their lengths in units of the full width.
+        line = layer.clone()
+        line.setDrawInsidePolygon(False)
+        line.setWidth(outer - low_edge)
+        line.setOffset((outer + low_edge) / 2.0)
+        line.setOffsetUnit(unit)
+        line.setOffsetMapUnitScale(layer.widthMapUnitScale())
+        line.setPenJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        solid = layer.penStyle() == Qt.PenStyle.SolidLine and not layer.useCustomDashPattern()
+        if not layer.useCustomDashPattern() and layer.penStyle() in self._QT_DASHES:
+            line.setUseCustomDashPattern(True)
+            line.setCustomDashVector([m * width for m in self._QT_DASHES[layer.penStyle()]])
+            line.setCustomDashPatternUnit(unit)
+            line.setCustomDashPatternMapUnitScale(layer.widthMapUnitScale())
+
+        def as_line(rule: FlattenedRule) -> List[FlattenedRule]:
+            derived = rule.derive()
+            replace_symbol_layer(derived.rule.symbol(), line.clone())
+            result = self.materialize(derived, derived.rule.symbol().symbolLayer(0))
+            return result if result is not None else [derived]
+
+        effect = layer.paintEffect()
+        if not solid or (effect is not None and effect.enabled()):
+            return as_line(flat_rule)
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        fill = QgsSimpleFillSymbolLayer(layer.color(), Qt.BrushStyle.SolidPattern,
+                                        layer.color(), Qt.PenStyle.NoPen)
+        if props.isActive(P.PropertyStrokeColor):
+            fill.setDataDefinedProperty(P.PropertyFillColor, QgsProperty(props.property(P.PropertyStrokeColor)))
+        symbol = QgsFillSymbol([fill])
+        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        join = {Qt.PenJoinStyle.BevelJoin: "bevel", Qt.PenJoinStyle.RoundJoin: "round"}.get(
+            layer.penJoinStyle(), "miter")
+
+        def band(rule: FlattenedRule, per_unit: float) -> FlattenedRule:
+            derived = self._with_symbol(rule, symbol.clone(), 2, 1, mat.inside_band(
+                inner * per_unit, outer * per_unit, _ring_filter(layer), join, crs))
+            return derived
+
+        if normalize_unit(unit) in ("map", "m"):
+            return [band(flat_rule, 1.0)]
+        unit_mm = _to_mm(1.0, unit)
+        low, high = self._zoom_range(flat_rule)
+        if not unit_mm or low > high:
+            return as_line(flat_rule)
+        zoom_rules = self._per_zoom(flat_rule)
+        vertices = self._layer_vertices(flat_rule.layer)
+        steps = next((n for n in (8, 4, 2, 1)
+                      if vertices * len(zoom_rules) * n <= self.MAX_PATTERN_ELEMENTS), 0)
+        if not steps:
+            self._report("Q2VT_PATTERN_BUDGET",
+                         "Lines drawn only inside polygons would exceed the output budget; drawn "
+                         "as a line of the visible band's width.", flat_rule)
+            return as_line(flat_rule)
+        rules = []
+        for rule in zoom_rules:
+            start = float(rule.get_attr("o"))
+            for sub, zoom in self._sub_zoom_bands(rule, steps, False):
+                derived = band(sub, unit_mm * self._map_units_per_mm(flat_rule, zoom))
+                derived.visibility = (sub.visibility or ZoomInterval(start, start + 1.0)).intersect(
+                    ZoomInterval(start, start + 1.0))
+                rules.append(derived)
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
+        if not overzoom.is_empty:  # past the last tiles: the band as a line
+            native = flat_rule.derive()
+            native.set_attr("o", high)
+            native.visibility = overzoom
+            replace_symbol_layer(native.rule.symbol(), line.clone())
+            native.recipe = mat.Recipe("polygon_offset", params=(
+                ("ring_filter", _ring_filter(layer)), ("crs", crs), ("rhr", True)))
+            native.set_attr("m", 1)
+            rules.append(native)
+        return rules
 
     def _layer_vertices(self, layer) -> int:
         """Vertices of a source layer (cached): the size of per-zoom copies."""
