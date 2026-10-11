@@ -1525,13 +1525,13 @@ def _qgis_px(value, kind, zoom):
     return min(max(px, 96 / 25.4), 4 * 96 / 25.4) if kind == "mm" else px
 
 
-def _limited_spacing(plugin, layer, recipe_param, getter, zooms, kind):
+def _limited_spacing(plugin, layer, recipe_param, getter, zooms, kind, out_dir):
     """The spacing the export draws at each zoom (one visible component,
     materialized in map units or kept in millimetres) against QGIS's."""
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener
     from fidelity.diagnostics import DiagnosticCollector
     reset_project(layer)
-    rules = RulesFlattener(0, 16, "/tmp", QgsProcessingFeedback(),
+    rules = RulesFlattener(0, 16, str(out_dir), QgsProcessingFeedback(),
                            DiagnosticCollector()).flatten_all_rules()
     for zoom in zooms:
         visible = [r for r in rules if r.visibility.contains(zoom)
@@ -1569,7 +1569,7 @@ def test_map_unit_hatch_spacing_limits_match_qgis(plugin, tmp_path, kind):
     lp.setDistanceMapUnitScale(_limits(kind))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([lp])))
     _limited_spacing(plugin, layer, "spacing", "distance",
-                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind)
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind, tmp_path)
 
 
 @pytest.mark.parametrize("kind", ["mm", "range"])
@@ -1585,7 +1585,7 @@ def test_map_unit_marker_interval_limits_match_qgis(plugin, tmp_path, kind):
     ml.setSubSymbol(_marker(Qgis.MarkerShape.Triangle, 6))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
     _limited_spacing(plugin, layer, "interval", "interval",
-                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind)
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind, tmp_path)
 
 
 def test_point_pattern_distance_limits_match_qgis(plugin, tmp_path):
@@ -1604,4 +1604,68 @@ def test_point_pattern_distance_limits_match_qgis(plugin, tmp_path):
     pp.setClipMode(Qgis.MarkerClipMode.CentroidWithin)
     pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 3))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
-    _limited_spacing(plugin, layer, "dx", "distanceX", (12.2, 15.5, 16.5, 17.5, 19, 22), "mm")
+    _limited_spacing(plugin, layer, "dx", "distanceX", (12.2, 15.5, 16.5, 17.5, 19, 22), "mm",
+                     tmp_path)
+
+
+def _pattern_exporter(symbol, low, maxzoom=16):
+    """The fill layer converted from ``low`` to zoom 24 (archive up to
+    ``maxzoom``)."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, maxzoom
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = low
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", low, 24)
+    return exporter
+
+
+def test_screen_spaced_hatch_lines_in_map_units_grow_per_zoom(plugin):
+    """A hatch spaced in millimetres (e.g. a map-unit spacing clamped to its
+    maximum) with map-unit lines: one texture froze the line width at its
+    first zoom (a thin hatch where QGIS fills the polygon when zoomed in).
+    True-size textures per zoom up to 22, lines drawn at mid-zoom width."""
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(4)
+    lp.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 1.7)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    lp.setSubSymbol(QgsLineSymbol([line]))
+    exporter = _pattern_exporter(QgsFillSymbol([lp]), 16.25)
+    layer = exporter.style["layers"][0]
+    pattern = layer["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [17, 18, 19, 20, 21, 22]
+    assert layer["metadata"][exporter.SCREEN_PATTERN_FLAG] is True
+    spacing = 4 * 96 / 25.4
+    for zoom, name in zip([16.25] + pattern[3::2], pattern[2::2]):
+        middle = (zoom + math.floor(zoom) + 1) / 2
+        width = 1.7 * 512 * 2 ** middle / 40075016.68557849
+        cell = exporter.pattern_images[name].img_1x
+        alpha = cell.getchannel("A")
+        ink = sum(alpha.getdata()) / 255.0 / (cell.size[0] * cell.size[1])
+        assert ink == pytest.approx(min(1.0, width / spacing), abs=0.08), zoom
+
+
+def test_point_pattern_rows_in_map_units_follow_the_map_in_overzoom(plugin):
+    """A point pattern spaced in millimetres across and map units down (QGIS
+    clamps only the distance across when it draws the pattern brush): the
+    textures stopped at max zoom + 3, so the rows stopped spreading apart
+    and the overzoomed map was far too dense."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 1))
+    pp.setDistanceX(4)
+    pp.setDistanceXUnit(Qgis.RenderUnit.Millimeters)
+    pp.setDistanceY(15)
+    pp.setDistanceYUnit(Qgis.RenderUnit.MapUnits)
+    exporter = _pattern_exporter(QgsFillSymbol([pp]), 16.25)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    assert pattern[3::2] == [17, 18, 19, 20, 21, 22]
+    for zoom, name in zip(pattern[3::2], pattern[4::2]):
+        height = exporter.pattern_images[name].img_1x.size[1]
+        assert height == pytest.approx(15 * 512 * 2 ** zoom / 40075016.68557849, rel=0.05), zoom
