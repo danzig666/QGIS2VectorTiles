@@ -359,7 +359,7 @@ class PropertyExtractor:
         zooms = sorted({zoom for curve in curves if ex.is_zoom_curve(curve)
                         for zoom in curve[3::2]})
         return ex.exponential_zoom_curve(
-            [(zoom, ["literal", [round(ex.evaluate_zoom_curve(curve, zoom), 4)
+            [(zoom, ["literal", [round(ex.evaluate_zoom_curve(curve, zoom), 6)
                                  for curve in curves]]) for zoom in zooms])
 
     @staticmethod

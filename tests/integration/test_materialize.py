@@ -790,10 +790,14 @@ def test_arrow_fill_offset_grows_with_the_map_in_map_units(plugin, tmp_path, uni
         assert translate == pytest.approx([12 * 96 / 25.4, -6 * 96 / 25.4])
         return
     assert translate[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
-    stops = dict(zip(translate[3::2], (out[1] for out in translate[4::2])))
+    from fidelity import expressions as ex
+    # Each axis as a zoom curve of its own (stops: zoom, ["literal", [x, y]]).
+    axes = [translate[:3] + [item if index % 2 == 0 else item[1][axis]
+                             for index, item in enumerate(translate[3:])] for axis in (0, 1)]
     for zoom in (0, 16, 19, 22):
         px = 512 * 2 ** zoom / 40075016.68557849
-        assert stops[zoom] == pytest.approx([12 * px, -6 * px], rel=1e-3, abs=1e-5)
+        value = [ex.evaluate_zoom_curve(curve, zoom) for curve in axes]
+        assert value == pytest.approx([12 * px, -6 * px], rel=1e-3, abs=1e-5)
 
 
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])
@@ -2143,8 +2147,14 @@ def test_point_pattern_rows_in_map_units_follow_the_map_in_overzoom(plugin):
     pp.setDistanceY(15)
     pp.setDistanceYUnit(Qgis.RenderUnit.MapUnits)
     exporter = _pattern_exporter(QgsFillSymbol([pp]), 16.25)
-    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
-    assert pattern[3::2] == [17, 18, 19, 20, 21, 22]
+    layer = exporter.style["layers"][0]
+    pattern = layer["paint"]["fill-pattern"]
+    # One texture per zoom past max zoom + 3 while a cell stays within the
+    # texture size cap (z22's 804 px rows are over it); above the last one
+    # the patched MapLibre scales it with the map (q2vt:pattern-zoom).
+    assert pattern[3::2] == [17, 18, 19, 20, 21]
+    assert layer["metadata"][exporter.PATTERN_ZOOM_FLAG] == 21
+    assert max(exporter.pattern_images[pattern[-1]].img_1x.size) <= exporter.MAX_PATTERN_TEXTURE_PX
     for zoom, name in zip(pattern[3::2], pattern[4::2]):
         height = exporter.pattern_images[name].img_1x.size[1]
         assert height == pytest.approx(15 * 512 * 2 ** zoom / 40075016.68557849, rel=0.05), zoom
