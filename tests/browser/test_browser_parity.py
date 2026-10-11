@@ -1438,3 +1438,141 @@ def test_free_label_frame_turns_with_its_label(tmp_path):
     browser = _red_axis_degrees(str(tmp_path / "v_browser.png"))
     assert qgis == pytest.approx(30, abs=6)
     assert browser == pytest.approx(qgis, abs=6)
+
+
+# A Publish export: tiles from zoom 0 to 16, the web map zoomed in to 22.
+PUBLISH_ZOOMS = (0, 16)
+
+
+def _label_point(tmp_path, settings, text="N0"):
+    """A hidden point at the centre, labelled with ``settings``."""
+    from qgis.core import QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes([text])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings.fieldName = "t"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return layer
+
+
+def _blue_box(path):
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    mask = Image.new("L", image.size)
+    mask.putdata([255 if p[2] > 150 and p[0] < 150 and p[1] < 150 else 0 for p in image.getdata()])
+    return mask.getbbox()
+
+
+@pytest.mark.parametrize("case,zoom", [("mu_text_mm_offset", 17.5), ("mu_text_mm_offset", 19.5),
+                                       ("pt_text_mu_offset", 17.5), ("pt_text_mu_offset", 19.5)])
+def test_label_offsets_in_other_units_than_the_text_follow_qgis(tmp_path, monkeypatch, case, zoom):
+    """Text and offset in different units, exported from zoom 0: the offset
+    was one em ratio taken at zoom 0, so map-unit text with a 3 mm offset was
+    drawn ~1e5 em away (not at all) and 10 pt text with a 15 map-unit offset
+    stayed on its point. Each zoom now has its ratio (exact at the zoom's
+    middle)."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setColor(QColor("blue"))
+    if case == "mu_text_mm_offset":
+        fmt.setSize(3)
+        fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 8, -5, Qgis.RenderUnit.Millimeters
+    else:
+        fmt.setSize(10)
+        fmt.setSizeUnit(Qgis.RenderUnit.Points)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    for a, b in zip(qgis, browser):  # the text where QGIS draws it, within 3 px
+        assert abs(a - b) <= 3, (qgis, browser)
+
+
+def _framed_settings(text_size, text_unit, size_type, size, stroke):
+    from qgis.core import QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat
+    from qgis.PyQt.QtCore import QSizeF
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(text_size)
+    fmt.setSizeUnit(text_unit)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(size_type)
+    frame.setSize(QSizeF(*size))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(stroke)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    return settings
+
+
+@pytest.mark.parametrize("zoom", [20.0, 20.5, 21.5])
+def test_frames_of_map_unit_text_keep_their_size_above_the_tiles(tmp_path, monkeypatch, zoom):
+    """A frame fitted to map-unit text, tiles to zoom 16: above zoom 20 one
+    icon-size curve drew it 8x, 16x... too large (MapLibre lays overscaled
+    tiles out again at each zoom); each zoom now has its own ramp."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(1, Qgis.RenderUnit.MapUnits,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (0.25, 0.25), 0.1)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # frame edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)
+
+
+@pytest.mark.parametrize("kind", ["buffer", "fixed"])
+@pytest.mark.parametrize("zoom", [17.5, 19.5])
+def test_map_unit_frames_of_screen_text_grow_with_the_map(tmp_path, monkeypatch, kind, zoom):
+    """10 pt text in a map-unit frame, exported from zoom 0: the frame was
+    converted at zoom 0 (a fixed frame: a 1 px sprite; a buffer frame: no
+    margin and no border at any zoom)."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    if kind == "buffer":
+        settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                    QgsTextBackgroundSettings.SizeType.SizeBuffer, (4, 2), 0.6)
+    else:
+        settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                    QgsTextBackgroundSettings.SizeType.SizeFixed, (16, 6), 0.6)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # frame edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)
+
+
+def test_huge_map_unit_text_is_drawn_when_zoomed_in(tmp_path, monkeypatch):
+    """25 map-unit text at zoom 20.5: MapLibre lays it out at the next zoom's
+    size, its collision box then covered the whole view, which stock MapLibre
+    counted as a collision (nothing drawn, even alone). QGIS draws it."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 20.5)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    qgis, browser = _compare(tmp_path, _label_point(tmp_path, settings), metric="ink",
+                             zooms=PUBLISH_ZOOMS)
+    assert qgis > 10000 and browser > 0.7 * qgis, (qgis, browser)

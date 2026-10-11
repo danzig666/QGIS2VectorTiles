@@ -758,6 +758,10 @@ def test_around_point_distance_in_map_units_follows_the_zoom():
     scaled = _js("m.aroundOption({px: 10, zoom: 14}, 16, 0.001)")
     # Without anchors: QGIS's first candidate, above right of the point.
     assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom-left"
+    # Kept within a map unit scale's limits: the distance's own zoom curve.
+    limited = _js("m.aroundOption({px: ['interpolate', ['exponential', 2], ['zoom'], "
+                  "0, 0.001, 18, 262.144, 24, 262.144]}, 20, 0.001)")
+    assert limited["distance"] == pytest.approx(0.262144)
     assert _js("m.aroundOption(undefined, 16, 0.001)") is None
     # No distance: centred on the point first (QGIS), then around it.
     assert _js("m.aroundOption({px: 0, anchors: ['top']}, 16, 0.001)")["anchors"] == ["center", "top"]

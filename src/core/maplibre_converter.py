@@ -60,6 +60,11 @@ def _enum_int(value, default=None):
     return default
 
 
+def _is_map_unit(unit) -> bool:
+    """Map units or meters at scale: lengths that grow with the map."""
+    return normalize_unit(unit) in ("map", "m")
+
+
 def _label_enum(settings, name: str, default=None):
     """An enum attribute of label settings as an int; ``default`` when PyQGIS
     cannot read it: an old project's unset value (-1, saved as 4294967295,
@@ -1535,15 +1540,15 @@ class TextPropertyExtractor:
         """``text-offset`` in ems moving an above/below line label by the
         label distance away from the line."""
         side = TextPropertyExtractor.line_side(label_settings)
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
         try:
             distance = float(label_settings.dist or 0)
         except (AttributeError, TypeError, ValueError):
             distance = 0.0
-        if side == "on" or not distance or size <= 0:
+        if side == "on" or not distance:
             return [0, 0]
-        em = PropertyExtractor.static_pixels(distance, label_settings.distUnits) / size
-        return [0, -em if side == "above" else em]
+        pixels = PropertyExtractor.length(distance, label_settings.distUnits)
+        return TextPropertyExtractor.label_ems(
+            [0, ex.mul(pixels, -1 if side == "above" else 1)], text_size_px, limit=True)
 
     @staticmethod
     def get_text_justify(label_settings: QgsPalLayerSettings) -> Union[str, List]:
@@ -1588,14 +1593,10 @@ class TextPropertyExtractor:
         y_offset = label_settings.yOffset
         if x_offset == 0 and y_offset == 0:
             return [0, 0]
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
-        if size <= 0:
-            return [0, 0]
         unit = label_settings.offsetUnits
-        return [
-            PropertyExtractor.static_pixels(x_offset, unit) / size,
-            PropertyExtractor.static_pixels(y_offset, unit) / size,
-        ]
+        return TextPropertyExtractor.label_ems(
+            [PropertyExtractor.length(x_offset, unit), PropertyExtractor.length(y_offset, unit)],
+            text_size_px, limit=True)
 
     @staticmethod
     def get_text_radial_offset(label_settings: QgsPalLayerSettings,
@@ -1611,10 +1612,45 @@ class TextPropertyExtractor:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):
             return base
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
-        if not distance or size <= 0:
+        if not distance:
             return base
-        return base + PropertyExtractor.static_pixels(distance, label_settings.distUnits) / size
+        ems = TextPropertyExtractor.label_ems(
+            [PropertyExtractor.length(distance, label_settings.distUnits)], text_size_px, plus=base)
+        if ex.is_zoom_curve(ems):  # a step of one-number lists
+            return ems[:2] + [v[1][0] if isinstance(v, list) else v for v in ems[2:]]
+        return ems[0]
+
+    # text-offset is stored per glyph vertex in 1/32 px of a 24 px em as a
+    # 16-bit integer (MapLibre symbol layout): beyond ~42 em it wraps around.
+    MAX_TEXT_OFFSET_EM = 40.0
+
+    @staticmethod
+    def label_ems(lengths: list, size, plus: float = 0.0, limit: bool = False):
+        """Label offsets ``lengths`` (px: numbers or zoom curves) in ems of the
+        text size ``size`` (px: a number or a zoom curve), ``plus`` added: a
+        list, or a zoom step of lists when offset and size do not scale alike
+        (map-unit text with a mm offset, mm text with a map-unit distance).
+        MapLibre multiplies the ems by the drawn text size but lays them out at
+        the tile's whole zoom only: each zoom takes the ratio of its middle
+        (exact there, within sqrt(2) at its ends). One ratio taken at the
+        style's min zoom was ~1e5 em from zoom 0 (or 0 em the other way round).
+        ``limit``: kept within MAX_TEXT_OFFSET_EM (text-offset; the zooms
+        where it applies draw text too small to see or far off screen)."""
+        if ex.is_number(size) and all(ex.is_number(v) for v in lengths):
+            return [v / size + plus if size > 0 else plus for v in lengths]
+        top = TextPropertyExtractor.MAX_TEXT_OFFSET_EM if limit else float("inf")
+        steps = []
+        for zoom in range(0, 24):
+            den = ex.evaluate_zoom_curve(size, zoom + 0.5)
+            steps.append([round(max(-top, min(top, ex.evaluate_zoom_curve(v, zoom + 0.5) / den)) + plus, 4)
+                          if den > 0 else plus for v in lengths])
+        if all(step == steps[0] for step in steps):
+            return steps[0]
+        expression = ["step", ["zoom"], ["literal", steps[0]]]
+        for zoom in range(1, len(steps)):
+            if steps[zoom] != steps[zoom - 1]:
+                expression += [zoom, ["literal", steps[zoom]]]
+        return expression
 
     @staticmethod
     def get_text_variable_anchor(label_settings: QgsPalLayerSettings = None) -> Optional[List[str]]:
@@ -4314,8 +4350,16 @@ class QgisMapLibreStyleExporter:
         else:
             self.glyphs[font] = [dataset]
         text_size = TextPropertyExtractor.get_text_size(text_format, label_settings, self.viewer)
-        em_size = text_size if ex.is_number(text_size) else \
-            PropertyExtractor.static_pixels(text_format.size(), text_format.sizeUnit())
+        # The size offsets are measured in: a number, or a zoom curve for
+        # map-unit text (a data-defined size: its static size).
+        em_size = text_size
+        try:
+            ex.evaluate_zoom_curve(em_size, 0)
+        except ex.ExpressionError:
+            em_size = PropertyExtractor.length(text_format.size(), text_format.sizeUnit(), None,
+                                               text_format.sizeMapUnitScale())
+            if self.viewer == 0:
+                em_size = ex.div(em_size, _MAPLIBRE_LABELS_FACTOR)
         placement = TextPropertyExtractor.placement_name(label_settings)
         layer_def["layout"].update({
             "text-font": [font],
@@ -4502,14 +4546,14 @@ class QgisMapLibreStyleExporter:
             around["outside"] = True
         if ex.is_number(pixels):
             around["px"] = round(max(0.0, float(pixels)), 3)
+        elif len(pixels) == 7:
+            # Map units: doubles with each zoom level. Taken at zoom 24: at
+            # the style's min zoom (0 in a Publish export) it rounded to 0.
+            around["px"] = round(max(0.0, float(ex.evaluate_zoom_curve(pixels, 24))), 3)
+            around["zoom"] = 24
         else:
-            # Map units: doubles with each zoom level. Taken at the curve's
-            # last stop, to full precision: at a low reference zoom (0) a
-            # distance of metres rounded to 0 px.
-            zoom = float(pixels[-2]) if ex.is_zoom_curve(pixels) else float(PropertyExtractor.context.reference_zoom)
-            value = max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom)))
-            around["px"] = float(f"{value:.6g}")
-            around["zoom"] = zoom
+            # Kept within a map unit scale's limits: the curve itself.
+            around["px"] = pixels
         return around
 
     @staticmethod
@@ -4566,7 +4610,10 @@ class QgisMapLibreStyleExporter:
         low = layer_def.get("minzoom", 0)
         high = layer_def.get("maxzoom", 24)
         fit = self.LINE_LABEL_FIT_ZOOM
-        top = fit if not framed else min(24, max(fit, int(self.maxzoom) + 4))
+        # A frame needs its ramp at every zoom: MapLibre lays out overscaled
+        # tiles again at each zoom (one curve above the tiles' max zoom drew
+        # frames 8x too large 4 zooms higher).
+        top = fit if not framed else 24
         if low >= top:
             return [layer_def]
         out = []
@@ -4652,9 +4699,12 @@ class QgisMapLibreStyleExporter:
                             (parts[0], "|", parts[1])]
         return ["match", key] + cases + ["bottom-left"]
 
-    def _background_image(self, background, stroke_px: Optional[float] = None) -> Optional[str]:
+    def _background_image(self, background, stroke_px: Optional[float] = None,
+                          zoom: Optional[float] = None) -> Optional[str]:
         """Sprite for a label background shape (rectangle/ellipse/SVG/marker).
-        ``stroke_px`` overrides the frame stroke (per-zoom map-unit frames)."""
+        ``stroke_px`` overrides the frame stroke (per-zoom map-unit frames);
+        ``zoom``: the zoom map-unit sizes are drawn at (a fixed map-unit frame,
+        scaled by icon-size)."""
         from .fidelity.patterns import frame_image  # pylint: disable=import-outside-toplevel
         shape = _enum_int(background.type(), 0)
         names = {0: "rectangle", 1: "rectangle", 2: "ellipse", 3: "ellipse", 4: "svg", 5: "marker"}
@@ -4684,15 +4734,18 @@ class QgisMapLibreStyleExporter:
         stroke = background.strokeColor()
         if stroke_px is None:
             stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
-                                                        background.strokeWidthUnit())
+                                                        background.strokeWidthUnit(), zoom)
         radii = background.radii()
-        radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
-                                                    background.radiiUnit()) if kind == "rectangle" else 0
+        radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()), background.radiiUnit(),
+                                                    zoom) if kind == "rectangle" else 0
         fixed = 0
-        if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed
+        if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed: QGIS's width x height
+            # QGIS strokes the outline centred on it: half the stroke outside
+            # (the image's stroke lies inside its edge).
             size = background.size()
-            fixed = max(1, round(PropertyExtractor.static_pixels(
-                max(size.width(), size.height()), background.sizeUnit())))
+            fixed = tuple(max(1, round(PropertyExtractor.static_pixels(side, background.sizeUnit(), zoom)
+                                       + max(stroke_px, 0.0)))
+                          for side in (size.width(), size.height()))
         rgba = lambda c: (c.red(), c.green(), c.blue(), c.alpha())  # noqa: E731
         one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 1, fixed)
         two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2, fixed)
@@ -4700,7 +4753,8 @@ class QgisMapLibreStyleExporter:
         self.pattern_images[name] = PatternImages(one, two, meta)
         return name
 
-    def _frame_variants(self, background, label_settings, base: str, source_layer: str):
+    def _frame_variants(self, background, label_settings, base: str, source_layer: str,
+                        zoom: Optional[float] = None):
         """Frame per distinct data-defined frame fill/border colour."""
         from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
         props = label_settings.dataDefinedProperties()
@@ -4732,7 +4786,7 @@ class QgisMapLibreStyleExporter:
                     variant.setStrokeColor(color)
                 else:
                     variant.setFillColor(color)
-            return self._background_image(variant)
+            return self._background_image(variant, zoom=zoom)
         key, cases = self._variant_images(names, combos, make)
         return ["match", key] + cases + [base] if cases else base
 
@@ -4742,13 +4796,13 @@ class QgisMapLibreStyleExporter:
         With a zoom-dependent ``text-size`` MapLibre fits the icon to the text
         box shaped at ``tile zoom + 1``; map-unit sizes double per zoom, so
         the frame is scaled by ``2^(z - tile_zoom - 1)``: a sawtooth per zoom
-        level up to the archive's max zoom, then smooth overzoom.
+        level, above the archive's max zoom too (overscaled tiles are laid out
+        again at each zoom).
         """
-        top = int(self.maxzoom)
         stops = []
-        for level in range(0, top):
+        for level in range(0, 24):
             stops += [level, 0.5, level + 0.999, 2 ** -0.001]
-        stops += [top, 0.5, 24, 2.0 ** (24 - top - 1)]
+        stops += [24, 0.5]
         return ["interpolate", ["exponential", 2], ["zoom"]] + stops
 
     @staticmethod
@@ -4784,7 +4838,8 @@ class QgisMapLibreStyleExporter:
     def _apply_icon_from_background(self, layer_def: dict, background, style_name: str,
                                     label_settings=None):
         """Configure icon layout/paint from a label background shape."""
-        image = self._background_image(background)
+        fixed_zoom = self._fixed_frame_zoom(background)
+        image = self._background_image(background, zoom=fixed_zoom)
         if image is None:
             self.context.report("Q2VT_UNSUPPORTED_SYMBOL_LAYER",
                                 "Label background shape could not be exported.")
@@ -4792,7 +4847,7 @@ class QgisMapLibreStyleExporter:
         is_frame = image.startswith("frame_")
         if is_frame and label_settings is not None:
             image = self._frame_variants(background, label_settings, image,
-                                         layer_def.get("source-layer", ""))
+                                         layer_def.get("source-layer", ""), fixed_zoom)
         layer_def["layout"]["icon-image"] = image
 
         text_fit = IconPropertyExtractor.get_icon_text_fit(background)
@@ -4821,13 +4876,22 @@ class QgisMapLibreStyleExporter:
         if is_frame:
             layer_def["layout"]["icon-allow-overlap"] = True
             layer_def["layout"]["icon-ignore-placement"] = True
-            if isinstance(image, str) and _enum_int(background.strokeWidthUnit(), 0) == 1 \
-                    and background.strokeWidth() > 0:
+            map_stroke = isinstance(image, str) and _is_map_unit(background.strokeWidthUnit()) \
+                and background.strokeWidth() > 0
+            text_curve = ex.is_zoom_curve(layer_def["layout"].get("text-size"))
+            if fixed_zoom is not None:
+                # A fixed map-unit frame: drawn at fixed_zoom, scaled with the
+                # map (drawn at the style's min zoom it was 1 px).
+                self._scale_fixed_frame(layer_def, background, fixed_zoom)
+            elif text_fit and not text_curve:
+                # Screen text: the map-unit buffer and stroke grow, not the text.
+                self._grow_screen_text_frame(layer_def, background, label_settings, map_stroke)
+            elif text_fit and map_stroke:
                 # Map-unit frame stroke: one frame image per zoom
                 # (_line_label_zoom_split); one image drew a hairline.
                 from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
                 layer_def["_q2vt_frame"] = QgsTextBackgroundSettings(background)
-            if ex.is_zoom_curve(layer_def["layout"].get("text-size")):
+            if text_fit and text_curve:
                 layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
                 padding = self._text_fit_padding_curve(background)
                 if padding is None:
@@ -4843,6 +4907,86 @@ class QgisMapLibreStyleExporter:
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
         })
+
+    # A fixed map-unit frame is drawn at the zoom where its longer side is at
+    # most this many px, then scaled by icon-size (MapLibre stores icon
+    # vertices as 16-bit 1/32 px).
+    FIXED_FRAME_PX = 128.0
+
+    def _fixed_frame_zoom(self, background) -> Optional[int]:
+        """The zoom a fixed-size map-unit frame (rectangle or ellipse) is drawn
+        at, or None for any other background."""
+        if _enum_int(background.sizeType(), 0) != 1 or _enum_int(background.type(), 0) > 3 \
+                or not _is_map_unit(background.sizeUnit()):
+            return None
+        size = background.size()
+        side = PropertyExtractor.length(max(size.width(), size.height()), background.sizeUnit())
+        try:
+            top = float(ex.evaluate_zoom_curve(side, 24))
+        except ex.ExpressionError:
+            return None
+        if top <= 0:
+            return None
+        return int(max(0, min(24, math.floor(24 - math.log2(top / self.FIXED_FRAME_PX)))))
+
+    def _scale_fixed_frame(self, layer_def: dict, background, zoom: int):
+        """``icon-size`` of a fixed map-unit frame drawn at ``zoom``: doubles
+        per zoom like the map; its offset (multiplied by icon-size) divided by it."""
+        size = ex.exponential_zoom_curve([(0, 2.0 ** -zoom), (24, 2.0 ** (24 - zoom))])
+        layer_def["layout"]["icon-size"] = size
+        offset = background.offset()
+        if offset.x() or offset.y():
+            unit = background.offsetUnit()
+            layer_def["layout"]["icon-offset"] = TextPropertyExtractor.label_ems(
+                [PropertyExtractor.length(offset.x(), unit), PropertyExtractor.length(offset.y(), unit)],
+                size)
+
+    def _grow_screen_text_frame(self, layer_def: dict, background, label_settings, map_stroke: bool):
+        """A text-fitted frame around screen-size text with a map-unit buffer or
+        stroke: its padding and frame image per tile zoom (a ``step``: MapLibre
+        lays both out at the tile's zoom), at the zoom's middle (within sqrt(2)
+        of QGIS's at its ends). Converted once at the style's min zoom, the
+        buffer and stroke were 0 at every zoom."""
+        layout = layer_def["layout"]
+        low = int(math.floor(max(0, layer_def.get("minzoom", 0))))
+        high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
+        zooms = list(range(low, max(low + 1, high)))
+        if _enum_int(background.sizeType(), 0) == 0 and _is_map_unit(background.sizeUnit()):
+            size = background.size()
+            steps = []
+            for zoom in zooms:
+                x = PropertyExtractor.static_pixels(size.width(), background.sizeUnit(), zoom + 0.5)
+                y = PropertyExtractor.static_pixels(size.height(), background.sizeUnit(), zoom + 0.5)
+                padding = [y, x, y, x]
+                if label_settings is not None:
+                    padding = self._frame_fit_padding(padding, label_settings.format(), layout)
+                steps.append([round(v, 4) for v in padding])
+            layout["icon-text-fit-padding"] = self._zoom_step(zooms, steps, literal=True)
+        if map_stroke:
+            # The frame shown at icon-size 1: the stroke of the zoom's middle,
+            # whatever its shape; zooms whose strokes round alike share an image.
+            self.pattern_images.pop(layout["icon-image"], None)
+            images, names = {}, []
+            for zoom in zooms:
+                stroke = round(PropertyExtractor.static_pixels(
+                    background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5), 2)
+                if stroke not in images:
+                    images[stroke] = self._background_image(background, stroke_px=stroke)
+                names.append(images[stroke])
+            layout["icon-image"] = self._zoom_step(zooms, names)
+
+    @staticmethod
+    def _zoom_step(zooms: list, values: list, literal: bool = False):
+        """A ``step`` on the zoom: ``values[i]`` from ``zooms[i]`` (the first
+        below it too); equal values as the value itself."""
+        wrap = (lambda v: ["literal", v]) if literal else (lambda v: v)  # noqa: E731
+        if all(value == values[0] for value in values):
+            return values[0]
+        out = ["step", ["zoom"], wrap(values[0])]
+        for zoom, previous, value in zip(zooms[1:], values, values[1:]):
+            if value != previous:
+                out += [zoom, wrap(value)]
+        return out
 
     # Text whose mean character width stands for label text (lower case,
     # Hungarian accents, digits, spaces and punctuation).

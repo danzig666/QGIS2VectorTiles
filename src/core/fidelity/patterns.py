@@ -307,28 +307,31 @@ def point_pattern_cell(dx: float, dy: float, disp_x: float, disp_y: float):
 
 
 def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px: float,
-                pixel_ratio: float, size_px: int = 0):
+                pixel_ratio: float, size_px=0):
     """Label background frame and its stretch metadata (logical pixels).
 
     ``shape``: "rectangle" (stretchable: corners and border keep their size
     when MapLibre fits the frame around the text) or "ellipse" (the whole
-    image is scaled). Returns ``(image, metadata)``.
+    image is scaled). ``size_px``: a fixed-size frame, ``(width, height)``
+    or one side of a square. Returns ``(image, metadata)``.
     """
     from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel
 
     edge = max(stroke_px, 0.0)
     radius = max(radius_px, 0.0)
     logical = size_px or int(max(32, 2 * math.ceil(radius + edge) + 16))
+    # A fixed-size frame: (width, height), as QGIS draws it (one number: square).
+    width_px, height_px = logical if isinstance(logical, (tuple, list)) else (logical, logical)
     ss = 4  # supersampling for anti-aliased edges
     scale = pixel_ratio * ss
-    big = max(1, round(logical * scale))
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    big_w, big_h = max(1, round(width_px * scale)), max(1, round(height_px * scale))
+    img = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     # PIL draws an outline inside the box: the stroke covers [0, edge] from
     # the image edge, inside the fixed (non-stretched) border below. An inset
     # of half the stroke pushed thick map-unit strokes into the stretched
     # middle, which then filled the whole frame.
-    box = [0, 0, big - 1, big - 1]
+    box = [0, 0, big_w - 1, big_h - 1]
     width = max(0, round(edge * scale))
     fill = tuple(fill_rgba)
     outline = tuple(stroke_rgba) if width else None
@@ -343,7 +346,8 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
                                width=width)
     # Area average of the supersampled image (Lanczos overshoots: a darker
     # stroke with a light line just inside it).
-    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.BOX)
+    out = img.resize((max(1, round(width_px * pixel_ratio)), max(1, round(height_px * pixel_ratio))),
+                     Image.BOX)
     metadata = {}
     if shape != "ellipse" and not size_px:
         fixed = math.ceil(radius + edge) + 1

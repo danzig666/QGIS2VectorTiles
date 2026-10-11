@@ -56,7 +56,13 @@ a double-size copy after every whole zoom. The patch:
 
 9. tells a polygon's shells from its holes by the winding of its largest
    ring, not of its first: GDAL's MVT writer can put a tiny hole-wound
-   sliver before the shell, and the shell then became that sliver's hole.
+   sliver before the shell, and the shell then became that sliver's hole;
+
+10. a label whose collision box covers the whole collision grid (the view plus
+    100 px around it) collides only with the boxes placed in it: stock
+    MapLibre counted it as colliding with everything, so big map-unit text
+    (laid out at the size of the next zoom) vanished when zoomed in, even
+    alone, while QGIS draws it.
 
 Idempotent; run after updating MapLibre:
 
@@ -83,6 +89,23 @@ SAMPLING_NEW = (SAMPLING_MARK + "vec2 pos_a=vec2(mix(pattern_tl_a.x,pattern_br_a
                 "mix(pattern_tl_a.y+0.5,pattern_br_a.y-0.5,y))*texel_size;"
                 "vec2 pos_b=vec2(mix(pattern_tl_b.x,pattern_br_b.x,x_b),"
                 "mix(pattern_tl_b.y+0.5,pattern_br_b.y-0.5,y))*texel_size;")
+
+
+GRID_MARK = "/*q2vt-grid-hit-test*/"
+# GridIndex._query: a query covering the whole grid returns every box, and a
+# hit test one "collision" whatever the grid holds.
+GRID_HIT = re.compile(r"if\((\w)<=0&&(\w)<=0&&this\.width<=(\w)&&this\.height<=(\w)\)\{"
+                      r"if\((\w)\)return\[\{key:null,x1:\1,y1:\2,x2:\3,y2:\4\}\];")
+
+
+def _grid_patch(text: str) -> str:
+    found = list(GRID_HIT.finditer(text))
+    if len(found) != 1:
+        raise SystemExit(f"grid index hit test: {len(found)} matches (expected 1)")
+    m = found[0]
+    # Hit tests go on to the per-cell query (cells clamped to the grid).
+    return (text[:m.start()] + f"if({GRID_MARK}!{m.group(5)}&&{m.group(1)}<=0&&{m.group(2)}<=0&&"
+            f"this.width<={m.group(3)}&&this.height<={m.group(4)}){{" + text[m.end():])
 
 
 WIDTH_MARK = "/*q2vt-current-width*/"
@@ -449,6 +472,8 @@ def patch(text: str) -> str:
         text = _line_atlas_patch(text)
     if ANCHOR_MARK not in text:
         text = _anchor_patch(text)
+    if GRID_MARK not in text:
+        text = _grid_patch(text)
     if WIDTH_MARK not in text:
         for old, new, count in WIDTH_EDITS:
             if text.count(old) != count:
@@ -489,7 +514,7 @@ def main() -> int:
         shared = handle.read()
     if "--check" in sys.argv:
         done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK,
-                                             PATTERN_ZOOM_MARK, ATLAS_MARK)) \
+                                             PATTERN_ZOOM_MARK, ATLAS_MARK, GRID_MARK)) \
             and BUCKET_MARK in shared and CLOSED_MARK in shared \
             and ROTATED_MARK in shared and RINGS_MARK in shared
         print("patched" if done else "NOT patched")

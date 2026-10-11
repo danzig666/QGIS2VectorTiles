@@ -779,7 +779,8 @@ export function repeatOption(repeat, zoom, perPx) {
 // (q2vt:label-around): the label distance in world units at this zoom.
 export function aroundOption(around, zoom, perPx) {
   if (!around) return null;
-  let px = Number(around.px) || 0;
+  // A zoom curve: map units within a map unit scale's limits.
+  let px = Math.max(0, Number(Array.isArray(around.px) ? evaluate(around.px, zoom) : around.px) || 0);
   if (Number.isFinite(Number(around.zoom))) px *= 2 ** (zoom - Number(around.zoom));  // map units
   // QGIS's order (pal createCandidatesAroundPoint): top-right first.
   let anchors = Array.isArray(around.anchors) && around.anchors.length ? around.anchors
