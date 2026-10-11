@@ -219,6 +219,37 @@ def test_screen_offset_hashes_on_polygons_are_placed_per_zoom(plugin, tmp_path):
                 if "polygon outline markers" in d.message]
 
 
+@pytest.mark.parametrize("kind", ["HashLine", "MarkerLine"])
+@pytest.mark.parametrize("ring_filter", [0, 2])
+def test_screen_offset_polygon_outline_markers_overzoom_inwards_on_the_kept_rings(
+        plugin, tmp_path, kind, ring_filter):
+    """Past the last tiles, millimetre-interval hashes or markers on polygon
+    outlines are placed by the browser along the rings: the native rule
+    took the raw rings, which ignored the ring filter (interior rings only
+    drew the exterior too) and put the screen offset on the right-hand side
+    of each ring as stored (outwards on a counter-clockwise exterior)."""
+    line = QgsHashedLineSymbolLayer() if kind == "HashLine" else QgsMarkerLineSymbolLayer()
+    if kind == "MarkerLine":
+        line.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    datasets, rules, _ = _polygon_offset_markers(plugin, tmp_path, line)
+    over = [(dataset, rule) for dataset, rule in zip(datasets, rules)
+            if rule.visibility is not None and rule.visibility.min_zoom >= 17]
+    assert over
+    for dataset, rule in over:
+        assert rule.recipe is not None and rule.recipe.kind == "polygon_offset"
+        assert rule.recipe.param("rhr") and rule.recipe.param("ring_filter") == ring_filter
+        rings = [QgsGeometry(f.geometry()) for f in dataset.getFeatures()]
+        rings = [part for ring in rings for part in ring.asMultiPolyline()] \
+            if rings and rings[0].isMultipart() else [ring.asPolyline() for ring in rings]
+        assert len(rings) == (1 if ring_filter == 2 else 3)
+        for ring in rings:
+            area = sum(a.x() * b.y() - b.x() * a.y() for a, b in zip(ring, ring[1:]))
+            hole = max(p.x() for p in ring) < -20 and min(p.y() for p in ring) > -40
+            assert (area > 0) == hole  # holes counter-clockwise, exteriors clockwise
+            assert hole or ring_filter != 2
+
+
 def _hash_line(placements):
     hl = QgsHashedLineSymbolLayer()
     hl.setPlacements(placements)

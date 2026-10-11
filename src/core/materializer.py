@@ -2356,6 +2356,17 @@ class SymbolMaterializer:
             last = zoom_rules[-1]
             last.visibility = (last.visibility or ZoomInterval(float(high), None)).intersect(
                 ZoomInterval(float(high), float(high + 1)))
+            if native.get_attr("g") == 2 and (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
+                # Polygon outlines: the ring filter, and a screen offset
+                # towards the interior on right-hand-rule rings (a map offset
+                # buffered), as _polygon_outline_offset draws native markers.
+                params = [("ring_filter", _ring_filter(layer)), ("crs", crs)]
+                if abs(layer.offset()) > 1e-9 and normalize_unit(layer.offsetUnit()) == "map":
+                    params.append(("offset", float(layer.offset())))
+                    over.rule.symbol().symbolLayer(0).setOffset(0.0)
+                elif abs(layer.offset()) > 1e-9:
+                    params.append(("rhr", True))
+                over.recipe = mat.Recipe("polygon_offset", params=tuple(params))
             if not over.visibility.is_empty:
                 rules.extend(self._native_interval_bands(over, 8))
         # A zoom where no line or ring is an interval long (to its end): one
