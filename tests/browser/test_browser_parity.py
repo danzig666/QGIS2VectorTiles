@@ -839,9 +839,12 @@ def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, 
     """Map-unit textures stop at tile zoom + 3 (18 from a 0-16 export) while
     the web map goes to 22. The last texture stayed at its pixel size above
     it (2x too small at zoom 19, 16x at 22); flagged with its zoom, the
-    patched MapLibre scales it with the map."""
+    patched MapLibre scales it with the map. (Without a budget for them,
+    there are no sharper textures above tile zoom + 3.)"""
     from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
     monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    monkeypatch.setattr(mc.QgisMapLibreStyleExporter, "MAX_OVERZOOM_PATTERN_SPRITE_PX", 0)
     layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
     marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 1.2)
     marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
@@ -859,6 +862,92 @@ def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, 
     assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 18
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser == pytest.approx(qgis, rel=0.05), (qgis, browser)
+
+
+def _point_pattern(spacing, unit, size, size_unit):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, size)
+    marker.setSizeUnit(size_unit)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(spacing)
+        getattr(pattern, f"set{name}Unit")(unit)
+    return pattern
+
+
+@pytest.mark.parametrize("zoom", [16.1, 16.9, 19.5])
+def test_zero_map_unit_displacement_keeps_a_screen_grid_exact(tmp_path, monkeypatch, zoom):
+    """A 4 mm grid of 1.5 mm squares whose zero displacement has map units
+    as its unit, exported 0-16: taken for a map-unit pattern, its textures
+    scaled with the map (11.25 px instead of QGIS's 15 at zoom 16.1, 20 px
+    at 16.9). QGIS draws nothing of it in map units."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    pattern = _point_pattern(4, Qgis.RenderUnit.Millimeters, 1.5, Qgis.RenderUnit.Millimeters)
+    pattern.setDisplacementXUnit(Qgis.RenderUnit.MapUnits)
+    pattern.setDisplacementYUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["metadata"]["q2vt:screen-pattern"] is True
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.03), (qgis, browser)
+
+
+@pytest.mark.parametrize("spacing,scales,zoom", [
+    (12.0, (2000, 5000), 15.95),  # shown from zoom 15.85
+    (3.0, (300, 1000), 18.6),  # shown from zoom 18.17, on overzoomed tiles
+])
+def test_map_unit_pattern_of_a_rule_matches_qgis_from_its_first_zoom(tmp_path, monkeypatch,
+                                                                     spacing, scales, zoom):
+    """A map-unit pattern in a rule shown from 1:5000 (zoom 15.85), exported
+    0-16: its first texture was rendered for zoom 15.85 and drawn in zoom
+    15's pixels, 1.8x too large up to zoom 16 (1.2x from 1:1000 at 18.6)."""
+    from qgis.core import QgsRuleBasedRenderer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    pattern = _point_pattern(spacing, Qgis.RenderUnit.MapUnits, 0.4 * spacing,
+                             Qgis.RenderUnit.MapUnits)
+    root = QgsRuleBasedRenderer.Rule(None)
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol([pattern]), scales[0], scales[1],
+                                               "", "detail"))
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.06), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [20.5, 21.5])
+def test_thin_map_unit_hatch_strokes_stay_sharp_in_overzoom(tmp_path, monkeypatch, zoom):
+    """Line markers 5 m apart with a 0.1 m stroke, all in map units,
+    exported 0-16: the zoom-18 texture (a sub-pixel stroke) was magnified
+    up to zoom 22, a wide pale band (no pixel darker than 220) where QGIS
+    draws a thin red line. Textures go on above tile zoom + 3."""
+    from PIL import Image
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 7)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setAngle(45)
+    marker.setStrokeColor(QColor("red"))
+    marker.setStrokeWidth(0.1)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(5)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    darkness = _compare(tmp_path, layer, metric="darkness", zooms=(0, 16))
+    assert darkness[1] == pytest.approx(darkness[0], rel=0.15), darkness
+    darkest = [min(Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+               for n in ("qgis", "browser")]
+    assert darkest[1] < 128, darkest  # an opaque red stroke (L 76) somewhere
 
 
 @pytest.mark.parametrize("zoom", [20.5, 21.5])

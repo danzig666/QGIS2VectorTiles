@@ -2849,39 +2849,99 @@ class QgisMapLibreStyleExporter:
         return one, two
 
     @staticmethod
-    def _pattern_uses_map_units(layer) -> bool:
+    def _map_length(value, unit) -> bool:
+        """Whether a length is drawn in map units (or meters at scale): a
+        zero length draws nothing in any unit (styles often set every unit
+        selector to map units, the unused ones too)."""
+        from qgis.PyQt.QtCore import QPointF  # pylint: disable=import-outside-toplevel
+        if isinstance(value, QPointF):
+            value = not value.isNull()
+        elif isinstance(value, (list, tuple)):
+            value = any(value)
+        return bool(value) and normalize_unit(unit) in ("map", "m")
+
+    # (length, unit) getters of a pattern fill drawn into its texture, and
+    # those of its repeat (spacing, displacement, cell size or density).
+    _PATTERN_LENGTHS = (
+        ("distance", "distanceUnit"), ("offset", "offsetUnit"), ("lineWidth", "lineWidthUnit"),
+        ("distanceX", "distanceXUnit"), ("distanceY", "distanceYUnit"),
+        ("displacementX", "displacementXUnit"), ("displacementY", "displacementYUnit"),
+        ("offsetX", "offsetXUnit"), ("offsetY", "offsetYUnit"),
+        ("maximumRandomDeviationX", "randomDeviationXUnit"),
+        ("maximumRandomDeviationY", "randomDeviationYUnit"),
+        ("patternWidth", "patternWidthUnit"), ("svgStrokeWidth", "svgStrokeWidthUnit"),
+        ("width", "widthUnit"), ("densityArea", "densityAreaUnit"))
+    _PATTERN_REPEAT_LENGTHS = ("distance", "distanceX", "distanceY", "displacementX",
+                               "displacementY", "patternWidth", "width", "densityArea")
+    # Length getters of sub-symbol layers not named after their unit getter.
+    _LENGTH_OF_UNIT = {"customDashPatternUnit": "customDashVector",
+                       "averageAngleUnit": "averageAngleLength",
+                       "randomDeviationXUnit": "maximumRandomDeviationX",
+                       "randomDeviationYUnit": "maximumRandomDeviationY"}
+
+    @classmethod
+    def _symbol_layer_uses_map_units(cls, layer) -> bool:
+        """``usesMapUnits()`` of a marker or line symbol layer (sub-symbols
+        included) counting only lengths it draws: a zero length or a stroke
+        with no pen is none. A unit without a known length counts as in
+        QGIS."""
+        no_pen = Qt.PenStyle.NoPen
+        for unit_getter in dir(layer):
+            if not unit_getter.endswith("Unit") or not unit_getter[:1].islower() or \
+                    unit_getter.startswith("set") or unit_getter == "outputUnit":
+                continue
+            try:
+                unit = getattr(layer, unit_getter)()
+            except TypeError:
+                continue
+            if normalize_unit(unit) not in ("map", "m"):
+                continue
+            value_getter = cls._LENGTH_OF_UNIT.get(unit_getter, unit_getter[:-4])
+            if unit_getter in ("customDashPatternUnit", "dashPatternOffsetUnit") and \
+                    not layer.useCustomDashPattern():
+                continue
+            if unit_getter == "strokeWidthUnit" and hasattr(layer, "strokeStyle") and \
+                    layer.strokeStyle() == no_pen:
+                continue
+            if unit_getter == "widthUnit" and hasattr(layer, "penStyle") and \
+                    layer.penStyle() == no_pen:
+                continue
+            if not hasattr(layer, value_getter) or \
+                    cls._map_length(getattr(layer, value_getter)(), unit):
+                return True
+        sub = layer.subSymbol()
+        return sub is not None and any(cls._symbol_layer_uses_map_units(sub.symbolLayer(i))
+                                       for i in range(sub.symbolLayerCount()))
+
+    @classmethod
+    def _pattern_uses_map_units(cls, layer) -> bool:
         """Whether any length drawn into the pattern's texture is in map units
-        (or meters at scale): the layer's own (QGIS ``usesMapUnits``, which
-        covers a hatch's distance and offset), or any length of the marker or
-        line it repeats. ``outputUnit()`` of a sub-symbol layer is no help: it
-        is Unknown when that layer mixes units (a map-unit size with a
-        millimetre offset)."""
-        if layer.usesMapUnits():
-            return True
-        units = []
-        for getter in ("distanceUnit", "offsetUnit", "lineWidthUnit", "distanceXUnit",
-                       "distanceYUnit", "displacementXUnit", "displacementYUnit", "offsetXUnit",
-                       "offsetYUnit", "patternWidthUnit", "svgStrokeWidthUnit", "widthUnit",
-                       "densityAreaUnit"):
-            if hasattr(layer, getter):
-                units.append(getattr(layer, getter)())
-        if any(normalize_unit(unit) in ("map", "m") for unit in units):
+        (or meters at scale): the layer's own (a hatch's distance and offset,
+        a grid's spacing, displacement, offset ...), or any length of the
+        marker or line it repeats. Lengths are paired with their values, as
+        QGIS draws them: a zero displacement whose unit is map units draws
+        nothing in map units (``usesMapUnits()`` reads the units alone).
+        ``outputUnit()`` of a sub-symbol layer is no help: it is Unknown
+        when that layer mixes units (a map-unit size with a millimetre
+        offset)."""
+        if any(hasattr(layer, value) and cls._map_length(getattr(layer, value)(),
+                                                         getattr(layer, unit)())
+               for value, unit in cls._PATTERN_LENGTHS):
             return True
         # An SVG fill's sub-symbol is its outline, not part of the texture.
         sub = layer.subSymbol() if layer.layerType() != "SVGFill" else None
-        return sub is not None and any(sub.symbolLayer(i).usesMapUnits()
+        return sub is not None and any(cls._symbol_layer_uses_map_units(sub.symbolLayer(i))
                                        for i in range(sub.symbolLayerCount()))
 
-    @staticmethod
-    def _pattern_spacing_in_map_units(layer) -> bool:
+    @classmethod
+    def _pattern_spacing_in_map_units(cls, layer) -> bool:
         """Whether the pattern's repeat (spacing, displacement, cell size or
-        density) is in map units or meters at scale. When it is not, only
-        the marker or line it repeats has map-unit lengths."""
-        return any(hasattr(layer, getter) and
-                   normalize_unit(getattr(layer, getter)()) in ("map", "m")
-                   for getter in ("distanceUnit", "distanceXUnit", "distanceYUnit",
-                                  "displacementXUnit", "displacementYUnit",
-                                  "patternWidthUnit", "widthUnit", "densityAreaUnit"))
+        density) is in map units or meters at scale (zero lengths count as
+        none). When it is not, only the marker or line it repeats has
+        map-unit lengths."""
+        return any(value in cls._PATTERN_REPEAT_LENGTHS and hasattr(layer, value) and
+                   cls._map_length(getattr(layer, value)(), getattr(layer, unit)())
+                   for value, unit in cls._PATTERN_LENGTHS)
 
     @staticmethod
     def _pattern_has_screen_lengths(layer) -> bool:
@@ -2937,6 +2997,15 @@ class QgisMapLibreStyleExporter:
     # does not load, and every icon and pattern of the map is lost.
     MAX_PATTERN_SPRITE_PX = 1_500_000
     _pattern_sprite_px = 0
+    # Textures above tile zoom + 3 of a pattern that scales with the map
+    # only keep its thin strokes sharp (the last one scaled would do
+    # otherwise): they have a budget of their own, so the exported zooms of
+    # the patterns after keep theirs, and cells up to half
+    # MAX_PATTERN_TEXTURE_PX, so that several patterns get them. Both
+    # budgets together are 7.6 Mpx in the 2x sprite, under half the
+    # browser's canvas limit.
+    MAX_OVERZOOM_PATTERN_SPRITE_PX = 400_000
+    _overzoom_pattern_px = 0
     # Style layer metadata: the zoom of the last per-zoom texture, which the
     # patched MapLibre (tools/patch_maplibre.py) keeps scaling with the map
     # above it (stock MapLibre draws it in the pixels of the view's integer
@@ -2955,13 +3024,16 @@ class QgisMapLibreStyleExporter:
         zoom, so a texture grows with the map until the next zoom, exactly
         like map-unit sizes in QGIS: each zoom's texture is rendered at that
         integer zoom (screen-unit parts, see ``TEXTURE_SCREEN_SCALE``, stay
-        within about ±41 %); ``fill-pattern`` steps between them. Textures
-        go up to tile zoom + 3 (or the size budgets); above the last one,
-        ``self._last_pattern_zoom``, the patched MapLibre scales it with the
-        map (PATTERN_ZOOM_FLAG): more textures there would only be sharper.
-        ``screen_lengths``: the pattern also has screen-unit lengths, which
-        would grow with the map there: textures go up to the viewer's last
-        zoom (within the size budgets).
+        within about ±41 %); ``fill-pattern`` steps between them. A first
+        zoom between integers (a rule's scale limit) is rendered at the
+        integer zoom below, whose pixels MapLibre draws it in. Textures go
+        up to the viewer's last zoom (or the size budgets); above the last
+        one, ``self._last_pattern_zoom``, the patched MapLibre scales it with
+        the map (PATTERN_ZOOM_FLAG). Above tile zoom + 3 they only keep
+        thin strokes sharp (magnified, a sub-pixel stroke became a wide pale
+        band), within MAX_OVERZOOM_PATTERN_SPRITE_PX; with
+        ``screen_lengths`` (screen-unit lengths, which would grow with the
+        map) they go on within the size budgets.
 
         ``screen_spacing``: the repeat is in screen units and only the marker
         or line has map-unit lengths. The textures are then exact screen
@@ -2969,16 +3041,16 @@ class QgisMapLibreStyleExporter:
         zoom), each rendered in the middle of its zoom, so only the map-unit
         sizes are off, within about ±41 %. A screen texture cannot scale with
         the map, so these go up to the highest zoom the viewer shows
-        (overzoomed tiles too); their cells are a screen-unit spacing.
+        (overzoomed tiles too); their cells are a screen-unit spacing. A
+        marker too large for the sprite renderer stops growing at the last
+        texture that could be drawn.
         """
         self._last_pattern_zoom = None
         low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
         tiles_top = min(top, float(self.maxzoom) + 3.0)
-        if screen_spacing or screen_lengths:
-            top = min(top, max(tiles_top, self._view_max_zoom() + 1.0))
-        else:
-            top = tiles_top
+        top = min(top, max(tiles_top, self._view_max_zoom() + 1.0))
+        sharper_only = not (screen_spacing or screen_lengths)
         # Over the cap, the highest zooms get their own texture (zoomed out,
         # a map-unit pattern is a tint of sub-pixel cells): the lowest of
         # them also serves the zooms below. Counted from the lowest zoom
@@ -2992,25 +3064,46 @@ class QgisMapLibreStyleExporter:
             zoom = low
             while zoom < top - 1e-9:
                 upper = min(math.floor(zoom) + 1.0, top)
-                self.context.reference_zoom = (zoom + upper) / 2 if screen_spacing else zoom
+                # MapLibre draws a map-unit texture in the pixels of the
+                # tile's integer zoom (up to 2x too large from a rule's
+                # 1:5000, zoom 15.85, rendered for 15.85 instead of 15).
+                self.context.reference_zoom = (zoom + upper) / 2 if screen_spacing else \
+                    math.floor(zoom)
                 try:
                     name = register()
                 except SpriteRenderError:
-                    if not stops or zoom < tiles_top - 1e-9:
+                    if not stops:
                         raise
-                    break  # past the exported zooms: the last texture serves those above
+                    # A marker (or cell) too large for the sprite renderer:
+                    # the last texture serves the zooms above.
+                    if screen_spacing:
+                        self.context.report(
+                            "Q2VT_PATTERN_MAP_UNITS",
+                            "Map-unit marker of a screen-unit pattern stops growing above zoom "
+                            f"{math.floor(stops[-1][0]) + 1:g} (sprite size limit).",
+                            strategy=Strategy.APPROXIMATE.value)
+                    break
                 if name is None:
                     if stops:
                         break  # the last texture serves the zooms above
                     zoom = upper
                     continue  # the first texture serves the zooms below
                 width, height = self.pattern_images[name].img_1x.size
-                if stops and (max(width, height) > self.MAX_PATTERN_TEXTURE_PX or
-                              self._pattern_sprite_px + width * height >
-                              self.MAX_PATTERN_SPRITE_PX):
+                sharper = sharper_only and zoom >= tiles_top - 1e-9
+                if sharper:
+                    largest, used, budget = (self.MAX_PATTERN_TEXTURE_PX // 2,
+                                             self._overzoom_pattern_px,
+                                             self.MAX_OVERZOOM_PATTERN_SPRITE_PX)
+                else:
+                    largest, used, budget = (self.MAX_PATTERN_TEXTURE_PX, self._pattern_sprite_px,
+                                             self.MAX_PATTERN_SPRITE_PX)
+                if stops and (max(width, height) > largest or used + width * height > budget):
                     del self.pattern_images[name]
                     break
-                self._pattern_sprite_px += width * height
+                if sharper:
+                    self._overzoom_pattern_px += width * height
+                else:
+                    self._pattern_sprite_px += width * height
                 stops.append((zoom, name))
                 zoom = upper
         finally:
@@ -3019,7 +3112,8 @@ class QgisMapLibreStyleExporter:
             self._exact_screen_texture = False
         if not stops:
             return None
-        self._last_pattern_zoom = stops[-1][0]
+        # The zoom whose pixels the last texture is drawn in (a whole one).
+        self._last_pattern_zoom = stops[-1][0] if screen_spacing else math.floor(stops[-1][0])
         self.context.report(
             "Q2VT_PATTERN_MAP_UNITS",
             "Pattern with map-unit sizes on a screen-unit spacing drawn with one texture per "
