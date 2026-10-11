@@ -1870,3 +1870,124 @@ def test_generator_fill_patterns_are_materialized(plugin, tmp_path):
     assert hatched and all(r.recipe.kind == "hatch_lines" and r.pre_generator for _, r in hatched)
     ours = ink_mask(render([o for o, _ in hatched], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.1
+
+
+def _generator_fill(expression, stroke_width=2.0):
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, stroke_width)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": expression, "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    return QgsFillSymbol([generator])
+
+
+def _draw_outlines_as_lines(outputs, rules):
+    """The styler draws a split stroke (class 1) as a line on the rings."""
+    for output, rule in zip(outputs, rules):
+        if rule.get_attr("c") == 1:
+            line = rule.rule.symbol().symbolLayer(0).clone()
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+
+
+@pytest.mark.parametrize("kind", ["Fill", "Line"])
+def test_generator_with_map_scale_is_drawn_at_every_zoom(plugin, tmp_path, kind):
+    """A geometry generator whose expression reads @map_scale is exported
+    per zoom with that zoom's scale (the generated polygons follow the
+    zoom, as in QGIS), not with a NULL scale that generates nothing. A line
+    sub-symbol draws the generated polygons' rings."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    expression = "buffer($geometry, -@map_scale/400)"
+    if kind == "Fill":
+        symbol = _generator_fill(expression)
+    else:
+        generator = QgsGeometryGeneratorSymbolLayer.create({
+            "geometryModifier": expression, "SymbolType": "Line"})
+        generator.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor(200, 0, 0), 2.0)]))
+        symbol = QgsFillSymbol([generator])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    generated = [(o, r) for o, r in zip(outputs, rules)
+                 if r.get_attr("c") == (2 if kind == "Fill" else 1)]
+    zooms = sorted(r.get_attr("o") for _, r in generated)
+    # The 150 x 154 m polygon vanishes when the inward buffer passes 75 m.
+    first = min(z for z in range(23) if ZoomLevels.zoom_to_scale(z) / 400 < 75)
+    assert first > 10 and zooms == list(range(first, first + len(zooms))) and zooms[-1] >= 21
+    for output, rule in generated:
+        assert rule.get_attr("o") == rule.get_attr("i")
+        assert rule.pre_generator.startswith("with_variable('map_scale'")
+        inset = ZoomLevels.zoom_to_scale(rule.get_attr("o")) / 400
+        box = output.extent()
+        assert (box.xMinimum(), box.yMaximum()) == pytest.approx((-97 + inset, 71 - inset),
+                                                                 abs=1e-6)
+
+
+@pytest.mark.parametrize("renderer", ["merged", "inverted"])
+def test_generator_fill_draws_on_the_merged_or_inverted_geometry(plugin, tmp_path, renderer):
+    """QgsMergedFeatureRenderer / QgsInvertedPolygonRenderer render the
+    symbol, its geometry generator included, on the merged (inverted)
+    geometry: two touching parcels shrink as one, and an inverted area's
+    holes grow."""
+    from qgis.core import QgsInvertedPolygonRenderer, QgsMergedFeatureRenderer
+    kind = QgsMergedFeatureRenderer if renderer == "merged" else QgsInvertedPolygonRenderer
+    layer = _layer("Polygon", ["POLYGON((-90 -60, 0 -60, 0 60, -90 60, -90 -60))",
+                               "POLYGON((0 -60, 90 -60, 90 60, 0 60, 0 -60))"],
+                   str(tmp_path / f"{renderer}.gpkg"))
+    layer.setRenderer(kind(QgsSingleSymbolRenderer(_generator_fill("buffer($geometry, -15)"))))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    fill = next(o for o, r in zip(outputs, rules) if r.get_attr("c") == 2)
+    geometries = [f.geometry() for f in fill.getFeatures()]
+    if renderer == "merged":
+        assert len(geometries) == 1
+        assert geometries[0].area() == pytest.approx(150 * 90)
+    else:  # the hole is the merged parcel grown by 15 m (rounded corners)
+        hole = QgsGeometry.fromWkt("POLYGON((-90 -60, 90 -60, 90 60, -90 60, -90 -60))")
+        assert not any(g.intersects(hole.buffer(14, 16)) for g in geometries)
+    _draw_outlines_as_lines(outputs, rules)
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+@pytest.mark.parametrize("limits,shifted", [
+    ({}, True), ({"ddp": True}, True), ({"max_mm": 100000.0}, True),
+    ({"max_mm": 8.0}, False), ({"min_scale": 50000.0}, False)])
+def test_map_unit_fill_offset_shift_or_curve(plugin, tmp_path, limits, shifted):
+    """A map-unit fill offset moves the exported polygon (a translate is cut
+    at the tile edges when overzoomed) unless its map unit scale limits it
+    within the exported zooms (then a zoom-curve translate draws it). A
+    data-defined offset uses its static value (the converter reports it)."""
+    from qgis.core import QgsMapUnitScale, QgsProperty, QgsSimpleFillSymbolLayer, QgsSymbolLayer
+    from qgis.PyQt.QtCore import QPointF
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    layer = _layer("Polygon", ["POLYGON((-90 -80, 60 -80, 60 50, -90 50, -90 -80))"],
+                   str(tmp_path / "fill.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor("red"), strokeColor=QColor("black"), strokeWidth=0.8)
+    fill.setOffset(QPointF(30, 20))
+    fill.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    scale = QgsMapUnitScale()
+    if "max_mm" in limits:
+        scale.maxSizeMMEnabled, scale.maxSizeMM = True, limits["max_mm"]
+    scale.minScale = limits.get("min_scale", 0.0)
+    fill.setOffsetMapUnitScale(scale)
+    if limits.get("ddp"):
+        fill.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOffset,
+                                    QgsProperty.fromExpression("'5,5'"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(10, 16, str(tmp_path), QgsProcessingFeedback(),
+                           diags).flatten_all_rules()
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    assert bool(diags.by_code("Q2VT_SYMBOL_APPROXIMATE")) == (not shifted)
+    for rule in rules:
+        if shifted:
+            assert rule.shift == pytest.approx((30, -20)) and not rule.translate
+        else:
+            assert not rule.shift
+            assert rule.translate or rule.rule.symbol().symbolLayer(0).offset() == QPointF(30, 20)

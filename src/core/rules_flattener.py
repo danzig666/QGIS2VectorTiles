@@ -1470,7 +1470,7 @@ class RulesFlattener:
         on the polygon's rings, above its fill. A map-unit offset moves the
         exported polygon (outline too)."""
         rules = []
-        shift = self._map_offset_shift(fill_layer)
+        shift = self._map_offset_shift(fill_layer, rule_clone)
         if shift is not None:
             # The exported polygon is moved (outline too); no translate.
             rule_clone.shift = shift
@@ -1570,6 +1570,12 @@ class RulesFlattener:
                           f"'Polygon', {g}, if(geometry_type({g}) = 'Line', if(is_multipart({g}), "
                           f"collect_geometries(array_foreach(generate_series(1, num_geometries({g})), "
                           f"make_polygon(geometry_n({g}, @element)))), make_polygon({g})), NULL)))")
+        elif kind == 1:
+            # A line sub-symbol draws lines: polygons are coerced to their
+            # rings (MultiLineString), points are not drawn.
+            g = "@q2vt_generated"
+            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type({g}) = "
+                          f"'Line', {g}, if(geometry_type({g}) = 'Polygon', boundary({g}), NULL)))")
         rules = []
         clone_layer = None
         for inner_idx in reversed(range(sub_symbol.symbolLayerCount())):
@@ -1614,21 +1620,27 @@ class RulesFlattener:
                 rules.append(rule_clone)
         return rules
 
-    def _map_offset_shift(self, fill_layer) -> Optional[tuple]:
+    def _map_offset_shift(self, fill_layer, flat_rule: FlattenedRule) -> Optional[tuple]:
         """A simple fill's offset in map units or meters at scale as a shift
         of the polygon in project map units, y up (QgsSimpleFillSymbolLayer::
-        renderPolygon translates the painter by it: x right, y down). None
-        when there is none, or it is data-defined or limited by a map unit
-        scale (then a zoom-curve translate draws it)."""
+        renderPolygon translates the painter by it: x right, y down). A
+        data-defined offset is shifted by its static value (reported as such
+        by the converter). None when there is none, or a map unit scale
+        limits it within the rule's zooms (then a zoom-curve translate draws
+        it: a translated fill is cut at the tile edges when overzoomed)."""
         from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
         offset = fill_layer.offset()
         unit = normalize_unit(fill_layer.offsetUnit())
         if unit not in ("map", "m") or (abs(offset.x()) <= 1e-9 and abs(offset.y()) <= 1e-9):
             return None
-        if fill_layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyOffset):
-            return None
         scale = fill_layer.offsetMapUnitScale()
-        if scale.minScale or scale.maxScale or scale.minSizeMMEnabled or scale.maxSizeMMEnabled:
+        min_zoom = flat_rule.get_attr("o") or 0
+        if any(self._map_unit_scale_limits(value, unit, scale, min_zoom)
+               for value in (offset.x(), offset.y())):
+            self.diagnostics.add(
+                "Q2VT_SYMBOL_APPROXIMATE", "Fill offset limited by a map unit scale is drawn "
+                "as a translate: overzoomed tiles may show gaps at their edges.",
+                layer_id=flat_rule.layer.id(), rule_id=flat_rule.rule_id)
             return None
         factor = 1.0
         if unit == "m":
@@ -1642,6 +1654,28 @@ class RulesFlattener:
             else:
                 factor = QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, map_units)
         return offset.x() * factor, -offset.y() * factor
+
+    def _map_unit_scale_limits(self, value: float, unit: str, scale, min_zoom: int) -> bool:
+        """True if ``scale`` (a QgsMapUnitScale) changes the drawn size of
+        ``value`` map units (meters) at some zoom from ``min_zoom`` to the
+        curves' last zoom (QgsMapUnitScale::computeMapUnitsPerPixel, then
+        the min/max size in mm)."""
+        from .fidelity import units  # pylint: disable=import-outside-toplevel
+        if abs(value) <= 1e-9:
+            return False
+        z_lo, z_hi = float(min_zoom), units.CURVE_MAX_ZOOM
+        if scale.minScale and units.scale_to_zoom(scale.minScale) > z_lo:
+            return True
+        if scale.maxScale and units.scale_to_zoom(scale.maxScale) < z_hi:
+            return True
+        context = self.lengths.map_context
+        per_unit = context.mercator_per_map_unit if unit == "map" else context.mercator_per_meter
+        mm = units.physical_factor(units.MM, self.lengths.dpi)
+        px_per_unit = per_unit * units.WORLD_SIZE_PX / units.EARTH_CIRCUMFERENCE
+        if scale.minSizeMMEnabled and abs(value) * px_per_unit * 2.0 ** z_lo < scale.minSizeMM * mm:
+            return True
+        return bool(scale.maxSizeMMEnabled and
+                    abs(value) * px_per_unit * 2.0 ** z_hi > scale.maxSizeMM * mm)
 
     @staticmethod
     def _fill_offset(fill_layer) -> Optional[tuple]:
@@ -2163,6 +2197,8 @@ class RulesFlattener:
                 collect(text_format.dataDefinedProperties())
         else:
             walk(flat_rule.rule.symbol())
+        if flat_rule.pre_generator:
+            found.append(flat_rule.pre_generator)
         found = [expression for expression in found if uses_map_scale(expression)]
         if sum(map_scale_reads(expression) for expression in found) != map_scale_reads(text) or \
                 any(self._is_feature_dependent(expression) for expression in found):
@@ -2222,8 +2258,9 @@ class RulesFlattener:
         return True
 
     def _scale_dependency_text(self, flat_rule: FlattenedRule) -> Optional[str]:
-        """The rule's serialized XML (its expressions) if it reads the map
-        scale (@map_scale, @zoom_level, @vector_tile_zoom), else None."""
+        """The rule's serialized XML (its expressions, and the expression of
+        the geometry generator it is drawn on) if it reads the map scale
+        (@map_scale, @zoom_level, @vector_tile_zoom), else None."""
         doc = QDomDocument("style")
         context = QgsReadWriteContext()
         rule_clone = flat_rule.rule.clone()
@@ -2240,6 +2277,8 @@ class RulesFlattener:
         doc.appendChild(elem)
         _drop_inactive_properties(elem)
         text = html.unescape(doc.toString())
+        if flat_rule.pre_generator:
+            text = f"{text}\n{flat_rule.pre_generator}"
         return text if uses_map_scale(text) else None
 
     def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, piece: ZoomInterval,
@@ -2261,6 +2300,8 @@ class RulesFlattener:
             rule_clone.unbound_filter = flat_rule.renderer_filter()
         # label_filter stays unbound like unbound_filter: labels are matched
         # to it, then bound at their own zoom.
+        if flat_rule.pre_generator and uses_map_scale(flat_rule.pre_generator):
+            rule_clone.pre_generator = with_map_scale(flat_rule.pre_generator, scale)
 
         if flat_rule.get_attr("t") == 1 and flat_rule.rule.settings():
             settings = flat_rule.rule.settings()

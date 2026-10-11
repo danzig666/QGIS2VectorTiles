@@ -1642,15 +1642,17 @@ class RulesExporter:
                 return None
             current_input = filt
 
-        if grp.pre_generator:
-            current_input = self._generated_lines(current_input, grp)
+        # Merged features / inverted polygons: the symbol's features drawn
+        # together, before any recipe (a gradient fills the merged shape)
+        # and before a geometry generator (QGIS renders the symbol, generator
+        # included, on the merged or inverted geometry).
+        if grp.merge and grp.rule_type == 0:
+            current_input = self._merged_features(current_input, grp)
             if current_input is None:
                 return None
 
-        # Merged features / inverted polygons: the symbol's features drawn
-        # together, before any recipe (a gradient fills the merged shape).
-        if grp.merge and grp.rule_type == 0:
-            current_input = self._merged_features(current_input, grp)
+        if grp.pre_generator:
+            current_input = self._generated_lines(current_input, grp)
             if current_input is None:
                 return None
 
@@ -2111,8 +2113,9 @@ class RulesExporter:
         self._check_cancel()
         union = QgsGeometry.unaryUnion(geometries) if geometries else QgsGeometry()
         kind = QgsWkbTypes.geometryType(layer.wkbType())
-        if grp.merge == "invert" and grp.geometry_target == 1:
-            # The outline of the inverted area is the polygons' own edge.
+        if grp.merge == "invert" and grp.geometry_target == 1 and not grp.pre_generator:
+            # The outline of the inverted area is the polygons' own edge
+            # (a generator needs the inverted area itself).
             if union.isEmpty():
                 return None
             result = union
@@ -3179,6 +3182,8 @@ class RulesExporter:
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
             zoom_scale = fidelity_zoom.zoom_to_scale(flat_rule.evaluation_zoom())
+            if flat_rule.pre_generator and uses_map_scale(flat_rule.pre_generator):
+                flat_rule.pre_generator = with_map_scale(flat_rule.pre_generator, zoom_scale)
             if rule_type == 1 and flat_rule.rule.settings():
                 settings = flat_rule.rule.settings()
                 label_exp = settings.getLabelExpression().expression()
