@@ -1330,7 +1330,7 @@ class RulesFlattener:
         evaluates them on the painter geometry in those units (fixed screen
         sizes, y down), so each zoom gets its own generator in map units; the
         symbol's other layers are split as usual. Overzoomed zooms (up to
-        zoom MAX_TILE_ZOOM) get bands of the last tile zoom (attribute "b"),
+        ``overzoom_top``) get bands of the last tile zoom (attribute "b"),
         each with its own generator, so sizes stay fixed on screen there too."""
         from .fidelity.qgis_expr import in_screen_units  # pylint: disable=import-outside-toplevel
         from .fidelity.units import normalize_unit, physical_factor  # pylint: disable=import-outside-toplevel
@@ -1348,8 +1348,8 @@ class RulesFlattener:
             if not last:
                 slices.append((zoom_rule, zoom))
                 continue
-            top = fidelity_zoom.MAX_TILE_ZOOM if visible.max_zoom is None else \
-                min(fidelity_zoom.MAX_TILE_ZOOM, int(math.ceil(visible.max_zoom)) - 1)
+            top = self.overzoom_top if visible.max_zoom is None else \
+                min(self.overzoom_top, int(math.ceil(visible.max_zoom)) - 1)
             if top <= zoom:
                 slices.append((zoom_rule, zoom))
                 continue
@@ -1361,6 +1361,7 @@ class RulesFlattener:
                 banded = zoom_rule.derive()
                 banded.visibility = interval
                 banded.set_attr("b", band)
+                banded.scale_zoom = float(at_zoom)
                 slices.append((banded, at_zoom))
         for zoom_rule, zoom in slices:
             # Web Mercator units per CSS px at this zoom (512 px tiles).
