@@ -1774,6 +1774,9 @@ class SymbolMaterializer:
                 ZoomInterval(float(high), float(high + 1)))
             if not over.visibility.is_empty:
                 rules.append(over)
+                self._report("Q2VT_PATTERN_APPROXIMATE",
+                             "Past the last tile zoom, the point pattern is a texture (markers "
+                             "cut at the outline instead of whole).", flat_rule)
         for index, rule in enumerate(zoom_rules):
             for band, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
                 per_mm = self._map_units_per_mm(flat_rule, zoom)

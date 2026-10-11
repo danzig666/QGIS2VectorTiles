@@ -925,7 +925,10 @@ def test_point_clusters_break_apart_beyond_the_last_tile_zoom(flattener):
     def groups(zoom):
         shown = _shown_at(rules, zoom)
         assert shown, zoom
+        # (the points alone at every zoom past the last tiles are one rule
+        # of their own, "part" "stable", grouped at its first zoom)
         return {len(group) for rule in shown
+                if dict(rule.point_group[3]).get("part") != "stable"
                 for group in pg.group_points(points, dict(rule.point_group[3])["tolerance"])}
     # 15 m apart: a cluster per pair at zoom 16 (10 mm is about 45 m), the
     # single points once 10 mm is under 15 m (about zoom 17.6).

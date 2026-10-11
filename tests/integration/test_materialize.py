@@ -455,20 +455,25 @@ def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plu
     assert cell.getbbox() is not None and cell.size[0] == pytest.approx(2 * 5 / 0.0373, abs=3)
 
 
-def test_coarse_map_unit_pattern_textures_stop_before_outgrowing_the_sprite(plugin, tmp_path):
+@pytest.mark.parametrize("stroke_unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters])
+def test_coarse_map_unit_pattern_textures_stop_before_outgrowing_the_sprite(plugin, tmp_path,
+                                                                            stroke_unit):
     """A tiling map-unit pattern (60 m squares 60 m apart) exported from
     zoom 0 to 16: its cell doubles with every zoom, and the overzoom
     textures up to zoom 22 made the sprite renderer give up (a cell
     thousands of px wide), failing the export. The overzoom textures stop
-    under MAX_OVERZOOM_CELL_PX; the last one serves the zooms above."""
+    under MAX_OVERZOOM_CELL_PX; the last one serves the zooms above. All
+    in map units, the textures stop at max zoom + 2 and the patched MapLibre
+    scales the last one with the map; with a millimetre stroke (which would
+    grow with it) they go on while they fit."""
     from qgis.core import QgsPointPatternFillSymbolLayer
     layer = _layer("Polygon", ["POLYGON((-500 -500, 500 -500, 500 500, -500 500, -500 -500))"],
                    str(tmp_path / "tiles.gpkg"))
     pp = QgsPointPatternFillSymbolLayer()
     marker = _marker(Qgis.MarkerShape.Square, 60)
     marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
-    marker.symbolLayer(0).setStrokeWidth(3)
-    marker.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeWidth(3 if stroke_unit == Qgis.RenderUnit.MapUnits else 0.5)
+    marker.symbolLayer(0).setStrokeWidthUnit(stroke_unit)
     pp.setSubSymbol(marker)
     for name in ("DistanceX", "DistanceY"):
         getattr(pp, f"set{name}")(60)
@@ -489,7 +494,12 @@ def test_coarse_map_unit_pattern_textures_stop_before_outgrowing_the_sprite(plug
     zooms = pattern[3::2]
     # The exported zooms' textures as before (up to maxzoom + 2), then the
     # overzoom ones while they fit.
-    assert zooms[:11] == list(range(8, 19)) and 18 < zooms[-1] < 22
+    assert zooms[:11] == list(range(8, 19))
+    if stroke_unit == Qgis.RenderUnit.MapUnits:
+        assert zooms[-1] == 18
+        assert exporter.style["layers"][0]["metadata"][exporter.PATTERN_ZOOM_FLAG] == 18
+    else:
+        assert 18 < zooms[-1] < 22
     cells = [exporter.pattern_images[name].img_2x for name in pattern[2::2]]
     assert max(cells[-1].size) <= exporter.MAX_OVERZOOM_CELL_PX
     assert set(exporter.pattern_images) == set(pattern[2::2])  # none left over
@@ -1753,9 +1763,14 @@ def test_a_map_from_zoom_0_keeps_the_exact_last_zooms(plugin, tmp_path, monkeypa
     monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
     narrow, narrow_diags = _zoom_rules(tmp_path, 13, 16)
     wide, wide_diags = _zoom_rules(tmp_path, 0, 16)
-    top = sorted(repr(_band_key(r)) for r in narrow)
-    assert len(top) > 4 and not narrow_diags.by_code("Q2VT_PATTERN_BUDGET")
-    assert sorted(repr(_band_key(r)) for r in wide if r.get_attr("o") >= 13) == top
+    # The exported zooms (the zooms past the last tiles, "v", share what is
+    # left of the budget, which the zooms below take in the wide export).
+    top = sorted(repr(_band_key(r)) for r in narrow if r.get_attr("v") is None)
+    assert len(top) > 4
+    assert not [d for d in narrow_diags.by_code("Q2VT_PATTERN_BUDGET")
+                if "past the last tile zoom" not in d.message]
+    assert sorted(repr(_band_key(r)) for r in wide
+                  if r.get_attr("o") >= 13 and r.get_attr("v") is None) == top
     if kind == "polygon_offset":  # no outline (QGIS draws none), no budget spent
         assert not [r for r in wide if r.get_attr("o") < 13]
         assert not wide_diags.by_code("Q2VT_PATTERN_BUDGET")
@@ -2241,7 +2256,9 @@ def test_percentage_pattern_offsets_are_of_the_spacing(plugin, tmp_path, unit, s
         rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(),
                                diags).flatten_all_rules()
         recipes.append([r.recipe for r in rules if r.recipe])
-        assert not diags.by_code("Q2VT_PATTERN_APPROXIMATE") or clip == "Shape"
+        # (past the last tile zoom the pattern is a texture: reported apart)
+        assert not [d for d in diags.by_code("Q2VT_PATTERN_APPROXIMATE")
+                    if not d.message.startswith("Past the last tile zoom")] or clip == "Shape"
     assert recipes[0] and recipes[0] == recipes[1]
     params = dict(recipes[0][-1].params)
     assert params["disp_x"] and params["off_x"] and params["off_y"]

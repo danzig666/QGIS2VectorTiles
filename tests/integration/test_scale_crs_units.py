@@ -169,9 +169,11 @@ def test_geographic_screen_lengths_of_marker_lines_are_degrees(plugin, tmp_path)
             middle = (band.min_zoom + band.max_zoom) / 2
             assert rule.recipe.param("interval") == pytest.approx(4 * _degrees_per_mm(middle), rel=1e-6)
     for rule in offset:
-        # At the middle of the rule's zoom (QGIS's offset at zoom o + 1/2).
+        # At the middle of the rule's zoom (QGIS's offset at zoom o + 1/2;
+        # past the last tile zoom, "v": the zoom it is drawn at).
+        zoom = rule.get_attr("v") if rule.get_attr("v") is not None else rule.get_attr("o")
         assert abs(rule.recipe.param("offset")) == pytest.approx(
-            3 * _degrees_per_mm(rule.get_attr("o")) / math.sqrt(2), rel=1e-6)
+            3 * _degrees_per_mm(zoom) / math.sqrt(2), rel=1e-6)
 
 
 # --- symbology reference scale ----------------------------------------------
