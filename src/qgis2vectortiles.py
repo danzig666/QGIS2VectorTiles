@@ -245,7 +245,8 @@ class QGIS2VectorTiles:
         # zoom <-> scale: QGIS's scale for the browser's ground resolution in
         # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.;
         # the metric ground scale QgsScaleCalculator gives a geographic CRS).
-        ZoomLevels.configure(self.lengths.map_context.top_scale)
+        ZoomLevels.configure(self.lengths.map_context.top_scale,
+                             self.lengths.map_context.map_units_per_mm_0)
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}

@@ -863,8 +863,7 @@ class SymbolMaterializer:
             return 0.0
         low = rule.get_attr("o")
         span = max(0, min(rule.get_attr("i"), low + 3) - low) + 1
-        scale = (ZoomLevels.zoom_to_scale(low) or 0.0) / 2 ** (span / 2.0)
-        return mm / 1000.0 * scale  # ground metres; map units are metres here
+        return mm * ZoomLevels.map_units_per_mm(low + span / 2.0)
 
     # Interval markers along a line are few per tile even when close together.
     INTERVAL_MIN_SPACING_PX = 2.0
@@ -923,7 +922,7 @@ class SymbolMaterializer:
         low, high = self._zoom_range(flat_rule)
         switch = None
         for zoom in range(low, high + 1):
-            px = spacing * 96.0 / (0.0254 * ZoomLevels.zoom_to_scale(zoom))
+            px = spacing * 96.0 / (25.4 * ZoomLevels.map_units_per_mm(zoom))
             if px >= (self.GRID_MIN_SPACING_PX if min_px is None else min_px):
                 switch = zoom
                 break
@@ -1421,7 +1420,7 @@ class SymbolMaterializer:
                 return 0.0
             if normalize_unit(unit) == "map":
                 return float(value)
-            return _to_mm(value, unit) / 1000.0 * (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom
+            return _to_mm(value, unit) * ZoomLevels.map_units_per_mm(zoom)
 
         interval_mm = _to_mm(layer.interval(), layer.intervalUnit())
         if interval_mm is not None and \
@@ -1542,8 +1541,7 @@ class SymbolMaterializer:
 
         def zoom_offset(rule):
             """The screen offset in map units at the middle of ``rule``'s zoom."""
-            return zoom_offset_mm / 1000.0 * \
-                ZoomLevels.zoom_to_scale(rule.get_attr("o")) / math.sqrt(2)
+            return zoom_offset_mm * ZoomLevels.map_units_per_mm(rule.get_attr("o")) / math.sqrt(2)
 
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, offset,
                                             offset_unit, flat_rule)

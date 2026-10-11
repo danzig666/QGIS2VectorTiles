@@ -128,6 +128,7 @@ def worker_state(exporter) -> dict:
         "missing_variables": sorted(set(global_missing) | set(project_missing)),
         "layer_names": dict(exporter._layer_names),
         "top_scale": fidelity_zoom.TOP_SCALE,
+        "map_units_per_mm_0": fidelity_zoom.MAP_UNITS_PER_MM_0,
     }
 
 
@@ -297,7 +298,7 @@ def _build_exporter(state: dict):
     from ..utils.zoom_levels import ZoomLevels
     from .fidelity.diagnostics import DiagnosticCollector
     from .rules_exporter import RulesExporter
-    ZoomLevels.configure(state["top_scale"])
+    ZoomLevels.configure(state["top_scale"], state.get("map_units_per_mm_0"))
     document = QDomDocument()
     document.setContent(state["transform_context"])
     transform_context = QgsCoordinateTransformContext()

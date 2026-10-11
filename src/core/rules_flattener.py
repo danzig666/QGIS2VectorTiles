@@ -251,6 +251,13 @@ class RulesFlattener:
                 f"Layer '{layer.name()}' (reference scale 1:{reference:g}): "
                 f"{', '.join(sorted(set(converter.unhandled)))} keep their screen size.",
                 layer_id=layer.id())
+        if converter.map_unit_sizes:
+            self.diagnostics.add(
+                "Q2VT_REFERENCE_SCALE",
+                f"Layer '{layer.name()}' (reference scale 1:{reference:g}): "
+                f"{', '.join(sorted(set(converter.map_unit_sizes)))} in map units keep their "
+                "map size; QGIS also scales map-unit sizes by the reference scale.",
+                layer_id=layer.id())
 
     @staticmethod
     @staticmethod
@@ -1364,8 +1371,12 @@ class RulesFlattener:
                     layer.setEnabled(False)
                     continue
                 per_unit = mercator_per_px * physical_factor(normalize_unit(layer.units()))
+                # @map_scale of this slice's zoom (an overzoom band keeps the
+                # last tile zoom as "o", which the exporter would bind).
+                expression = with_map_scale(layer.geometryExpression(),
+                                            fidelity_zoom.zoom_to_scale(zoom))
                 layer.setGeometryExpression(in_screen_units(
-                    layer.geometryExpression(), per_unit, "EPSG:3857", layer_crs))
+                    expression, per_unit, "EPSG:3857", layer_crs))
                 layer.setUnits(Qgis.RenderUnit.MapUnits)
             rules.extend(self._split_by_symbol_layers(zoom_rule))
         return rules
@@ -1510,7 +1521,7 @@ class RulesFlattener:
         rules = []
         for rule in self.materializer._per_zoom(flat_rule):  # pylint: disable=protected-access
             zoom = rule.get_attr("o")
-            factor = scale * _to_mm(1.0, unit) / 1000.0 * ZoomLevels.zoom_to_scale(zoom) / math.sqrt(2)
+            factor = scale * _to_mm(1.0, unit) * ZoomLevels.map_units_per_mm(zoom) / math.sqrt(2)
             rules.extend(self._generated_line_rules(rule, generator(factor), layer_idx))
         return rules
 

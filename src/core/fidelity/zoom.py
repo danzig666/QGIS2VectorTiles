@@ -28,19 +28,33 @@ WEB_MERCATOR_TOP_SCALE = 40075016.68557849 / 512.0 * 96.0 / 0.0254
 LEGACY_TOP_SCALE = 419311712.0
 
 TOP_SCALE = WEB_MERCATOR_TOP_SCALE
+# Project map units per screen millimetre at zoom 0: the browser's Mercator
+# metres per mm over the Mercator units per map unit. It is TOP_SCALE / 1000
+# for metre CRSs only: QGIS's scale counts metres, not degrees or feet.
+MAP_UNITS_PER_MM_0 = WEB_MERCATOR_TOP_SCALE / 1000.0
 MAX_TILE_ZOOM = 22
 
 
-def configure(top_scale: float) -> None:
-    """Set the scale of zoom 0 for this export (see ``WEB_MERCATOR_TOP_SCALE``)."""
-    global TOP_SCALE  # pylint: disable=global-statement
-    if top_scale <= 0 or not math.isfinite(top_scale):
-        raise ValueError(f"Invalid top scale {top_scale!r}")
+def configure(top_scale: float, map_units_per_mm_0: Optional[float] = None) -> None:
+    """Set the scale of zoom 0 for this export (see ``WEB_MERCATOR_TOP_SCALE``)
+    and the project map units per mm at zoom 0 (default: a metre CRS's)."""
+    global TOP_SCALE, MAP_UNITS_PER_MM_0  # pylint: disable=global-statement
+    if map_units_per_mm_0 is None:
+        map_units_per_mm_0 = top_scale / 1000.0
+    for value in (top_scale, map_units_per_mm_0):
+        if value <= 0 or not math.isfinite(value):
+            raise ValueError(f"Invalid top scale {value!r}")
     TOP_SCALE = float(top_scale)
+    MAP_UNITS_PER_MM_0 = float(map_units_per_mm_0)
 
 
 def zoom_to_scale(zoom: float) -> float:
     return TOP_SCALE / (2.0 ** zoom)
+
+
+def map_units_per_mm(zoom: float) -> float:
+    """Project map units of one screen millimetre at (fractional) ``zoom``."""
+    return MAP_UNITS_PER_MM_0 / (2.0 ** zoom)
 
 
 def scale_to_zoom(scale: float) -> float:

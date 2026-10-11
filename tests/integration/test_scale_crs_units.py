@@ -54,6 +54,16 @@ def _export(tmp_path, min_zoom=0, max_zoom=16):
         return exporter, json.load(handle)
 
 
+@pytest.fixture(autouse=True)
+def _web_mercator_zooms(plugin):
+    """An export configures the zoom scales of its project CRS: back to the
+    Web Mercator defaults after each test."""
+    yield
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.zoom import WEB_MERCATOR_TOP_SCALE  # pylint: disable=import-error
+    ZoomLevels.configure(WEB_MERCATOR_TOP_SCALE)
+
+
 def _data_layers(style, kind=None):
     return [l for l in style["layers"] if l.get("source-layer") and (kind is None or l["type"] == kind)]
 
@@ -109,6 +119,59 @@ def test_geographic_screen_millimetres_are_qgis_degrees_per_mm(plugin):
     _geographic_project(layer)
     per_mm = SymbolMaterializer(DiagnosticCollector())._map_units_per_mm(None, 15.0, layer)  # pylint: disable=protected-access
     assert per_mm == pytest.approx(360.0 / 512 / 2 ** 15 * 96 / 25.4, rel=1e-6)
+
+
+def _degrees_per_mm(zoom):
+    return 360.0 / 512 / 2 ** zoom * 96 / 25.4
+
+
+def test_geographic_screen_lengths_of_marker_lines_are_degrees(plugin, tmp_path):
+    """Interval markers spaced in mm and vertex markers offset in mm in a
+    degree CRS: the zoom's metric scale (QGIS's) was taken as degrees, so
+    the spacing and offset came out tens of thousands of times too large
+    (no markers on the web)."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.diagnostics import DiagnosticCollector  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.units import MapUnitContext  # pylint: disable=import-error
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels  # pylint: disable=import-error
+    from qgis.core import QgsMarkerLineSymbolLayer
+    d = 0.002
+    wkt = f"LINESTRING({LON - d} {LAT}, {LON} {LAT + d}, {LON + d} {LAT}, {LON + 2 * d} {LAT + d})"
+    layer = _layer(str(tmp_path / "l.gpkg"), "LineString", [wkt], crs="EPSG:4326")
+    circle = QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2.0)])
+    interval = QgsMarkerLineSymbolLayer(True, 4)
+    interval.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+    interval.setSubSymbol(circle.clone())
+    vertices = QgsMarkerLineSymbolLayer(True, 4)
+    vertices.setPlacements(Qgis.MarkerLinePlacement.InnerVertices)
+    vertices.setOffset(3)
+    vertices.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    vertices.setSubSymbol(circle.clone())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([interval, vertices])))
+    _geographic_project(layer)
+    context = MapUnitContext.for_project(False, "degrees", LAT)
+    ZoomLevels.configure(context.top_scale, context.map_units_per_mm_0)
+    diagnostics = DiagnosticCollector()
+    rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(),
+                           diagnostics).flatten_all_rules()
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    _, rules = RulesExporter(rules, EXTENT, 0, 16, str(utils), 0, QgsProcessingFeedback(),
+                             diagnostics=diagnostics).export()
+    placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    spaced = [r for r in placed if r.recipe.param("interval") is not None]
+    offset = [r for r in placed if r.recipe.param("offset")]
+    assert spaced and offset
+    for rule in spaced:
+        band = rule.visibility
+        if band.max_zoom is not None:
+            middle = (band.min_zoom + band.max_zoom) / 2
+            assert rule.recipe.param("interval") == pytest.approx(4 * _degrees_per_mm(middle), rel=1e-6)
+    for rule in offset:
+        # At the middle of the rule's zoom (QGIS's offset at zoom o + 1/2).
+        assert abs(rule.recipe.param("offset")) == pytest.approx(
+            3 * _degrees_per_mm(rule.get_attr("o")) / math.sqrt(2), rel=1e-6)
 
 
 # --- symbology reference scale ----------------------------------------------
@@ -184,6 +247,99 @@ def test_reference_scale_scales_data_defined_sizes(plugin):
     prop = layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyStrokeWidth)
     assert prop.expressionString() == '("w") * 10.0'
     assert not converter.unhandled
+
+
+def _reference_symbols():
+    from qgis.core import (QgsEllipseSymbolLayer, QgsHashedLineSymbolLayer,
+                           QgsLinePatternFillSymbolLayer, QgsMarkerLineSymbolLayer,
+                           QgsPointPatternFillSymbolLayer)
+    mm = Qgis.RenderUnit.Millimeters
+    markers = QgsMarkerLineSymbolLayer(True, 4)
+    markers.setIntervalUnit(mm)
+    markers.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2.0)]))
+    hashes = QgsHashedLineSymbolLayer(True, 4)
+    hashes.setIntervalUnit(mm)
+    hashes.setHashLength(3)
+    hashes.setHashLengthUnit(mm)
+    hashes.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("black"), 0.5)]))
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setDistance(5)
+    hatch.setDistanceUnit(mm)
+    hatch.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("black"), 1.5)]))
+    # Drawn line by line (not with the image brush): the hatch line follows
+    # the reference scale as well.
+    lines = hatch.clone()
+    lines.setClipMode(Qgis.LineClipMode.NoClipping)
+    dots = QgsPointPatternFillSymbolLayer()
+    dots.setDistanceX(6)
+    dots.setDistanceY(6)
+    dots.setDistanceXUnit(mm)
+    dots.setDistanceYUnit(mm)
+    dots.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2.0)]))
+    ellipse = QgsEllipseSymbolLayer()
+    ellipse.setSymbolWidth(3)
+    ellipse.setSymbolHeight(2)
+    ellipse.setSymbolWidthUnit(mm)
+    ellipse.setSymbolHeightUnit(mm)
+    ellipse.setFillColor(QColor("black"))
+    return {
+        "marker line": ("LineString", QgsLineSymbol([markers])),
+        "hashed line": ("LineString", QgsLineSymbol([hashes])),
+        "line pattern": ("Polygon", QgsFillSymbol([hatch])),
+        "line pattern lines": ("Polygon", QgsFillSymbol([lines])),
+        "point pattern": ("Polygon", QgsFillSymbol([dots])),
+        "ellipse": ("Point", QgsMarkerSymbol([ellipse])),
+    }
+
+
+@pytest.mark.parametrize("name", ["marker line", "hashed line", "line pattern",
+                                  "line pattern lines", "point pattern", "ellipse"])
+def test_reference_scale_conversion_draws_like_qgis(plugin, name):
+    """Converted symbols drawn without a reference scale look like the
+    originals QGIS draws with it. Setters that write through to sub-symbols
+    or other sizes (a marker line's width is its marker's size) scaled
+    those sizes twice, or zeroed the hatch line width. QGIS's image brush
+    of a pattern fill draws its sub-symbol without the reference scale."""
+    from q2vt_plugin.src.core.reference_scale import ReferenceScaleConverter  # pylint: disable=import-error
+    from q2vt_render import ink_mask, mask_difference, render
+    kind, symbol = _reference_symbols()[name]
+    wkt = {"LineString": f"LINESTRING({CX - 120} {CY - 40}, {CX} {CY + 50}, {CX + 120} {CY - 30})",
+           "Polygon": f"POLYGON(({CX - 300} {CY - 250}, {CX + 300} {CY - 250}, {CX + 300} {CY + 250}, "
+                      f"{CX - 300} {CY + 250}, {CX - 300} {CY - 250}))",
+           "Point": f"POINT({CX} {CY})"}[kind]
+    reference = 20000.0
+    layers = []
+    for converted in (False, True):
+        layer = QgsVectorLayer(f"{kind}?crs=EPSG:3857", "lyr", "memory")
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(wkt))
+        layer.dataProvider().addFeatures([feature])
+        copy = symbol.clone()
+        if converted:
+            converter = ReferenceScaleConverter(reference)
+            converter.symbol(copy)
+            assert not converter.unhandled and not converter.map_unit_sizes
+        layer.setRenderer(QgsSingleSymbolRenderer(copy))
+        if not converted:
+            layer.renderer().setReferenceScale(reference)
+        layers.append(layer)
+    for scale in (10000.0, 20000.0, 40000.0):
+        half = 150 * scale * 0.0254 / 96  # 300 px at 96 dpi
+        extent = QgsRectangle(CX - half, CY - half, CX + half, CY + half)
+        original, converted = (ink_mask(render([layer], extent)) for layer in layers)
+        assert original
+        assert mask_difference(original, converted) < 0.05, (name, scale, len(original), len(converted))
+
+
+def test_reference_scale_reports_map_unit_sizes(plugin):
+    """QgsRenderContext::convertToPainterUnits multiplies map-unit sizes by
+    reference / map scale too: those keep their map size on the web."""
+    from q2vt_plugin.src.core.reference_scale import ReferenceScaleConverter  # pylint: disable=import-error
+    layer = QgsSimpleLineSymbolLayer(QColor("black"), 10.0)
+    layer.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    converter = ReferenceScaleConverter(20000)
+    converter.symbol(QgsLineSymbol([layer]))
+    assert converter.map_unit_sizes == ["SimpleLine width"]
 
 
 # --- geometry generators in screen units --------------------------------------

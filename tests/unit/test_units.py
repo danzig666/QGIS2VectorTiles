@@ -111,6 +111,27 @@ def test_geographic_top_scale_is_qgis_metric_scale():
     assert u.MapUnitContext.for_project(True, "meters", 47.5).top_scale == WEB_MERCATOR_TOP_SCALE
 
 
+@pytest.mark.parametrize("units,per_unit", [("degrees", 360.0 / 40075016.68557849),
+                                            ("feet", 1.0 / 0.3048), ("meters", 1.0)])
+def test_screen_mm_in_map_units_do_not_go_through_the_scale(units, per_unit):
+    """QGIS's scale counts metres; a screen mm in project map units is the
+    browser's Mercator metres per mm over the Mercator units per map unit
+    (degrees and feet were taken from the metric scale as if metres)."""
+    from fidelity import zoom
+    cos = math.cos(math.radians(47.5))
+    ctx = u.MapUnitContext.for_project(False, units, 47.5)
+    try:
+        zoom.configure(ctx.top_scale, ctx.map_units_per_mm_0)
+        mercator_per_mm = 40075016.68557849 / 512 / 2 ** 15 * 96 / 25.4
+        expected = mercator_per_mm * per_unit * (1.0 if units == "degrees" else cos)
+        assert zoom.map_units_per_mm(15) == pytest.approx(expected, rel=1e-6)
+        if units == "meters":
+            assert zoom.map_units_per_mm(15) == pytest.approx(zoom.zoom_to_scale(15) / 1000)
+    finally:
+        zoom.configure(zoom.WEB_MERCATOR_TOP_SCALE)
+    assert zoom.map_units_per_mm(0) == pytest.approx(zoom.WEB_MERCATOR_TOP_SCALE / 1000)
+
+
 def test_projected_top_scale_counts_the_crs_unit():
     from fidelity.zoom import WEB_MERCATOR_TOP_SCALE
     cos = math.cos(math.radians(47.5))

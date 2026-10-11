@@ -124,6 +124,11 @@ class MapUnitContext:
         Mercator units per px / mercator_per_map_unit)."""
         return WEB_MERCATOR_TOP_SCALE / self.mercator_per_map_unit * self.scale_metres_per_map_unit
 
+    @property
+    def map_units_per_mm_0(self) -> float:
+        """Project map units of one screen mm at MapLibre zoom 0."""
+        return WEB_MERCATOR_TOP_SCALE / 1000.0 / self.mercator_per_map_unit
+
     @classmethod
     def for_project(cls, crs_is_web_mercator: bool, map_units: str,
                     reference_latitude: float) -> "MapUnitContext":

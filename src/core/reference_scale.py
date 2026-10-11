@@ -20,7 +20,7 @@ from qgis.core import (Qgis, QgsEffectStack, QgsMapUnitScale, QgsPalLayerSetting
 from qgis.PyQt.QtCore import QPointF, QSizeF
 
 from .fidelity.qgis_expr import in_screen_units
-from .fidelity.units import MM, normalize_unit, physical_factor
+from .fidelity.units import MAP, METERS, MM, normalize_unit, physical_factor
 
 # Value getters whose name is not the unit getter's name without "Unit"
 # (tried in order; the first one the object has is used).
@@ -38,6 +38,18 @@ _VALUE_NAMES = {
 _NO_VALUE = {"outputUnit", "strokeWidthUnit"}
 # Areas scale with the square of the length factor.
 _AREAS = {"densityAreaUnit"}
+# Sizes whose setter writes through to other sizes that are converted on
+# their own (QgsMarkerLineSymbolLayer::setWidth sizes the sub-marker,
+# QgsHashedLineSymbolLayer::setWidth the hash length, QgsEllipseSymbolLayer::
+# setSize the symbol width and height, QgsLinePatternFillSymbolLayer::
+# setLineWidth the sub-line): only their unit follows, scaling them as well
+# would scale the delegate twice.
+_UNIT_ONLY = {
+    "MarkerLine": {"widthUnit"},
+    "HashLine": {"widthUnit"},
+    "EllipseMarker": {"sizeUnit"},
+    "LinePatternFill": {"lineWidthUnit"},
+}
 
 _P = QgsSymbolLayer.Property
 # Data-defined properties holding a plain number in the unit of a converted
@@ -93,7 +105,8 @@ class ReferenceScaleConverter:
 
     ``scale_metres_per_map_unit``: metres QGIS's scale calculator counts per
     project map unit (MapUnitContext). ``unhandled`` collects what keeps its
-    screen size (for one diagnostic per layer).
+    screen size and ``map_unit_sizes`` the map-unit sizes (for one
+    diagnostic per layer).
     """
 
     def __init__(self, reference_scale: float, scale_metres_per_map_unit: float = 1.0,
@@ -103,6 +116,10 @@ class ReferenceScaleConverter:
         self.project_crs = project_crs
         self.layer_crs = layer_crs
         self.unhandled: List[str] = []
+        # Map-unit sizes: QgsRenderContext::convertToPainterUnits scales
+        # them by reference / map scale as well (4x per zoom on screen),
+        # which the exported map-unit curves do not follow.
+        self.map_unit_sizes: List[str] = []
 
     def map_units_per(self, unit) -> Optional[float]:
         """Project map units of one ``unit`` (mm, pt, px, in) at the reference scale."""
@@ -113,9 +130,10 @@ class ReferenceScaleConverter:
         return mm / 1000.0 * self.reference_scale / self.scale_metres_per_map_unit
 
     # --- objects with xxxUnit()/xxx() pairs ---------------------------------
-    def _convert_units(self, obj, what: str) -> List[str]:
-        """Convert every screen-unit ``xxxUnit``/``xxx`` pair of ``obj``;
-        returns the converted unit getter names."""
+    def _convert_units(self, obj, what: str, unit_only=frozenset()) -> List[str]:
+        """Convert every screen-unit ``xxxUnit``/``xxx`` pair of ``obj``
+        (only the unit of the ``unit_only`` getters); returns the converted
+        unit getter names."""
         converted = []
         for name in dir(obj):
             if not name.endswith("Unit") or name.startswith("set") or name in ("outputUnit",):
@@ -129,9 +147,15 @@ class ReferenceScaleConverter:
             except TypeError:
                 continue
             factor = self.map_units_per(unit)
-            if factor is None:
-                continue
             base = name[:-len("Unit")]
+            if factor is None:
+                if normalize_unit(unit) in (MAP, METERS) and name not in unit_only and \
+                        self._has_length(obj, name, base):
+                    self.map_unit_sizes.append(f"{what} {base}")
+                continue
+            if name in unit_only:
+                unit_setter(Qgis.RenderUnit.MapUnits)
+                continue
             value_name = next((candidate for candidate in _VALUE_NAMES.get(name, (base,))
                                if callable(getattr(obj, candidate, None))
                                and callable(getattr(obj, _setter_name(candidate), None))), None)
@@ -152,6 +176,28 @@ class ReferenceScaleConverter:
                 scale_setter(QgsMapUnitScale())
             converted.append(name)
         return converted
+
+    @staticmethod
+    def _has_length(obj, name: str, base: str) -> bool:
+        """Whether the size of unit getter ``name`` is set (non-zero)."""
+        for candidate in _VALUE_NAMES.get(name, (base,)):
+            getter = getattr(obj, candidate, None)
+            if callable(getter):
+                try:
+                    value = getter()
+                except TypeError:
+                    continue
+                if isinstance(value, QPointF):
+                    return bool(value.x() or value.y())
+                if isinstance(value, QSizeF):
+                    return bool(value.width() or value.height())
+                if isinstance(value, (list, tuple)):
+                    return any(value)
+                try:
+                    return bool(float(value))
+                except (TypeError, ValueError):
+                    return False
+        return False
 
     def _scale_property(self, collection, key, factor: float) -> None:
         prop = collection.property(key)
@@ -175,7 +221,7 @@ class ReferenceScaleConverter:
                      if name.endswith("Unit") and not name.startswith("set")
                      and callable(getattr(layer, name, None)) and name != "outputUnit"
                      and _safe_unit(layer, name) is not None}
-            converted = self._convert_units(layer, kind)
+            converted = self._convert_units(layer, kind, _UNIT_ONLY.get(kind, frozenset()))
             properties = layer.dataDefinedProperties()
             scaled = set()
             for name in converted:
@@ -198,7 +244,8 @@ class ReferenceScaleConverter:
                     self.unhandled.append(f"{kind} data-defined dash pattern")
             layer.setDataDefinedProperties(properties)
             self._effect(layer.paintEffect(), kind)
-        self.symbol(layer.subSymbol())
+        if not _image_brush(layer):
+            self.symbol(layer.subSymbol())
 
     def _generator(self, layer) -> None:
         """A generator in screen units: its expression evaluated on the
@@ -264,6 +311,29 @@ class ReferenceScaleConverter:
                 self.unhandled.append(f"label data-defined {name}")
         result.setDataDefinedProperties(properties)
         return result
+
+
+def _image_brush(layer) -> bool:
+    """Whether QGIS draws this line / point pattern fill on screen with its
+    image brush (QgsLinePatternFillSymbolLayer / QgsPointPatternFillSymbolLayer
+    ::startRender): applyPattern draws the sub-symbol into the pattern image
+    with a render context of its own, without the reference scale, so the
+    hatch line / pattern marker keeps its screen size there."""
+    kind = layer.layerType()
+    props = layer.dataDefinedProperties()
+    sub = layer.subSymbol()
+    if sub is None or sub.hasDataDefinedProperties():
+        return False
+    if kind == "LinePatternFill":
+        return layer.clipMode() == Qgis.LineClipMode.ClipPainterOnly and \
+            not props.isActive(_P.PropertyLineClipping)
+    if kind == "PointPatternFill":
+        return layer.clipMode() == Qgis.MarkerClipMode.Shape and not any(
+            props.isActive(key) for key in (_P.PropertyMarkerClipping, _P.PropertyRandomOffsetX,
+                                            _P.PropertyRandomOffsetY, _P.PropertyAngle)) and \
+            not layer.maximumRandomDeviationX() and not layer.maximumRandomDeviationY() and \
+            not layer.angle()
+    return False
 
 
 def _safe_unit(obj, name: str):

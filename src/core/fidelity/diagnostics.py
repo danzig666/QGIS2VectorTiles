@@ -56,8 +56,9 @@ CODES: Dict[str, CodeInfo] = {
         "Screen-unit parts (e.g. millimetre outlines) scale with the map in the browser."),
     "Q2VT_REFERENCE_SCALE": CodeInfo(
         Severity.WARNING, "Symbology reference scale not applied to every size",
-        "The listed sizes keep a fixed screen size in the browser; QGIS scales them with "
-        "the map from the layer's reference scale."),
+        "The listed sizes do not follow the layer's reference scale in the browser: screen "
+        "sizes keep a fixed screen size and map-unit sizes their map size, while QGIS "
+        "scales both by reference scale / map scale."),
     "Q2VT_ZOOM_EMPTY_INTERVAL": CodeInfo(
         Severity.WARNING, "Rule has an empty visibility interval and was skipped",
         "Check the rule's minimum and maximum scale."),
