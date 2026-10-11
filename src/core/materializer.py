@@ -84,9 +84,10 @@ def inherit_opacity(parent, symbol):
     if not any(prop is not None and prop.isActive() for prop in props):
         symbol.setOpacity(symbol.opacity() * parent.opacity())
         return symbol
-    # A data-defined value replaces the symbol's own opacity: one expression
-    # for both, the static opacity left at 1.
-    terms = [f"({prop.asExpression()})" if prop is not None and prop.isActive()
+    # A data-defined value replaces the symbol's own opacity (a NULL keeps
+    # it): one expression for both, the static opacity left at 1.
+    terms = [f"coalesce(({prop.asExpression()}), {round(owner.opacity() * 100.0, 6)!r})"
+             if prop is not None and prop.isActive()
              else repr(round(owner.opacity() * 100.0, 6))
              for prop, owner in zip(props, (parent, symbol))]
     symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty.fromExpression(
@@ -2288,13 +2289,53 @@ class SymbolMaterializer:
             return layer.colorRamp()
         return QgsGradientColorRamp(layer.color(), layer.color2())
 
-    def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True):
+    @staticmethod
+    def _gradient_color(ramp):
+        """``t -> QColor`` of a gradient fill: QGIS hands the ramp's stops to
+        a QGradient (QgsGradientColorRamp::addStopsToGradient), which Qt
+        interpolates premultiplied; ``ramp.color`` blends a translucent end
+        unpremultiplied (blue to transparent white turns grey halfway)."""
+        from qgis.core import QgsGradientColorRamp  # pylint: disable=import-outside-toplevel
+        if not isinstance(ramp, QgsGradientColorRamp) or ramp.isDiscrete():
+            return ramp.color
+        stops = {0.0: ramp.color1(), 1.0: ramp.color2()}
+        last = 0.0
+        for stop in ramp.stops():
+            stops[stop.offset] = QColor(stop.color)
+            if stop.colorSpec() != QColor.Spec.Rgb:  # extra stops, as QGIS adds them
+                offset = last + 0.05
+                while offset < stop.offset:
+                    stops[offset] = ramp.color(offset)
+                    offset += 0.05
+            last = stop.offset
+        if ramp.colorSpec() != QColor.Spec.Rgb:
+            offset = last + 0.05
+            while offset < 1:
+                stops[offset] = ramp.color(offset)
+                offset += 0.05
+        offsets = sorted(stops)
+        premultiplied = [(c.alphaF(), c.redF() * c.alphaF(), c.greenF() * c.alphaF(),
+                          c.blueF() * c.alphaF()) for c in (stops[o] for o in offsets)]
+
+        def color(t):
+            index = max(0, min(len(offsets) - 2, bisect.bisect_right(offsets, t) - 1))
+            t0, t1 = offsets[index], offsets[index + 1]
+            f = min(1.0, max(0.0, (t - t0) / (t1 - t0) if t1 > t0 else 0.0))
+            a, r, g, b = (p + (q - p) * f for p, q in zip(premultiplied[index], premultiplied[index + 1]))
+            if a <= 0:
+                return QColor(0, 0, 0, 0)
+            return QColor.fromRgbF(min(1.0, r / a), min(1.0, g / a), min(1.0, b / a), a)
+        return color
+
+    def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True, color_of=None):
         """One rule drawing every colour band of the fill: a solid fill whose
-        colour is the band's (COLOR_FIELD), from one materialized dataset."""
+        colour is the band's (COLOR_FIELD), from one materialized dataset.
+        ``color_of``: ``t -> QColor`` (default ``ramp.color``)."""
         from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
-        probe = [ramp.color(i / 64) for i in range(65)]
+        color_of = color_of or ramp.color
+        probe = [color_of(i / 64) for i in range(65)]
         bands = self._band_count(probe)
-        colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
+        colors = [color_of((i + 0.5) / bands) for i in range(bands)]
         # Nested bands only where every pixel ends up opaque: below 100 %
         # symbol or layer opacity they would show through each other.
         parent = flat_rule.rule.symbol()
@@ -2337,7 +2378,8 @@ class SymbolMaterializer:
                 layer.referencePoint1IsCentroid(), layer.referencePoint2IsCentroid(),
                 layer.angle(), spread, band, bands, overlap, crs,
                 0.5 if opaque and not overlap else 0.0)
-        return self._band_rules(flat_rule, layer, self._ramp_of(layer), recipe)
+        ramp = self._ramp_of(layer)
+        return self._band_rules(flat_rule, layer, ramp, recipe, color_of=self._gradient_color(ramp))
 
     # Shapeburst distances in screen units: band sets per quarter of a zoom
     # (within +-9 % of QGIS's width), fewer when over the output budget.

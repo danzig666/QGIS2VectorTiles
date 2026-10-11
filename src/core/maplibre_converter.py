@@ -3337,6 +3337,19 @@ class QgisMapLibreStyleExporter:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved
 
+    @staticmethod
+    def _symbol_opacity(symbol: QgsSymbol):
+        """A symbol's opacity as QGIS applies it (QgsSymbol::renderFeature):
+        its data-defined Opacity (0-100) replaces the static one, which
+        stays where the value is NULL."""
+        prop = symbol.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY)
+        if prop is None or not prop.isActive():
+            return max(0.0, min(1.0, float(symbol.opacity())))
+        value = PropertyExtractor.get_value_or_expression(symbol.opacity() * 100.0, prop, "number")
+        if ex.is_number(value):
+            return max(0.0, min(1.0, value / 100.0))
+        return ex.clamp(ex.div(value, 100.0), 0, 1)
+
     def _marker_layer(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -3356,6 +3369,16 @@ class QgisMapLibreStyleExporter:
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             symbol, symbol_layer)
+        # A data-defined symbol opacity (e.g. a parent's, see
+        # materializer.inherit_opacity) varies per feature: icon-opacity,
+        # over a sprite drawn opaque. The static opacity is in the sprite.
+        icon_opacity = IconPropertyExtractor.get_icon_opacity()
+        opacity = symbol.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY)
+        if opacity is not None and opacity.isActive():
+            icon_opacity = self._symbol_opacity(symbol)
+            symbol = symbol.clone()
+            symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty())
+            symbol.setOpacity(1.0)
         self.marker_symbols[marker_name] = SpriteRequest(
             symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
@@ -3384,7 +3407,7 @@ class QgisMapLibreStyleExporter:
             "visibility": "visible",
         })
         layer_def["paint"].update({
-            "icon-opacity": IconPropertyExtractor.get_icon_opacity(),
+            "icon-opacity": icon_opacity,
             "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(),
             "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),
@@ -3494,7 +3517,7 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-offset"] = self._icon_offset(offset_px, icon_size)
 
         layer_def["paint"].update({
-            "icon-opacity": PropertyExtractor.opacity(symbol) if symbol is not None
+            "icon-opacity": self._symbol_opacity(symbol) if symbol is not None
             else IconPropertyExtractor.get_icon_opacity(),
             "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(),
             "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(),

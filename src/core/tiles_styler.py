@@ -152,7 +152,14 @@ class TilesStyler:
             self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
             new_symbol = sub_symbol
         elif source_geom != target_geom:
-            if sub_symbol and symbol_layer.layerType() in ("GeometryGenerator", "CentroidFill"):
+            if sub_symbol and symbol_layer.layerType() == "CentroidFill":
+                # QgsCentroidFillSymbolLayer draws its marker with the fill
+                # symbol's opacity multiplied in.
+                from .materializer import _SYMBOL_OPACITY_KEY, inherit_opacity  # pylint: disable=import-outside-toplevel
+                new_symbol = inherit_opacity(symbol, sub_symbol.clone())
+                self._copy_data_driven_properties(symbol, new_symbol, skip=(_SYMBOL_OPACITY_KEY,))
+                self._copy_data_driven_properties(symbol_layer, new_symbol.symbolLayers()[-1])
+            elif sub_symbol and symbol_layer.layerType() == "GeometryGenerator":
                 self._copy_data_driven_properties(symbol, sub_symbol)
                 self._copy_data_driven_properties(symbol_layer, sub_symbol_layer)
                 new_symbol = sub_symbol
@@ -202,11 +209,15 @@ class TilesStyler:
             self._GEOM_TYPE_MAP.get(geom_code, QgsWkbTypes.PointGeometry)
         )
 
-    def _copy_data_driven_properties(self, source_obj, target_obj):
-        """Copy all active data-driven properties from source to target object."""
+    def _copy_data_driven_properties(self, source_obj, target_obj, skip=()):
+        """Copy all active data-driven properties from source to target object
+        (except the keys in ``skip``)."""
         source_props = source_obj.dataDefinedProperties()
         target_props = target_obj.dataDefinedProperties()
+        skip = {int(getattr(key, "value", key)) for key in skip}
         for prop_key in source_obj.propertyDefinitions():
+            if int(getattr(prop_key, "value", prop_key)) in skip:
+                continue
             prop = source_props.property(prop_key)
             if prop.isActive():
                 target_props.setProperty(prop_key, prop)

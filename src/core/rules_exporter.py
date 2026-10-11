@@ -312,6 +312,9 @@ class _RuleGroupSnapshot:
     # Lowest tile zoom of the data ("o"): colour band edges keep clear of
     # vertices at its coordinate grid.
     data_min_zoom: int = 0
+    # Highest zoom of the rule ("i"): colour bands of a rule drawn below the
+    # archive's last zoom (a shapeburst set per zoom) are merged at it.
+    data_max_zoom: Optional[int] = None
     # Feature-aligned pattern fill (materializer.pattern_anchor_kind) and the
     # map CRS its anchor is measured in: each feature carries the anchor.
     pattern_anchor: str = ""
@@ -712,6 +715,7 @@ class RulesExporter:
                 merge=primary.merge,
                 point_group=primary.point_group,
                 data_min_zoom=int(primary.get_attr("o") or 0),
+                data_max_zoom=None if primary.get_attr("i") is None else int(primary.get_attr("i")),
                 pattern_anchor=self._pattern_anchor(primary, geom_target),
                 anchor_crs=self._map_crs if self._pattern_anchor(primary, geom_target) else "",
             ))
@@ -1494,6 +1498,7 @@ class RulesExporter:
             # Only colour bands depend on the first zoom (bands under a pixel
             # there are merged); other datasets are reused under a new range.
             group.pop("data_min_zoom", None)
+            group.pop("data_max_zoom", None)
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
                   if f.name not in ("layer_id", "name", "feature_key", "key_uri")}
         if src.key_uri:  # a per-export copy: the layer's own URI
@@ -1669,7 +1674,8 @@ class RulesExporter:
             if not check.isValid() or check.featureCount() <= 0:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
-            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom)
+            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom,
+                                              grp.data_max_zoom)
             if current_input is None:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
@@ -1907,18 +1913,24 @@ class RulesExporter:
                                  MAX_NODES=mat.PIECE_MAX_NODES)
         return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
 
-    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0) -> Optional[str]:
+    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0,
+                     max_zoom: Optional[int] = None) -> Optional[str]:
         """Worker: every colour band of a gradient / shapeburst fill as its
         own polygon (BAND_FIELD, COLOR_FIELD), all in one dataset, bands in
-        order (see materialize.color_bands_recipe)."""
+        order (see materialize.color_bands_recipe). ``max_zoom``: the rule's
+        last zoom."""
         from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
                                QgsProject, QgsVectorFileWriter, QgsWkbTypes)
         from .fidelity.bands import BandBuilder  # pylint: disable=import-outside-toplevel
         layer = self._open(source, "bands_src")
         if not layer.isValid():
             return None
-        # Bands under a pixel wide are merged, two zooms past the archive.
-        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0, float(min_zoom))
+        # Bands under a pixel wide are merged, two zooms past the archive, or
+        # one past a rule that ends below it (drawn up to that zoom only).
+        detail = float(self.max_zoom) + 2.0
+        if max_zoom is not None and max_zoom < self.max_zoom:
+            detail = max(float(min_zoom), float(max_zoom)) + 1.0
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", detail, float(min_zoom))
         colors = recipe.param("colors")
         fields = QgsFields()
         for field in layer.fields():

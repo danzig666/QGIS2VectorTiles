@@ -29,28 +29,37 @@ def _union(parts: Iterable[QgsGeometry]) -> Optional[QgsGeometry]:
     return QgsGeometry.unaryUnion(parts) if len(parts) > 1 else parts[0]
 
 
-def _without_holes(shape: QgsGeometry) -> List[QgsGeometry]:
-    """``shape`` as polygons without holes, cut at each hole. Bands that do
-    not overlap are rings narrower than a tile unit at low zooms: there a
-    ring's hole collapses onto its outline and the tiles drop it, so the
-    ring would cover the whole inside; a part without holes vanishes."""
-    parts, todo = [], [QgsGeometry.fromPolygonXY(p) for p in
-                       (shape.asMultiPolygon() if shape.isMultipart() else [shape.asPolygon()]) if p]
+def _polygons(shape: QgsGeometry) -> List[QgsGeometry]:
+    """The polygons of ``shape``, one per part: an intersection can also
+    give points and lines (a wedge touching the feature at its apex)."""
+    out = []
+    for part in shape.asGeometryCollection():
+        if part.isEmpty() or QgsWkbTypes.geometryType(part.wkbType()) != QgsWkbTypes.PolygonGeometry:
+            continue
+        out.extend(QgsGeometry.fromPolygonXY(p) for p in
+                   (part.asMultiPolygon() if part.isMultipart() else [part.asPolygon()]) if p)
+    return out
+
+
+def _without_holes(shape: QgsGeometry, min_width: float = math.inf) -> List[QgsGeometry]:
+    """The polygons of ``shape``, those narrower than ``min_width`` (about
+    2 x area / perimeter, a ring's width) cut at each hole. Bands that do not
+    overlap are rings narrower than a tile unit at low zooms: there a ring's
+    hole collapses onto its outline and the tiles drop it, so the ring would
+    cover the whole inside; a part without holes vanishes."""
+    parts, todo = [], _polygons(shape)
     while todo:
         part = todo.pop()
         rings = part.asPolygon()
-        if len(rings) < 2:
+        if len(rings) < 2 or 2 * part.area() >= min_width * part.constGet().perimeter():
             parts.append(part)
             continue
         # Cut across the first hole, through a point inside it.
         x = QgsGeometry.fromPolygonXY([rings[1]]).pointOnSurface().asPoint().x()
         box = part.boundingBox()
         for x0, x1 in ((box.xMinimum() - 1, x), (x, box.xMaximum() + 1)):
-            half = part.intersection(QgsGeometry.fromRect(
-                QgsRectangle(x0, box.yMinimum() - 1, x1, box.yMaximum() + 1)))
-            for piece in half.asGeometryCollection():
-                if piece.type() == QgsWkbTypes.PolygonGeometry and not piece.isEmpty():
-                    todo.append(piece)
+            todo.extend(_polygons(part.intersection(QgsGeometry.fromRect(
+                QgsRectangle(x0, box.yMinimum() - 1, x1, box.yMaximum() + 1)))))
     return parts
 
 
@@ -88,14 +97,15 @@ class BandBuilder:
             local.transform(self._to_crs)
         shapes = []
         clearance = 0.0
+        # Two tile units (1/4096 of a tile) at the coarsest zoom (export CRS).
+        two_units = 2 * self.METRES_PER_PX_Z0 * 512 / 4096 / 2 ** (self.coarse_zoom or 0.0)
         if self.coarse_zoom is not None:
-            # Two tile units (1/4096 of a tile) at the coarsest zoom, in
-            # layer units.
-            clearance = 2 * self.METRES_PER_PX_Z0 * 512 / 4096 / 2 ** self.coarse_zoom
+            # In layer units.
+            clearance = two_units
             if self._to_crs is not None and self._to_crs.destinationCrs().isGeographic():
                 clearance /= 111320.0
         context = _Context(local, clearance)
-        for index, band in self._merged(geometry):
+        for index, band in self._merged(geometry, local):
             if band.kind == "shapeburst_band":
                 shape = _shapeburst(local, band, context)
             else:
@@ -107,23 +117,35 @@ class BandBuilder:
             if shape.isEmpty():
                 continue
             if band.param("overlap") is False:
-                shapes.extend((index, part) for part in _without_holes(shape))
+                # Rings over two tile units wide keep their holes. One
+                # feature per band (fewer for the tiles to cut and write).
+                parts = _without_holes(shape, two_units)
+                if parts:
+                    shapes.append((index, QgsGeometry.collectGeometry(parts) if len(parts) > 1 else parts[0]))
             else:
                 shapes.append((index, shape))
         return shapes
 
 
-    def _merged(self, geometry: QgsGeometry):
+    def _merged(self, geometry: QgsGeometry, local: QgsGeometry):
         """[(colour index, band recipe)]: neighbouring bands merged so none is
         narrower than about a pixel at ``detail_zoom`` (the feature's
-        bounding box diagonal bounds every band's extent); a merged band takes
-        the colour of its middle."""
+        bounding box diagonal bounds every band's extent, a shapeburst's
+        distance or half the box's short side its bands'); a merged band
+        takes the colour of its middle."""
         count = len(self.bands)
         if self.detail_zoom is None or count < 2:
             return list(enumerate(self.bands))
-        box = geometry.boundingBox()
-        pixels = math.hypot(box.width(), box.height()) / (
-            self.METRES_PER_PX_Z0 / 2 ** self.detail_zoom)
+        box, own = geometry.boundingBox(), local.boundingBox()
+        extent = math.hypot(box.width(), box.height())
+        first = self.bands[0]
+        if first.kind == "shapeburst_band":
+            reach = min(own.width(), own.height()) / 2
+            if not first.param("whole") and first.param("distance") > 0:
+                reach = min(reach, first.param("distance"))
+            # Layer units to export units.
+            extent *= reach / max(math.hypot(own.width(), own.height()), 1e-12)
+        pixels = extent / (self.METRES_PER_PX_Z0 / 2 ** self.detail_zoom)
         step = max(1, math.ceil(count / max(pixels, 1.0)))
         if step == 1:
             return list(enumerate(self.bands))

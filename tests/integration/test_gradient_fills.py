@@ -171,13 +171,24 @@ def _render_aliased(layers):
     return job.renderedImage()
 
 
-@pytest.mark.parametrize("case", ["transparent", "opacity", "layer_opacity", "gradient"])
+@pytest.mark.parametrize("case", ["transparent", "opacity", "layer_opacity", "gradient",
+                                  "gradient_transparent", "conical_transparent", "conical_opacity"])
 def test_translucent_bands_do_not_overlap(plugin, tmp_path, case):
     """A shapeburst fading to transparent, or a shapeburst / gradient drawn
     at 50 % symbol or layer opacity: each pixel is in one band. Nested bands
     (each reaching the middle) stacked ~256 translucent layers into an
-    opaque tint over the inside QGIS leaves see-through."""
-    if case == "gradient":
+    opaque tint over the inside QGIS leaves see-through. A gradient to
+    transparent keeps its colour as it fades (Qt blends premultiplied), and
+    conical wedges touching the house only at its roof top (the gradient's
+    centre) are no polygons (that failed the whole rule)."""
+    if case.startswith("conical"):
+        fill = QgsGradientFillSymbolLayer(QColor("#1f4e9c"), QColor(255, 255, 255, 0) if case.endswith(
+            "transparent") else QColor("#ffd23f"), Qgis.GradientColorSource.SimpleTwoColor,
+            Qgis.GradientType.Conical)
+    elif case == "gradient_transparent":
+        fill = QgsGradientFillSymbolLayer(QColor("#1f4e9c"), QColor(255, 255, 255, 0),
+                                          Qgis.GradientColorSource.SimpleTwoColor, Qgis.GradientType.Linear)
+    elif case == "gradient":
         fill = QgsGradientFillSymbolLayer(QColor("#1f4e9c"), QColor("#ffd23f"),
                                           Qgis.GradientColorSource.SimpleTwoColor, Qgis.GradientType.Radial)
     else:
@@ -188,7 +199,7 @@ def test_translucent_bands_do_not_overlap(plugin, tmp_path, case):
         fill.setDistanceUnit(Qgis.RenderUnit.MapUnits)
         fill.setBlurRadius(0)
     symbol = QgsFillSymbol([fill])
-    if case in ("opacity", "gradient"):
+    if case in ("opacity", "gradient", "conical_opacity"):
         symbol.setOpacity(0.5)
     layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
@@ -209,6 +220,30 @@ def test_translucent_bands_do_not_overlap(plugin, tmp_path, case):
                for part in f.geometry().asGeometryCollection())  # without holes
     diff = np.abs(expected - got).max(axis=2)[_inside_house()]
     assert diff.mean() < 6 and np.percentile(diff, 99) < 30, (diff.mean(), np.percentile(diff, 99))
+
+
+def test_disjoint_bands_merged_to_their_zoom_and_holes_kept_when_wide(plugin):
+    """A 3 mm shapeburst set for zoom 10 (~11 px wide): its 256 colour
+    levels become bands of about a pixel at the next zoom, not 256 rings of
+    a twentieth of a pixel (exports took three times as long). Rings wider
+    than two tile units keep their holes; only thinner ones are cut."""
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.bands import BandBuilder  # pylint: disable=import-error
+    reach = 3 / 25.4 * 96 * BandBuilder.METRES_PER_PX_Z0 / 2 ** 10  # 3 mm at zoom 10, metres
+    bands = [mat.shapeburst_band_recipe(reach, False, False, band, 256, "EPSG:3857", False)
+             for band in range(256)]
+    recipe = mat.color_bands_recipe(bands, ["0,0,0,255"] * 256)
+    square = QgsGeometry.fromWkt("POLYGON((0 0, 5000 0, 5000 5000, 0 5000, 0 0))")
+    built = BandBuilder(recipe, "EPSG:3857", 11.0, 10.0).build(square)
+    count = len({index for index, _ in built})
+    assert 10 <= count <= 40, count
+    assert sum(g.area() for _, g in built) == pytest.approx(square.area(), rel=1e-6)
+    # About 2 tile units wide at zoom 10 (holes kept) ...
+    assert any(len(p.asPolygon()) > 1 for _, g in built for p in g.asGeometryCollection())
+    # ... but thinner than that at zoom 2: cut (one feature per band).
+    built = BandBuilder(recipe, "EPSG:3857", 11.0, 2.0).build(square)
+    assert len(built) == count
+    assert all(len(p.asPolygon()) == 1 for _, g in built for p in g.asGeometryCollection())
 
 
 def test_translucent_bands_stay_apart_in_the_tiles(plugin, tmp_path):

@@ -99,37 +99,94 @@ def test_hatch_drawn_line_by_line_keeps_its_own_opacity(plugin, tmp_path):
     assert lines and all(r.rule.symbol().opacity() == pytest.approx(1.0) for r in lines)
 
 
-def test_data_defined_parent_opacity_reaches_the_markers(plugin, tmp_path):
-    """The parent's data-defined opacity (0-100) replaces its own and
-    multiplies the marker's (QgsSymbol::renderFeature)."""
-    symbol = _marker_line(Qgis.RenderUnit.MapUnits)
-    symbol.setDataDefinedProperty(OPACITY_KEY, QgsProperty.fromExpression('"id" * 10 + 30'))
-    marker = symbol.symbolLayer(1).subSymbol()
-    marker.setOpacity(0.5)
-    layer = _layer("LineString", [LINE], str(tmp_path / "src.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-    markers = [r for r in _flatten(layer, tmp_path) if r.recipe is not None and r.get_attr("c") == 0]
-    assert markers
-    for rule in markers:
-        prop = rule.rule.symbol().dataDefinedProperties().property(OPACITY_KEY)
-        assert rule.rule.symbol().opacity() == 1.0 and prop.isActive()
-        assert prop.asExpression().replace(" ", "") == '50.0*("id"*10+30)/100'
+def _evaluate(expression, properties):
+    """A MapLibre expression of the kinds the style's opacities use."""
+    if not isinstance(expression, list):
+        return expression
+    op, args = expression[0], expression[1:]
+    if op == "get":
+        return properties.get(args[0])
+    values = [_evaluate(a, properties) for a in args]
+    if op == "coalesce":
+        return next((v for v in values if v is not None), None)
+    if op == "to-number":
+        return float(values[0]) if values[0] is not None else 0.0
+    if op == "*":
+        return values[0] * values[1]
+    return {"max": max, "min": min}[op](values)
 
 
-def test_marker_line_sprite_layer_takes_the_line_opacity(plugin, tmp_path):
-    """A marker line in screen units stays a symbol layer along the line:
-    its icon-opacity is the line symbol's (it was 1 under a 30 % line)."""
+def _export(layer, tmp_path):
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
-    symbol = _marker_line(Qgis.RenderUnit.Millimeters)
-    symbol.setOpacity(0.3)
-    layer = _layer("LineString", [LINE], str(tmp_path / "src.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     reset_project(layer)
     out = tmp_path / "out"
     out.mkdir()
     result = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=EXTENT, output_dir=str(out),
                               serve=False).convert_project_to_vector_tiles()
-    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    return result, json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+
+
+def test_data_defined_parent_opacity_reaches_the_markers(plugin, tmp_path):
+    """The parent's data-defined opacity (0-100) replaces its own (a NULL
+    keeps it) and multiplies the marker's (QgsSymbol::renderFeature). The
+    materialized markers draw it per feature (icon-opacity over an opaque
+    sprite): they were opaque for any value read from a field."""
+    from osgeo import gdal
+    symbol = _marker_line(Qgis.RenderUnit.MapUnits)
+    symbol.deleteSymbolLayer(0)
+    symbol.setOpacity(0.3)
+    symbol.setDataDefinedProperty(OPACITY_KEY, QgsProperty.fromExpression('CASE WHEN "id" > 0 THEN 60 END'))
+    symbol.symbolLayer(0).subSymbol().setOpacity(0.5)
+    layer = _layer("LineString", [LINE, "LINESTRING(-100 60, 100 100)"], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    result, style = _export(layer, tmp_path)
+    markers = [l for l in style["layers"] if l["type"] == "symbol" and "icon-image" in l.get("layout", {})
+               and l.get("minzoom", 0) <= 15 < l.get("maxzoom", 24)]
+    assert markers
+    tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), open_options=["ZOOM_LEVEL=15"])
+    for style_layer in markers:
+        source = tiles.GetLayerByName(style_layer["source-layer"])
+        if source is None:
+            continue
+        values = {round(_evaluate(style_layer["paint"]["icon-opacity"],
+                                  {f.GetFieldDefnRef(i).GetName(): f.GetField(i)
+                                   for i in range(f.GetFieldCount())}), 3)
+                  for f in source}
+        assert values == {0.15, 0.3}, (style_layer["id"], values)
+        break
+    else:
+        pytest.fail("no marker layer in the zoom 15 tiles")
+
+
+def test_centroid_fill_marker_keeps_the_parent_opacity(plugin, tmp_path):
+    """QgsCentroidFillSymbolLayer draws its marker with the fill symbol's
+    opacity multiplied in: the sprite is drawn at 30 % (it was opaque)."""
+    from qgis.core import QgsCentroidFillSymbolLayer
+    from PIL import Image
+    centroid = QgsCentroidFillSymbolLayer()
+    centroid.setSubSymbol(_square_marker(8.0))
+    symbol = QgsFillSymbol([centroid])
+    symbol.setOpacity(0.3)
+    layer = _layer("Polygon", [SQUARE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    result, style = _export(layer, tmp_path)
+    markers = [l for l in style["layers"] if l["type"] == "symbol" and "icon-image" in l.get("layout", {})]
+    assert len(markers) == 1 and markers[0]["paint"]["icon-opacity"] == 1
+    sprite = os.path.join(result, "style", "sprite", "sprite")
+    frame = json.load(open(sprite + ".json", encoding="utf-8"))[markers[0]["layout"]["icon-image"]]
+    image = Image.open(sprite + ".png").convert("RGBA").crop(
+        (frame["x"], frame["y"], frame["x"] + frame["width"], frame["y"] + frame["height"]))
+    assert max(a for *_rgb, a in image.getdata()) == pytest.approx(0.3 * 255, abs=3)
+
+
+def test_marker_line_sprite_layer_takes_the_line_opacity(plugin, tmp_path):
+    """A marker line in screen units stays a symbol layer along the line:
+    its icon-opacity is the line symbol's (it was 1 under a 30 % line)."""
+    symbol = _marker_line(Qgis.RenderUnit.Millimeters)
+    symbol.setOpacity(0.3)
+    layer = _layer("LineString", [LINE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _, style = _export(layer, tmp_path)
     # Markers along the line (markers placed at exact positions are points
     # whose sprite carries the opacity, see the tests above).
     along = [l for l in style["layers"] if l["type"] == "symbol"
