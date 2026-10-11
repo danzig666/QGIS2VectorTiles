@@ -67,12 +67,20 @@ const TILE_INTERVAL_MS = 80;
 const MOVE_INTERVAL_MS = 150;
 const REACH = 0.5;   // labels in advance up to half a screen beyond each edge
 const GUARD_PX = 48; // ... but not so close that their text reaches the screen
-// Label point tiles stop at this zoom (then overzoomed): bigger tiles cover
-// more around the screen, so panning rarely needs new ones laid out. Points
-// keep 1/8192 of a z15 tile (about 0.1 m at mid latitudes).
+// Label point tiles stop at this zoom at least (then overzoomed): bigger
+// tiles cover more around the screen, so panning rarely needs new ones laid
+// out. Points are rounded to 1/8192 of a tile of that zoom: 2^(z - maxzoom - 4)
+// px at zoom z, so the source goes deep enough (pointMaxzoom) for half a
+// pixel at the deepest browser zoom - else overzoomed labels sat off their
+// line (4 px at z22 from z15 tiles).
 const POINT_MAXZOOM = 15;
 const KEEP_ROOM = 0.8;  // a kept "pole" label keeps >= 80 % of the best room
 const KEEP_PX = 24;     // a kept centroid label stays this close to the centroid
+
+// The label point source's maxzoom for a map that zooms to maxZoom.
+export function pointMaxzoom(maxZoom) {
+  return Math.max(POINT_MAXZOOM, Math.ceil(maxZoom) - 4);
+}
 
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
@@ -127,7 +135,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     }, firstLayer);
     map.addSource(group.source, {
       type: "geojson", data: { type: "FeatureCollection", features: [] },
-      maxzoom: Math.min(tileSource.maxzoom ?? POINT_MAXZOOM, POINT_MAXZOOM),
+      maxzoom: pointMaxzoom(map.getMaxZoom()),
     });
     for (const { def } of group.layers) map.removeLayer(def.id);
   }

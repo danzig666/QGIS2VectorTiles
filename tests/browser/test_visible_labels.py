@@ -516,6 +516,15 @@ def test_scaled_text_size_keeps_a_dense_zoom_curve():
     assert stops[1][2][0] == "to-number"
 
 
+def test_label_point_source_is_deep_enough_for_the_deepest_browser_zoom():
+    # Points are rounded to 1/8192 of a maxzoom tile: 2^(z - maxzoom - 4) px
+    # at zoom z, at most half a pixel at the map's maximum zoom.
+    depths = _js("[22, 23.99, 18, 0].map(m.pointMaxzoom)")
+    assert depths == [18, 20, 15, 15]
+    for max_zoom, depth in zip((22, 23.99), depths):
+        assert 2 ** (max_zoom - depth - 4) / 2 <= 0.5
+
+
 # "Around point" polygon labels (QGIS AroundPoint): beside the point at the
 # QGIS label distance, never on it (a centroid marker stays visible).
 AROUND = {"anchors": ["bottom", "bottom-left", "bottom-right", "left", "right", "top", "top-left",
@@ -714,7 +723,7 @@ def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
         removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
         addSource: (id, spec) => { sources[id] = spec; }, getSource: (id) => ({setData: (d) => { out[id] = d; }}),
         getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},
-        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0,
+        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0, getMaxZoom: () => 22,
         getContainer: () => ({clientWidth: 1000}),
         getBounds: () => ({getSouthWest: () => ({lng: 0, lat: 1}), getNorthEast: () => ({lng: 1, lat: 0})}),
         querySourceFeatures: (s, {sourceLayer}) => sourceLayer !== 'parks' ? [] : [{_x: 0, _y: 0, _z: 0,
