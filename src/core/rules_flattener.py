@@ -44,9 +44,9 @@ from .fidelity.model import OverzoomPolicy, ZoomInterval
 from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.units import LengthConverter
-from .fidelity.qgis_expr import (and_filters, enabled_condition, map_scale_reads,
-                                 scale_thresholds, substitute_geometry, uses_map_scale,
-                                 with_map_scale)
+from .fidelity.qgis_expr import (SCALE_VARIABLES, and_filters, enabled_condition,
+                                 map_scale_reads, scale_thresholds, substitute_geometry,
+                                 uses_map_scale, with_map_scale)
 from .fidelity.materialize import coerce_to_symbol_type
 from .materializer import SymbolMaterializer
 
@@ -1908,6 +1908,14 @@ class RulesFlattener:
         found = [expression for expression in found if uses_map_scale(expression)]
         if sum(map_scale_reads(expression) for expression in found) != map_scale_reads(text) or \
                 any(self._is_feature_dependent(expression) for expression in found):
+            return None
+        # A variable set only while rendering (@symbol_color, @map_rotation)
+        # is NULL here: every zoom would look alike and merge into one piece.
+        from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+        known = set(SCALE_VARIABLES) | set(QgsExpressionContext(
+            QgsExpressionContextUtils.globalProjectLayerScopes(flat_rule.layer)).variableNames())
+        if any(set(QgsExpression(expression).referencedVariables()) - known
+               for expression in found):
             return None
         return found
 

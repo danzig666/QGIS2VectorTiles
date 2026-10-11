@@ -648,6 +648,25 @@ def test_zooms_valued_alike_by_a_map_scale_expression_are_one_piece(flattener):
         assert len([r for r in pieces if r.visibility.min_zoom >= 16]) == 2  # 16, then 17-
 
 
+def test_a_scale_expression_reading_a_render_variable_keeps_its_zoom_pieces(flattener):
+    """A fill fading in with the scale ('set_color_part(@symbol_color,
+    'alpha', ...)') reads a variable set only while rendering: valued NULL
+    at every zoom, all zooms looked alike and merged into one piece bound
+    at zoom 0, so the fill was transparent at every zoom."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = rule_based(zoning_layer(), [("w", "", 0, 0, True, "255,0,0")])
+    layer.renderer().rootRule().children()[0].symbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyFillColor,
+        QgsProperty.fromExpression(
+            "set_color_part(@symbol_color, 'alpha', min(255, 2000000 / @map_scale))"))
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    fills = [r for r in rules if r.get_attr("c") == 2]
+    for zoom in (0.5, 12.5, 16.5, 22.5):
+        assert len([r for r in fills if r.visibility.contains(zoom)]) == 1
+    assert len({r.visibility.min_zoom for r in fills}) > 16
+
+
 def test_a_line_shown_beyond_the_last_tile_zoom_does_not_widen_the_tile_buffer(plugin):
     """A line piece shown from zoom 22 draws the zoom-16 tiles 64 times
     magnified: its 60 px width is under a pixel of those tiles. Read at
