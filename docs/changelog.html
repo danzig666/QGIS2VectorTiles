@@ -449,6 +449,18 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 
   <div class="cl-entry featured latest">
     <div class="cl-header">
+      <div class="cl-version">v4.33.0</div>
+      <div class="cl-date">11 Oct 2026</div>
+    </div>
+    <div class="cl-body">
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Zooming in past the last tile zoom: symbols in millimetres keep their size; rules, layers and labels shown only there are drawn; <code>@map_scale</code> expressions, map-unit patterns and point clusters keep following the zoom.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Map units and millimetres: labels mixing them are placed and drawn; map-unit dashes and line patterns follow every zoom; size limits, degree and feet CRSs, the reference scale, "Meters at scale" and generator units are converted as QGIS does; map-unit random fills no longer crash the export.</span></div>
+      <div class="cl-item"><div class="cl-item-dot"></div><span>Fixed: ELSE rules drew hidden features; polygon labels avoid each other, label every part and place outside; horizontal line labels mid-line, upside-down labels turned; hatches touching a corner, translucent shapeburst, symbol opacity, generator fills, fill offsets and more.</span></div>
+    </div>
+  </div>
+
+  <div class="cl-entry">
+    <div class="cl-header">
       <div class="cl-version">v4.32.0</div>
       <div class="cl-date">10 Oct 2026</div>
     </div>

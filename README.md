@@ -42,7 +42,21 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.32.0**. Newest first:
+This README describes QWebMap **4.33.0**. Newest first:
+
+**4.33.0** — conversion audit: zooms past the last tiles, mixed units, QGIS rule semantics
+- **Zooming in past the last tile zoom (17–22):** symbols in millimetres keep their size (arrows,
+  point patterns, shapeburst bands, offset markers grew 2× per zoom); rules, layers and labels
+  shown only there are drawn; `@map_scale` expressions, map-unit patterns and point clusters keep
+  following the zoom.
+- **Map units and millimetres:** labels mixing them (map-unit text with millimetre offsets and the
+  reverse) are placed and drawn; map-unit dashes and line patterns follow every zoom; min/max size
+  limits, degree and feet CRSs, the reference scale, "Meters at scale" and geometry-generator units
+  are converted as QGIS does; random marker fills with a map-unit density no longer crash the export.
+- **Rules, labels and symbols:** ELSE / "all other values" no longer draw hidden features; polygon
+  labels avoid each other, label every part and place outside polygons; horizontal line labels sit
+  mid-line and upside-down labels turn; hatches touching a corner, translucent shapeburst, symbol
+  opacity on drawn parts, generator fills, fill offsets and more are fixed.
 
 **4.32.0** — finding layers in big projects, editable zoomed-out limits
 - **Finding layers:** the *Map* tab's layer list has a filter box (part of the name, upper or
