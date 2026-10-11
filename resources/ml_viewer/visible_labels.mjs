@@ -1939,7 +1939,13 @@ export function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) 
     // (a town name 4 mm above its dot).
     const offset = layout["text-variable-anchor"] ? null : evaluate(layout["text-offset"], zoom, f.properties);
     const em = Number(evaluate(layout["text-size"] ?? 16, zoom, f.properties)) || 16;
-    const [dx, dy] = Array.isArray(offset) ? offset.map((v) => (Number(v) || 0) * em * perPx) : [0, 0];
+    let [dx, dy] = Array.isArray(offset) ? offset.map((v) => (Number(v) || 0) * em * perPx) : [0, 0];
+    // text-translate (px; an offset in units unlike the text's).
+    const translate = evaluate((f.layer.paint || {})["text-translate"], zoom, f.properties);
+    if (Array.isArray(translate)) {
+      dx += (Number(translate[0]) || 0) * perPx;
+      dy += (Number(translate[1]) || 0) * perPx;
+    }
     boxes.push([p.x + dx - half[0], p.y + dy - half[1], p.x + dx + half[0], p.y + dy + half[1]]);
   }
   return boxes;

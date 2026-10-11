@@ -74,6 +74,9 @@ def test_a_mm_offset_of_map_unit_text_keeps_its_size_at_every_zoom(mc, at, zoom)
     assert at(offset, zoom + 0.5)[0] * at(size, zoom + 0.5) == pytest.approx(3 * MM, rel=1e-3)
     # Low zooms (text too small to see) stay within MapLibre's 16-bit offsets.
     assert abs(at(offset, 0)[0]) <= mc.TextPropertyExtractor.MAX_TEXT_OFFSET_EM
+    # Over point: drawn as text-translate instead, the mm offset at every zoom.
+    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings, 0)
+    assert translate == pytest.approx([3 * MM, 0], abs=1e-4)
 
 
 @pytest.mark.parametrize("zoom", [15, 17, 19, 21])
@@ -213,3 +216,68 @@ def test_a_map_unit_buffer_frame_of_screen_text_grows_with_the_map(mc, at, zoom)
     meta = exporter.pattern_images[at(layout["icon-image"], zoom)].metadata
     assert meta["content"][0] == pytest.approx(_mu(1, zoom + 0.5) / 2, abs=0.01)
     assert "icon-size" not in layout
+
+
+@pytest.mark.parametrize("zoom", [15, 19, 21.5, 22])
+def test_a_map_unit_over_point_offset_of_screen_text_is_a_px_translate(mc, at, zoom):
+    """10 pt text, offset 15, -10 map units: in ems (text-offset, baked into
+    each glyph's 16-bit position) a long label wrapped round to the far side
+    of its point from zoom 21.5; as text-translate px it is exact at every
+    zoom, whole ones too, with no limit."""
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings, 0)
+    assert translate[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
+    stops = list(zip(translate[3::2], (value[1] for value in translate[4::2])))
+    x = mc.ex.exponential_zoom_curve([(z, v[0]) for z, v in stops])
+    y = mc.ex.exponential_zoom_curve([(z, v[1]) for z, v in stops])
+    assert mc.ex.evaluate_zoom_curve(x, zoom) == pytest.approx(_mu(15, zoom), rel=1e-4)
+    assert mc.ex.evaluate_zoom_curve(y, zoom) == pytest.approx(_mu(-10, zoom), rel=1e-4)
+    # Turned with a fixed label rotation, as MapLibre turns text-offset.
+    turned = mc.TextPropertyExtractor.get_text_offset_translate(settings, 90)
+    stops = list(zip(turned[3::2], (value[1] for value in turned[4::2])))
+    x = mc.ex.exponential_zoom_curve([(z, v[0]) for z, v in stops])
+    y = mc.ex.exponential_zoom_curve([(z, v[1]) for z, v in stops])
+    assert mc.ex.evaluate_zoom_curve(x, zoom) == pytest.approx(_mu(10, zoom), rel=1e-4)
+    assert mc.ex.evaluate_zoom_curve(y, zoom) == pytest.approx(_mu(15, zoom), rel=1e-4)
+    # A data-defined rotation: kept as text-offset ems.
+    assert mc.TextPropertyExtractor.get_text_offset_translate(settings, ["get", "r"]) is None
+
+
+def test_per_zoom_label_offsets_are_cut_to_the_layer_zooms(mc):
+    """A step of per-zoom ems keeps only the stops within the layer's zooms."""
+    step = ["step", ["zoom"], ["literal", [0, 1]], 5, ["literal", [0, 2]], 14, ["literal", [0, 3]],
+            15, ["literal", [0, 4]], 20, ["literal", [0, 5]]]
+    trim = mc.QgisMapLibreStyleExporter._layer_zoom_step
+    assert trim({"minzoom": 14, "maxzoom": 20}, step) == [
+        "step", ["zoom"], ["literal", [0, 3]], 15, ["literal", [0, 4]]]
+    assert trim({"minzoom": 15, "maxzoom": 18}, step) == [0, 4]
+    assert trim({}, step) == step
+    assert trim({"minzoom": 3}, [0, 1]) == [0, 1]
+
+
+def test_a_map_unit_border_with_data_defined_colours_grows_around_screen_text(mc, at):
+    """10 pt text, 3 x 2 map-unit buffer, 0.5 map-unit border, data-defined
+    fill colour: the colour variants kept the border of zoom 0 (none)."""
+    from qgis.core import QgsProperty
+    exporter = _exporter(mc)
+    exporter._distinct_values = lambda source_layer, fields: [("#00ff00",), ("#0000ff",)]
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.ShapeFillColor, QgsProperty.fromField(f"{mc._FIELD_PREFIX}_fill"))
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2),
+                   Qgis.RenderUnit.MapUnits, 0.5, Qgis.RenderUnit.MapUnits)
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24, "source-layer": "p",
+                 "layout": {"text-size": 13.3333, "text-line-height": 1.2}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    image = layer_def["layout"]["icon-image"]
+    assert image[0] == "step"
+    for zoom in (17, 19, 21):
+        variants = at(image, zoom)
+        assert variants[0] == "match"
+        for name in variants[3::2] + variants[-1:]:
+            meta = exporter.pattern_images[name].metadata
+            assert meta["content"][0] == pytest.approx(_mu(0.5, zoom + 0.5) / 2, abs=0.01)
+    # The zoom-0 images of the variants are not left in the sprite.
+    used = {n for v in [image[2]] + image[4::2] for n in v[3::2] + v[-1:]}
+    assert set(exporter.pattern_images) == used

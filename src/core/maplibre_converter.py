@@ -1599,6 +1599,50 @@ class TextPropertyExtractor:
             text_size_px, limit=True)
 
     @staticmethod
+    def get_text_offset_translate(label_settings: QgsPalLayerSettings, rotation) -> Optional[List]:
+        """The over-point X/Y offset as ``text-translate`` px (turned with a
+        fixed ``text-rotate`` as text-offset is), or None (a data-defined
+        rotation, an offset that is no plain zoom curve).
+
+        For an offset whose unit scales unlike the text (map-unit offset, mm
+        text or the other way round): text-translate is drawn at the camera
+        zoom, exact at every zoom, and has no limit. In ems (text-offset) it
+        was a per-zoom step, and MapLibre bakes text-offset into each glyph's
+        16-bit position: beyond ~42 em with the glyph's own position, a long
+        label wrapped round to the far side of its point."""
+        if not ex.is_number(rotation):
+            return None
+        unit = label_settings.offsetUnits
+        lengths = [PropertyExtractor.length(label_settings.xOffset, unit),
+                   PropertyExtractor.length(label_settings.yOffset, unit)]
+        zooms = set()
+        for length in lengths:
+            if ex.is_number(length):
+                continue
+            if not ex.is_zoom_curve(length) or length[0] != "interpolate" \
+                    or length[1] != ["exponential", 2]:
+                return None
+            zooms.update(length[3::2])
+        angle = math.radians(float(rotation))
+        cos, sin = math.cos(angle), math.sin(angle)
+
+        def turned(zoom):
+            try:
+                x, y = (float(ex.evaluate_zoom_curve(v, zoom)) for v in lengths)
+            except ex.ExpressionError:
+                return None
+            return [float(f"{x * cos - y * sin:.6g}") + 0.0, float(f"{x * sin + y * cos:.6g}") + 0.0]
+        if not zooms:
+            return turned(0)
+        stops = [(zoom, turned(zoom)) for zoom in sorted(zooms)]
+        if any(value is None for _, value in stops):
+            return None
+        out = ["interpolate", ["exponential", 2], ["zoom"]]
+        for zoom, value in stops:
+            out += [zoom, ["literal", value]]
+        return out
+
+    @staticmethod
     def get_text_radial_offset(label_settings: QgsPalLayerSettings,
                                text_size_px: Union[float, List] = 16.0) -> float:
         """Return ``text-radial-offset`` in ems for "around point" placement:
@@ -4391,6 +4435,7 @@ class QgisMapLibreStyleExporter:
         # mode; MapLibre lets some of them override each other.
         variable_anchor = TextPropertyExtractor.get_text_variable_anchor(label_settings)
         pinned = self._is_pinned(label_settings)
+        translate = None
         if pinned:
             # Data-defined position: the label's alignment point sits on the
             # exported point; offsets and candidate positions do not apply.
@@ -4408,16 +4453,22 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["text-radial-offset"] = 1
         elif variable_anchor:
             layer_def["layout"]["text-variable-anchor"] = variable_anchor
-            layer_def["layout"]["text-radial-offset"] = \
-                TextPropertyExtractor.get_text_radial_offset(label_settings, em_size)
+            layer_def["layout"]["text-radial-offset"] = self._layer_zoom_step(
+                layer_def, TextPropertyExtractor.get_text_radial_offset(label_settings, em_size))
         elif placement == "OverPoint":
             offset = TextPropertyExtractor.get_text_offset(label_settings, em_size)
+            if ex.is_zoom_curve(offset):
+                # Offset and text scale unlike: px drawn at the camera zoom.
+                translate = TextPropertyExtractor.get_text_offset_translate(
+                    label_settings, layer_def["layout"]["text-rotate"])
+                if translate is not None:
+                    offset = [0, 0]
             if offset != [0, 0]:
-                layer_def["layout"]["text-offset"] = offset
+                layer_def["layout"]["text-offset"] = self._layer_zoom_step(layer_def, offset)
         elif placement in ("Line", "Curved"):
             offset = TextPropertyExtractor.get_line_text_offset(label_settings, em_size)
             if offset != [0, 0]:
-                layer_def["layout"]["text-offset"] = offset
+                layer_def["layout"]["text-offset"] = self._layer_zoom_step(layer_def, offset)
         if style_name in self.label_windows and not pinned:
             # Each feature is the window of one label, laid out as QGIS lays
             # it out: the label is centred on it ("line" would place its own
@@ -4438,7 +4489,7 @@ class QgisMapLibreStyleExporter:
                 text_format, label_settings
             ),
             "text-halo-width": TextPropertyExtractor.get_text_halo_width(text_format, label_settings),
-            "text-translate": TextPropertyExtractor.get_text_translate(),
+            "text-translate": translate or TextPropertyExtractor.get_text_translate(),
             "text-translate-anchor": TextPropertyExtractor.get_text_translate_anchor(),
         })
 
@@ -4453,6 +4504,9 @@ class QgisMapLibreStyleExporter:
 
         if background.enabled():
             self._apply_icon_from_background(layer_def, background, style_name, label_settings)
+            if translate and "icon-image" in layer_def["layout"]:
+                # The frame goes with its text (text-offset moved both).
+                layer_def["paint"]["icon-translate"] = translate
         else:
             self._apply_default_icon_props(layer_def)
 
@@ -4521,6 +4575,24 @@ class QgisMapLibreStyleExporter:
     # the tile zoom; map-unit text doubles per zoom, so below z18 labels that
     # fit are dropped.
     LINE_LABEL_FIT_ZOOM = 18
+
+    @staticmethod
+    def _layer_zoom_step(layer_def: dict, value):
+        """A ``step`` on the zoom (per-zoom label offsets) cut to the layer's
+        zooms: the stops below its min zoom and from its max zoom on dropped."""
+        if not ex.is_zoom_curve(value) or value[0] != "step":
+            return value
+        low = layer_def.get("minzoom", 0)
+        high = layer_def.get("maxzoom", 24)
+        default, kept = value[2], []
+        for zoom, output in zip(value[3::2], value[4::2]):
+            if zoom <= low:
+                default = output
+            elif zoom < high:
+                kept += [zoom, output]
+        if not kept:
+            return default[1] if isinstance(default, list) and default[:1] == ["literal"] else default
+        return ["step", ["zoom"], default] + kept
 
     @staticmethod
     def _label_around(label_settings: QgsPalLayerSettings, placement: str) -> Optional[dict]:
@@ -4754,7 +4826,7 @@ class QgisMapLibreStyleExporter:
         return name
 
     def _frame_variants(self, background, label_settings, base: str, source_layer: str,
-                        zoom: Optional[float] = None):
+                        zoom: Optional[float] = None, stroke_px: Optional[float] = None):
         """Frame per distinct data-defined frame fill/border colour."""
         from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
         props = label_settings.dataDefinedProperties()
@@ -4786,7 +4858,7 @@ class QgisMapLibreStyleExporter:
                     variant.setStrokeColor(color)
                 else:
                     variant.setFillColor(color)
-            return self._background_image(variant, zoom=zoom)
+            return self._background_image(variant, stroke_px=stroke_px, zoom=zoom)
         key, cases = self._variant_images(names, combos, make)
         return ["match", key] + cases + [base] if cases else base
 
@@ -4876,8 +4948,7 @@ class QgisMapLibreStyleExporter:
         if is_frame:
             layer_def["layout"]["icon-allow-overlap"] = True
             layer_def["layout"]["icon-ignore-placement"] = True
-            map_stroke = isinstance(image, str) and _is_map_unit(background.strokeWidthUnit()) \
-                and background.strokeWidth() > 0
+            map_stroke = _is_map_unit(background.strokeWidthUnit()) and background.strokeWidth() > 0
             text_curve = ex.is_zoom_curve(layer_def["layout"].get("text-size"))
             if fixed_zoom is not None:
                 # A fixed map-unit frame: drawn at fixed_zoom, scaled with the
@@ -4886,7 +4957,7 @@ class QgisMapLibreStyleExporter:
             elif text_fit and not text_curve:
                 # Screen text: the map-unit buffer and stroke grow, not the text.
                 self._grow_screen_text_frame(layer_def, background, label_settings, map_stroke)
-            elif text_fit and map_stroke:
+            elif text_fit and map_stroke and isinstance(image, str):
                 # Map-unit frame stroke: one frame image per zoom
                 # (_line_label_zoom_split); one image drew a hairline.
                 from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
@@ -4964,14 +5035,21 @@ class QgisMapLibreStyleExporter:
             layout["icon-text-fit-padding"] = self._zoom_step(zooms, steps, literal=True)
         if map_stroke:
             # The frame shown at icon-size 1: the stroke of the zoom's middle,
-            # whatever its shape; zooms whose strokes round alike share an image.
-            self.pattern_images.pop(layout["icon-image"], None)
+            # whatever its shape; zooms whose strokes round alike share an image
+            # (data-defined colours: a match of variants per stroke).
+            image = layout["icon-image"]
+            variants = isinstance(image, list)
+            for name in (image[3::2] + image[-1:] if variants else [image]):
+                self.pattern_images.pop(name, None)
             images, names = {}, []
             for zoom in zooms:
                 stroke = round(PropertyExtractor.static_pixels(
                     background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5), 2)
                 if stroke not in images:
-                    images[stroke] = self._background_image(background, stroke_px=stroke)
+                    base = self._background_image(background, stroke_px=stroke)
+                    images[stroke] = self._frame_variants(
+                        background, label_settings, base, layer_def.get("source-layer", ""),
+                        stroke_px=stroke) if variants and label_settings is not None else base
                 names.append(images[stroke])
             layout["icon-image"] = self._zoom_step(zooms, names)
 
