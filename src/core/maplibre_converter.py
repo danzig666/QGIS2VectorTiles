@@ -3449,13 +3449,20 @@ class QgisMapLibreStyleExporter:
         A raster layer's opacity in a symbol of several layers cannot be
         applied to the whole icon: it changes the image (sprite variants).
         """
+        def replaced(static, prop):
+            # valueAsDouble(PropertyOpacity, ..., static * 100) / 100: a NULL
+            # value keeps the static opacity.
+            value = ex.div(PropertyExtractor.get_value_or_expression(
+                float(static) * 100.0, prop, "number"), 100.0)
+            return max(0.0, min(1.0, value)) if ex.is_number(value) else ex.clamp(value, 0, 1)
+
         props = symbol.dataDefinedProperties()
         prop = props.property(_SYMBOL_OPACITY_KEY) if props else None
         sprite_symbol, opacity = symbol, IconPropertyExtractor.get_icon_opacity()
         if prop is not None and prop.isActive():
             sprite_symbol = symbol.clone()
             sprite_symbol.setOpacity(1.0)
-            opacity = PropertyExtractor.opacity(symbol=sprite_symbol)
+            opacity = replaced(symbol.opacity(), prop)
         if symbol.symbolLayerCount() == 1:
             layer = sprite_symbol.symbolLayer(0)
             layer_prop = layer.dataDefinedProperties().property(
@@ -3465,8 +3472,9 @@ class QgisMapLibreStyleExporter:
                 if sprite_symbol is symbol:
                     sprite_symbol = symbol.clone()
                     layer = sprite_symbol.symbolLayer(0)
+                static = layer.opacity()
                 layer.setOpacity(1.0)
-                opacity = ex.mul(opacity, PropertyExtractor.opacity(symbol_layer=layer))
+                opacity = ex.mul(opacity, replaced(static, layer_prop))
         return sprite_symbol, opacity
 
     def _convert_line_symbol(

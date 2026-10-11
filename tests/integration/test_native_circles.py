@@ -1,5 +1,7 @@
 """PR-09: plain circular simple markers become native MapLibre circles."""
 
+import json
+
 import pytest
 from qgis.core import (Qgis, QgsMarkerSymbol, QgsProperty, QgsSimpleMarkerSymbolLayer,
                        QgsSymbolLayer)
@@ -191,6 +193,8 @@ def test_data_defined_symbol_opacity_of_a_sprite_is_the_icon_opacity(exporter):
     layer = _convert(exporter, symbol)[0]
     opacity = layer["paint"]["icon-opacity"]
     assert ex.referenced_fields(opacity) == {"q2vt_property_alpha_0_00"}
+    # A NULL value keeps the static opacity (valueAsDouble's default).
+    assert '["coalesce", ["get", "q2vt_property_alpha_0_00"], 50.0]' in json.dumps(opacity)
     assert exporter.marker_symbols[layer["layout"]["icon-image"]].symbol.opacity() == 1.0
     assert symbol.opacity() == 0.5  # the converted symbol itself is left alone
     # Without one the static opacity stays in the sprite, applied once.
@@ -216,6 +220,9 @@ def test_data_defined_raster_marker_opacity_is_the_icon_opacity(exporter, tmp_pa
     second = raster.clone()
     layer = _convert(exporter, QgsMarkerSymbol([raster]))[0]
     assert ex.referenced_fields(layer["paint"]["icon-opacity"]) == {"q2vt_property_alpha_35_00"}
+    # NULL keeps the layer's static opacity.
+    assert '["coalesce", ["get", "q2vt_property_alpha_35_00"], 40.0]' in \
+        json.dumps(layer["paint"]["icon-opacity"])
     sprite = exporter.marker_symbols[layer["layout"]["icon-image"]].symbol
     assert sprite.symbolLayer(0).opacity() == 1.0
     asked = []

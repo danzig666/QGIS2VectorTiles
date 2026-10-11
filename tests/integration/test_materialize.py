@@ -1789,6 +1789,65 @@ def test_generator_fill_stroke_is_a_line_on_the_generated_polygons(plugin, tmp_p
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
 
 
+def test_generator_fill_line_and_centroid_layers_are_drawn(plugin, tmp_path):
+    """A fill generator's sub-symbol layers are drawn like a fill layer's:
+    a line layer (an outline) on the generated polygons' rings, a centroid
+    fill as markers at their centroids."""
+    from qgis.core import QgsCentroidFillSymbolLayer, QgsGeometryGeneratorSymbolLayer
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                    QColor("black"), Qt.PenStyle.NoPen)
+    outline = QgsSimpleLineSymbolLayer(QColor(200, 0, 0), 1.5)
+    centroid = QgsCentroidFillSymbolLayer()
+    centroid.setSubSymbol(_marker(Qgis.MarkerShape.Square, 10))
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([fill, outline, centroid]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    kinds = sorted((r.get_attr("c"), r.rule.symbol().symbolLayer(0).layerType()) for r in rules)
+    assert kinds == [(0, "CentroidFill"), (1, "SimpleLine"), (2, "SimpleFill")]
+    for output, rule in zip(outputs, rules):
+        symbol_layer = rule.rule.symbol().symbolLayer(0)
+        if rule.get_attr("c") == 0:  # the styler draws the centroids with the sub-symbol
+            output.setRenderer(QgsSingleSymbolRenderer(symbol_layer.subSymbol().clone()))
+        elif rule.get_attr("c") == 1:
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([symbol_layer.clone()])))
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+def test_generator_fill_coerces_lines_to_polygons(plugin, tmp_path):
+    """QgsGeometryGeneratorSymbolLayer coerces a fill generator's line output
+    to polygons (each part closed into a ring), as QgsGeometry::coerceToType."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, 1.0)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "make_line(make_point(-90, -70), make_point(40, -70), "
+                            "make_point(40, 60))", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    for output, rule in zip(outputs, rules):
+        geometry = next(output.getFeatures()).geometry()
+        if rule.get_attr("c") == 2:  # the closed polygon, not the line
+            assert geometry.type() == Qgis.GeometryType.Polygon
+            assert geometry.area() == pytest.approx(130 * 130 / 2)
+        else:
+            line = rule.rule.symbol().symbolLayer(0)
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
 def test_generator_fill_patterns_are_materialized(plugin, tmp_path):
     """A map-unit hatch inside a fill generator is exported as hatch lines
     on the generated polygons (not one texture frozen at the first zoom)."""

@@ -1562,10 +1562,14 @@ class RulesFlattener:
         kind = int(getattr(sub_symbol.type(), "value", sub_symbol.type()))
         expression = generator.geometryExpression()
         if kind == 2:
-            # A fill sub-symbol draws only polygons (the rest is not coerced
-            # to a polygon by QgsGeometryGeneratorSymbolLayer::render).
-            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type("
-                          f"@q2vt_generated) = 'Polygon', @q2vt_generated, NULL))")
+            # A fill sub-symbol draws polygons: QgsGeometryGeneratorSymbolLayer
+            # coerces lines to MultiPolygon (each part closed into a ring);
+            # points are not drawn.
+            g = "@q2vt_generated"
+            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type({g}) = "
+                          f"'Polygon', {g}, if(geometry_type({g}) = 'Line', if(is_multipart({g}), "
+                          f"collect_geometries(array_foreach(generate_series(1, num_geometries({g})), "
+                          f"make_polygon(geometry_n({g}, @element)))), make_polygon({g})), NULL)))")
         rules = []
         clone_layer = None
         for inner_idx in reversed(range(sub_symbol.symbolLayerCount())):
@@ -1581,7 +1585,13 @@ class RulesFlattener:
             single.setOpacity(single.opacity() * flat_rule.rule.symbol().opacity())
             rule_clone.rule.setSymbol(single)
             rule_clone.set_attr("g", kind)
-            rule_clone.set_attr("c", kind)
+            # Each fill sub-layer is drawn like a fill layer's: centroid
+            # markers as points, line layers (an outline) on the rings.
+            if kind == 2:
+                rule_clone.set_attr("c", 0 if inner.layerType() == "CentroidFill"
+                                    else int(getattr(inner.type(), "value", inner.type())))
+            else:
+                rule_clone.set_attr("c", kind)
             # A distinct dataset per sub-symbol layer (their recipes differ),
             # apart from the ordinary symbol layers' (s = their index): with
             # layer_idx * 100 the generator at layer 0 gave its sub-layer 1
