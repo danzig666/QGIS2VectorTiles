@@ -455,6 +455,46 @@ def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plu
     assert cell.getbbox() is not None and cell.size[0] == pytest.approx(2 * 5 / 0.0373, abs=3)
 
 
+def test_coarse_map_unit_pattern_textures_stop_before_outgrowing_the_sprite(plugin, tmp_path):
+    """A tiling map-unit pattern (60 m squares 60 m apart) exported from
+    zoom 0 to 16: its cell doubles with every zoom, and the overzoom
+    textures up to zoom 22 made the sprite renderer give up (a cell
+    thousands of px wide), failing the export. The overzoom textures stop
+    under MAX_OVERZOOM_CELL_PX; the last one serves the zooms above."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-500 -500, 500 -500, 500 500, -500 500, -500 -500))"],
+                   str(tmp_path / "tiles.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 60)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeWidth(3)
+    marker.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(60)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reset_project(layer)
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    exporter._convert_symbol(layer.renderer().symbol(), "s", "src", "q2vt", 0, 24)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    zooms = pattern[3::2]
+    # The exported zooms' textures as before (up to maxzoom + 2), then the
+    # overzoom ones while they fit.
+    assert zooms[:11] == list(range(8, 19)) and 18 < zooms[-1] < 22
+    cells = [exporter.pattern_images[name].img_2x for name in pattern[2::2]]
+    assert max(cells[-1].size) <= exporter.MAX_OVERZOOM_CELL_PX
+    assert set(exporter.pattern_images) == set(pattern[2::2])  # none left over
+
+
 def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     """Patterns sized only in screen units are flagged for the patched
     MapLibre (drawn at the real zoom) and rendered at their true size, not

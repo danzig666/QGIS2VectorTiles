@@ -30,7 +30,7 @@ from qgis.core import (
 from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
-from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
+from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
 from .fidelity import expressions as ex
 from .fidelity import feature_order
 from .fidelity import html_labels
@@ -2866,6 +2866,10 @@ class QgisMapLibreStyleExporter:
     # above it (stock MapLibre draws it in the pixels of the view's integer
     # zoom: 2x too small one zoom deeper, 4x two zooms deeper ...).
     PATTERN_ZOOM_FLAG = "q2vt:pattern-zoom"
+    # Largest 2x cell of a texture (MAX_PATTERN_TEXTURE_PX in the 2x
+    # sprite): past it, a coarse pattern (tiles, bricks) would outgrow the
+    # sprite renderer; the last texture under it serves the zooms above.
+    MAX_OVERZOOM_CELL_PX = 2 * MAX_PATTERN_TEXTURE_PX
 
     def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float,
                           screen_spacing: bool = False, screen_lengths: bool = False):
@@ -2913,7 +2917,12 @@ class QgisMapLibreStyleExporter:
             while zoom < top - 1e-9:
                 upper = min(math.floor(zoom) + 1.0, top)
                 self.context.reference_zoom = (zoom + upper) / 2 if screen_spacing else zoom
-                name = register()
+                try:
+                    name = register()
+                except SpriteRenderError:
+                    if not stops or zoom < tiles_top - 1e-9:
+                        raise
+                    break  # past the exported zooms: the last texture serves those above
                 if name is None:
                     if stops:
                         break  # the last texture serves the zooms above
