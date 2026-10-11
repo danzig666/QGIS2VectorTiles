@@ -344,27 +344,39 @@ def test_screen_offset_is_the_qgis_offset_curve_per_band(plugin, tmp_path):
         assert mask_difference(reference, ours) < 0.08, zoom
 
 
-@pytest.mark.parametrize("kind", ["LineString", "Polygon"])
+@pytest.mark.parametrize("kind", ["LineString", "LineAtEdge", "Polygon", "PolygonWithHole"])
 def test_screen_offsets_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
     """Exported from zoom 0 (the Publish defaults), a 1.5 mm offset is
-    hundreds of km at the first zooms: offset curves there lay outside the
+    hundreds of km at the first zooms: offset curves there lie outside the
     4 km export extent and every eighth-of-a-zoom band reported a rule
     missing from the map (Strict mode failed). Those zooms are drawn with
     the browser's line offset, mitred like QGIS's offset curve; the offset
-    curves start where the offset fits in the extent."""
+    curves start where the offset may reach into the extent. A line at the
+    extent's edge offset outwards, or rings collapsed by an inward offset,
+    are not drawn inside the extent by QGIS either: no loss reported, and
+    no native rings drawn where QGIS's rings collapse."""
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     from q2vt_fixtures import reset_project
     cx, cy = 2121000.0, 6021000.0
-    shape = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
-    if kind == "Polygon":
-        shape += [(300, 200), (-300, 200), (-300, -100)]
-    coords = ", ".join(f"{cx + x} {cy + y}" for x, y in shape)
-    wkt = f"POLYGON(({coords}))" if kind == "Polygon" else f"LINESTRING({coords})"
-    layer = _layer(kind, [wkt], str(tmp_path / "offset.gpkg"))
+
+    def ring(points):
+        return "(" + ", ".join(f"{cx + x} {cy + y}" for x, y in points) + ")"
+    zigzag = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
+    if kind == "LineAtEdge":  # upwards, 60-100 m inside the right edge, offset to the right
+        wkt = "LINESTRING" + ring([(1900, -300), (1940, -150), (1900, 0), (1940, 150), (1900, 300)])
+    elif kind == "LineString":
+        wkt = "LINESTRING" + ring(zigzag)
+    else:
+        wkt = "POLYGON(" + ring(zigzag + [(300, 200), (-300, 200), (-300, -100)])
+        if kind == "PolygonWithHole":
+            wkt += ", " + ring([(-50, 100), (50, 100), (50, 150), (-50, 150), (-50, 100)])
+        wkt += ")"
+    polygon = kind.startswith("Polygon")
+    layer = _layer("Polygon" if polygon else "LineString", [wkt], str(tmp_path / "offset.gpkg"))
     line = QgsSimpleLineSymbolLayer(QColor("red"), 0.6)
     line.setOffset(1.5)
     layer.setRenderer(QgsSingleSymbolRenderer(
-        QgsFillSymbol([line]) if kind == "Polygon" else QgsLineSymbol([line])))
+        QgsFillSymbol([line]) if polygon else QgsLineSymbol([line])))
     reset_project(layer)
     out = tmp_path / "out"
     out.mkdir()
@@ -378,12 +390,15 @@ def test_screen_offsets_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
     lines = [l for l in style["layers"] if l["type"] == "line"]
     native = [l for l in lines if "line-offset" in l["paint"]]
     bands = [l for l in lines if "line-offset" not in l["paint"]]
-    # 1.5 mm = 5.67 px is at most half the 4 km extent from zoom 8 on.
-    first = math.ceil(math.log2(1.5 * 96 / 25.4 * WORLD / 512 / 2000))
-    assert first == 8
-    assert min(l.get("minzoom", 0) for l in native) == 0
-    if kind == "LineString":
-        assert min(l["minzoom"] for l in bands) == first
-    else:  # the rings buffered inwards to nothing below 11.75 (QGIS draws none)
-        assert min(l["minzoom"] for l in bands) == 11.75
+    # 1.5 mm = 5.67 px is at most the 4 km extent's diagonal from zoom 7 on.
+    first = math.ceil(math.log2(1.5 * 96 / 25.4 * WORLD / 512 / math.hypot(4000, 4000)))
+    assert first == 7
     assert {l["layout"]["line-join"] for l in native} == {"miter"}
+    if kind == "Polygon":
+        # The rings buffered inwards to nothing below 11.75: QGIS draws
+        # none there, and nor does the browser.
+        assert min(l.get("minzoom", 0) for l in lines) == 11.75
+        return
+    early = [l for l in native if l.get("minzoom", 0) == 0]  # lines, holes
+    assert [l["maxzoom"] for l in early] == [first]
+    assert min(l["minzoom"] for l in bands) >= first

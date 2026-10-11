@@ -819,9 +819,17 @@ class SymbolMaterializer:
         rules = []
         visible = flat_rule.visibility or ZoomInterval(float(low), None)
         overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
-        early = self._offset_beyond_extent(flat_rule, visible, low, first)
+        # Below ``first`` the offset is wider than the extent: the rings moved
+        # inwards collapse (every exterior with a positive offset, every hole
+        # with a negative one) and QGIS draws only the others, natively.
+        kept = 2 if offset_mm > 0 else 1
+        ring_filter = dict(params).get("ring_filter", 0)
+        early = self._offset_beyond_extent(flat_rule, visible, low, first) \
+            if ring_filter in (0, kept) else None
         if early is not None:  # native, right-hand-rule rings
-            early.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
+            early.recipe = mat.Recipe("polygon_offset", params=tuple(
+                (key, kept if key == "ring_filter" else value) for key, value in params) + (
+                    ("rhr", True),))
             early.set_attr("m", 1)
             rules.append(early)
         if native_zooms:  # the budget ends below the last zooms: native there
@@ -1188,17 +1196,18 @@ class SymbolMaterializer:
 
     def _offset_in_extent_zoom(self, offset_px: float) -> int:
         """First zoom at which a screen offset of ``offset_px`` CSS pixels is
-        at most half the export extent's shorter side. Below it an offset
-        geometry ends up mostly outside the extent (the exporter's clip
-        leaves nothing: hundreds of km at zoom 0), while the whole extent is
-        a few pixels wide on screen: the browser's line-offset draws it."""
+        at most the export extent's diagonal. Below it the offset geometry
+        of a feature inside the extent lies wholly outside it (the
+        exporter's clip leaves nothing: hundreds of km at zoom 0), while the
+        whole extent is a few pixels wide on screen: the browser's
+        line-offset draws it."""
         if self.extent is None or not offset_px:
             return -1
-        side = min(self.extent.width(), self.extent.height())
-        if side <= 0:
+        diagonal = math.hypot(self.extent.width(), self.extent.height())
+        if diagonal <= 0:
             return -1
         metres_at_zero = abs(offset_px) * 40075016.68557849 / 512.0
-        return int(math.ceil(math.log2(max(metres_at_zero / (0.5 * side), 1.0))))
+        return int(math.ceil(math.log2(max(metres_at_zero / diagonal, 1.0))))
 
     @staticmethod
     def _offset_beyond_extent(flat_rule: FlattenedRule, visible: ZoomInterval, low: int,

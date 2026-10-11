@@ -1832,10 +1832,7 @@ class RulesExporter:
         return out
 
     def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
-        if grp.recipe is not None and grp.recipe.kind == "polygon_offset" and \
-                grp.recipe.param("offset"):
-            # Rings buffered to nothing (an inward offset wider than the
-            # polygons at this zoom): QGIS's offsetLine draws nothing either.
+        if self._offset_drawn_nowhere(grp, source):
             return
         matched = self._open(source, "matched")
         count = matched.featureCount() if matched.isValid() else 0
@@ -1846,6 +1843,33 @@ class RulesExporter:
                 f"expression produced no geometry.",
                 layer_id=grp.layer_id, component=grp.output_dataset,
                 detail=grp.geometry_expression)
+
+    def _offset_drawn_nowhere(self, grp: _RuleGroupSnapshot, source: str) -> bool:
+        """Worker: whether an empty offset line or ring output is what QGIS
+        draws inside the export extent too, nothing: the offset geometry lies
+        wholly outside the extent (a few-pixel extent at a low zoom, or
+        features at its edge offset outwards), or the rings it keeps
+        collapsed (a positive offset wider than the polygon, an interior-ring
+        outline of polygons without holes)."""
+        recipe = grp.recipe
+        if recipe is None or recipe.kind not in ("line_offset", "polygon_offset"):
+            return False
+        crs = f"EPSG:{_EPSG_CRS}"
+        if recipe.kind == "line_offset":
+            expression = mat.offset_line_expression(recipe, crs)
+        else:
+            expression = mat.polygon_offset_expression(recipe, crs)
+        unclipped = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
+                                       OUTPUT_GEOMETRY=1, EXPRESSION=expression)
+        unclipped = self._run_alg_safe("removenullgeometries", "native", INPUT=unclipped,
+                                       REMOVE_EMPTY=True)
+        check = self._open(unclipped, "unclipped")
+        if check.isValid() and check.featureCount() > 0:
+            return True  # only the extent clip emptied it
+        if recipe.kind != "polygon_offset":
+            return False
+        return float(recipe.param("offset", 0.0) or 0.0) > 0 or \
+            int(recipe.param("ring_filter", 0) or 0) == 2
 
     def _ranked_points(self, source: str) -> Optional[str]:
         """Worker: pattern markers as single points in QGIS's drawing order,
