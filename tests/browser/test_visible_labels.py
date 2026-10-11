@@ -521,6 +521,53 @@ def test_connected_parts_of_multi_part_lines_are_merged():
     assert sorted((round(x, 3), round(y, 3)) for x, y, _ in labels) == [(0.5, 0.5), (0.5, 0.875)]
 
 
+def test_merged_lines_stay_simple_lines():
+    """Merge connected lines builds simple lines as pal does: the longest
+    part grows by the longest part ending on one of its ends; a side branch
+    of the same text stays apart with its own label. Every touching part of
+    a network was merged into one entry: one label for a whole network."""
+    main = [(1, "Echo", [[512, 2048], [2048, 2048]]), (2, "Echo", [[2048, 2048], [3584, 2048]])]
+    branch = [(3, "Echo", [[2048, 2048], [2048, 1536]])]
+    labels = _merged(main + branch, [0, 0, 1, 1], {"box": [0.05, 0.01], "merge": True})
+    assert len(labels) == 2
+    on_main = [label for label in labels if label[1] == pytest.approx(0.5)]
+    assert len(on_main) == 1 and on_main[0][0] == pytest.approx(0.5)  # the middle of both main parts
+    assert [label[2] for label in labels if label not in on_main] == [3]
+    # A grid of one text: a label per merged row or column line, not one.
+    step = 4096 // 10
+    grid = [(100 * i + j, "Path", [[step * (j + 1), step * (i + 1)], [step * (j + 2), step * (i + 1)]])
+            for i in range(8) for j in range(8)]
+    grid += [(1000 + 100 * i + j, "Path", [[step * (i + 1), step * (j + 1)], [step * (i + 1), step * (j + 2)]])
+             for i in range(8) for j in range(8)]
+    assert len(_merged(grid, [0, 0, 1, 1], {"box": [0.02, 0.005], "merge": True})) >= 10
+
+
+def test_merging_many_lines_of_one_text_is_fast():
+    """Merge connected lines finds the parts meeting a line end by lookup:
+    testing every pair of the parts of one text took seconds per update
+    for some thousand parts (a class or constant label text)."""
+    script = f"""
+import {{ labelPoints, newLabelState, textKey }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = [];
+for (let i = 0; i < 110; i++) for (let j = 0; j < 110; j++) {{
+  const line = [[36 * j + 20, 36 * i + 20], [36 * j + 40, 36 * i + 30]].map(([x, y]) => ({{ x, y }}));
+  features.push({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 110 * i + j, name: "Path" }},
+    _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [line] }} }});
+}}
+const options = {{ kind: "line", state: newLabelState(), tileZoom: 0, labelBox: () => [0.01, 0.003],
+  mergeText: textKey(["get", "name"]) }};
+const start = performance.now();
+labelPoints(features, [0, 0, 1, 1], maplibregl, options);
+console.log(JSON.stringify(performance.now() - start));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    assert json.loads(run.stdout) < 2000  # 12100 parts: about 0.2 s (all pairs: over 5 s)
+
+
 def test_repeated_line_label_is_chopped_on_the_visible_line():
     """A repeated line label (QGIS repeat distance): the line clipped to the
     screen is cut into equal parts at a whole multiple of the repeat at

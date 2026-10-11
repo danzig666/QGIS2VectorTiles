@@ -1389,8 +1389,15 @@ export function textKey(expression) {
 // meet are labelled as one line (pal Layer::joinConnectedFeatures), so a
 // river split into short features gets one label along its course - not
 // one per feature, nor none where each is shorter than the label. Ends on
-// a tile or reach cut (piece.clip) are not line ends. byFeature -> the same
-// with each connected set as one entry (keyed by its first feature's key).
+// a tile or reach cut (piece.clip) are not line ends. As pal, only simple
+// lines are built: the parts of one text longest first, each grown by the
+// longest other part with one end on one of its two ends and the other
+// end off it (FeaturePart::isConnected; GEOSLineMerge must give one line),
+// so side branches and the other arms of a junction stay apart, each with
+// its own label - not one label for a whole network. pal tests that other
+// end against the whole line, here against the ends of its parts (the
+// nodes of a network). byFeature -> the same with each merged line as one
+// entry (keyed by its first feature's key).
 const MERGED_PREFIX = "\u0001";
 // Feature key / part separator of the parts merged by mergeConnected.
 const PART_OF = "\u0002";
@@ -1404,33 +1411,96 @@ function mergeConnected(byFeature, textOf, tolerance) {
     if (!byText.has(text)) byText.set(text, []);
     const ends = value.rings.flatMap((piece) => [piece[0], piece[piece.length - 1]]
       .filter((end) => !piece.clip || !onCut(end, piece.clip)));
-    byText.get(text).push({ key, value, ends });
+    const length = value.rings.reduce((sum, piece) => sum + chainLength(piece), 0);
+    byText.get(text).push({ key, value, ends, length });
   }
   const meet = (a, b) => Math.abs(a[0] - b[0]) <= tolerance && Math.abs(a[1] - b[1]) <= tolerance;
+  const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  // Line ends in a grid of tolerance-sized cells: the parts meeting an end
+  // are found by lookup, not by testing every pair (thousands of parts of
+  // one text: seconds per update).
+  const cell = ([x, y]) => [Math.floor(x / tolerance), Math.floor(y / tolerance)];
+  // A part with more than two free ends is no simple line: never merged.
+  const simple = (member) => member.ends.length >= 1 && member.ends.length <= 2;
+  // A part this short has both ends within the tolerance of the point it
+  // joins at: its other end is not checked against the line.
+  const tiny = 3 * tolerance;
   const out = new Map();
   for (const members of byText.values()) {
-    const parent = members.map((_, i) => i);
-    const root = (i) => (parent[i] === i ? i : (parent[i] = root(parent[i])));
-    for (let i = 0; i < members.length; i++) {
-      for (let j = i + 1; j < members.length; j++) {
-        if (root(i) !== root(j) && members[i].ends.some((a) => members[j].ends.some((b) => meet(a, b)))) {
-          parent[root(j)] = root(i);
+    members.sort((a, b) => b.length - a.length || byKey(a, b));  // ties: the same every frame
+    const grid = new Map();
+    members.forEach((member, i) => {
+      for (const end of member.ends) {
+        const k = cell(end).join();
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k).push([i, end]);
+      }
+    });
+    const near = (point) => {  // the parts with an end meeting point
+      const [cx, cy] = cell(point);
+      const found = [];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (const [i, end] of grid.get(`${cx + dx},${cy + dy}`) || []) if (meet(point, end)) found.push(i);
         }
       }
-    }
-    const sets = new Map();
-    members.forEach((member, i) => {
-      if (!sets.has(root(i))) sets.set(root(i), []);
-      sets.get(root(i)).push(member);
-    });
-    for (const set of sets.values()) {
-      if (set.length === 1) {
-        out.set(set[0].key, set[0].value);
+      return found;
+    };
+    const lineOf = new Array(members.length).fill(-1);
+    for (let seed = 0; seed < members.length; seed++) {
+      if (lineOf[seed] >= 0) continue;
+      lineOf[seed] = seed;
+      const before = [], after = [];  // the parts added at the line's start, at its end
+      // The line's two ends (null: a cut, nothing joins there).
+      const ends = simple(members[seed]) ? [members[seed].ends[0], members[seed].ends[1] || null] : [null, null];
+      // Parts that cannot join this line however it grows.
+      const tried = new Set();
+      // A closed line (its ends on one point: the same in every tile, under
+      // half a tile unit apart) does not grow; a line crumpled within the
+      // tolerance (a pixel or so at low zooms) is not closed.
+      const closed = () => ends[0] && ends[1]
+        && Math.hypot(ends[0][0] - ends[1][0], ends[0][1] - ends[1][1]) <= tolerance / 16;
+      while (!closed()) {
+        // Each part's end nearest a line end joins there. The parts ending
+        // right on it first (pal: exactly), then those only within the
+        // tolerance; the longest first.
+        const candidates = [...new Set(ends.flatMap((end) => (end ? near(end) : [])))]
+          .filter((i) => lineOf[i] < 0 && !tried.has(i)).map((i) => {
+            let side = -1, at = -1, gap = Infinity;
+            members[i].ends.forEach((end, k) => ends.forEach((own, s) => {
+              const d = own && meet(end, own) ? Math.hypot(end[0] - own[0], end[1] - own[1]) : Infinity;
+              if (d < gap) [side, at, gap] = [s, k, d];
+            }));
+            return { i, side, at, gap };
+          }).sort((a, b) => a.gap - b.gap || a.i - b.i);
+        let joined = false;
+        for (const { i, side, at } of candidates) {
+          const member = members[i];
+          // The other end must be off the line: no loop, no part ending on
+          // the line's nodes.
+          const other = member.ends.length === 2 ? member.ends[1 - at] : null;
+          if (!simple(member) || side < 0
+              || (other && member.length > tiny && near(other).some((j) => lineOf[j] === seed))) {
+            tried.add(i);
+            continue;
+          }
+          lineOf[i] = seed;
+          (side ? after : before).push(member);
+          ends[side] = other;
+          joined = true;
+          break;
+        }
+        if (!joined) break;
+      }
+      if (!before.length && !after.length) {
+        out.set(members[seed].key, members[seed].value);
         continue;
       }
-      set.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-      out.set(MERGED_PREFIX + set[0].key, { properties: set[0].value.properties,
-                                             rings: set.flatMap(({ value }) => value.rings) });
+      // In order along the line: its pieces stitch up without searching.
+      const set = [...before.reverse(), members[seed], ...after];
+      const first = set.slice().sort(byKey)[0];
+      out.set(MERGED_PREFIX + first.key, { properties: first.value.properties,
+                                           rings: set.flatMap(({ value }) => value.rings) });
     }
   }
   return out;
