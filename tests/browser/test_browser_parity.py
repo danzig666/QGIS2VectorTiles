@@ -773,15 +773,13 @@ def test_map_unit_patterns_keep_growing_on_overzoomed_tiles(tmp_path, monkeypatc
     assert browser == pytest.approx(qgis, rel=0.12), (qgis, browser)
 
 
-@pytest.mark.parametrize("zoom", [20.5, 21.5])
+@pytest.mark.parametrize("zoom", [19.5, 20.5, 21.5])
 def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, zoom):
-    """Large map-unit cells stop getting textures at MAX_PATTERN_TEXTURE_PX
-    (here lowered: 3 m cells stop at zoom 19). The last texture stayed at its
-    pixel size above it (2x too small one zoom deeper); flagged with its
-    zoom, the patched MapLibre scales it with the map."""
+    """Map-unit textures stop at tile zoom + 3 (18 from a 0-16 export) while
+    the web map goes to 22. The last texture stayed at its pixel size above
+    it (2x too small at zoom 19, 16x at 22); flagged with its zoom, the
+    patched MapLibre scales it with the map."""
     from qgis.core import QgsPointPatternFillSymbolLayer
-    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter  # pylint: disable=import-error
-    monkeypatch.setattr(QgisMapLibreStyleExporter, "MAX_PATTERN_TEXTURE_PX", 32)
     monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
     layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
     marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 1.2)
@@ -797,9 +795,32 @@ def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, 
     _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
     style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
     fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
-    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 19
+    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 18
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser == pytest.approx(qgis, rel=0.05), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [20.5, 21.5])
+def test_millimetre_hatch_lines_keep_their_width_above_tile_zoom_3(tmp_path, monkeypatch, zoom):
+    """A viewport hatch 3 m apart with 0.4 mm lines, exported 0-16: scaled
+    with the map above the last texture (zoom 18), the lines grew with it
+    (15x QGIS's ink at 21.5). Such patterns get textures up to the web
+    map's last zoom."""
+    from qgis.core import QgsLinePatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "hatch.gpkg"), False)
+    pattern = QgsLinePatternFillSymbolLayer()
+    pattern.setLineAngle(45)
+    pattern.setDistance(3)
+    pattern.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    pattern.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("red"), 0.4)]))
+    pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    qgis_ink, browser_ink = _compare(tmp_path, layer, metric="ink", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 22
+    assert 0.5 * qgis_ink < browser_ink < 3 * qgis_ink, (qgis_ink, browser_ink)
 
 
 @pytest.mark.parametrize("zoom", [16.0, 17.5, 19.0])
