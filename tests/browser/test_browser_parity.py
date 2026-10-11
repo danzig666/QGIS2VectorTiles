@@ -53,7 +53,8 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17)):
+def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None):
+    zoom_range = zooms or zoom_range  # (min zoom, max zoom) of the export
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
@@ -740,6 +741,66 @@ def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypa
     _compare(tmp_path, layer, metric="shape")
     qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.03), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [19.5, 21.5])
+def test_map_unit_patterns_keep_growing_on_overzoomed_tiles(tmp_path, monkeypatch, zoom):
+    """A map exported with the Publish window's zooms (tiles 0-16, the map
+    zooms on to 22): map-unit pattern textures stopped at zoom 18, so above
+    it the pattern kept its zoom-18 size, 2x too dense at 19, 8x at 21."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    spacing = 3.0 if zoom < 20 else 1.0  # a few repeats in the view
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 0.4 * spacing)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(spacing)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.12), (qgis, browser)
+
+
+@pytest.mark.parametrize("case", ["map_dash_tweak", "mm_dash_map_width"])
+def test_dashes_in_another_unit_than_the_width_from_zoom_0(tmp_path, monkeypatch, case):
+    """Map-unit dashes on a mm line (with "tweak dash pattern at corners",
+    not cut into dash geometry) and mm dashes on a map-unit line, exported
+    from zoom 0: the dash / width ratio was taken at zoom 0 and both were
+    drawn as solid lines at every zoom."""
+    from qgis.PyQt.QtCore import Qt
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 18.0)
+    source = QgsVectorLayer("LineString?crs=EPSG:3857", "dashes", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 150} {CENTER[1]}, {CENTER[0] + 150} {CENTER[1] + 1})"))
+    source.dataProvider().addFeature(feature)
+    layer = to_geopackage(source, str(tmp_path / "dashes.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 0.5)
+    line.setUseCustomDashPattern(True)
+    if case == "map_dash_tweak":  # QGIS's default square cap
+        line.setCustomDashVector([10.0, 10.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+        line.setTweakDashPatternOnCorners(True)
+    else:
+        line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+        line.setWidth(1.0)
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setCustomDashVector([3.0, 2.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png"), axis=0) for n in ("qgis", "browser"))
+    # Within 2^0.25 (half-zoom steps).
+    assert browser == pytest.approx(qgis, rel=0.2), (qgis, browser)
+    # A solid line has about twice the ink of the dashed one.
+    result = gallery.score(str(tmp_path / "v_qgis.png"), str(tmp_path / "v_browser.png"))
+    assert result["ink_browser"] == pytest.approx(result["ink_qgis"], rel=0.25), result
 
 
 @pytest.mark.parametrize("kind", ["hatch", "points"])

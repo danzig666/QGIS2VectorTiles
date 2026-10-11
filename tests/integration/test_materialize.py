@@ -406,7 +406,8 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     exporter.context.reference_zoom = 14
     exporter._convert_symbol(rules[0].rule.symbol(), "s", "src", "q2vt", 14, 24)
     pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
-    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [15, 16, 17, 18, 19]
+    # Up to the web map's last zoom (22, overzoomed tiles).
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == list(range(15, 23))
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
     # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag);
@@ -418,7 +419,9 @@ def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plu
     """A map exported from zoom 0 (the Publish window's default): the
     per-zoom textures are capped at 12; they were counted from zoom 0, so
     zoom 11's texture - a sub-pixel tint of nothing - was drawn at every
-    zoom above it and the fill vanished. The highest zooms get them."""
+    zoom above it and the fill vanished. The highest zooms get them, up to
+    the web map's last zoom (22): above tile zoom + 3 the last texture used
+    to stay, 2x too small at zoom 19, 16x at 22."""
     from qgis.core import QgsPointPatternFillSymbolLayer
     layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
                    str(tmp_path / "pp.gpkg"))
@@ -444,9 +447,9 @@ def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plu
     pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
     zooms = pattern[3::2]
     assert len(pattern[2::2]) == exporter.MAX_PATTERN_ZOOMS
-    assert zooms[-1] == 18 and zooms == list(range(8, 19))  # up to maxzoom + 2, the first below
-    cell = exporter.pattern_images[pattern[-1]].img_1x  # zoom 18: squares 3 m in 5 m cells
-    assert cell.getbbox() is not None and cell.size[0] >= 8
+    assert zooms == list(range(8, 23))  # up to the view's zoom 22, the first below
+    cell = exporter.pattern_images[pattern[-1]].img_1x  # zoom 22: squares 3 m in 5 m cells
+    assert cell.getbbox() is not None and cell.size[0] == pytest.approx(2 * 5 / 0.0373, abs=3)
 
 
 def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
@@ -479,6 +482,114 @@ def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     # QGIS's texture brush: two spacings, truncated to whole pixels.
     assert cell.size == (int(2 * px), int(2 * px))
     assert exporter._screen_scale() == exporter.TEXTURE_SCREEN_SCALE  # reset afterwards
+
+
+def _style_exporter(mc, maxzoom=16, reference_zoom=0, **profile):
+    """A style converter for one symbol, as for a map exported from zoom 0
+    (the Publish window's default) to ``maxzoom``."""
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile(**profile)
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, maxzoom
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = reference_zoom
+    return exporter
+
+
+def _hatch(distance, distance_unit, width, width_unit, viewport):
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(distance)
+    lp.setDistanceUnit(distance_unit)
+    line = lp.subSymbol().symbolLayer(0)
+    line.setColor(QColor("red"))
+    line.setWidth(width)
+    line.setWidthUnit(width_unit)
+    if viewport:
+        lp.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    return lp
+
+
+def _map_marker_point_pattern():
+    """Markers 1.5 m wide, 4 mm apart; the marker keeps its mm stroke
+    width, so its layer mixes units (outputUnit() is Unknown)."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Circle, 1.5)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(4)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    return pp
+
+
+MU, MM = Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters
+
+
+@pytest.mark.parametrize("make", [
+    lambda: _hatch(3, MU, 0.4, MM, True),  # viewport hatch, map-unit spacing
+    lambda: _hatch(3, MM, 0.5, MU, False),  # mm spacing, map-unit line width
+    lambda: _hatch(3, MM, 0.5, MU, True),
+    _map_marker_point_pattern,  # map-unit markers in a mm grid
+], ids=["viewport-hatch", "hatch-map-width", "viewport-hatch-map-width", "point-map-marker"])
+def test_patterns_with_any_map_unit_part_get_a_texture_per_zoom(plugin, make):
+    """Map-unit lengths the old check missed (a hatch's distanceUnit, a
+    sub-symbol layer mixing units): the pattern became one screen texture
+    with its map-unit parts drawn at the style's first zoom, 0 from the
+    Publish window - map-unit markers 2e-5 px (an empty texture), a viewport
+    hatch a fixed cropped preview, a hatch width a constant hairline."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    exporter = _style_exporter(mc)
+    layer = make()
+    kind = layer.layerType()
+    assert exporter._pattern_uses_map_units(layer)
+    symbol = QgsFillSymbol([layer])
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[-2] == 22
+    assert exporter.SCREEN_PATTERN_FLAG not in layer_def.get("metadata", {})
+    assert not exporter.context.diagnostics.by_code("Q2VT_PATTERN_APPROXIMATE")
+    names = dict(zip(pattern[3::2], pattern[4::2]))
+    # The texture of zoom 18 draws the map-unit parts at zoom 18.
+    alpha = exporter.pattern_images[names[18]].img_1x.getchannel("A")
+    assert alpha.getextrema()[1] > 200
+    if kind == "PointPatternFill":
+        # Dots 1.5 m wide at zoom 18 in a 4 mm grid (drawn at 1/sqrt(2)).
+        coverage = sum(1 for a in alpha.getdata() if a > 128) / (alpha.width * alpha.height)
+        dot = 1.5 * 512 * 2 ** 18 / 40075016.69
+        grid = 4 * 96 / 25.4 * exporter.TEXTURE_SCREEN_SCALE
+        assert coverage == pytest.approx(math.pi / 4 * dot ** 2 / grid ** 2, rel=0.5)
+
+
+def test_map_unit_pattern_textures_stop_at_the_view_zoom_and_the_size_budget(plugin):
+    """The last texture is the view's last zoom (Publish: Max view zoom);
+    a texture larger than MAX_PATTERN_TEXTURE_PX is not made, the one below
+    serves the zooms above."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 10)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(40)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    symbol = QgsFillSymbol([pp])
+    exporter = _style_exporter(mc, view_max_zoom=20.0)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    assert exporter.style["layers"][0]["paint"]["fill-pattern"][-2] == 20
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    # Two 40 m cells: 1073 px at zoom 21, 2147 px at zoom 22.
+    assert pattern[-2] == 21
+    assert max(exporter.pattern_images[pattern[-1]].img_1x.size) <= exporter.MAX_PATTERN_TEXTURE_PX
+    assert len(exporter.pattern_images) == len(pattern[2::2])
 
 
 @pytest.mark.parametrize("curved,repeated,head_type", [
@@ -557,6 +668,45 @@ def test_arrow_outline_is_a_line_on_the_arrow_rings(plugin, tmp_path):
     layer_defs = exporter.style["layers"]
     assert [d["type"] for d in layer_defs] == ["fill", "line"]
     assert "fill-outline-color" not in layer_defs[0]["paint"]
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters])
+def test_arrow_fill_offset_grows_with_the_map_in_map_units(plugin, tmp_path, unit):
+    """An arrow fill's offset becomes a viewport translate. In map units it
+    was one pixel value taken at the style's first zoom: 0.0002 px for a
+    12 m offset exported from zoom 0, so the shifted fill (a drop shadow)
+    stayed under the arrow at every zoom. It doubles with every zoom now."""
+    from qgis.core import QgsArrowSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from qgis.PyQt.QtCore import QPointF
+    layer = _layer("LineString", ["LINESTRING(-100 0, 100 0)"], str(tmp_path / "arrow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowWidth", 20), ("ArrowStartWidth", 20), ("HeadLength", 50),
+                        ("HeadThickness", 30)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    arrow.setIsCurved(False)
+    fill = arrow.subSymbol().symbolLayer(0)
+    fill.setStrokeStyle(0)
+    fill.setOffset(QPointF(12, -6))
+    fill.setOffsetUnit(unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules[0].recipe.kind == "arrow_polygons" and rules[0].translate[:2] == (12, -6)
+
+    exporter = _style_exporter(mc)
+    layer_defs = [{"type": "fill", "paint": {}}]
+    exporter._apply_translate(layer_defs, rules[0].translate)
+    translate = layer_defs[0]["paint"]["fill-translate"]
+    assert layer_defs[0]["paint"]["fill-translate-anchor"] == "viewport"
+    if unit == Qgis.RenderUnit.Millimeters:
+        assert translate == pytest.approx([12 * 96 / 25.4, -6 * 96 / 25.4])
+        return
+    assert translate[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
+    stops = dict(zip(translate[3::2], (out[1] for out in translate[4::2])))
+    for zoom in (0, 16, 19, 22):
+        px = 512 * 2 ** zoom / 40075016.68557849
+        assert stops[zoom] == pytest.approx([12 * px, -6 * px], rel=1e-3, abs=1e-5)
 
 
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])

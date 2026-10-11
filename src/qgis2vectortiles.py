@@ -186,6 +186,7 @@ class QGIS2VectorTiles:
         scale_limits=None,
         background_tiles: bool = False,
         fast_markers: bool = False,
+        view_max_zoom: int = 22,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -200,7 +201,9 @@ class QGIS2VectorTiles:
         publishing identity/filter fields (see RulesExporter).
         ``background_tiles``: convert_project_to_vector_tiles() returns once
         the tile processes are started; finish_tiles() waits for them and
-        completes the export (the publishing workflow goes on meanwhile)."""
+        completes the export (the publishing workflow goes on meanwhile).
+        ``view_max_zoom``: the highest zoom the web map shows, overzooming
+        the last tiles (map-unit pattern textures are made up to it)."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -241,6 +244,7 @@ class QGIS2VectorTiles:
             mode=FidelityMode.from_index(fidelity_mode),
             overzoom=[OverzoomPolicy.PERSIST, OverzoomPolicy.STOP][int(overzoom)],
             reference_latitude=self._reference_latitude(),
+            view_max_zoom=float(max(view_max_zoom - viewer, self.max_zoom)),
         )
         self.lengths = self._length_converter()
         # zoom <-> scale: QGIS's scale for the browser's ground resolution in

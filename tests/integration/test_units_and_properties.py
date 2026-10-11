@@ -7,7 +7,7 @@ from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsLineSymbol, QgsMapRende
                        QgsMapSettings, QgsMarkerLineSymbolLayer, QgsProperty, QgsRectangle,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
                        QgsSingleSymbolRenderer, QgsSymbolLayer, QgsVectorLayer)
-from qgis.PyQt.QtCore import QSize
+from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtGui import QColor
 
 from fidelity import expressions as ex
@@ -376,3 +376,81 @@ def test_upside_down_labels_are_turned_upright_as_qgis_does(mc):
     settings.placement = Qgis.LabelPlacement.OverPoint
     settings.upsidedownLabels = Qgis.UpsideDownLabelHandling.AlwaysAllowUpsideDown
     assert not mc.TextPropertyExtractor.flips_upside_down(settings)
+
+
+def _dash_at(dasharray, zoom):
+    """The ``line-dasharray`` MapLibre uses at ``zoom`` (a list or a step)."""
+    if not isinstance(dasharray[0], str):
+        return dasharray
+    value = dasharray[2][1]
+    for stop, array in zip(dasharray[3::2], dasharray[4::2]):
+        if zoom >= stop:
+            value = array[1]
+    return value
+
+
+def _px_per_metre(zoom):
+    return 512 * 2 ** zoom / 40075016.68557849
+
+
+def _dashed_line(width, width_unit, dashes, dash_unit, cap=Qt.PenCapStyle.FlatCap):
+    line = QgsSimpleLineSymbolLayer(QColor("black"), width)
+    line.setWidthUnit(width_unit)
+    line.setPenCapStyle(cap)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector(dashes)
+    line.setCustomDashPatternUnit(dash_unit)
+    return line
+
+
+def test_screen_dashes_on_a_map_unit_width_follow_the_zoom(mc):
+    """MapLibre multiplies line-dasharray by the line width. A 1 m wide line
+    with 3/2 mm dashes: the ratio was computed once with the width at the
+    style's first zoom (1.3e-5 px from zoom 0), so the dashes were a million
+    widths long and the line solid at every zoom. QGIS keeps 3 mm dashes."""
+    line = _dashed_line(1.0, Qgis.RenderUnit.MapUnits, [3.0, 2.0], Qgis.RenderUnit.Millimeters)
+    mc.PropertyExtractor.context.reference_zoom = 0
+    width = mc.LinePropertyExtractor.get_line_width(line)
+    dasharray = mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 24)
+    assert dasharray[:2] == ["step", ["zoom"]]
+    for zoom in (14.0, 16.0, 17.5, 18.0):
+        dash, gap = _dash_at(dasharray, zoom)
+        width_px = ex.evaluate_zoom_curve(width, zoom)
+        # Within 2^0.25 of QGIS's 3 / 2 mm (half-zoom steps).
+        assert dash * width_px == pytest.approx(3 * 96 / 25.4, rel=0.19)
+        assert gap * width_px == pytest.approx(2 * 96 / 25.4, rel=0.19)
+
+
+def test_map_unit_dashes_with_corner_tweak_follow_the_zoom(mc):
+    """10 m dashes on a 0.5 mm line with "tweak dash pattern at corners"
+    are not cut into dash geometry: the native dasharray took the dash
+    length at the style's first zoom (1e-4 px from zoom 0) and, with the
+    square cap, became [1.0001, 0] - a solid line at every zoom."""
+    from fidelity.diagnostics import DiagnosticCollector
+    from qgis.core import QgsLineSymbol
+    line = _dashed_line(0.5, Qgis.RenderUnit.Millimeters, [10.0, 10.0],
+                        Qgis.RenderUnit.MapUnits, Qt.PenCapStyle.SquareCap)
+    line.setTweakDashPatternOnCorners(True)
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    width = paint["line-width"]
+    assert width == pytest.approx(0.5 * 96 / 25.4, rel=1e-3)
+    for zoom in (16.0, 18.0, 21.0):
+        dash, gap = _dash_at(paint["line-dasharray"], zoom)
+        # Qt draws a square cap on every dash: one width added to it here.
+        assert (dash - 1) * width == pytest.approx(10 * _px_per_metre(zoom), rel=0.19)
+        assert (gap + 1) * width == pytest.approx(10 * _px_per_metre(zoom), rel=0.19)
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.Millimeters, Qgis.RenderUnit.MapUnits])
+def test_dashes_in_the_line_width_unit_stay_one_array(mc, unit):
+    line = _dashed_line(1.0, unit, [3.0, 2.0], unit)
+    width = mc.LinePropertyExtractor.get_line_width(line)
+    assert mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 24) == [3.0, 2.0]

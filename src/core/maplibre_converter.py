@@ -466,13 +466,17 @@ class LinePropertyExtractor:
 
     @staticmethod
     def get_line_dasharray(
-        symbol_layer: QgsSimpleLineSymbolLayer, width_px: float
-    ) -> Optional[List[float]]:
+        symbol_layer: QgsSimpleLineSymbolLayer, width_px, min_zoom: float = 0.0,
+        max_zoom: float = 24.0,
+    ) -> Optional[Union[List[float], List]]:
         """Return ``line-dasharray`` from a custom dash vector or pen-style preset.
 
         MapLibre dash lengths are multiples of the line width. QGIS custom
         dash lengths are absolute, so they are converted to pixels and divided
-        by the static line width. Qt pen-style presets are already relative.
+        by the line width (a number or a zoom curve). Qt pen-style presets are
+        already relative. When the dashes and the width do not scale alike
+        with the zoom (map-unit dashes on a screen-unit line or the other way
+        round), the ratio is a zoom step over the layer's zooms.
         """
         try:
             custom_dash_enabled = bool(symbol_layer.useCustomDashPattern())
@@ -480,35 +484,104 @@ class LinePropertyExtractor:
         except (RuntimeError, AttributeError):
             custom_dash_enabled, dash_vector = False, None
 
+        square = _enum_int(symbol_layer.penCapStyle()) == 0x10  # Qt::SquareCap
         if custom_dash_enabled and dash_vector:
-            # QGIS divides by max(1, width) and Qt scales the pattern back by
-            # the same clamped width, so on screen a dash is its own length;
-            # MapLibre multiplies by the line width.
-            width = width_px if ex.is_number(width_px) and width_px > 0 else 1.0
             unit = symbol_layer.customDashPatternUnit()
-            pattern = [max(0.0, PropertyExtractor.static_pixels(d, unit)) / width
-                       for d in dash_vector]
-        else:
-            # Qt pen styles, in pen widths (QPen::dashPattern).
-            pattern = {
-                2: [4, 2],               # DashLine
-                3: [1, 2],               # DotLine
-                4: [4, 2, 1, 2],         # DashDotLine
-                5: [4, 2, 1, 2, 1, 2],   # DashDotDotLine
-            }.get(_enum_int(symbol_layer.penStyle()))
-            if pattern is None:
-                return None
+            dashes = [PropertyExtractor.length(d, unit) for d in dash_vector]
+            if not ex.is_number(width_px) and not ex.is_zoom_curve(width_px):
+                width_px = 1.0
+            if all(ex.is_number(v) for v in dashes + [width_px]):
+                return LinePropertyExtractor._dash_widths(
+                    [max(0.0, d) for d in dashes], width_px, square)
+            try:
+                return LinePropertyExtractor._dash_step(
+                    dashes, width_px, square, min_zoom, max_zoom,
+                    _enum_int(symbol_layer.penCapStyle()) == 0x20)
+            except ex.ExpressionError:
+                # Curves that cannot be sampled: their reference-zoom value.
+                try:
+                    width_px = ex.evaluate_zoom_curve(
+                        width_px, PropertyExtractor.context.reference_zoom)
+                except ex.ExpressionError:
+                    width_px = 1.0
+                return LinePropertyExtractor._dash_widths(
+                    [max(0.0, PropertyExtractor.static_pixels(d, unit)) for d in dash_vector],
+                    width_px, square)
+        # Qt pen styles, in pen widths (QPen::dashPattern).
+        pattern = {
+            2: [4, 2],               # DashLine
+            3: [1, 2],               # DotLine
+            4: [4, 2, 1, 2],         # DashDotLine
+            5: [4, 2, 1, 2, 1, 2],   # DashDotDotLine
+        }.get(_enum_int(symbol_layer.penStyle()))
+        if pattern is None:
+            return None
+        return LinePropertyExtractor._dash_pattern(pattern, square)
+
+    @staticmethod
+    def _dash_widths(dashes_px: List[float], width_px: float, square: bool) -> List[float]:
+        """Dash lengths in CSS px as ``line-dasharray`` (multiples of the width)."""
+        # QGIS divides by max(1, width) and Qt scales the pattern back by
+        # the same clamped width, so on screen a dash is its own length;
+        # MapLibre multiplies by the line width.
+        width = width_px if ex.is_number(width_px) and width_px > 0 else 1.0
+        return LinePropertyExtractor._dash_pattern([d / width for d in dashes_px], square)
+
+    @staticmethod
+    def _dash_pattern(pattern: List[float], square: bool) -> List[float]:
         if len(pattern) % 2:
             pattern = pattern + pattern
         pattern = LinePropertyExtractor._without_empty_dashes(pattern)
         # Qt draws square and round caps on every dash (one line width longer,
         # gaps one width shorter); MapLibre does so for round caps only
         # (measured), so square-capped dashes are lengthened here.
-        if _enum_int(symbol_layer.penCapStyle()) == 0x10:  # Qt::SquareCap
+        if square:
             pattern = [value + 1.0 if i % 2 == 0 and value > 0 else
                        value if i % 2 == 0 else max(0.0, value - 1.0)
                        for i, value in enumerate(pattern)]
         return [round(v, 4) for v in pattern]
+
+    # Dash periods outside this range (CSS px) look alike at every zoom
+    # (a tint or a solid line, one dash wider than the screen): the zoom
+    # step stops changing there, which keeps MapLibre's line atlas small.
+    _DASH_PERIOD_PX = (1.0, 8192.0)
+
+    @staticmethod
+    def _dash_step(dashes, width, square: bool, min_zoom: float, max_zoom: float,
+                   round_cap: bool):
+        """``line-dasharray`` as a zoom step: dash / width sampled in the
+        middle of every half zoom (within 2^0.25 of QGIS), every whole zoom
+        for round caps (whose dashes take 15 rows of MapLibre's 512-row line
+        atlas each). The patched MapLibre multiplies by the width at the
+        current zoom (tools/patch_maplibre.py)."""
+        low, high = LinePropertyExtractor._DASH_PERIOD_PX
+        step = 1.0 if round_cap else 0.5
+        start = math.floor(max(0.0, min_zoom) / step) * step
+        end = min(max_zoom if max_zoom is not None and max_zoom > start else 24.0, 24.0)
+        stops = []
+        zoom = start
+        while zoom < end - 1e-9:
+            mid = zoom + step / 2
+            dash_px = [max(0.0, ex.evaluate_zoom_curve(d, mid)) for d in dashes]
+            width_px = ex.evaluate_zoom_curve(width, mid)
+            useful = low <= sum(dash_px) <= high and width_px >= 0.05
+            stops.append((zoom, LinePropertyExtractor._dash_widths(dash_px, width_px, square),
+                          useful))
+            zoom += step
+        if not stops:
+            return None
+        useful = [i for i, stop in enumerate(stops) if stop[2]]
+        first, last = (useful[0], useful[-1]) if useful else (len(stops) - 1, len(stops) - 1)
+        arrays = [stops[min(max(i, first), last)][1] for i in range(len(stops))]
+        # Every gap closed by the caps: a solid line, whatever the dashes.
+        arrays = [[1.0, 0.0] if not any(a[1::2]) else a for a in arrays]
+        if all(a == arrays[0] for a in arrays):
+            return arrays[0]
+        expression: List[Any] = ["step", ["zoom"], ["literal", arrays[0]]]
+        for (zoom, _, _), array, previous in zip(stops[1:], arrays[1:], arrays):
+            if array != previous:
+                expression += [zoom, ["literal", array]]
+        return expression
 
     @staticmethod
     def _without_empty_dashes(pattern: List[float]) -> List[float]:
@@ -2688,23 +2761,33 @@ class QgisMapLibreStyleExporter:
 
     @staticmethod
     def _pattern_uses_map_units(layer) -> bool:
+        """Whether any length drawn into the pattern's texture is in map units
+        (or meters at scale): the layer's own (QGIS ``usesMapUnits``, which
+        covers a hatch's distance and offset), or any length of the marker or
+        line it repeats. ``outputUnit()`` of a sub-symbol layer is no help: it
+        is Unknown when that layer mixes units (a map-unit size with a
+        millimetre offset)."""
+        if layer.usesMapUnits():
+            return True
         units = []
-        for getter in ("distanceXUnit", "distanceYUnit", "patternWidthUnit", "widthUnit",
+        for getter in ("distanceUnit", "offsetUnit", "lineWidthUnit", "distanceXUnit",
+                       "distanceYUnit", "displacementXUnit", "displacementYUnit", "offsetXUnit",
+                       "offsetYUnit", "patternWidthUnit", "svgStrokeWidthUnit", "widthUnit",
                        "densityAreaUnit"):
             if hasattr(layer, getter):
                 units.append(getattr(layer, getter)())
-        sub = layer.subSymbol()
-        if sub is not None:
-            units += [sub.symbolLayer(i).outputUnit() for i in range(sub.symbolLayerCount())]
-        return any(normalize_unit(unit) in ("map", "m") for unit in units)
+        if any(normalize_unit(unit) in ("map", "m") for unit in units):
+            return True
+        # An SVG fill's sub-symbol is its outline, not part of the texture.
+        sub = layer.subSymbol() if layer.layerType() != "SVGFill" else None
+        return sub is not None and any(sub.symbolLayer(i).usesMapUnits()
+                                       for i in range(sub.symbolLayerCount()))
 
     # Upper bound on per-zoom textures of one map-unit pattern.
-    MAX_PATTERN_ZOOMS = 12
-    # Patterns spaced in screen units (map-unit parts otherwise) get their
-    # own textures up to the web map's last zoom, while a cell stays this
-    # small (logical px): their cells do not double with every zoom.
-    OVERZOOM_PATTERN_ZOOM = 22
-    MAX_OVERZOOM_PATTERN_PX = 1024
+    MAX_PATTERN_ZOOMS = 16
+    # Largest per-zoom texture (CSS px a side): above it the last smaller one
+    # serves the higher zooms (a sprite sheet that size is already huge).
+    MAX_PATTERN_TEXTURE_PX = 2048
 
     @staticmethod
     def _screen_spacing(layer) -> bool:
@@ -2726,68 +2809,53 @@ class QgisMapLibreStyleExporter:
                           if hasattr(line, getter)]
         return any(normalize_unit(unit) in ("map", "m") for unit in units)
 
-    def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float,
-                          screen_spacing: bool = False, exact: bool = False):
+    def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float):
         """One texture per integer zoom for a pattern sized in map units.
 
         MapLibre draws ``fill-pattern`` in the pixels of the tile's integer
         zoom, so a texture grows with the map until the next zoom, exactly
         like map-unit sizes in QGIS: each zoom's texture is rendered at that
         integer zoom (screen-unit parts, see ``TEXTURE_SCREEN_SCALE``, stay
-        within about ±41 %); ``fill-pattern`` steps between them.
-
-        ``screen_spacing``: textures continue past max zoom + 3 (up to
-        ``OVERZOOM_PATTERN_ZOOM``) while they stay small; a frozen texture
-        there kept the map-unit parts (the rows of a point pattern clamped
-        to millimetres only across) from growing with the map. ``exact``:
-        textures at true screen size (the caller sets SCREEN_PATTERN_FLAG),
-        map-unit parts drawn at the middle of each zoom (within about ±41 %).
+        within about ±41 %); ``fill-pattern`` steps between them. Textures
+        go up to the highest zoom the viewer shows (overzoomed tiles too:
+        MapLibre draws the pattern in the pixels of the view's zoom there).
         """
         low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
-        last = min(top, float(self.OVERZOOM_PATTERN_ZOOM) + 1.0)
-        capped = min(top, float(self.maxzoom) + 3.0)
-        if exact:
-            # Screen-spaced cells keep their size: one texture per zoom.
-            top = extend_from = last
-        else:
-            # Over the cap, the highest zooms get their own texture (zoomed
-            # out, a map-unit pattern is a tint of sub-pixel cells): the
-            # lowest of them also serves the zooms below. Counted from the
-            # lowest zoom instead, a map exported from zoom 0 had no texture
-            # above zoom 11.
-            low = max(low, math.ceil(capped) - self.MAX_PATTERN_ZOOMS)
-            top, extend_from = (max(capped, last) if screen_spacing else capped), capped
-        saved = self.context.reference_zoom, self._exact_screen_texture
+        top = min(top, max(float(self.maxzoom) + 3.0,
+                           float(getattr(self.profile, "view_max_zoom", 22.0)) + 1.0))
+        # Over the cap, the highest zooms get their own texture (zoomed out,
+        # a map-unit pattern is a tint of sub-pixel cells): the lowest of
+        # them also serves the zooms below. Counted from the lowest zoom
+        # instead, a map exported from zoom 0 had no texture above zoom 11.
+        low = max(low, math.ceil(top) - self.MAX_PATTERN_ZOOMS)
+        saved = self.context.reference_zoom
         self._pattern_zoom_bands = True
-        self._exact_screen_texture = exact
         stops = []
         try:
             zoom = low
             while zoom < top - 1e-9:
                 upper = min(math.floor(zoom) + 1.0, top)
-                self.context.reference_zoom = (zoom + upper) / 2.0 if exact else zoom
+                self.context.reference_zoom = zoom
                 name = register()
                 if name is None:
-                    if zoom >= extend_from - 1e-9:
-                        break
-                    return None
-                images = self.pattern_images.get(name)
-                if zoom >= extend_from - 1e-9 and images is not None and \
-                        max(images.img_1x.size) > self.MAX_OVERZOOM_PATTERN_PX:
+                    if stops:
+                        break  # the last texture serves the zooms above
+                    zoom = upper
+                    continue  # the first texture serves the zooms below
+                size = max(self.pattern_images[name].img_1x.size)
+                if stops and size > self.MAX_PATTERN_TEXTURE_PX:
                     del self.pattern_images[name]
                     break
                 stops.append((zoom, name))
                 zoom = upper
         finally:
-            self.context.reference_zoom, self._exact_screen_texture = saved
+            self.context.reference_zoom = saved
             self._pattern_zoom_bands = False
         if not stops:
             return None
         self.context.report(
             "Q2VT_PATTERN_MAP_UNITS",
-            "Pattern in map units drawn with one texture per zoom level (map-unit parts "
-            "within about ±41 % of QGIS between integer zooms)." if exact else
             "Pattern in map units drawn with one texture per zoom level (screen-unit "
             "parts within about ±41 % of QGIS between integer zooms).",
             strategy=Strategy.APPROXIMATE.value)
@@ -3759,9 +3827,14 @@ class QgisMapLibreStyleExporter:
             width_value = layer_def["paint"]["line-width"]
             layer_def["paint"]["line-opacity"] = thin_line_opacity(
                 width_value, layer_def["paint"]["line-opacity"])
-            width_px = width_value if ex.is_number(width_value) else \
-                PropertyExtractor.static_pixels(symbol_layer.width(), symbol_layer.widthUnit())
-            dasharray = LinePropertyExtractor.get_line_dasharray(symbol_layer, width_px)
+            # A data-defined width: the dashes follow the static one.
+            width_px = width_value if ex.is_number(width_value) or (
+                ex.is_zoom_curve(width_value) and ex.is_camera_only(width_value)) \
+                else hairline(PropertyExtractor.length(
+                    symbol_layer.width(), symbol_layer.widthUnit(),
+                    map_unit_scale=symbol_layer.widthMapUnitScale()))
+            dasharray = LinePropertyExtractor.get_line_dasharray(
+                symbol_layer, width_px, min_zoom, max_zoom)
             if dasharray:
                 layer_def["paint"]["line-dasharray"] = dasharray
 
@@ -4001,20 +4074,8 @@ class QgisMapLibreStyleExporter:
                 return None
             map_units = self._pattern_uses_map_units(symbol_layer)
             viewport = pattern_in_viewport(symbol_layer)
-            if kind == "LinePatternFill" and not viewport and \
-                    self._screen_spacing(symbol_layer) and self._map_unit_lines(symbol_layer):
-                # A hatch spaced in screen units (e.g. a map-unit spacing
-                # clamped to millimetres) with map-unit lines: true-size
-                # textures whose lines grow with the map zoom by zoom (one
-                # texture froze them at its first zoom).
-                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, exact=True)
-                if pattern_name is not None:
-                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
-            elif map_units and (kind != "LinePatternFill" or viewport):
-                pattern_name = self._per_zoom_pattern(
-                    register, min_zoom, max_zoom, self._screen_spacing(symbol_layer))
-            elif map_units:
-                pattern_name = register()
+            if map_units:
+                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
             else:
                 self._exact_screen_texture = True
                 try:
