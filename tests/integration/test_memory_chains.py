@@ -9,8 +9,9 @@ import os
 import sys
 
 import pytest
-from qgis.core import (QgsFeature, QgsFillSymbol, QgsGeometry, QgsLineSymbol, QgsMarkerLineSymbolLayer,
-                       QgsRuleBasedRenderer, QgsUnitTypes, QgsVectorLayer)
+from qgis.core import (Qgis, QgsFeature, QgsFillSymbol, QgsGeometry, QgsLineSymbol, QgsMarkerLineSymbolLayer,
+                       QgsPalLayerSettings, QgsRuleBasedLabeling, QgsRuleBasedRenderer, QgsUnitTypes,
+                       QgsVectorLayer)
 
 from publishing import mvt
 from publishing.controller import export_local
@@ -25,7 +26,8 @@ from test_publishing_pipeline import EXTENT, _parcels  # noqa: E402  pylint: dis
 
 def _lines(path):
     """A road layer: two kinds (rule filters), screen-unit interval markers
-    (positions per zoom) on one of them."""
+    (positions per zoom) on one of them; a filtered line label (a visible-line
+    label dataset whose parts must not depend on the chain mode)."""
     layer = QgsVectorLayer("LineString?crs=EPSG:3857&field=kind:string", "Utak", "memory")
     for kind, wkt in (("fo", "LINESTRING(2119500 6019500, 2120800 6020400, 2122600 6022700)"),
                       ("mellek", "LINESTRING(2119200 6022800, 2121500 6021100, 2122800 6019300)"),
@@ -45,6 +47,13 @@ def _lines(path):
     root.appendChild(QgsRuleBasedRenderer.Rule(QgsLineSymbol.createSimple({"color": "90,90,90"}),
                                                filterExp="\"kind\" = 'mellek'", label="Mellékút"))
     saved.setRenderer(QgsRuleBasedRenderer(root))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "kind"
+    settings.placement = Qgis.LabelPlacement.Line
+    labels = QgsRuleBasedLabeling.Rule(None)
+    labels.appendChild(QgsRuleBasedLabeling.Rule(settings, filterExp="\"kind\" = 'fo'"))
+    saved.setLabeling(QgsRuleBasedLabeling(labels))
+    saved.setLabelsEnabled(True)
     return saved
 
 
@@ -118,6 +127,8 @@ def test_memory_chains_give_the_same_tiles_and_share_steps(plugin, tmp_path, mon
     assert stats["direct"] > 0, stats  # 4.28: interval markers computed in Python (same tiles)
     marker_layers = {name for tile in memory.values() for name in tile if "t00" in name}
     assert len(marker_layers) > 3  # fills, roads and per-zoom marker datasets were exported
+    visible = {name[-3:] for tile in memory.values() for name in tile}
+    assert {"_vp", "_vl"} <= visible  # polygon and line label datasets (q2vt_part)
 
 
 def test_a_failing_memory_chain_is_redone_with_files(plugin, tmp_path, monkeypatch):

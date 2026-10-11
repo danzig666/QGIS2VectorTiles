@@ -104,6 +104,88 @@ def test_arrow_polygons_are_qgis_arrows(plugin):
             (curved, repeated, head_type, arrow_type)
 
 
+def test_arrow_skeletons_drawn_as_line_and_head_markers_are_qgis_arrows(plugin):
+    """fidelity.arrows.arrow_skeletons (arrows past the last tiles' geometry
+    grid, SymbolMaterializer._native_arrow): the body's centre line drawn
+    with the body's width and a triangle marker turned along the line at
+    every tip cover what QGIS fills, curved arrows and half arrows too."""
+    from qgis.core import QgsArrowSymbolLayer, QgsEllipseSymbolLayer, QgsField, QgsMarkerSymbol, \
+        QgsProperty, QgsSymbolLayer
+    from qgis.PyQt.QtCore import QPointF, QVariant
+    from fidelity.arrows import arrow_skeletons
+    rng = random.Random(11)
+    size, mm = 300, 96 / 25.4
+    shapes = {1: QgsEllipseSymbolLayer.Shape.RightHalfTriangle,
+              2: QgsEllipseSymbolLayer.Shape.LeftHalfTriangle}
+    for _ in range(25):
+        curved, repeated = rng.random() < 0.6, rng.random() < 0.6
+        head_type, arrow_type = rng.choice([0, 0, 1, 2]), rng.choice([0, 0, 1, 2])
+        points = [(rng.uniform(30, 270), rng.uniform(30, 270)) for _ in range(rng.randint(2, 6))]
+        width, length = rng.uniform(1, 3), rng.uniform(2, 5)
+        thickness = rng.uniform(width / 2 + 0.5, 4)
+        source = QgsVectorLayer("LineString?crs=EPSG:3857", "a", "memory")
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(*p) for p in points]))
+        source.dataProvider().addFeatures([feature])
+        arrow = QgsArrowSymbolLayer()
+        arrow.setIsCurved(curved)
+        arrow.setIsRepeated(repeated)
+        arrow.setArrowStartWidth(width)
+        arrow.setArrowWidth(width)
+        arrow.setHeadLength(length)
+        arrow.setHeadThickness(thickness)
+        arrow.setHeadType(QgsArrowSymbolLayer.HeadType(head_type))
+        arrow.setArrowType(QgsArrowSymbolLayer.ArrowType(arrow_type))
+        arrow.setSubSymbol(_fill())
+        source.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+        bodies, heads = arrow_skeletons([(x, size - y) for x, y in points], curved, repeated,
+                                        width * mm, width * mm, length * mm, head_type,
+                                        arrow_type, 0.0)
+        lines = QgsVectorLayer("LineString?crs=EPSG:3857", "l", "memory")
+        for body in bodies:
+            shape = QgsFeature()
+            shape.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(x, size - y) for x, y in body]))
+            lines.dataProvider().addFeatures([shape])
+        line = QgsSimpleLineSymbolLayer(QColor("black"), width * mm / (2 if arrow_type else 1))
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+        lines.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+        tips = QgsVectorLayer("Point?crs=EPSG:3857", "h", "memory")
+        tips.dataProvider().addAttributes([QgsField("angle", QVariant.Double),
+                                           QgsField("back", QVariant.Int)])
+        tips.updateFields()
+        for (x, y), (dx, dy), back in heads:
+            shape = QgsFeature(tips.fields())
+            shape.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, size - y)))
+            shape["angle"] = math.degrees(math.atan2(dx, -dy))
+            shape["back"] = int(back)
+            tips.dataProvider().addFeatures([shape])
+        head = QgsEllipseSymbolLayer()
+        head.setShape(shapes.get(arrow_type, QgsEllipseSymbolLayer.Shape.Triangle))
+        if arrow_type:
+            # A head pointing back: the other half (one rule each in the export).
+            names = {1: "right_half_triangle", 2: "left_half_triangle"}
+            head.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyName, QgsProperty.fromExpression(
+                f"if(\"back\", '{names[3 - arrow_type]}', '{names[arrow_type]}')"))
+        head.setSymbolWidth(2 * thickness * mm)
+        head.setSymbolHeight(length * mm)
+        head.setSymbolWidthUnit(Qgis.RenderUnit.MapUnits)
+        head.setSymbolHeightUnit(Qgis.RenderUnit.MapUnits)
+        head.setColor(QColor("black"))
+        head.setStrokeStyle(Qt.PenStyle.NoPen)
+        head.setOffset(QPointF(0, length * mm / 2))
+        head.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+        head.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyAngle,
+                                    QgsProperty.fromField("angle"))
+        tips.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([head])))
+        extent = QgsRectangle(0, 0, size, size)
+        reference = ink_mask(render([source], extent, (size, size)))
+        drawn = ink_mask(render([tips, lines], extent, (size, size)))
+        # Straight-sided heads (QGIS bends a curved arrow's head sides).
+        assert reference and mask_difference(reference, drawn) < 0.06, \
+            (curved, repeated, head_type, arrow_type)
+
+
 def test_arrow_shadow_is_covered_by_later_arrows(plugin):
     """QGIS fills each arrow with all fill layers before the next one: the
     shadow of a later arrow hides an earlier arrow (painter order)."""
@@ -197,8 +279,9 @@ def test_inner_shadow_line_exports_strips_by_direction(plugin, tmp_path):
     lines = [l for l in style["layers"] if l["type"] == "line"]
     ends = [l for l in lines if l["id"].endswith("_ends")]
     strips = [l for l in lines if re.search(r"_in\d+$", l["id"])]
-    assert len(ends) == 2  # one per zoom
-    assert len(strips) == 2 * math.ceil(3.6 * 96 / 25.4)
+    tiles = [l for l in ends if l["minzoom"] < 17]  # (and per overzoom from 17)
+    assert len(tiles) == 2 and len(ends) > 2  # one per zoom
+    assert len(strips) == len(ends) * math.ceil(3.6 * 96 / 25.4)
     assert all(s["paint"]["line-color"][0] == "match" for s in strips)
     assert {s["paint"].get("line-offset", 0) for s in strips} != {0}
     report = json.load(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8"))
@@ -259,3 +342,132 @@ def test_screen_offset_is_the_qgis_offset_curve_per_band(plugin, tmp_path):
         reference = ink_mask(render([layer], view, (240, 240)))
         ours = ink_mask(render([out], view, (240, 240)))
         assert mask_difference(reference, ours) < 0.08, zoom
+
+
+@pytest.mark.parametrize("kind", ["LineString", "LineAtEdge", "Polygon", "PolygonWithHole"])
+def test_screen_offsets_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
+    """Exported from zoom 0 (the Publish defaults), a 1.5 mm offset is
+    hundreds of km at the first zooms: offset curves there lie outside the
+    4 km export extent and every eighth-of-a-zoom band reported a rule
+    missing from the map (Strict mode failed). Those zooms are drawn with
+    the browser's line offset, mitred like QGIS's offset curve; the offset
+    curves start where the offset may reach into the extent. A line at the
+    extent's edge offset outwards, or rings collapsed by an inward offset,
+    are not drawn inside the extent by QGIS either: no loss reported, and
+    no native rings drawn where QGIS's rings collapse."""
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    cx, cy = 2121000.0, 6021000.0
+
+    def ring(points):
+        return "(" + ", ".join(f"{cx + x} {cy + y}" for x, y in points) + ")"
+    zigzag = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
+    if kind == "LineAtEdge":  # upwards, 60-100 m inside the right edge, offset to the right
+        wkt = "LINESTRING" + ring([(1900, -300), (1940, -150), (1900, 0), (1940, 150), (1900, 300)])
+    elif kind == "LineString":
+        wkt = "LINESTRING" + ring(zigzag)
+    else:
+        wkt = "POLYGON(" + ring(zigzag + [(300, 200), (-300, 200), (-300, -100)])
+        if kind == "PolygonWithHole":
+            wkt += ", " + ring([(-50, 100), (50, 100), (50, 150), (-50, 150), (-50, 100)])
+        wkt += ")"
+    polygon = kind.startswith("Polygon")
+    layer = _layer("Polygon" if polygon else "LineString", [wkt], str(tmp_path / "offset.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("red"), 0.6)
+    line.setOffset(1.5)
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol([line]) if polygon else QgsLineSymbol([line])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    extent = QgsRectangle(cx - 2000, cy - 2000, cx + 2000, cy + 2000)
+    exporter = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=extent, output_dir=str(out),
+                                feedback=QgsProcessingFeedback(), serve=False, fidelity_mode=1)
+    export_dir = exporter.convert_project_to_vector_tiles()  # Strict: raises on a loss
+    assert not [d for d in exporter.diagnostics.items if d.code == "Q2VT_RULE_OUTPUT_EMPTY"]
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        style = json.load(handle)
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    native = [l for l in lines if "line-offset" in l["paint"]]
+    bands = [l for l in lines if "line-offset" not in l["paint"]]
+    # 1.5 mm = 5.67 px is at most the 4 km extent's diagonal from zoom 7 on.
+    first = math.ceil(math.log2(1.5 * 96 / 25.4 * WORLD / 512 / math.hypot(4000, 4000)))
+    assert first == 7
+    assert {l["layout"]["line-join"] for l in native} == {"miter"}
+    if kind == "Polygon":
+        # The rings buffered inwards to nothing below 11.75: QGIS draws
+        # none there, and nor does the browser.
+        assert min(l.get("minzoom", 0) for l in lines) == 11.75
+        return
+    early = [l for l in native if l.get("minzoom", 0) == 0]  # lines, holes
+    assert [l["maxzoom"] for l in early] == [first]
+    assert min(l["minzoom"] for l in bands) >= first
+
+
+@pytest.mark.parametrize("kind", ["Interval", "Vertex", "Hashes", "PolygonVertex",
+                                  "PolygonInterval", "Shapeburst"])
+def test_screen_offset_markers_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
+    """Marker and hash lines with a 1.5 mm offset, and a 2 mm shapeburst,
+    exported from zoom 0: their positions (bands) per zoom lie on an offset
+    line hundreds of km away at the first zooms, wholly outside the 4 km
+    extent (one rule missing from the map per zoom or band, Strict mode
+    failed), and the shapeburst's per-step polygons were too small for a
+    tile unit (source layers without tiles). Until the distance is at most
+    half the extent's side the markers sit on the line, offset on screen
+    (rings an inward offset collapses keep none), and the shapeburst is one
+    band set."""
+    from qgis.core import (QgsHashedLineSymbolLayer, QgsMarkerLineSymbolLayer,  # pylint: disable=import-outside-toplevel
+                           QgsMarkerSymbol, QgsShapeburstFillSymbolLayer,
+                           QgsSimpleMarkerSymbolLayer)
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    cx, cy = 2121000.0, 6021000.0
+
+    def ring(points):
+        return "(" + ", ".join(f"{cx + x} {cy + y}" for x, y in points) + ")"
+    zigzag = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
+    polygon = kind.startswith("Polygon") or kind == "Shapeburst"
+    if polygon:
+        wkt = "POLYGON(" + ring(zigzag + [(300, 200), (-300, 200), (-300, -100)]) + ", " + \
+            ring([(-50, 100), (50, 100), (50, 150), (-50, 150), (-50, 100)]) + ")"
+    else:
+        wkt = "LINESTRING" + ring(zigzag)
+    layer = _layer("Polygon" if polygon else "LineString", [wkt], str(tmp_path / "markers.gpkg"))
+    if kind == "Shapeburst":
+        symbol_layer = QgsShapeburstFillSymbolLayer(QColor("red"), QColor("white"))
+        symbol_layer.setUseWholeShape(False)
+        symbol_layer.setMaxDistance(2.0)
+        symbol_layer.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    else:
+        if kind == "Hashes":
+            symbol_layer = QgsHashedLineSymbolLayer()
+        else:
+            symbol_layer = QgsMarkerLineSymbolLayer()
+            symbol_layer.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(
+                Qgis.MarkerShape.Circle, 1.2)]))
+        symbol_layer.setInterval(3.0)
+        if kind.endswith("Vertex"):
+            symbol_layer.setPlacements(Qgis.MarkerLinePlacement.Vertex)
+        symbol_layer.setOffset(1.5)
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol([symbol_layer]) if polygon else QgsLineSymbol([symbol_layer])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    extent = QgsRectangle(cx - 2000, cy - 2000, cx + 2000, cy + 2000)
+    exporter = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=extent, output_dir=str(out),
+                                feedback=QgsProcessingFeedback(), serve=False, fidelity_mode=1)
+    export_dir = exporter.convert_project_to_vector_tiles()  # Strict: raises on a loss
+    assert not [d for d in exporter.diagnostics.items
+                if d.code in ("Q2VT_RULE_OUTPUT_EMPTY", "Q2VT_SOURCE_LAYER_MISSING")]
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        drawn = [l for l in json.load(handle)["layers"] if l.get("source-layer")]
+    # 1.5 mm = 5.67 px (the shapeburst's 2 mm = 7.56 px) is at most half
+    # the 4 km extent's side from zoom 8 (9) on.
+    distance = 2.0 if kind == "Shapeburst" else 1.5
+    first = math.ceil(math.log2(distance * 96 / 25.4 * WORLD / 512 / 2000))
+    assert first == (9 if kind == "Shapeburst" else 8)
+    early = [l for l in drawn if l.get("minzoom", 0) < first]
+    assert early and max(l["maxzoom"] for l in early) == first
+    if kind.endswith("Vertex") or kind == "Shapeburst":  # one rule (band set) below them
+        assert {(l.get("minzoom", 0), l["maxzoom"]) for l in early} == {(0, first)}

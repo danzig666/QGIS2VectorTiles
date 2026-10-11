@@ -1,5 +1,7 @@
 """PR-09: plain circular simple markers become native MapLibre circles."""
 
+import json
+
 import pytest
 from qgis.core import (Qgis, QgsMarkerSymbol, QgsProperty, QgsSimpleMarkerSymbolLayer,
                        QgsSymbolLayer)
@@ -176,3 +178,136 @@ def test_marker_sized_by_map_unit_extents_grows_with_the_map(exporter):
     assert ex.is_zoom_curve(size)
     assert ex.evaluate_zoom_curve(size, 16.5) == pytest.approx(
         2 ** 0.5 * ex.evaluate_zoom_curve(size, 16), rel=1e-3)
+
+
+def test_data_defined_symbol_opacity_of_a_sprite_is_the_icon_opacity(exporter):
+    """QgsMarkerSymbol::renderPoint replaces the symbol's opacity by its
+    data-defined Opacity per feature: the sprite (drawn without a feature)
+    is opaque and icon-opacity reads the attribute."""
+    from qgis.core import QgsSymbol
+    symbol = _circle()
+    symbol.symbolLayer(0).setShape(Qgis.MarkerShape.Square)
+    symbol.setOpacity(0.5)
+    key = getattr(QgsSymbol.Property, "Opacity", None) or QgsSymbol.PropertyOpacity
+    symbol.setDataDefinedProperty(key, QgsProperty.fromField("q2vt_property_alpha_0_00"))
+    layer = _convert(exporter, symbol)[0]
+    opacity = layer["paint"]["icon-opacity"]
+    assert ex.referenced_fields(opacity) == {"q2vt_property_alpha_0_00"}
+    # A NULL value keeps the static opacity (valueAsDouble's default).
+    assert '["coalesce", ["get", "q2vt_property_alpha_0_00"], 50.0]' in json.dumps(opacity)
+    assert exporter.marker_symbols[layer["layout"]["icon-image"]].symbol.opacity() == 1.0
+    assert symbol.opacity() == 0.5  # the converted symbol itself is left alone
+    # Without one the static opacity stays in the sprite, applied once.
+    symbol.setDataDefinedProperty(key, QgsProperty())
+    exporter.style["layers"] = []
+    layer = _convert(exporter, symbol)[0]
+    assert layer["paint"]["icon-opacity"] == 1.0
+    assert exporter.marker_symbols[layer["layout"]["icon-image"]].symbol.opacity() == 0.5
+
+
+def test_data_defined_raster_marker_opacity_is_the_icon_opacity(exporter, tmp_path, monkeypatch):
+    """QgsRasterMarkerSymbolLayer reads its own data-defined opacity (other
+    markers ignore it): one raster layer gets it as icon-opacity; one among
+    several changes the image, so each value is its own sprite variant."""
+    from qgis.core import QgsRasterMarkerSymbolLayer
+    from PIL import Image
+    path = str(tmp_path / "cell.png")
+    Image.new("RGBA", (8, 8), (0, 0, 200, 255)).save(path)
+    raster = QgsRasterMarkerSymbolLayer(path, 6)
+    raster.setOpacity(0.4)
+    raster.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOpacity,
+                                  QgsProperty.fromField("q2vt_property_alpha_35_00"))
+    second = raster.clone()
+    layer = _convert(exporter, QgsMarkerSymbol([raster]))[0]
+    assert ex.referenced_fields(layer["paint"]["icon-opacity"]) == {"q2vt_property_alpha_35_00"}
+    # NULL keeps the layer's static opacity.
+    assert '["coalesce", ["get", "q2vt_property_alpha_35_00"], 40.0]' in \
+        json.dumps(layer["paint"]["icon-opacity"])
+    sprite = exporter.marker_symbols[layer["layout"]["icon-image"]].symbol
+    assert sprite.symbolLayer(0).opacity() == 1.0
+    asked = []
+
+    def distinct(_source, fields):
+        asked.append(fields)
+
+    monkeypatch.setattr(exporter, "_distinct_values", distinct)
+    exporter.style["layers"] = []
+    circle = _circle()
+    two = QgsMarkerSymbol([second, circle.symbolLayer(0).clone()])
+    layer = _convert(exporter, two)[0]
+    assert asked == [["q2vt_property_alpha_35_00"]]  # its values are sprite variants
+    assert layer["paint"]["icon-opacity"] == 1.0
+
+
+def _hash_marker():
+    layer = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 3.0)
+    layer.setStrokeColor(QColor("#c80000"))
+    layer.setStrokeWidth(0.6)
+    layer.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertySize,
+                                 QgsProperty.fromField("q2vt_property_size_0_00"))
+    return QgsMarkerSymbol([layer])
+
+
+def test_data_defined_hash_length_keeps_the_stroke_width(exporter, monkeypatch):
+    """A hash (line marker) with a data-defined length: QGIS draws every
+    length with the same pen, but the one image scaled by length / static
+    length drew an 8 mm hash of a 3 mm image 2.7 times as wide. Each length
+    is its own sprite now, the icon scaled with the map only (a tile holds
+    the length 4.0 as the number 4)."""
+    from q2vt_plugin.src.core.sprite_generator import SymbolImage  # pylint: disable=import-error
+    monkeypatch.setattr(exporter, "_distinct_values",
+                        lambda _source, _fields: [(4.0,), (8.0,), (2.5,)])
+    layer = _convert(exporter, _hash_marker())[0]
+    image = layer["layout"]["icon-image"]
+    assert image[:2] == ["match", ["to-string", ["get", "q2vt_property_size_0_00"]]]
+    assert image[2:8:2] == ["4", "8", "2.5"]
+    assert not ex.referenced_fields(layer["layout"]["icon-size"])
+    sizes = []
+    for name in image[3::2] + image[-1:]:  # the variants, then the static image
+        request = exporter.marker_symbols[name]
+        sprite = SymbolImage(request.symbol, name, 1, False, request.map_units_per_pixel,
+                             request.attributes)
+        sizes.append((sprite.width, sprite.height))
+    widths = [width for width, _ in sizes]
+    assert max(widths) - min(widths) <= 1  # the same stroke width (antialiased)
+    heights = [height for _, height in sizes]  # 4, 8, 2.5 mm and the static 3 mm
+    assert heights[1] > heights[0] > heights[3] > heights[2]
+    assert heights[1] - heights[0] == pytest.approx(4 * MM, abs=2)
+    assert not exporter.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+
+
+def test_data_defined_hash_length_over_the_variant_budget_is_reported(exporter, monkeypatch):
+    """More lengths than sprite variants: the image is scaled, reported."""
+    monkeypatch.setattr(exporter, "_distinct_values", lambda _source, _fields: None)
+    layer = _convert(exporter, _hash_marker())[0]
+    assert ex.referenced_fields(layer["layout"]["icon-size"]) == {"q2vt_property_size_0_00"}
+    assert any("Data-defined size of a line marker" in d.message
+               for d in exporter.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+
+
+def test_numeric_sprite_variants_match_the_viewers_number_text(exporter):
+    """Variant values are matched against ``to-string`` of the tile's
+    number, which writes JavaScript's shortest form: 0.00001 is "0.00001"
+    there, not Python's "1e-05", so such a variant never matched."""
+    _key, cases = exporter._variant_images(
+        ["q2vt_size"], [(0.00001,), (1e-7,), (4.0,), (2.5,), (1e16,), (1.5e22,)],
+        lambda combo: f"v{combo[0]}")
+    assert cases[::2] == ["0.00001", "1e-7", "4", "2.5", "10000000000000000", "1.5e+22"]
+
+
+def test_rules_drawing_the_same_hash_lengths_share_their_sprites(exporter, monkeypatch):
+    """Per-zoom rules of one hash symbol with a data-defined length (screen
+    units: the same images at every zoom) each rendered their own sprite
+    per length: 60 lengths made a sprite sheet of about 0.9 MB."""
+    monkeypatch.setattr(exporter, "_distinct_values",
+                        lambda _source, _fields: [(4.0,), (8.0,), (2.5,)])
+    layers = _convert(exporter, _hash_marker()) and _convert(exporter, _hash_marker())
+    first, second = (layer["layout"]["icon-image"] for layer in layers)
+    assert first[2:-1] == second[2:-1]  # the same variant sprites
+    assert first[-1] != second[-1]  # each rule keeps its static image
+    assert len(exporter.marker_symbols) == 3 + 2
+    other = _hash_marker()
+    other.symbolLayer(0).setStrokeWidth(0.9)
+    third = _convert(exporter, other)[-1]["layout"]["icon-image"]
+    assert not set(third[3:-1:2]) & set(first[3:-1:2])  # another pen: its own sprites

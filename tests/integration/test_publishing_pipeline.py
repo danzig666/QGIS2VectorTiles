@@ -120,8 +120,13 @@ def test_local_publication_end_to_end(project, tmp_path):
         assert rule["componentIds"], rule
     label = next(c for c in manifest["components"] if c["role"] == "label")
     assert label["dependsOnSourceLayers"] and label["dependsOnSourceLayers"][0].endswith("_vp")
-    style_ids = {l["id"] for l in json.load(open(os.path.join(rel, "style.json"), encoding="utf-8"))["layers"]}
+    style_layers = json.load(open(os.path.join(rel, "style.json"), encoding="utf-8"))["layers"]
+    style_ids = {l["id"] for l in style_layers}
     assert all(set(c["styleLayerIds"]) <= style_ids for c in manifest["components"])
+    # The project background is drawn at every zoom (MapLibre hides a layer
+    # at its maxzoom: it used to end at 22, the default browser maximum).
+    [background] = [l for l in style_layers if l["type"] == "background"]
+    assert "maxzoom" not in background and "minzoom" not in background
     assert layer["filterFields"][0]["values"] == [["K1", 1], ["K2", 1], ["Lk", 1]]
     assert layer["filterFields"][0]["nulls"] == 0
     # Tiles: feature key (exact text) and the approved filter field only.

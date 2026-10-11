@@ -161,3 +161,101 @@ def test_line_angles(plugin, wkt, distance, expected):
     line = Line(*linestring_coords(bytes(QgsGeometry.fromWkt(wkt).asWkb())))
     assert line.angle(distance) == pytest.approx(expected)
     assert QgsGeometry.fromWkt(wkt).interpolateAngle(distance) * 180 / 3.141592653589793 == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("along, expected", [
+    (-5.0, [-5, 15, 35, 55, 75, 95]),
+    (-25.0, [-25, -5, 15, 35, 55, 75, 95]),
+    (-50.0, [-50, -30, -10, 10, 30, 50, 70, 90]),
+    (5.0, [5, 25, 45, 65, 85]),
+])
+@pytest.mark.parametrize("average", [0.0, 3.0])
+def test_negative_offset_along_an_open_line_places_markers_before_it(plugin, along, expected, average):
+    """QGIS starts an open line's interval markers ``along`` from its start
+    even when that is before the start (renderPolylineInterval extends the
+    first segment); a negative offset gave no markers at all."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    from qgis.core import QgsExpression, QgsExpressionContext  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    recipe = mat.interval_points(20.0, along)
+    if average:
+        recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (("average", average),))
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 10, 100 10)"))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    points = QgsExpression(mat.interval_points_expression(recipe)).evaluate(context)
+    found = [(p.x(), p.y(), p.z()) for p in points.constGet().vertices()]
+    assert [round(x, 6) for x, _, _ in found] == expected
+    assert all(y == pytest.approx(10) for _, y, _ in found)
+    # Before the start the markers keep the first segment's direction, except
+    # that QGIS turns a marker around when its whole averaging span
+    # (+-average / 2) lies before the start.
+    for x, _, angle in found:
+        turned = average and x + average / 2 < 0
+        assert angle == pytest.approx(270 if turned else 90)
+    line = marker_points.Line(*marker_points.linestring_coords(bytes(feature.geometry().asWkb())))
+    assert marker_points.interval_positions(line, 20.0, along, average) == found
+
+
+@pytest.mark.parametrize("wkt, plain", [
+    ("LINESTRING(0 0, 0 0, 0 100)", "LINESTRING(0 0, 0 100)"),
+    ("LINESTRING(0 0, 0 0, 100 30)", "LINESTRING(0 0, 100 30)"),
+    ("LINESTRING(5 5, 5 5, 5 5, 5 50, 40 50)", "LINESTRING(5 5, 5 50, 40 50)"),
+])
+@pytest.mark.parametrize("along, average", [(-20.0, 0.0), (-40.0, 0.0), (-20.0, 6.0)])
+def test_negative_offset_along_skips_a_repeated_first_vertex(plugin, wkt, plain, along, average):
+    """QGIS skips repeated vertices (``lastPt == pt``): the markers before
+    the start follow the first segment of non-zero length, so a repeated
+    first vertex changes nothing. They were placed and turned along the
+    zero-length segment (due east)."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    from qgis.core import QgsExpression, QgsExpressionContext  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    recipe = mat.interval_points(40.0, along)
+    if average:
+        recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (("average", average),))
+    expression = QgsExpression(mat.interval_points_expression(recipe))
+
+    def markers(text):
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(text))
+        context = QgsExpressionContext()
+        context.setFeature(feature)
+        points = expression.evaluate(context)
+        found = [(p.x(), p.y(), p.z()) for p in points.constGet().vertices()]
+        line = marker_points.Line(*marker_points.linestring_coords(bytes(feature.geometry().asWkb())))
+        assert marker_points.interval_positions(line, 40.0, along, average) == found
+        return found
+    found, expected = markers(wkt), markers(plain)
+    assert len(found) == len(expected)
+    for (x, y, angle), (ex, ey, eangle) in zip(found, expected):
+        assert (x, y) == (pytest.approx(ex, abs=1e-9), pytest.approx(ey, abs=1e-9))
+        assert (angle - eangle + 180) % 360 - 180 == pytest.approx(0, abs=1e-9)
+    if wkt.startswith("LINESTRING(0 0, 0 0, 100 30)") and along == -20 and not average:
+        # the first marker as QGIS renders it: 20 m back along (100, 30)
+        assert found[0][:2] == (pytest.approx(-19.157, abs=1e-3), pytest.approx(-5.747, abs=1e-3))
+        assert found[0][2] == pytest.approx(73.301, abs=1e-3)
+
+
+@pytest.mark.parametrize("points, placement, expected", [
+    # markerAngle walks to the first / last point that differs
+    ([(0, 0), (0, 0), (0, 30)], "FirstVertex", [(0, 0.0)]),
+    ([(0, 0), (0, 0), (0, 0), (30, 15)], "FirstVertex", [(0, 63.435)]),
+    ([(0, 0), (30, 0), (30, 0)], "LastVertex", [(2, 90.0)]),
+    # a repeat of the start has no distinct neighbour before it: angle 0
+    ([(0, 0), (0, 0), (0, 30), (20, 30)], "Vertex", [(0, 0.0), (1, 90.0), (2, 45.0), (3, 90.0)]),
+    # inner repeats both take the nearest distinct neighbours
+    ([(0, 0), (0, 30), (0, 30), (20, 30)], "InnerVertices", [(1, 45.0), (2, 45.0)]),
+    # a closed line: "Vertex" averages its start with the closing segment
+    # and draws no marker on its last vertex; "FirstVertex" does neither
+    ([(0, 0), (40, 0), (40, 40), (0, 0)], "Vertex", [(0, 157.5), (1, 45.0), (2, 292.5)]),
+    ([(0, 0), (40, 0), (40, 40), (0, 0)], "FirstVertex", [(0, 90.0)]),
+])
+def test_vertex_marker_angles_skip_repeated_points(plugin, points, placement, expected):
+    """Vertex markers turned as QgsTemplatedLineSymbolLayerBase::markerAngle
+    turns them (azimuths, map y up); native:extractvertices took a repeated
+    vertex's zero-length segment (east)."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    found = marker_points.vertex_markers([x for x, _ in points], [y for _, y in points], placement)
+    assert [(index, round(angle, 3)) for index, angle in found] == expected

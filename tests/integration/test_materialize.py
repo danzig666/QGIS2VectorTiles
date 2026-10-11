@@ -11,7 +11,7 @@ from qgis.core import (Qgis, QgsFeature, QgsField, QgsFillSymbol, QgsGeometry,
                        QgsMarkerLineSymbolLayer, QgsMarkerSymbol, QgsProcessingFeedback,
                        QgsRectangle, QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer,
                        QgsVectorLayer, QgsSimpleLineSymbolLayer, QgsLineSymbolLayer)
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QPointF, QVariant, Qt
 from qgis.PyQt.QtGui import QColor
 
 from q2vt_fixtures import reset_project, to_geopackage
@@ -93,6 +93,67 @@ def test_marker_line_positions_match_qgis(plugin, tmp_path, placements):
     assert mask_difference(reference, ours) < 0.05
 
 
+def _marker_azimuth(feature) -> float:
+    """The line azimuth a materialized marker of angle 0 was turned to (its
+    rotation field holds azimuth - 90, see marker_rotation_expression)."""
+    name = next(n for n in feature.fields().names() if n.startswith("q2vt_property_angle"))
+    return (feature[name] + 90.0) % 360.0
+
+
+# Lines starting (and one ending) with a repeated vertex.
+REPEATED_LINES = ["LINESTRING(-100 -80, -100 -80, -100 -20, -40 -20)",
+                  "LINESTRING(-20 10, -20 10, -20 10, 60 50)",
+                  "LINESTRING(20 -30, 20 -30, 50 -90, 90 -60, 90 -60)"]
+
+
+@pytest.mark.parametrize("placements", [
+    Qgis.MarkerLinePlacement.FirstVertex,
+    Qgis.MarkerLinePlacement.LastVertex,
+    Qgis.MarkerLinePlacement.Vertex,
+])
+def test_vertex_markers_skip_repeated_vertices_like_qgis(plugin, tmp_path, placements):
+    """QGIS turns a vertex marker towards the nearest point that differs
+    from the vertex (markerAngle); the angle of native:extractvertices
+    takes a repeated vertex's zero-length segment, so every first-vertex
+    marker of such a line pointed east. A repeat of the start keeps its own
+    marker, at QGIS's fallback angle (east)."""
+    layer = _layer("LineString", REPEATED_LINES, str(tmp_path / "r.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(placements)
+    ml.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["marker_points"]
+    ours = ink_mask(render(outputs, EXTENT))
+    assert mask_difference(reference, ours) < 0.05
+    angles = sorted((round(f.geometry().asPoint().x()), round(f.geometry().asPoint().y()),
+                     round(_marker_azimuth(f), 3)) for f in outputs[0].getFeatures())
+    if placements == Qgis.MarkerLinePlacement.FirstVertex:
+        assert angles == [(-100, -80, 0.0), (-20, 10, 63.435), (20, -30, 153.435)]
+    elif placements == Qgis.MarkerLinePlacement.LastVertex:
+        assert angles == [(-40, -20, 90.0), (60, 50, 63.435), (90, -60, 53.13)]
+    else:  # the repeats of the start at 90 (QGIS's angle 0)
+        assert (-100, -80, 90.0) in angles and angles.count((-20, 10, 90.0)) == 2
+        assert len(angles) == 4 + 4 + 5
+
+
+def test_first_vertex_marker_on_a_ring_follows_its_first_segment(plugin, tmp_path):
+    """On a polygon ring the first-vertex marker follows the ring's first
+    segment (QGIS renders First vertex as an open line); the closed line's
+    vertex angle averaged it with the closing segment."""
+    layer = _layer("Polygon", ["POLYGON((-80 -80, 80 -80, 80 60, -80 60, -80 -80))"],
+                   str(tmp_path / "pf.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(Qgis.MarkerLinePlacement.FirstVertex)
+    ml.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [_marker_azimuth(f) for f in outputs[0].getFeatures()] == [pytest.approx(90.0)]
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.05
+
+
 def test_marker_line_on_polygon_outline(plugin, tmp_path):
     layer = _layer("Polygon", ["POLYGON((-80 -80, 80 -80, 80 60, -80 60, -80 -80))"],
                    str(tmp_path / "p.gpkg"))
@@ -121,6 +182,172 @@ def test_hash_line_converted_to_markers(plugin, tmp_path):
     reference = ink_mask(render([layer], EXTENT))
     outputs, _, _ = _export(plugin, layer, tmp_path)
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.08
+
+
+def _polygon_offset_markers(plugin, tmp_path, line, offset=1.5, fast_markers=False):
+    tmp_path = tmp_path / line.layerType()
+    tmp_path.mkdir()
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "po.gpkg"))
+    line.setInterval(3)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    return _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT, fast_markers)
+
+
+def test_screen_offset_hashes_on_polygons_are_placed_per_zoom(plugin, tmp_path):
+    """Hashes on a polygon outline with a millimetre interval and offset:
+    QGIS buffers each ring by the offset (holes grow, exteriors shrink) and
+    spaces the hashes on screen. A marker line was placed per zoom, at
+    QGIS's positions, a hashed line drawn natively along the unbuffered
+    rings at all zooms, without a report."""
+    hashes = QgsHashedLineSymbolLayer()
+    hashes.subSymbol().symbolLayer(0).setColor(QColor("black"))
+    markers = QgsMarkerLineSymbolLayer()
+    markers.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    _, rules, diags = _polygon_offset_markers(plugin, tmp_path, hashes)
+    _, marker_rules, _ = _polygon_offset_markers(plugin, tmp_path, markers)
+
+    def placed(found):
+        return sorted((r.get_attr("o"), r.visibility.min_zoom, r.recipe.params) for r in found
+                      if r.recipe is not None and r.recipe.kind == "marker_points")
+    assert len({zoom for zoom, _, _ in placed(rules)}) > 3
+    assert placed(rules) == placed(marker_rules)  # the same positions as the markers'
+    native = [r for r in rules if r.recipe is not None and r.recipe.kind == "polygon_offset"]
+    assert all(r.visibility.min_zoom >= 17 for r in native)  # beyond the tiles only
+    assert not [d for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+                if "polygon outline markers" in d.message]
+
+
+@pytest.mark.parametrize("kind", ["HashLine", "MarkerLine"])
+@pytest.mark.parametrize("ring_filter", [0, 2])
+def test_screen_offset_polygon_outline_markers_overzoom_inwards_on_the_kept_rings(
+        plugin, tmp_path, kind, ring_filter):
+    """Past the last tiles, millimetre-interval hashes or markers on polygon
+    outlines are placed by the browser along the rings: the native rule
+    took the raw rings, which ignored the ring filter (interior rings only
+    drew the exterior too) and put the screen offset on the right-hand side
+    of each ring as stored (outwards on a counter-clockwise exterior)."""
+    line = QgsHashedLineSymbolLayer() if kind == "HashLine" else QgsMarkerLineSymbolLayer()
+    if kind == "MarkerLine":
+        line.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    datasets, rules, _ = _polygon_offset_markers(plugin, tmp_path, line)
+    over = [(dataset, rule) for dataset, rule in zip(datasets, rules)
+            if rule.visibility is not None and rule.visibility.min_zoom >= 17]
+    assert over
+    for dataset, rule in over:
+        assert rule.recipe is not None and rule.recipe.kind == "polygon_offset"
+        assert rule.recipe.param("rhr") and rule.recipe.param("ring_filter") == ring_filter
+        rings = [QgsGeometry(f.geometry()) for f in dataset.getFeatures()]
+        rings = [part for ring in rings for part in ring.asMultiPolyline()] \
+            if rings and rings[0].isMultipart() else [ring.asPolyline() for ring in rings]
+        assert len(rings) == (1 if ring_filter == 2 else 3)
+        for ring in rings:
+            area = sum(a.x() * b.y() - b.x() * a.y() for a, b in zip(ring, ring[1:]))
+            hole = max(p.x() for p in ring) < -20 and min(p.y() for p in ring) > -40
+            assert (area > 0) == hole  # holes counter-clockwise, exteriors clockwise
+            assert hole or ring_filter != 2
+
+
+@pytest.mark.parametrize("kind", ["HashLine", "MarkerLine"])
+@pytest.mark.parametrize("ring_filter,offset", [(2, 0.0), (0, 1.5)])
+def test_fast_polygon_outline_markers_keep_the_ring_filter_and_inward_offset(
+        plugin, tmp_path, kind, ring_filter, offset):
+    """With fast marker lines (or over the output budget) millimetre-interval
+    hashes or markers on polygon outlines are not placed per zoom: the
+    browser draws them along the rings. That native rule took the raw rings,
+    without the ring filter (interior rings only drew the exteriors too) and
+    with the screen offset on the right-hand side of each ring as stored."""
+    line = QgsHashedLineSymbolLayer() if kind == "HashLine" else QgsMarkerLineSymbolLayer()
+    if kind == "MarkerLine":
+        line.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    datasets, rules, diags = _polygon_offset_markers(plugin, tmp_path, line, offset,
+                                                     fast_markers=True)
+    assert rules and diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    for dataset, rule in zip(datasets, rules):
+        assert rule.recipe is not None and rule.recipe.kind == "polygon_offset"
+        assert rule.recipe.param("ring_filter") == ring_filter
+        assert bool(rule.recipe.param("rhr")) == bool(offset)
+        rings = [QgsGeometry(f.geometry()) for f in dataset.getFeatures()]
+        rings = [part for ring in rings for part in ring.asMultiPolyline()] \
+            if rings and rings[0].isMultipart() else [ring.asPolyline() for ring in rings]
+        assert len(rings) == (1 if ring_filter == 2 else 3)
+
+
+def _hash_line(placements):
+    hl = QgsHashedLineSymbolLayer()
+    hl.setPlacements(placements)
+    hl.setHashLength(14)
+    hl.setHashLengthUnit(Qgis.RenderUnit.Pixels)
+    hl.subSymbol().symbolLayer(0).setColor(QColor("black"))
+    hl.subSymbol().symbolLayer(0).setWidth(2)
+    hl.subSymbol().symbolLayer(0).setWidthUnit(Qgis.RenderUnit.Pixels)
+    return hl
+
+
+def test_hash_line_keeps_a_data_defined_hash_angle_and_length(plugin, tmp_path):
+    """Hash angle and length read from a field were replaced by the static
+    values when the hashed line became a marker line."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "hd.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Interval)
+    hl.setInterval(25)
+    hl.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineAngle,
+                              QgsProperty.fromExpression('"id" * 20 + 40'))
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineDistance,
+                              QgsProperty.fromExpression('"id" * 6 + 22'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hl])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert exact and all(r.recipe.kind == "marker_points" for _, r in exact)
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1
+    # Each length is its own sprite (MapLibreConverter._stroke_sized).
+    assert not any("Data-defined size of a line marker" in d.message
+                   for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+
+
+def test_hash_line_keeps_a_data_defined_interval(plugin, tmp_path):
+    """A data-defined interval on a hashed line was placed exactly at the
+    static interval, without a report; it now takes the marker line's path
+    for data-defined intervals (browser spacing, reported)."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "hi.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Interval)
+    hl.setInterval(3)
+    hl.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hl.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval,
+                              QgsProperty.fromExpression('"id" + 7'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hl])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
+    assert any("Data-defined interval" in d.message for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+    converted = rules[0].rule.symbol().symbolLayer(0)
+    assert converted.layerType() == "MarkerLine"
+    assert converted.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyInterval)
+
+
+@pytest.mark.parametrize("ring_filter", [1, 2])
+def test_hash_line_vertices_keep_the_ring_filter(plugin, tmp_path, ring_filter):
+    """Vertex hashes on the exterior ring only (or the holes only) were
+    drawn on every ring."""
+    from qgis.core import QgsLineSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83),"
+                               "(-40 -40, 10 -40, 10 10, -40 10, -40 -40))"],
+                   str(tmp_path / "hr.gpkg"))
+    hl = _hash_line(Qgis.MarkerLinePlacement.Vertex)
+    hl.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([hl])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert exact and all(r.recipe.param("ring_filter") == ring_filter for _, r in exact)
+    ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1
 
 
 @pytest.mark.parametrize("angle,offset", [(0, 0), (0, 3), (90, 2)])
@@ -168,6 +395,111 @@ def test_rotated_map_unit_hatch_keeps_angle_and_spacing(plugin, tmp_path):
     steps = sorted(offsets)
     gaps = {round(b - a, 6) for a, b in zip(steps, steps[1:])}
     assert gaps == {15.0}
+
+
+def _export_zooms(plugin, layer, tmp_path, low, high, extent, fast_markers=False):
+    """Flatten and export ``layer`` for zooms ``low``-``high`` within ``extent``."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity.diagnostics import DiagnosticCollector
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags,
+                           fast_markers=fast_markers).flatten_all_rules()
+    utils = tmp_path / f"utils{low}_{high}"
+    utils.mkdir()
+    layers, rules = RulesExporter(rules, extent, low, high, str(utils), 0, QgsProcessingFeedback(),
+                                  diagnostics=diags).export()
+    by_name = {l.name(): l for l in layers}
+    return [by_name[rule.output_dataset] for rule in rules], rules, diags
+
+
+def _map_unit_hatch(angle, distance):
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(angle)
+    lp.setDistance(distance)
+    lp.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    return QgsFillSymbol([lp])
+
+
+@pytest.mark.parametrize("angle", [135, 120])
+def test_hatch_line_touching_a_corner_keeps_the_hatch(plugin, tmp_path, angle):
+    """At 90-180 degrees the first hatch line passes through the bounding box
+    corner the hatch is anchored at: on a rectangle it touches the polygon
+    there, the clip added a point, and the mixed collection could not be
+    written to the line dataset: the rectangle lost its whole hatch."""
+    x, y = 2110000.0, 6030000.0
+    wkts = [f"POLYGON(({x0} {y}, {x0 + w} {y}, {x0 + w} {y + h}, {x0} {y + h}, {x0} {y}))"
+            for x0, w, h in ((x, 300, 200), (x + 1000, 301, 204), (x + 2000, 300, 200))]
+    layer = _layer("Polygon", wkts, str(tmp_path / "corner.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(angle, 9)))
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16,
+                                          QgsRectangle(x - 100, y - 100, x + 2400, y + 300))
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = {}  # length per rectangle (1000 m apart)
+    for feature in outputs[0].getFeatures():
+        assert feature.geometry().type() == Qgis.GeometryType.Line
+        index = round((feature.geometry().boundingBox().xMinimum() - x) / 1000)
+        hatch[index] = hatch.get(index, 0.0) + feature.geometry().length()
+    assert sorted(hatch) == [0, 1, 2]
+    for index, (w, h) in enumerate(((300, 200), (301, 204), (300, 200))):
+        assert hatch[index] == pytest.approx(w * h / 9, rel=0.03)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+
+
+@pytest.mark.parametrize("angle", [315, -45])
+def test_hatch_first_chunk_touching_a_corner_keeps_the_hatch(plugin, tmp_path, angle):
+    """At 270-360 degrees the line through the anchor corner is the first one
+    clipped: when its chunk of lines only touched the polygon there, the
+    collected hatch took that point's type and lost every line."""
+    wkts = [f"POLYGON(({x} {y}, {x + w} {y}, {x + w} {y + h}, {x} {y + h}, {x} {y}))"
+            for x, y, w, h in ((2042854, 6077878, 32, 1899), (2044854, 6077878, 19, 1865))]
+    layer = _layer("Polygon", wkts, str(tmp_path / "first.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(angle, 9)))
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16,
+                                          QgsRectangle(2042000, 6077000, 2046000, 6080000))
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = {}
+    for feature in outputs[0].getFeatures():
+        geometry = feature.geometry()
+        assert geometry.type() == Qgis.GeometryType.Line
+        assert not any(part.isEmpty() for part in geometry.constParts())
+        index = round((geometry.boundingBox().xMinimum() - 2042854) / 2000)
+        hatch[index] = hatch.get(index, 0.0) + geometry.length()
+    for index, (w, h) in enumerate(((32, 1899), (19, 1865))):
+        assert hatch.get(index, 0.0) == pytest.approx(w * h / 9, rel=0.03)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+
+
+def test_hatch_of_a_large_polygon_is_kept(plugin, tmp_path):
+    """A polygon needing more than 20,000 hatch lines got no hatch at all,
+    unreported (the per-feature cap returned NULL)."""
+    x, y = 2110000.0, 6030000.0
+    side = 75000.0  # 5 m spacing: about 21,000 lines
+    layer = _layer("Polygon", [f"POLYGON(({x} {y}, {x + side} {y}, {x + side} {y + side}, "
+                               f"{x} {y + side}, {x} {y}))"], str(tmp_path / "big.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(45, 5)))
+    view = QgsRectangle(x + 1000, y + 1000, x + 1500, y + 1500)
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16, view)
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = QgsGeometry.unaryUnion([f.geometry() for f in outputs[0].getFeatures()])
+    inside = hatch.intersection(QgsGeometry.fromRect(view))
+    # 500 x 500 m at 5 m spacing: 100 diagonals' worth of lines
+    assert inside.length() == pytest.approx(500 * 500 / 5, rel=0.02)
+    assert not diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_hatch_over_the_budget_is_a_texture(plugin, tmp_path, monkeypatch):
+    """Hatch lines past the output budget: drawn as a texture and reported,
+    never dropped."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 1000)
+    layer = _layer("Polygon", ["POLYGON((-100 -100, 100 -100, 100 100, -100 100, -100 -100))"],
+                   str(tmp_path / "hb.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(30, 0.2)))  # about 1,400 lines
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not any(r.recipe for r in rules)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
 
 
 @pytest.mark.parametrize("disp_x,disp_y,off_x,off_y", [(0, 0, 0, 0), (0, 0, 3, 2), (5, 0, 0, 0), (0, 4, 0, 0), (5, 0, 3, 2)])
@@ -228,19 +560,25 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     exporter.context.reference_zoom = 14
     exporter._convert_symbol(rules[0].rule.symbol(), "s", "src", "q2vt", 14, 24)
     pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
-    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [15, 16, 17, 18, 19]
+    # Up to the web map's last zoom (22): scaled with the map, the markers'
+    # hairline stroke would grow with it.
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == list(range(15, 23))
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
-    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag);
-    # they start at each feature's anchor ("Align pattern to: Feature").
-    assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature"}
+    # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag),
+    # scaled with the map above the last one; they start at each feature's
+    # anchor ("Align pattern to: Feature").
+    assert exporter.style["layers"][0]["metadata"] == {exporter.PATTERN_ANCHOR_FLAG: "feature",
+                                                       exporter.PATTERN_ZOOM_FLAG: 22}
 
 
 def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plugin, tmp_path):
     """A map exported from zoom 0 (the Publish window's default): the
     per-zoom textures are capped at 12; they were counted from zoom 0, so
     zoom 11's texture - a sub-pixel tint of nothing - was drawn at every
-    zoom above it and the fill vanished. The highest zooms get them."""
+    zoom above it and the fill vanished. The highest zooms up to tile
+    zoom + 3 get them, and the zooms of the web map above (the markers'
+    hairline stroke would grow with the map)."""
     from qgis.core import QgsPointPatternFillSymbolLayer
     layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
                    str(tmp_path / "pp.gpkg"))
@@ -265,10 +603,60 @@ def test_map_unit_pattern_textures_reach_the_last_zooms_of_a_map_from_zoom_0(plu
     exporter._convert_symbol(layer.renderer().symbol(), "s", "src", "q2vt", 0, 24)
     pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
     zooms = pattern[3::2]
-    assert len(pattern[2::2]) == exporter.MAX_PATTERN_ZOOMS
-    assert zooms[-1] == 18 and zooms == list(range(8, 19))  # up to maxzoom + 2, the first below
-    cell = exporter.pattern_images[pattern[-1]].img_1x  # zoom 18: squares 3 m in 5 m cells
-    assert cell.getbbox() is not None and cell.size[0] >= 8
+    assert len(pattern[2::2]) == exporter.MAX_PATTERN_ZOOMS + 4  # 19-22 on top
+    assert zooms == list(range(8, 23))  # up to the view's zoom 22, the first below
+    cell = exporter.pattern_images[pattern[-1]].img_1x  # zoom 22: squares 3 m in 5 m cells
+    assert cell.getbbox() is not None and cell.size[0] == pytest.approx(2 * 5 / 0.0373, abs=3)
+
+
+@pytest.mark.parametrize("stroke_unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters])
+def test_coarse_map_unit_pattern_textures_stop_before_outgrowing_the_sprite(plugin, tmp_path,
+                                                                            stroke_unit):
+    """A tiling map-unit pattern (60 m squares 60 m apart) exported from
+    zoom 0 to 16: its cell doubles with every zoom, and the overzoom
+    textures up to zoom 22 made the sprite renderer give up (a cell
+    thousands of px wide), failing the export. The overzoom textures stop
+    under MAX_OVERZOOM_CELL_PX; the last one serves the zooms above. All
+    in map units, the textures stop at max zoom + 2 and the patched MapLibre
+    scales the last one with the map; with a millimetre stroke (which would
+    grow with it) they go on while they fit."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-500 -500, 500 -500, 500 500, -500 500, -500 -500))"],
+                   str(tmp_path / "tiles.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 60)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeWidth(3 if stroke_unit == Qgis.RenderUnit.MapUnits else 0.5)
+    marker.symbolLayer(0).setStrokeWidthUnit(stroke_unit)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(60)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    reset_project(layer)
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    exporter._convert_symbol(layer.renderer().symbol(), "s", "src", "q2vt", 0, 24)
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    zooms = pattern[3::2]
+    # The exported zooms' textures as before (up to maxzoom + 2), then the
+    # overzoom ones while they fit.
+    assert zooms[:11] == list(range(8, 19))
+    if stroke_unit == Qgis.RenderUnit.MapUnits:
+        assert zooms[-1] == 18
+        assert exporter.style["layers"][0]["metadata"][exporter.PATTERN_ZOOM_FLAG] == 18
+    else:
+        assert 18 < zooms[-1] < 22
+    cells = [exporter.pattern_images[name].img_2x for name in pattern[2::2]]
+    assert max(cells[-1].size) <= exporter.MAX_OVERZOOM_CELL_PX
+    assert set(exporter.pattern_images) == set(pattern[2::2])  # none left over
 
 
 def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
@@ -301,6 +689,363 @@ def test_screen_unit_pattern_fill_is_drawn_at_true_size(plugin):
     # QGIS's texture brush: two spacings, truncated to whole pixels.
     assert cell.size == (int(2 * px), int(2 * px))
     assert exporter._screen_scale() == exporter.TEXTURE_SCREEN_SCALE  # reset afterwards
+
+
+def _style_exporter(mc, maxzoom=16, reference_zoom=0, **profile):
+    """A style converter for one symbol, as for a map exported from zoom 0
+    (the Publish window's default) to ``maxzoom``."""
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile(**profile)
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, maxzoom
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = reference_zoom
+    return exporter
+
+
+def _hatch(distance, distance_unit, width, width_unit, viewport):
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(distance)
+    lp.setDistanceUnit(distance_unit)
+    line = lp.subSymbol().symbolLayer(0)
+    line.setColor(QColor("red"))
+    line.setWidth(width)
+    line.setWidthUnit(width_unit)
+    if viewport:
+        lp.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    return lp
+
+
+def _map_marker_point_pattern():
+    """Markers 1.5 m wide, 4 mm apart; the marker keeps its mm stroke
+    width, so its layer mixes units (outputUnit() is Unknown)."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Circle, 1.5)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.symbolLayer(0).setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(4)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    return pp
+
+
+MU, MM = Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters
+
+
+@pytest.mark.parametrize("make", [
+    lambda: _hatch(3, MU, 0.4, MM, True),  # viewport hatch, map-unit spacing
+    lambda: _hatch(3, MM, 0.5, MU, False),  # mm spacing, map-unit line width
+    lambda: _hatch(3, MM, 0.5, MU, True),
+    _map_marker_point_pattern,  # map-unit markers in a mm grid
+], ids=["viewport-hatch", "hatch-map-width", "viewport-hatch-map-width", "point-map-marker"])
+def test_patterns_with_any_map_unit_part_get_a_texture_per_zoom(plugin, make):
+    """Map-unit lengths the old check missed (a hatch's distanceUnit, a
+    sub-symbol layer mixing units): the pattern became one screen texture
+    with its map-unit parts drawn at the style's first zoom, 0 from the
+    Publish window - map-unit markers 2e-5 px (an empty texture), a viewport
+    hatch a fixed cropped preview, a hatch width a constant hairline.
+    A map-unit spacing scales with the map (and above its last texture);
+    a screen-unit spacing stays exact, only the marker or line width steps
+    per zoom (drawn for the middle of the zoom)."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    exporter = _style_exporter(mc)
+    layer = make()
+    kind = layer.layerType()
+    screen_spacing = layer.distanceUnit() == MM if kind == "LinePatternFill" else True
+    assert exporter._pattern_uses_map_units(layer)
+    symbol = QgsFillSymbol([layer])
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    # Up to the web map's last zoom: scaled with the map, their mm line
+    # width or map-unit marker in a mm grid would grow with it.
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[-2] == 22
+    metadata = layer_def.get("metadata", {})
+    if screen_spacing:
+        assert metadata.get(exporter.SCREEN_PATTERN_FLAG) is True
+        assert exporter.PATTERN_ZOOM_FLAG not in metadata
+    else:
+        assert exporter.SCREEN_PATTERN_FLAG not in metadata
+        assert metadata[exporter.PATTERN_ZOOM_FLAG] == 22
+    assert not exporter.context.diagnostics.by_code("Q2VT_PATTERN_APPROXIMATE")
+    names = dict(zip(pattern[3::2], pattern[4::2]))
+    alpha = exporter.pattern_images[names[18]].img_1x.getchannel("A")
+    assert alpha.getextrema()[1] > 200
+    if kind == "PointPatternFill":
+        # Dots 1.5 m wide at zoom 18.5 (the middle of the texture's zoom) in
+        # an exact 4 mm grid.
+        coverage = sum(1 for a in alpha.getdata() if a > 128) / (alpha.width * alpha.height)
+        dot = 1.5 * 512 * 2 ** 18.5 / 40075016.69
+        grid = 4 * 96 / 25.4
+        assert coverage == pytest.approx(math.pi / 4 * dot ** 2 / grid ** 2, rel=0.25)
+        assert alpha.width == pytest.approx(grid, abs=1)
+
+
+def _map_unit_point_pattern(spacing, size, stroke=False):
+    """Squares and spacing in map units; without a (hairline) stroke the
+    whole pattern scales with the map."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, size)
+    marker.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
+    if not stroke:
+        marker.symbolLayer(0).setStrokeStyle(0)  # Qt.NoPen
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(spacing)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    return QgsFillSymbol([pp])
+
+
+def test_map_unit_pattern_textures_stop_at_the_size_budgets(plugin):
+    """Map-unit textures above tile zoom + 3 (the last one scaled with the
+    map would do, only less sharp) stop at half MAX_PATTERN_TEXTURE_PX,
+    the others at MAX_PATTERN_TEXTURE_PX: the one below serves the zooms
+    above, with the layer's PATTERN_ZOOM_FLAG."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    symbol = _map_unit_point_pattern(40, 10)
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    assert exporter.style["layers"][0]["paint"]["fill-pattern"][-2] == 18
+    assert exporter.style["layers"][0]["metadata"][exporter.PATTERN_ZOOM_FLAG] == 18
+    exporter = _style_exporter(mc, maxzoom=18, view_max_zoom=22.0)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    # Two 40 m cells: 268 px at zoom 19, 536 px at zoom 20.
+    assert pattern[-2] == 19
+    assert layer_def["metadata"][exporter.PATTERN_ZOOM_FLAG] == 19
+    assert exporter.MAX_PATTERN_TEXTURE_PX <= 512  # 1024 px in the 2x sprite
+    assert max(exporter.pattern_images[pattern[-1]].img_1x.size) <= exporter.MAX_PATTERN_TEXTURE_PX
+    assert len(exporter.pattern_images) == len(pattern[2::2])
+    # A hairline stroke would grow with the map: textures up to the view's
+    # last zoom, here up to MAX_PATTERN_TEXTURE_PX.
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    exporter._convert_symbol(_map_unit_point_pattern(40, 10, stroke=True), "s", "src", "q2vt", 0, 24)
+    assert exporter.style["layers"][0]["paint"]["fill-pattern"][-2] == 19
+    assert exporter.style["layers"][0]["metadata"][exporter.PATTERN_ZOOM_FLAG] == 19
+
+
+def test_patterns_that_scale_with_the_map_are_told_apart(plugin):
+    """Only patterns whose every drawn length is in map units scale with the
+    map above their last texture; a mm line width, a hairline or mm marker
+    stroke would grow with it."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from qgis.core import QgsRasterFillSymbolLayer, QgsSVGFillSymbolLayer
+    has_screen = mc.QgisMapLibreStyleExporter._pattern_has_screen_lengths
+    raster = QgsRasterFillSymbolLayer("")
+    assert has_screen(raster)  # width 0: the image's pixel size
+    raster.setWidth(80)
+    raster.setWidthUnit(MU)
+    assert not has_screen(raster)
+    svg = QgsSVGFillSymbolLayer("")
+    svg.setPatternWidth(20)
+    svg.setPatternWidthUnit(MU)
+    assert has_screen(svg)  # 0.2 mm SVG stroke
+    svg.setSvgStrokeWidthUnit(MU)
+    assert not has_screen(svg)
+    assert has_screen(_hatch(3, MU, 0.4, MM, True))
+    assert not has_screen(_hatch(3, MU, 0.4, MU, True))
+    assert has_screen(_map_unit_point_pattern(40, 10, stroke=True).symbolLayer(0))
+    assert not has_screen(_map_unit_point_pattern(40, 10).symbolLayer(0))
+
+
+def test_map_unit_pattern_textures_of_a_style_fit_the_sprite_budget(plugin, monkeypatch):
+    """Per-zoom textures of many map-unit patterns: with textures up to
+    zoom 22, ten large cells made a 2x sprite of 38 Mpx, over the canvas
+    limit of mobile browsers (the sprite does not load: no icon or pattern
+    is drawn). Past MAX_PATTERN_SPRITE_PX each pattern keeps the textures
+    it has, at least one."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    for i in range(10):
+        exporter._convert_symbol(_map_unit_point_pattern(60 + 5 * i, 20), f"s{i}", "src", "q2vt", 0, 24)
+    area = sum(img.img_1x.size[0] * img.img_1x.size[1] for img in exporter.pattern_images.values())
+    assert area <= exporter.MAX_PATTERN_SPRITE_PX
+    assert 4 * exporter.MAX_PATTERN_SPRITE_PX <= 8_000_000  # 2x sprite, half the iOS limit
+    patterns = [layer["paint"]["fill-pattern"] for layer in exporter.style["layers"]]
+    assert all(p[-2] == 18 for p in patterns)
+    # A lower budget: the later patterns stop earlier, none is lost.
+    monkeypatch.setattr(mc.QgisMapLibreStyleExporter, "MAX_PATTERN_SPRITE_PX", area // 2)
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    for i in range(10):
+        exporter._convert_symbol(_map_unit_point_pattern(60 + 5 * i, 20), f"s{i}", "src", "q2vt", 0, 24)
+    area = sum(img.img_1x.size[0] * img.img_1x.size[1] for img in exporter.pattern_images.values())
+    assert area <= exporter.MAX_PATTERN_SPRITE_PX
+    layers = exporter.style["layers"]
+    assert len(layers) == 10 and all("fill-pattern" in layer["paint"] for layer in layers)
+    last = [layer["metadata"][exporter.PATTERN_ZOOM_FLAG] for layer in layers]
+    assert last[0] == 18 and last[-1] < 18
+
+
+@pytest.mark.parametrize("size,zooms,stops_below", [(60, (14, 19), 22), (440, (0, 16), 19)])
+def test_screen_grid_of_huge_map_unit_markers_exports(plugin, size, zooms, stops_below):
+    """Squares of 60 m (or 440 m) in a 10 mm grid: their per-zoom textures
+    go up to the web map's last zoom, and the marker outgrew the sprite
+    renderer (4096 px) below tile zoom + 3: the whole export failed. The
+    textures stop at the last marker that can be drawn (the cells are
+    covered there), which serves the zooms above."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, size)
+    marker.symbolLayer(0).setSizeUnit(MU)
+    marker.symbolLayer(0).setStrokeStyle(Qt.PenStyle.NoPen)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(10)
+        getattr(pp, f"set{name}Unit")(MM)
+    exporter = _style_exporter(mc, maxzoom=zooms[1], reference_zoom=zooms[0])
+    exporter._convert_symbol(QgsFillSymbol([pp]), "s", "src", "q2vt", zooms[0], 24)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[-2] < stops_below
+    assert layer_def["metadata"][exporter.SCREEN_PATTERN_FLAG] is True
+    grid = 10 * 96 / 25.4
+    cell = exporter.pattern_images[pattern[-1]].img_1x
+    assert cell.size[0] == pytest.approx(grid, abs=1)
+    assert cell.getchannel("A").getextrema() == (255, 255)  # covered by the marker
+    assert any("stops growing" in d.message
+               for d in exporter.context.diagnostics.by_code("Q2VT_PATTERN_MAP_UNITS"))
+
+
+def test_zero_map_unit_lengths_keep_a_screen_pattern_exact(plugin):
+    """A 4 mm grid of 1.5 mm squares whose (zero) displacement has map units
+    as its unit: counted as a map-unit pattern by its units alone, it got a
+    texture per zoom scaled with the map (its spacing 0.75x-1.33x of QGIS's
+    between zooms). QGIS draws nothing of it in map units: one exact screen
+    texture. Zero offsets and widths count as none too."""
+    from qgis.core import (QgsPointPatternFillSymbolLayer, QgsRasterFillSymbolLayer,
+                           QgsLinePatternFillSymbolLayer as LinePattern)
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 1.5)
+    marker.symbolLayer(0).setSizeUnit(MM)
+    marker.symbolLayer(0).setOffsetUnit(MU)  # zero offset
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(4)
+        getattr(pp, f"set{name}Unit")(MM)
+    for name in ("DisplacementX", "DisplacementY", "OffsetX", "OffsetY"):
+        getattr(pp, f"set{name}Unit")(MU)
+    symbol = QgsFillSymbol([pp])
+    pp, marker = symbol.symbolLayer(0), pp.subSymbol()
+    exporter = _style_exporter(mc)
+    assert not exporter._pattern_uses_map_units(pp)
+    assert not exporter._pattern_spacing_in_map_units(pp)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", 0, 24)
+    layer_def = exporter.style["layers"][0]
+    assert isinstance(layer_def["paint"]["fill-pattern"], str)
+    assert layer_def["metadata"][exporter.SCREEN_PATTERN_FLAG] is True
+    assert exporter.PATTERN_ZOOM_FLAG not in layer_def["metadata"]
+    # A displacement that is not zero is drawn in map units.
+    pp.setDisplacementX(2)
+    assert exporter._pattern_uses_map_units(pp) and exporter._pattern_spacing_in_map_units(pp)
+    pp.setDisplacementX(0)
+    marker.symbolLayer(0).setOffset(QPointF(0, 1))
+    assert exporter._pattern_uses_map_units(pp) and not exporter._pattern_spacing_in_map_units(pp)
+    # Width 0: the image's own pixel size, whatever its unit.
+    raster = QgsRasterFillSymbolLayer("")
+    raster.setWidthUnit(MU)
+    raster.setOffsetUnit(MU)
+    assert not exporter._pattern_uses_map_units(raster)
+    raster.setWidth(80)
+    assert exporter._pattern_uses_map_units(raster)
+    # A hatch with a zero map-unit offset and a mm line; a map-unit hairline
+    # (width 0) is one device pixel.
+    hatch = _hatch(3, MM, 0.4, MM, False)
+    assert isinstance(hatch, LinePattern)
+    hatch.setOffsetUnit(MU)
+    assert not exporter._pattern_uses_map_units(hatch)
+    hatch.subSymbol().symbolLayer(0).setWidth(0)
+    hatch.subSymbol().symbolLayer(0).setWidthUnit(MU)
+    assert not exporter._pattern_uses_map_units(hatch)
+
+
+@pytest.mark.parametrize("min_zoom,max_zoom,first,last", [
+    (15.8525, 17.1744, 15, 17),  # a rule's 1:5000-1:2000, inside the tile zooms
+    (18.1744, 19.9114, 18, 19),  # 1:1000-1:300, only on overzoomed tiles
+])
+def test_map_unit_texture_of_a_fractional_scale_limit_is_drawn_for_its_tile_zoom(
+        plugin, min_zoom, max_zoom, first, last):
+    """MapLibre draws fill-pattern in the pixels of the tile's integer zoom:
+    the first texture of a rule shown from 1:5000 (zoom 15.85) was rendered
+    for zoom 15.85 and drawn in zoom 15's pixels, 1.8x too large up to
+    zoom 16; the last one's PATTERN_ZOOM_FLAG (18.17) was not a zoom whose
+    pixels MapLibre draws in. Each texture is rendered for the integer zoom
+    it is drawn in."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    symbol = _map_unit_point_pattern(12, 4.8)
+    exporter = _style_exporter(mc)
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", min_zoom, max_zoom)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == list(range(first + 1, last + 1))
+    assert layer_def["metadata"][exporter.PATTERN_ZOOM_FLAG] == last
+    assert isinstance(layer_def["metadata"][exporter.PATTERN_ZOOM_FLAG], int)
+    # 12 m cells at the first texture's integer zoom (fill-pattern starts
+    # at the rule's own zoom).
+    cell = exporter.pattern_images[pattern[2]].img_1x
+    assert cell.size[0] == pytest.approx(12 * 512 * 2 ** first / 40075016.69, abs=1)
+
+
+def test_fine_map_unit_hatch_gets_sharp_textures_above_tile_zoom_3(plugin):
+    """A hatch of line markers 5 m apart with a 0.1 m stroke, all in map
+    units, exported 0-16: its last texture (zoom 18, a sub-pixel stroke)
+    was magnified up to the web map's zoom 22, a wide pale band where QGIS
+    draws a thin line. Textures go on above tile zoom + 3 while their cells
+    are small; they have a budget of their own, so the textures of the
+    exported zooms of the patterns after keep theirs."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc
+
+    def hatch(spacing):
+        pp = QgsPointPatternFillSymbolLayer()
+        marker = _marker(Qgis.MarkerShape.Line, 7)
+        line = marker.symbolLayer(0)
+        line.setSizeUnit(MU)
+        line.setAngle(45)
+        line.setStrokeColor(QColor("red"))
+        line.setStrokeWidth(0.1)
+        line.setStrokeWidthUnit(MU)
+        pp.setSubSymbol(marker)
+        for name in ("DistanceX", "DistanceY"):
+            getattr(pp, f"set{name}")(spacing)
+            getattr(pp, f"set{name}Unit")(MU)
+        return QgsFillSymbol([pp])
+
+    exporter = _style_exporter(mc, view_max_zoom=22.0)
+    exporter._convert_symbol(hatch(5), "s", "src", "q2vt", 0, 24)
+    layer_def = exporter.style["layers"][0]
+    pattern = layer_def["paint"]["fill-pattern"]
+    assert exporter.SCREEN_PATTERN_FLAG not in layer_def["metadata"]
+    # 17 px cells at zoom 18, 134 px at 21; 268 px at 22 is over half
+    # MAX_PATTERN_TEXTURE_PX: zoom 21's texture is scaled there.
+    assert pattern[3::2] == list(range(8, 22))
+    assert layer_def["metadata"][exporter.PATTERN_ZOOM_FLAG] == 21
+    names = dict(zip(pattern[3::2], pattern[4::2]))
+    for zoom in (19, 20, 21):
+        cell = exporter.pattern_images[names[zoom]].img_1x
+        assert cell.size[0] == pytest.approx(5 * 512 * 2 ** zoom / 40075016.69, abs=1)
+    # The stroke: 0.7 px in zoom 18's 2x texture (pale, antialiased), which
+    # was magnified 16x at zoom 22; 2.7 px in zoom 21's.
+    alpha = [exporter.pattern_images[names[zoom]].img_2x.getchannel("A").getextrema()[1]
+             for zoom in (18, 21)]
+    assert alpha[0] < 200 < alpha[1]
+    # Many such hatches: the overzoom textures stop at their own budget,
+    # the exported zooms' textures of a pattern converted after are whole.
+    for i in range(12):
+        exporter._convert_symbol(hatch(5 + 0.2 * i), f"h{i}", "src", "q2vt", 0, 24)
+    exporter._convert_symbol(_map_unit_point_pattern(60, 20), "coarse", "src", "q2vt", 0, 24)
+    layers = exporter.style["layers"]
+    assert exporter._overzoom_pattern_px <= exporter.MAX_OVERZOOM_PATTERN_SPRITE_PX
+    assert min(layer["metadata"][exporter.PATTERN_ZOOM_FLAG] for layer in layers) == 18
+    assert layers[-1]["paint"]["fill-pattern"][-2] == 18
 
 
 @pytest.mark.parametrize("curved,repeated,head_type", [
@@ -379,6 +1124,49 @@ def test_arrow_outline_is_a_line_on_the_arrow_rings(plugin, tmp_path):
     layer_defs = exporter.style["layers"]
     assert [d["type"] for d in layer_defs] == ["fill", "line"]
     assert "fill-outline-color" not in layer_defs[0]["paint"]
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters])
+def test_arrow_fill_offset_grows_with_the_map_in_map_units(plugin, tmp_path, unit):
+    """An arrow fill's offset becomes a viewport translate. In map units it
+    was one pixel value taken at the style's first zoom: 0.0002 px for a
+    12 m offset exported from zoom 0, so the shifted fill (a drop shadow)
+    stayed under the arrow at every zoom. It doubles with every zoom now."""
+    from qgis.core import QgsArrowSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from qgis.PyQt.QtCore import QPointF
+    layer = _layer("LineString", ["LINESTRING(-100 0, 100 0)"], str(tmp_path / "arrow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowWidth", 20), ("ArrowStartWidth", 20), ("HeadLength", 50),
+                        ("HeadThickness", 30)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    arrow.setIsCurved(False)
+    fill = arrow.subSymbol().symbolLayer(0)
+    fill.setStrokeStyle(0)
+    fill.setOffset(QPointF(12, -6))
+    fill.setOffsetUnit(unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules[0].recipe.kind == "arrow_polygons" and rules[0].translate[:2] == (12, -6)
+
+    exporter = _style_exporter(mc)
+    layer_defs = [{"type": "fill", "paint": {}}]
+    exporter._apply_translate(layer_defs, rules[0].translate)
+    translate = layer_defs[0]["paint"]["fill-translate"]
+    assert layer_defs[0]["paint"]["fill-translate-anchor"] == "viewport"
+    if unit == Qgis.RenderUnit.Millimeters:
+        assert translate == pytest.approx([12 * 96 / 25.4, -6 * 96 / 25.4])
+        return
+    assert translate[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
+    from fidelity import expressions as ex
+    # Each axis as a zoom curve of its own (stops: zoom, ["literal", [x, y]]).
+    axes = [translate[:3] + [item if index % 2 == 0 else item[1][axis]
+                             for index, item in enumerate(translate[3:])] for axis in (0, 1)]
+    for zoom in (0, 16, 19, 22):
+        px = 512 * 2 ** zoom / 40075016.68557849
+        value = [ex.evaluate_zoom_curve(curve, zoom) for curve in axes]
+        assert value == pytest.approx([12 * px, -6 * px], rel=1e-3, abs=1e-5)
 
 
 @pytest.mark.parametrize("clip", ["Shape", "CentroidWithin", "CompletelyWithin", "NoClipping"])
@@ -493,8 +1281,8 @@ def test_centroid_fill_position_matches_qgis(plugin, tmp_path, on_surface):
 
 
 @pytest.mark.parametrize("along,offset,geometry", [
-    (0, 0, "line"), (7, 0, "line"), (7, 4, "line"), (0, 0, "polygon"), (5, -3, "polygon"),
-    (0, 0, "holed")])
+    (0, 0, "line"), (7, 0, "line"), (7, 4, "line"), (-6, 0, "line"), (-25, 4, "line"),
+    (0, 0, "polygon"), (5, -3, "polygon"), (0, 0, "holed")])
 def test_map_unit_interval_markers_match_qgis(plugin, tmp_path, along, offset, geometry):
     if geometry == "line":
         layer = _layer("LineString", LINES, str(tmp_path / "iv.gpkg"))
@@ -619,11 +1407,17 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     from fidelity.zoom import zoom_to_scale
     top = max(zooms)
     assert len([r for r in placed if r.get_attr("o") == top]) == 8
+    longest = max(QgsGeometry.fromWkt(wkt).length() for wkt in LINES)
     for rule in placed:
         band = rule.visibility
         if band.max_zoom is None:
             continue
         middle = (band.min_zoom + band.max_zoom) / 2
+        if band.max_zoom - band.min_zoom == 1.0:
+            # No line is 4 mm long, even at the zoom's end: one marker a
+            # line at its start, one placement for the zoom.
+            assert longest < 0.004 * zoom_to_scale(band.max_zoom)
+            continue
         assert band.max_zoom - band.min_zoom == pytest.approx(1 / 8)
         assert rule.recipe.param("interval") == pytest.approx(0.004 * zoom_to_scale(middle), rel=1e-6)
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
@@ -672,6 +1466,210 @@ def test_ring_filters_match_qgis(plugin, tmp_path, ring_filter, kind):
     # Markers: QGIS averages corner angles over a screen length (4 mm), which a
     # multi-zoom point dataset reproduces at one zoom only.
     assert mask_difference(reference, ours) < (0.06 if kind == "line" else 0.1)
+
+
+# Two polygons sharing an edge, the first with a hole near its side.
+INSIDE_POLYGONS = ["POLYGON((-100 -70, 0 -70, 0 60, -100 60, -100 -70),"
+                   "(-80 -30, -30 -30, -30 20, -80 20, -80 -30))",
+                   "POLYGON((0 -70, 90 -70, 90 60, 0 60, 0 -70))"]
+
+
+def _inside_line(width, unit, offset=0.0, ring_filter=0, pen=None):
+    from qgis.core import QgsLineSymbolLayer
+    line = QgsSimpleLineSymbolLayer(QColor(0, 0, 255, 140), width)
+    line.setWidthUnit(unit)
+    line.setOffset(offset)
+    line.setOffsetUnit(unit)
+    line.setDrawInsidePolygon(True)
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    if pen is not None:
+        line.setPenStyle(pen)
+    return line
+
+
+@pytest.mark.parametrize("offset,ring_filter", [(0.0, 0), (5.0, 0), (-3.0, 0), (0.0, 1)])
+def test_map_unit_line_drawn_inside_polygon_matches_qgis(plugin, tmp_path, offset, ring_filter):
+    """"Draw line only inside polygon": QGIS clips the stroke to the polygon,
+    so only the band inside it shows, sharp at the corners. The whole stroke
+    was drawn, half of it over the neighbouring polygon."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "in.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(16, Qgis.RenderUnit.MapUnits, offset, ring_filter)])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["inside_band"]
+    for output, rule in zip(outputs, rules):
+        output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.03
+
+
+# A concave L with a hole, a part with a spike and a notch, and a sliver
+# narrower than twice the offset used below.
+INSIDE_SHAPES = ["POLYGON((-110 -100, -10 -100, -10 -30, -60 -30, -60 100, -110 100, -110 -100),"
+                 "(-95 -85, -75 -85, -75 30, -95 30, -95 -85))",
+                 "POLYGON((10 -100, 100 -100, 100 90, 80 10, 55 90, 10 90, 10 -100))",
+                 "POLYGON((10 100, 100 100, 100 110, 10 110, 10 100))"]
+
+
+@pytest.mark.parametrize("offset,join", [(6.0, Qt.PenJoinStyle.BevelJoin),
+                                         (6.0, Qt.PenJoinStyle.RoundJoin),
+                                         (-3.0, Qt.PenJoinStyle.BevelJoin)])
+def test_line_drawn_inside_polygon_with_an_offset_matches_qgis(plugin, tmp_path, offset, join):
+    """With an offset QGIS strokes each ring's offset ring (mitred buffer)
+    with the pen's join and then clips: the join cuts the corners of an
+    inward offset ring, and a part narrower than twice the offset gets no
+    stroke. A band at a distance from the rings filled corners sharp and
+    narrow parts whole."""
+    layer = _layer("Polygon", INSIDE_SHAPES, str(tmp_path / "io.gpkg"))
+    line = _inside_line(16, Qgis.RenderUnit.MapUnits, offset)
+    line.setPenJoinStyle(join)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    reference = ink_mask(render([layer], EXTENT, (480, 480)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["inside_band"]
+    ours = ink_mask(render(outputs, EXTENT, (480, 480)))
+    assert mask_difference(reference, ours) < 0.01
+
+
+def test_line_drawn_inside_polygon_keeps_only_polygons(plugin):
+    """Where a band piece touches the part along an edge, the intersection is
+    a collection with lines, which the tiles dropped: the feature lost its
+    whole band at that zoom."""
+    from qgis.core import QgsGeometry, QgsWkbTypes
+    from fidelity import materialize as mat
+    geometry = QgsGeometry.fromWkt(
+        "POLYGON((-160 -100, -20 -100, -20 -20, -90 -20, -90 90, -160 90, -160 -100),"
+        "(-140 -80, -110 -80, -110 40, -140 40, -140 -80))")
+    width = 2.420816752525332  # a quarter of it outside the rings
+    result = mat.inside_band_geometry(mat.inside_band(
+        -0.75 * width, 0.25 * width, 0, "bevel", "EPSG:3857"), geometry)
+    assert QgsWkbTypes.geometryType(result.wkbType()) == Qgis.GeometryType.Polygon
+    assert result.area() == pytest.approx(width / 4 * 2 * (140 + 190 + 30 + 120), rel=0.02)
+
+
+def test_screen_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path):
+    """A 4 mm stroke drawn only inside the polygon: its 2 mm inner band, as
+    polygons per eighth of a zoom (QGIS-rendered here at one band's zoom),
+    and beyond the last tiles a 2 mm line 1 mm inside the rings. Zooms
+    where the whole layer is under a pixel get no (empty) band dataset."""
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "is.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters)])))
+    zoom, size = 17.4375, 300  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    bands = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"]
+    top = max(r.get_attr("o") for _, r in bands)
+    first = min(r.get_attr("o") for _, r in bands)
+    # 190 map units: over a pixel (153 m at zoom 9) from the end of zoom 8 on.
+    assert top > 17 and first == 8 and {r.get_attr("o") for _, r in bands} == set(range(first, top + 1))
+    shown = [(o, r) for o, r in bands
+             if r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.05
+    over = [r for r in rules if r.recipe.kind == "polygon_offset"]
+    assert len(over) == 1 and over[0].visibility.min_zoom == top + 1 and over[0].recipe.param("rhr")
+    line = over[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.offset(), line.drawInsidePolygon()) == (2.0, 1.0, False)
+
+
+def test_mixed_unit_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path):
+    """A 4 mm stroke 5 map units inside the rings: the offset and the width
+    converted each in its own unit per band. The whole stroke was drawn."""
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_SHAPES, str(tmp_path / "im.gpkg"))
+    line = _inside_line(4, Qgis.RenderUnit.Millimeters, 5.0)
+    line.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    zoom, size = 17.0625, 360  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    shown = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"
+             and r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.02
+    # Beyond the last tiles the stroke cannot be narrowed in one unit.
+    assert any("different units" in d.message for d in diags.by_code("Q2VT_SYMBOL_APPROXIMATE"))
+
+
+def test_screen_line_drawn_inside_polygon_with_an_offset_is_reported_beyond_the_tiles(plugin, tmp_path):
+    """Beyond the last tiles a stroke inside the rings is a mitred line: QGIS
+    cuts the offset ring's corners with the pen join and draws nothing on
+    parts narrower than twice the offset, which is reported."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "ij.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 1.5)])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    over = [r for r in rules if r.recipe.kind == "polygon_offset"]
+    assert len(over) == 1
+    line = over[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.offset()) == (3.5, 1.75)
+    assert line.penJoinStyle() == Qt.PenJoinStyle.MiterJoin
+    assert any("beyond zoom" in d.message for d in diags.by_code("Q2VT_SYMBOL_APPROXIMATE"))
+
+
+def test_screen_line_drawn_inside_polygon_with_an_offset_exports_quickly(plugin, tmp_path):
+    """With an offset each band (eight per zoom) was one geometry expression
+    nested twenty function calls deep, which QGIS's parser reads in time
+    exponential in the depth: half a second per parse, three parses per
+    band, a minute for a few polygons over zooms 0-16. The bands are
+    computed directly and still match QGIS."""
+    import time
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "it.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 3.0)])))
+    zoom, size = 16.4375, 300  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    start = time.monotonic()
+    outputs, rules, _ = _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+    assert time.monotonic() - start < 20  # about 2 s; it took 40 s and more
+    bands = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"]
+    assert len(bands) > 16  # zooms 13-16 (narrower polygons than the offset before)
+    shown = [(o, r) for o, r in bands if r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.05
+
+
+def test_screen_line_drawn_inside_polygon_reports_no_empty_bands(plugin, tmp_path):
+    """Where the inner edge of an inward band (offset - width / 2) is wider
+    than the polygons, every ring's offset ring collapses and QGIS draws
+    nothing: such a band was reported as Q2VT_RULE_OUTPUT_EMPTY, eight times
+    a zoom, which failed a strict export."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "ie.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 3.0)])))
+    _, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+    assert any(r.recipe.kind == "inside_band" for r in rules)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+
+
+def test_dashed_line_drawn_inside_polygon_keeps_its_dash_lengths(plugin, tmp_path):
+    """Dashes stay a line: the band's half width at its middle, with Qt's
+    dash pattern (multiples of the pen width) kept at the full width's
+    lengths."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "id.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, pen=Qt.PenStyle.DashLine)])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules and all(r.recipe.kind == "polygon_offset" for r in rules)
+    line = rules[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.drawInsidePolygon(), line.useCustomDashPattern()) == (2.0, False, True)
+    assert list(line.customDashVector()) == [16.0, 8.0]
 
 
 @pytest.mark.parametrize("shape,size,angle,dx,clip", [
@@ -835,6 +1833,24 @@ def test_map_unit_font_markers_become_their_glyphs(plugin, tmp_path, text, angle
     assert mask_difference(reference, ours) < 0.05
 
 
+def test_limited_map_unit_font_marker_stays_a_sprite(plugin, tmp_path):
+    """A map-unit font marker with a minimum and maximum size: its glyph
+    outlines grew with the map past the maximum (4x too large when zoomed
+    in); the sprite marker applies the limits."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsMapUnitScale
+    layer = _layer("Point", ["POINT(-30 -10)"], str(tmp_path / "fm.gpkg"))
+    marker = QgsFontMarkerSymbolLayer("DejaVu Sans", "A", 10)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    marker.setSizeMapUnitScale(limits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules and not any(r.recipe for r in rules)
+    assert rules[0].rule.symbol().symbolLayer(0).layerType() == "FontMarker"
+
+
 def test_point_pattern_random_deviation_stays_in_range(plugin):
     """QGIS moves every pattern marker by a uniform ±max deviation (its own
     random sequence): the exported markers deviate within the same range."""
@@ -978,6 +1994,7 @@ def test_screen_point_pattern_markers_are_whole_and_in_qgis_order(plugin, tmp_pa
     from q2vt_plugin.src.core.rules_exporter import RulesExporter
     from fidelity import materialize as mat
     from fidelity.diagnostics import DiagnosticCollector
+    from fidelity.model import ZoomInterval
     monkeypatch.setattr(mat, "PIECE_CELLS", 4)  # several pieces
     layer = _layer("Polygon", ["POLYGON((-100 -90, 95 -90, 95 80, -100 80, -100 -90))"],
                    str(tmp_path / "p.gpkg"))
@@ -993,7 +2010,12 @@ def test_screen_point_pattern_markers_are_whole_and_in_qgis_order(plugin, tmp_pa
     reset_project(layer)
     diags = DiagnosticCollector()
     rules = RulesFlattener(16, 16, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    # Beyond the archive's last zoom: the true-size texture.
+    over = [r for r in rules if r.recipe is None]
+    assert len(over) == 1 and over[0].visibility == ZoomInterval(17.0, None)
+    rules = [r for r in rules if r.recipe is not None]
     assert len(rules) == 8 and all(r.recipe.param("ordered") for r in rules)  # eighths of z16
+    assert max(r.visibility.max_zoom for r in rules) == 17.0
     assert {r.z_order for r in rules} == {"source"}
     utils = tmp_path / "utils"
     utils.mkdir()
@@ -1030,6 +2052,157 @@ def test_patterns_over_the_budget_become_textures(plugin, tmp_path, monkeypatch)
     _, rules, diags = _export(plugin, layer, tmp_path)
     assert not any(r.recipe for r in rules)
     assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def _budget_symbol(kind):
+    from qgis.core import QgsArrowSymbolLayer, QgsShapeburstFillSymbolLayer
+    if kind == "polygon_offset":
+        line = QgsSimpleLineSymbolLayer(QColor("red"), 0.6)
+        line.setOffset(0.5)
+        line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+        return QgsFillSymbol([line])
+    if kind == "shapeburst":
+        burst = QgsShapeburstFillSymbolLayer(QColor("black"), QColor("white"))
+        burst.setUseWholeShape(False)
+        burst.setMaxDistance(2)
+        burst.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+        return QgsFillSymbol([burst])
+    arrow = QgsArrowSymbolLayer()
+    for name in ("ArrowWidth", "ArrowStartWidth", "HeadLength", "HeadThickness"):
+        getattr(arrow, f"set{name}")(1.5)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    arrow.setIsRepeated(False)
+    return QgsLineSymbol([arrow])
+
+
+def _zoom_rules(tmp_path, low, high):
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    return rules, diags
+
+
+def _band_key(rule):
+    visible = rule.visibility
+    return (rule.get_attr("o"), rule.get_attr("i"), rule.get_attr("b"),
+            visible and (visible.min_zoom, visible.max_zoom),
+            rule.recipe and (rule.recipe.kind, rule.recipe.params))
+
+
+@pytest.mark.parametrize("kind", ["polygon_offset", "shapeburst", "arrow"])
+def test_a_map_from_zoom_0_keeps_the_exact_last_zooms(plugin, tmp_path, monkeypatch, kind):
+    """Per-zoom output budgets counted every exported zoom alike: from zoom 0
+    (the Publish window's default) the low zooms, where a layer is a few
+    pixels, used up the budget, and the last zooms lost their exact offsets
+    (drawn with the browser's line offset) or sub-zoom bands. The last zooms
+    now get what an export of only them gets."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    if kind == "arrow":
+        wkts = [f"LINESTRING({x} 0, {x + 30} 40, {x + 60} 0)" for x in range(-100, 100, 50)]
+        layer = _layer("LineString", wkts, str(tmp_path / f"{kind}.gpkg"))
+        per_zoom = len(wkts)  # arrows per zoom step
+    else:
+        # Shapeburst: a 2 mm inset fits inside at 13-16. Offset: 0.5 mm
+        # inwards is wider than the squares below zoom 13 (no outline).
+        size = 150 if kind == "shapeburst" else 30
+        wkts = [f"POLYGON(({x} 0, {x + size} 0, {x + size} {size}, {x} {size}, {x} 0))"
+                for x in range(0, 800, 200)]
+        layer = _layer("Polygon", wkts, str(tmp_path / f"{kind}.gpkg"))
+        per_zoom = 5 * len(wkts)  # vertices per zoom step
+    layer.setRenderer(QgsSingleSymbolRenderer(_budget_symbol(kind)))
+    reset_project(layer)
+    budget = per_zoom * 8  # the last four zooms with two steps; not every zoom with one
+    if kind == "shapeburst":
+        # Bands per zoom step at 13-16: every band of every feature; below
+        # them a feature a few pixels wide has few. The last four zooms fit
+        # with four steps and the zooms below with two; every zoom counted
+        # alike (as before) only with one.
+        rules, _ = _zoom_rules(tmp_path, 16, 16)
+        per_zoom = len(wkts) * len(rules[0].recipe.param("colors"))
+        budget = int(per_zoom * 22.1)
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
+    narrow, narrow_diags = _zoom_rules(tmp_path, 13, 16)
+    wide, wide_diags = _zoom_rules(tmp_path, 0, 16)
+    # The exported zooms (the zooms past the last tiles, "v", share what is
+    # left of the budget, which the zooms below take in the wide export).
+    top = sorted(repr(_band_key(r)) for r in narrow if r.get_attr("v") is None)
+    assert len(top) > 4
+    assert not [d for d in narrow_diags.by_code("Q2VT_PATTERN_BUDGET")
+                if "past the last tile zoom" not in d.message]
+    assert sorted(repr(_band_key(r)) for r in wide
+                  if r.get_attr("o") >= 13 and r.get_attr("v") is None) == top
+    if kind == "polygon_offset":  # no outline (QGIS draws none), no budget spent
+        assert not [r for r in wide if r.get_attr("o") < 13]
+        assert not wide_diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def _offset_squares(tmp_path, sizes):
+    wkts = [f"POLYGON(({x} 0, {x + size} 0, {x + size} {size}, {x} {size}, {x} 0))"
+            for x, size in zip(range(0, 10000 * len(sizes), 10000), sizes)]
+    layer = _layer("Polygon", wkts, str(tmp_path / "squares.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_budget_symbol("polygon_offset")))
+    reset_project(layer)
+
+
+def test_polygon_offset_over_the_budget_is_native_only_where_drawn(plugin, tmp_path, monkeypatch):
+    """Past the budget the browser's line offset draws the lower zooms; it
+    must not draw at the zooms where every ring's inward offset is empty
+    (QGIS draws nothing there, the browser drew loops)."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    # 0.5 mm inwards: the 30 m squares have an outline from zoom 13, the
+    # 2,000 m one from zoom 7.
+    _offset_squares(tmp_path, [30, 30, 30, 30, 2000])
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 100)
+    rules, diags = _zoom_rules(tmp_path, 0, 16)
+    native = [r for r in rules if dict(r.recipe.params).get("rhr") and r.get_attr("o") < 16]
+    assert len(native) == 1
+    assert (native[0].get_attr("o"), native[0].get_attr("i")) == (7, 12)
+    assert (native[0].visibility.min_zoom, native[0].visibility.max_zoom) == (7.0, 13.0)
+    assert sorted({r.get_attr("o") for r in rules if r not in native}) == [13, 14, 15, 16]
+    assert "below zoom 13" in diags.by_code("Q2VT_PATTERN_BUDGET")[0].message
+
+
+def test_polygon_offset_budget_keeps_the_uniform_steps_of_a_narrow_export(plugin, tmp_path,
+                                                                          monkeypatch):
+    """Giving the last zooms finer steps must not leave the zooms below with
+    fewer than one step count for every zoom gives (14-19: two per zoom)."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    _offset_squares(tmp_path, [40] * 10)  # 5 vertices each, drawn at 14-19
+    per_zoom = 50
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS",
+                        int(per_zoom * 18.99))  # 6 zooms x 2 steps, not x 4
+    rules, diags = _zoom_rules(tmp_path, 14, 19)
+    exact = [r for r in rules if not dict(r.recipe.params).get("rhr")]
+    steps = {zoom: sum(r.get_attr("o") == zoom for r in exact) for zoom in range(14, 20)}
+    assert steps == {zoom: 2 for zoom in range(14, 20)}
+    assert not diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+@pytest.mark.parametrize("budget, exact_zooms", [(350, [14, 15, 16, 17, 18, 19]), (10, [])])
+def test_polygon_offset_overzoom_has_its_own_dataset(plugin, tmp_path, monkeypatch, budget,
+                                                     exact_zooms):
+    """With one sub-zoom step at the last zoom, its exact rule and the
+    overzoom rule (browser's line offset) had the same dataset name: one
+    style layer id twice, both shown only from the overzoom on (no outline
+    at the last zoom, a double one past it). Fully native: one rule from
+    the first zoom on, overzoom included."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    _offset_squares(tmp_path, [40] * 10)  # 50 vertices per zoom step at 14-19
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
+    rules, _ = _zoom_rules(tmp_path, 14, 19)
+    names = [r.output_dataset for r in rules]
+    assert len(set(names)) == len(names)
+    exact = [r for r in rules if not dict(r.recipe.params).get("rhr")]
+    assert sorted(r.get_attr("o") for r in exact) == exact_zooms  # one step each
+    native = [(r.visibility.min_zoom, r.visibility.max_zoom) for r in rules
+              if dict(r.recipe.params).get("rhr")]
+    if exact_zooms:
+        last = next(r for r in exact if r.get_attr("o") == 19)
+        assert (last.visibility.min_zoom, last.visibility.max_zoom) == (19.0, 20.0)
+        assert native == [(20.0, None)]
+    else:
+        assert native == [(14.0, None)]
 
 
 def test_map_unit_line_offset_is_the_offset_line(plugin, tmp_path):
@@ -1229,3 +2402,506 @@ def test_replaced_symbol_layer_leaves_no_dangling_wrapper(plugin):
     assert symbol.symbolLayer(0).layerType() == "MarkerLine"
     assert sip.ispyowned(held) and not sip.isdeleted(held)
     assert held.layerType() == "HashLine"
+
+
+def _limits(kind):
+    from qgis.core import QgsMapUnitScale
+    if kind == "range":
+        return QgsMapUnitScale(50000, 5000)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    return limits
+
+
+def _qgis_px(value, kind, zoom):
+    """QgsRenderContext::convertToPainterUnits of a limited map-unit length
+    (Web Mercator project, 96 dpi)."""
+    from fidelity.zoom import scale_to_zoom
+    if kind == "range":
+        zoom = min(max(zoom, scale_to_zoom(50000)), scale_to_zoom(5000))
+    px = value * 512 * 2 ** zoom / 40075016.68557849
+    return min(max(px, 96 / 25.4), 4 * 96 / 25.4) if kind == "mm" else px
+
+
+def _limited_spacing(plugin, layer, recipe_param, getter, zooms, kind, out_dir):
+    """The spacing the export draws at each zoom (one visible component,
+    materialized in map units or kept in millimetres) against QGIS's."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    reset_project(layer)
+    rules = RulesFlattener(0, 16, str(out_dir), QgsProcessingFeedback(),
+                           DiagnosticCollector()).flatten_all_rules()
+    for zoom in zooms:
+        visible = [r for r in rules if r.visibility.contains(zoom)
+                   and (r.recipe is None or r.recipe.param(recipe_param) is not None)]
+        assert len(visible) == 1, (zoom, [r.output_dataset for r in visible])
+        rule = visible[0]
+        if rule.recipe is not None and recipe_param == "interval" and \
+                rule.visibility.max_zoom - rule.visibility.min_zoom == 1.0 and \
+                max(f.geometry().length() for f in layer.getFeatures()) < \
+                rule.recipe.param("interval") / 2 ** 0.5:
+            # One placement a zoom where no line is an interval long (at the
+            # zoom's end too): one marker a line, whatever the spacing.
+            continue
+        if rule.recipe is not None:
+            drawn = rule.recipe.param(recipe_param) * 512 * 2 ** zoom / 40075016.68557849
+        else:
+            # A texture: in millimetres, or in plain map units (no limits).
+            symbol_layer = rule.rule.symbol().symbolLayer(0)
+            scale = getattr(symbol_layer, f"{getter}MapUnitScale")()
+            assert not (scale.minScale or scale.maxScale or scale.minSizeMMEnabled
+                        or scale.maxSizeMMEnabled)
+            drawn = getattr(symbol_layer, getter)()
+            if getattr(symbol_layer, f"{getter}Unit")() == Qgis.RenderUnit.Millimeters:
+                drawn *= 96 / 25.4
+            else:
+                drawn *= 512 * 2 ** zoom / 40075016.68557849
+        # Screen spacings are materialized per eighth of a zoom (+-4.5 %).
+        assert drawn == pytest.approx(_qgis_px(15, kind, zoom), rel=0.05), (zoom, rule.output_dataset)
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+def test_map_unit_hatch_spacing_limits_match_qgis(plugin, tmp_path, kind):
+    """A map-unit hatch with min/max spacing or a scale range: QGIS keeps the
+    spacing between the limits; the hatch kept the plain map spacing (5x
+    too sparse when zoomed in, a smear when zoomed out)."""
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "hatch.gpkg"))
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(15)
+    lp.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    lp.setDistanceMapUnitScale(_limits(kind))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([lp])))
+    _limited_spacing(plugin, layer, "spacing", "distance",
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind, tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+def test_map_unit_marker_interval_limits_match_qgis(plugin, tmp_path, kind):
+    """A map-unit marker interval with min/max size or a scale range: the
+    markers were spaced by the plain map interval at every zoom."""
+    layer = _layer("LineString", LINES, str(tmp_path / "ml.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    ml.setInterval(15)
+    ml.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    ml.setIntervalMapUnitScale(_limits(kind))
+    ml.setSubSymbol(_marker(Qgis.MarkerShape.Triangle, 6))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    _limited_spacing(plugin, layer, "interval", "interval",
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind, tmp_path)
+
+
+def test_point_pattern_distance_limits_match_qgis(plugin, tmp_path):
+    """A point pattern drawn marker by marker (clip mode "centroid within")
+    with min/max distances: QGIS limits both distances, the grid kept the
+    plain map distances; beyond the archive's last zoom the screen grid
+    stays a true-size texture."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(15)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+        getattr(pp, f"set{name}MapUnitScale")(_limits("mm"))
+    pp.setClipMode(Qgis.MarkerClipMode.CentroidWithin)
+    pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 3))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    _limited_spacing(plugin, layer, "dx", "distanceX", (12.2, 15.5, 16.5, 17.5, 19, 22), "mm",
+                     tmp_path)
+
+
+def _pattern_exporter(symbol, low, maxzoom=16):
+    """The fill layer converted from ``low`` to zoom 24 (archive up to
+    ``maxzoom``)."""
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, maxzoom
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = low
+    exporter._convert_symbol(symbol, "s", "src", "q2vt", low, 24)
+    return exporter
+
+
+def test_screen_spaced_hatch_lines_in_map_units_grow_per_zoom(plugin):
+    """A hatch spaced in millimetres (e.g. a map-unit spacing clamped to its
+    maximum) with map-unit lines: one texture froze the line width at its
+    first zoom (a thin hatch where QGIS fills the polygon when zoomed in).
+    True-size textures per zoom up to 22, lines drawn at mid-zoom width."""
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(4)
+    lp.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 1.7)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    lp.setSubSymbol(QgsLineSymbol([line]))
+    exporter = _pattern_exporter(QgsFillSymbol([lp]), 16.25)
+    layer = exporter.style["layers"][0]
+    pattern = layer["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == [17, 18, 19, 20, 21, 22]
+    assert layer["metadata"][exporter.SCREEN_PATTERN_FLAG] is True
+    spacing = 4 * 96 / 25.4
+    for zoom, name in zip([16.25] + pattern[3::2], pattern[2::2]):
+        middle = (zoom + math.floor(zoom) + 1) / 2
+        width = 1.7 * 512 * 2 ** middle / 40075016.68557849
+        cell = exporter.pattern_images[name].img_1x
+        alpha = cell.getchannel("A")
+        ink = sum(alpha.getdata()) / 255.0 / (cell.size[0] * cell.size[1])
+        assert ink == pytest.approx(min(1.0, width / spacing), abs=0.08), zoom
+
+
+def test_point_pattern_rows_in_map_units_follow_the_map_in_overzoom(plugin):
+    """A point pattern spaced in millimetres across and map units down (QGIS
+    clamps only the distance across when it draws the pattern brush): the
+    textures stopped at max zoom + 3, so the rows stopped spreading apart
+    and the overzoomed map was far too dense."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 1))
+    pp.setDistanceX(4)
+    pp.setDistanceXUnit(Qgis.RenderUnit.Millimeters)
+    pp.setDistanceY(15)
+    pp.setDistanceYUnit(Qgis.RenderUnit.MapUnits)
+    exporter = _pattern_exporter(QgsFillSymbol([pp]), 16.25)
+    layer = exporter.style["layers"][0]
+    pattern = layer["paint"]["fill-pattern"]
+    # One texture per zoom past max zoom + 3 while a cell stays within the
+    # texture size cap (z22's 804 px rows are over it); above the last one
+    # the patched MapLibre scales it with the map (q2vt:pattern-zoom).
+    assert pattern[3::2] == [17, 18, 19, 20, 21]
+    assert layer["metadata"][exporter.PATTERN_ZOOM_FLAG] == 21
+    assert max(exporter.pattern_images[pattern[-1]].img_1x.size) <= exporter.MAX_PATTERN_TEXTURE_PX
+    for zoom, name in zip(pattern[3::2], pattern[4::2]):
+        height = exporter.pattern_images[name].img_1x.size[1]
+        assert height == pytest.approx(15 * 512 * 2 ** zoom / 40075016.68557849, rel=0.05), zoom
+
+
+def _percent_pattern(unit, offset, displacement, spacing, clip):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 3)
+    marker.symbolLayer(0).setSizeUnit(unit)
+    marker.symbolLayer(0).setStrokeStyle(0)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(spacing)
+        getattr(pp, f"set{name}Unit")(unit)
+    for name, (value, value_unit) in (("OffsetX", offset), ("OffsetY", offset),
+                                      ("DisplacementX", displacement)):
+        getattr(pp, f"set{name}")(value)
+        getattr(pp, f"set{name}Unit")(value_unit)
+    pp.setClipMode(clip)
+    return QgsFillSymbol([pp])
+
+
+@pytest.mark.parametrize("unit,spacing,clip", [
+    (Qgis.RenderUnit.MapUnits, 20, "CentroidWithin"), (Qgis.RenderUnit.MapUnits, 20, "Shape"),
+    (Qgis.RenderUnit.Millimeters, 8, "CentroidWithin")])
+def test_percentage_pattern_offsets_are_of_the_spacing(plugin, tmp_path, unit, spacing, clip):
+    """QgsPointPatternFillSymbolLayer: a Percentage offset or displacement is
+    that share of the grid spacing, the same grid as the absolute value
+    (materialized grids; the screen-unit "Shape" texture is checked in
+    test_sprites)."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    pct = Qgis.RenderUnit.Percentage
+    recipes = []
+    for index, (offset, displacement) in enumerate((((50, pct), (50, pct)),
+                                                    ((spacing / 2, unit), (spacing / 2, unit)))):
+        layer = _layer("Polygon", ["POLYGON((-100 -90, 95 -90, 95 80, -100 80, -100 -90))"],
+                       str(tmp_path / f"pp{index}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(_percent_pattern(
+            unit, offset, displacement, spacing, getattr(Qgis.MarkerClipMode, clip))))
+        reset_project(layer)
+        diags = DiagnosticCollector()
+        rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(),
+                               diags).flatten_all_rules()
+        recipes.append([r.recipe for r in rules if r.recipe])
+        # (past the last tile zoom the pattern is a texture: reported apart)
+        assert not [d for d in diags.by_code("Q2VT_PATTERN_APPROXIMATE")
+                    if not d.message.startswith("Past the last tile zoom")] or clip == "Shape"
+    assert recipes[0] and recipes[0] == recipes[1]
+    params = dict(recipes[0][-1].params)
+    assert params["disp_x"] and params["off_x"] and params["off_y"]
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.MetersInMapUnits])
+def test_map_unit_fill_offset_moves_the_polygon(plugin, tmp_path, unit):
+    """QgsSimpleFillSymbolLayer::renderPolygon shifts the polygon and its
+    outline by the offset in any unit (x right, y down); map units (and
+    meters at scale in a metre CRS) move the exported geometry, so the
+    shift is exact at every zoom, overzoom included, with no tile seams."""
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import QPointF
+    layer = _layer("Polygon", ["POLYGON((-90 -80, 60 -80, 60 50, -90 50, -90 -80))"],
+                   str(tmp_path / "fill.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor("red"), strokeColor=QColor("black"),
+                                    strokeWidth=0.8)
+    fill.setOffset(QPointF(30, 20))
+    fill.setOffsetUnit(unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]  # fill + its outline
+    for output, rule in zip(outputs, rules):
+        assert rule.shift == pytest.approx((30, -20))
+        assert not rule.translate
+        box = output.extent()
+        assert (box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()) == \
+            pytest.approx((-60, -100, 90, 30), abs=1e-6)
+        symbol_layer = rule.rule.symbol().symbolLayer(0)
+        if rule.get_attr("c") == 2:
+            assert symbol_layer.offset() == QPointF()
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+@pytest.mark.parametrize("width,unit,dashed", [
+    (2.0, Qgis.RenderUnit.Millimeters, False),
+    (6.0, Qgis.RenderUnit.MapUnits, False),
+    (1.2, Qgis.RenderUnit.Millimeters, True),
+])
+def test_generator_fill_stroke_is_a_line_on_the_generated_polygons(plugin, tmp_path, width,
+                                                                   unit, dashed):
+    """A geometry generator drawn with a fill symbol: each sub-symbol layer
+    is a rule on the generated polygons, and a simple fill's stroke is a
+    line with its width, unit and dashes on their rings (MapLibre's
+    fill-outline is a one-pixel hairline)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    pen = Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), pen, width)
+    inner.setStrokeWidthUnit(unit)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    kinds = sorted((r.get_attr("c"), r.rule.symbol().symbolLayer(0).layerType()) for r in rules)
+    assert kinds == [(1, "SimpleLine"), (2, "SimpleFill")]
+    for output, rule in zip(outputs, rules):
+        assert rule.pre_generator
+        box = output.extent()  # the generated (buffered) polygon
+        assert (box.xMinimum(), box.yMaximum()) == pytest.approx((-82, 56), abs=1e-6)
+        if rule.get_attr("c") == 1:
+            line = rule.rule.symbol().symbolLayer(0)
+            assert (line.width(), line.widthUnit(), line.penStyle()) == (width, unit, pen)
+            # Drawn on the rings as the style draws it (a line symbol).
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
+        else:
+            assert rule.rule.symbol().symbolLayer(0).strokeStyle() == Qt.PenStyle.NoPen
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+def test_generator_fill_line_and_centroid_layers_are_drawn(plugin, tmp_path):
+    """A fill generator's sub-symbol layers are drawn like a fill layer's:
+    a line layer (an outline) on the generated polygons' rings, a centroid
+    fill as markers at their centroids."""
+    from qgis.core import QgsCentroidFillSymbolLayer, QgsGeometryGeneratorSymbolLayer
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                    QColor("black"), Qt.PenStyle.NoPen)
+    outline = QgsSimpleLineSymbolLayer(QColor(200, 0, 0), 1.5)
+    centroid = QgsCentroidFillSymbolLayer()
+    centroid.setSubSymbol(_marker(Qgis.MarkerShape.Square, 10))
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([fill, outline, centroid]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    kinds = sorted((r.get_attr("c"), r.rule.symbol().symbolLayer(0).layerType()) for r in rules)
+    assert kinds == [(0, "CentroidFill"), (1, "SimpleLine"), (2, "SimpleFill")]
+    for output, rule in zip(outputs, rules):
+        symbol_layer = rule.rule.symbol().symbolLayer(0)
+        if rule.get_attr("c") == 0:  # the styler draws the centroids with the sub-symbol
+            output.setRenderer(QgsSingleSymbolRenderer(symbol_layer.subSymbol().clone()))
+        elif rule.get_attr("c") == 1:
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([symbol_layer.clone()])))
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+def test_generator_fill_coerces_lines_to_polygons(plugin, tmp_path):
+    """QgsGeometryGeneratorSymbolLayer coerces a fill generator's line output
+    to polygons (each part closed into a ring), as QgsGeometry::coerceToType."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, 1.0)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "make_line(make_point(-90, -70), make_point(40, -70), "
+                            "make_point(40, 60))", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    for output, rule in zip(outputs, rules):
+        geometry = next(output.getFeatures()).geometry()
+        if rule.get_attr("c") == 2:  # the closed polygon, not the line
+            assert geometry.type() == Qgis.GeometryType.Polygon
+            assert geometry.area() == pytest.approx(130 * 130 / 2)
+        else:
+            line = rule.rule.symbol().symbolLayer(0)
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+def test_generator_fill_patterns_are_materialized(plugin, tmp_path):
+    """A map-unit hatch inside a fill generator is exported as hatch lines
+    on the generated polygons (not one texture frozen at the first zoom)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "hatch.gpkg"))
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setLineAngle(45)
+    hatch.setDistance(8)
+    hatch.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    hatch.subSymbol().symbolLayer(0).setWidth(1.5)
+    hatch.subSymbol().symbolLayer(0).setWidthUnit(Qgis.RenderUnit.MapUnits)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([hatch]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    hatched = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert hatched and all(r.recipe.kind == "hatch_lines" and r.pre_generator for _, r in hatched)
+    ours = ink_mask(render([o for o, _ in hatched], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1
+
+
+def _generator_fill(expression, stroke_width=2.0):
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, stroke_width)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": expression, "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    return QgsFillSymbol([generator])
+
+
+def _draw_outlines_as_lines(outputs, rules):
+    """The styler draws a split stroke (class 1) as a line on the rings."""
+    for output, rule in zip(outputs, rules):
+        if rule.get_attr("c") == 1:
+            line = rule.rule.symbol().symbolLayer(0).clone()
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+
+
+@pytest.mark.parametrize("kind", ["Fill", "Line"])
+def test_generator_with_map_scale_is_drawn_at_every_zoom(plugin, tmp_path, kind):
+    """A geometry generator whose expression reads @map_scale is exported
+    per zoom with that zoom's scale (the generated polygons follow the
+    zoom, as in QGIS), not with a NULL scale that generates nothing. A line
+    sub-symbol draws the generated polygons' rings."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    expression = "buffer($geometry, -@map_scale/400)"
+    if kind == "Fill":
+        symbol = _generator_fill(expression)
+    else:
+        generator = QgsGeometryGeneratorSymbolLayer.create({
+            "geometryModifier": expression, "SymbolType": "Line"})
+        generator.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor(200, 0, 0), 2.0)]))
+        symbol = QgsFillSymbol([generator])
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    generated = [(o, r) for o, r in zip(outputs, rules)
+                 if r.get_attr("c") == (2 if kind == "Fill" else 1)]
+    zooms = sorted(r.get_attr("o") for _, r in generated)
+    # The 150 x 154 m polygon vanishes when the inward buffer passes 75 m.
+    first = min(z for z in range(23) if ZoomLevels.zoom_to_scale(z) / 400 < 75)
+    assert first > 10 and zooms == list(range(first, first + len(zooms))) and zooms[-1] >= 21
+    for output, rule in generated:
+        assert rule.get_attr("o") == rule.get_attr("i")
+        assert rule.pre_generator.startswith("with_variable('map_scale'")
+        inset = ZoomLevels.zoom_to_scale(rule.get_attr("o")) / 400
+        box = output.extent()
+        assert (box.xMinimum(), box.yMaximum()) == pytest.approx((-97 + inset, 71 - inset),
+                                                                 abs=1e-6)
+
+
+@pytest.mark.parametrize("renderer", ["merged", "inverted"])
+def test_generator_fill_draws_on_the_merged_or_inverted_geometry(plugin, tmp_path, renderer):
+    """QgsMergedFeatureRenderer / QgsInvertedPolygonRenderer render the
+    symbol, its geometry generator included, on the merged (inverted)
+    geometry: two touching parcels shrink as one, and an inverted area's
+    holes grow."""
+    from qgis.core import QgsInvertedPolygonRenderer, QgsMergedFeatureRenderer
+    kind = QgsMergedFeatureRenderer if renderer == "merged" else QgsInvertedPolygonRenderer
+    layer = _layer("Polygon", ["POLYGON((-90 -60, 0 -60, 0 60, -90 60, -90 -60))",
+                               "POLYGON((0 -60, 90 -60, 90 60, 0 60, 0 -60))"],
+                   str(tmp_path / f"{renderer}.gpkg"))
+    layer.setRenderer(kind(QgsSingleSymbolRenderer(_generator_fill("buffer($geometry, -15)"))))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    fill = next(o for o, r in zip(outputs, rules) if r.get_attr("c") == 2)
+    geometries = [f.geometry() for f in fill.getFeatures()]
+    if renderer == "merged":
+        assert len(geometries) == 1
+        assert geometries[0].area() == pytest.approx(150 * 90)
+    else:  # the hole is the merged parcel grown by 15 m (rounded corners)
+        hole = QgsGeometry.fromWkt("POLYGON((-90 -60, 90 -60, 90 60, -90 60, -90 -60))")
+        assert not any(g.intersects(hole.buffer(14, 16)) for g in geometries)
+    _draw_outlines_as_lines(outputs, rules)
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+@pytest.mark.parametrize("limits,shifted", [
+    ({}, True), ({"ddp": True}, True), ({"max_mm": 100000.0}, True),
+    ({"max_mm": 8.0}, False), ({"min_scale": 50000.0}, False)])
+def test_map_unit_fill_offset_shift_or_curve(plugin, tmp_path, limits, shifted):
+    """A map-unit fill offset moves the exported polygon (a translate is cut
+    at the tile edges when overzoomed) unless its map unit scale limits it
+    within the exported zooms (then a zoom-curve translate draws it). A
+    data-defined offset uses its static value (the converter reports it)."""
+    from qgis.core import QgsMapUnitScale, QgsProperty, QgsSimpleFillSymbolLayer, QgsSymbolLayer
+    from qgis.PyQt.QtCore import QPointF
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    layer = _layer("Polygon", ["POLYGON((-90 -80, 60 -80, 60 50, -90 50, -90 -80))"],
+                   str(tmp_path / "fill.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor("red"), strokeColor=QColor("black"), strokeWidth=0.8)
+    fill.setOffset(QPointF(30, 20))
+    fill.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    scale = QgsMapUnitScale()
+    if "max_mm" in limits:
+        scale.maxSizeMMEnabled, scale.maxSizeMM = True, limits["max_mm"]
+    scale.minScale = limits.get("min_scale", 0.0)
+    fill.setOffsetMapUnitScale(scale)
+    if limits.get("ddp"):
+        fill.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOffset,
+                                    QgsProperty.fromExpression("'5,5'"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(10, 16, str(tmp_path), QgsProcessingFeedback(),
+                           diags).flatten_all_rules()
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]
+    assert bool(diags.by_code("Q2VT_SYMBOL_APPROXIMATE")) == (not shifted)
+    for rule in rules:
+        if shifted:
+            assert rule.shift == pytest.approx((30, -20)) and not rule.translate
+        else:
+            assert not rule.shift
+            assert rule.translate or rule.rule.symbol().symbolLayer(0).offset() == QPointF(30, 20)

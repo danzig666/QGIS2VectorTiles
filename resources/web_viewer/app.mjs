@@ -13,6 +13,9 @@ import { fetchChecked, showError, state as diagnostics, warn } from "./diagnosti
 
 export const EXPECTED_MAPLIBRE = "6.11.2";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
+// Style layers end at zoom 24 (the style spec maximum) and MapLibre hides a
+// layer at exactly its maxzoom: the browser stops just short of it.
+const MAX_VIEW_ZOOM = 23.99;
 
 function validateManifest(manifest) {
   if (!manifest || typeof manifest !== "object") throw new ViewerError("Q2VT_PUB_MANIFEST", "manifest is not an object");
@@ -206,7 +209,7 @@ async function start() {
       center: view.center,
       zoom: view.zoom,
       minZoom: view.minZoom ?? 0,
-      maxZoom: view.maxZoom ?? 22,
+      maxZoom: Math.min(view.maxZoom ?? 22, MAX_VIEW_ZOOM),
       bearing: 0,
       pitch: 0,
       maxPitch: 0,

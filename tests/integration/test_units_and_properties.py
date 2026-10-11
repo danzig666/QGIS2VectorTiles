@@ -1,11 +1,13 @@
 """PR-02 regressions for property evaluation, units and enums (PyQGIS)."""
 
+import math
+
 import pytest
 from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsLineSymbol, QgsMapRendererSequentialJob,
                        QgsMapSettings, QgsMarkerLineSymbolLayer, QgsProperty, QgsRectangle,
                        QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
                        QgsSingleSymbolRenderer, QgsSymbolLayer, QgsVectorLayer)
-from qgis.PyQt.QtCore import QSize
+from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtGui import QColor
 
 from fidelity import expressions as ex
@@ -284,3 +286,180 @@ def test_label_text_replacements_match_qgis(plugin):
         expression = QgsExpression(RulesExporter._substituted(literal, collection))
         assert not expression.hasParserError(), expression.parserErrorString()
         assert expression.evaluate(QgsExpressionContext()) == collection.process(text), text
+
+
+def test_map_unit_translate_grows_with_the_map(mc):
+    """A fill offset in map units drawn with a translate (a map unit scale
+    limits it) is a zoom curve of [x, y] reaching past the last tile zoom,
+    and the tile clip buffer covers it."""
+    from q2vt_plugin.src.core.tiles_generator import GDALTilesGenerator  # pylint: disable=import-error
+    shift = mc.PropertyExtractor.translate(30, 20, Qgis.RenderUnit.MapUnits)
+    assert shift[:3] == ["interpolate", ["exponential", 2], ["zoom"]] and shift[-2] == 24
+    px_per_unit_z16 = 512 * 2 ** 16 / 40075016.68557849
+    z16 = GDALTilesGenerator._translate_px(shift, 16)  # pylint: disable=protected-access
+    assert z16 == pytest.approx(math.hypot(30, 20) * px_per_unit_z16, rel=1e-3)
+    assert mc.PropertyExtractor.translate(1, 2, Qgis.RenderUnit.Pixels) == [1, 2]
+    assert GDALTilesGenerator._translate_px([3, 4], 16) == 5  # pylint: disable=protected-access
+
+
+def _evaluate(expression, properties, scope=None):
+    """The style expression forms keep_upright writes, evaluated."""
+    scope = scope or {}
+    if not isinstance(expression, list) or not expression or not isinstance(expression[0], str):
+        return expression
+    op, args = expression[0], expression[1:]
+
+    def ev(value):
+        return _evaluate(value, properties, scope)
+    if op == "literal":
+        return args[0]
+    if op == "get":
+        return properties.get(args[0])
+    if op == "var":
+        return scope[args[0]]
+    if op == "let":
+        return _evaluate(args[2], properties, {**scope, args[0]: ev(args[1])})
+    if op in ("to-number", "coalesce"):
+        values = [ev(a) for a in args]
+        return next((float(v) for v in values if v is not None), 0.0)
+    if op == "%":
+        return math.fmod(ev(args[0]), ev(args[1]))
+    if op in ("+", "-", ">=", "<"):
+        a, b = ev(args[0]), ev(args[1])
+        return {"+": a + b, "-": a - b, ">=": a >= b, "<": a < b}[op]
+    if op == "all":
+        return all(ev(a) for a in args)
+    if op == "case":
+        for i in range(0, len(args) - 1, 2):
+            if ev(args[i]):
+                return ev(args[i + 1])
+        return ev(args[-1])
+    raise AssertionError(op)
+
+
+def test_upside_down_labels_are_turned_upright_as_qgis_does(mc):
+    """QGIS ("Show upside-down labels: never", the default) turns a straight
+    label whose clockwise angle lies in [90, 270) by 180 degrees within its
+    box; MapLibre never turns point labels (text-keep-upright is for line
+    placement). A fixed or data-defined angle was drawn upside down."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.angleOffset = 150
+    assert mc.TextPropertyExtractor.flips_upside_down(settings)
+    layout = {"text-rotate": mc.TextPropertyExtractor.get_text_rotate(settings),
+              "text-anchor": "bottom-left", "text-offset": [1.0, -0.5]}
+    mc.TextPropertyExtractor.keep_upright(layout)
+    # The box stays: the anchor and the offset turn with the label.
+    assert layout == {"text-rotate": -30, "text-anchor": "top-right", "text-offset": [-1.0, 0.5]}
+    upright = {"text-rotate": 60, "text-anchor": "bottom"}
+    mc.TextPropertyExtractor.keep_upright(upright)
+    assert upright == {"text-rotate": 60, "text-anchor": "bottom"}
+
+    # A data-defined rotation as the export writes it (a dataset field).
+    field = "q2vt_property_labelrotation"
+    layout = {"text-rotate": ["to-number", ["coalesce", ["get", field], 0], 0],
+              "text-anchor": "bottom", "text-offset": [0, -1.0]}
+    mc.TextPropertyExtractor.keep_upright(layout)
+    turned = {value: _evaluate(layout["text-rotate"], {field: value})
+              for value in (0, 60, 90, 120, 200, 269, 270, 300, -100, 420)}
+    assert turned == {0: 0, 60: 60, 90: -90, 120: -60, 200: 20, 269: 89, 270: 270, 300: 300,
+                      -100: 80, 420: 60}
+    assert _evaluate(layout["text-anchor"], {field: 120}) == "top"
+    assert _evaluate(layout["text-anchor"], {field: 60}) == "bottom"
+    assert _evaluate(layout["text-offset"], {field: 120}) == [0, 1.0]
+    assert _evaluate(layout["text-offset"], {field: 300}) == [0, -1.0]
+
+    # Curved labels are always upright; the other modes keep the angle.
+    settings.placement = Qgis.LabelPlacement.Curved
+    assert not mc.TextPropertyExtractor.flips_upside_down(settings)
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.upsidedownLabels = Qgis.UpsideDownLabelHandling.AlwaysAllowUpsideDown
+    assert not mc.TextPropertyExtractor.flips_upside_down(settings)
+
+
+def _dash_at(dasharray, zoom):
+    """The ``line-dasharray`` MapLibre uses at ``zoom`` (a list or a step)."""
+    if not isinstance(dasharray[0], str):
+        return dasharray
+    value = dasharray[2][1]
+    for stop, array in zip(dasharray[3::2], dasharray[4::2]):
+        if zoom >= stop:
+            value = array[1]
+    return value
+
+
+def _px_per_metre(zoom):
+    return 512 * 2 ** zoom / 40075016.68557849
+
+
+def _dashed_line(width, width_unit, dashes, dash_unit, cap=Qt.PenCapStyle.FlatCap):
+    line = QgsSimpleLineSymbolLayer(QColor("black"), width)
+    line.setWidthUnit(width_unit)
+    line.setPenCapStyle(cap)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector(dashes)
+    line.setCustomDashPatternUnit(dash_unit)
+    return line
+
+
+def _line_style_exporter(mc):
+    """A style converter for one symbol of a map exported from zoom 0 (the
+    Publish window's default) to 16."""
+    from fidelity.diagnostics import DiagnosticCollector
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_symbols, exporter.marker_counter = {}, {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    exporter.style, exporter.maxzoom = {"layers": []}, 16
+    mc.PropertyExtractor.context = exporter.context
+    exporter.context.reference_zoom = 0
+    return exporter
+
+
+def test_screen_dashes_on_a_map_unit_width_follow_the_zoom(mc):
+    """MapLibre multiplies line-dasharray by the line width. A 1 m wide line
+    with 3/2 mm dashes: the ratio was computed once with the width at the
+    style's first zoom (1.3e-5 px from zoom 0), so the dashes were a million
+    widths long and the line solid at every zoom. QGIS keeps 3 mm dashes."""
+    from qgis.core import QgsLineSymbol
+    line = _dashed_line(1.0, Qgis.RenderUnit.MapUnits, [3.0, 2.0], Qgis.RenderUnit.Millimeters)
+    exporter = _line_style_exporter(mc)
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    width, dasharray = paint["line-width"], paint["line-dasharray"]
+    assert dasharray[:2] == ["step", ["zoom"]]
+    for zoom in (14.0, 16.0, 17.5, 18.0):
+        dash, gap = _dash_at(dasharray, zoom)
+        width_px = ex.evaluate_zoom_curve(width, zoom)
+        # Within 2^0.25 of QGIS's 3 / 2 mm (half-zoom steps).
+        assert dash * width_px == pytest.approx(3 * 96 / 25.4, rel=0.19)
+        assert gap * width_px == pytest.approx(2 * 96 / 25.4, rel=0.19)
+
+
+def test_map_unit_dashes_with_corner_tweak_follow_the_zoom(mc):
+    """10 m dashes on a 0.5 mm line with "tweak dash pattern at corners"
+    are not cut into dash geometry: the native dasharray took the dash
+    length at the style's first zoom (1e-4 px from zoom 0) and, with the
+    square cap, became [1.0001, 0] - a solid line at every zoom."""
+    from qgis.core import QgsLineSymbol
+    line = _dashed_line(0.5, Qgis.RenderUnit.Millimeters, [10.0, 10.0],
+                        Qgis.RenderUnit.MapUnits, Qt.PenCapStyle.SquareCap)
+    line.setTweakDashPatternOnCorners(True)
+    exporter = _line_style_exporter(mc)
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    width = paint["line-width"]
+    assert width == pytest.approx(0.5 * 96 / 25.4, rel=1e-3)
+    for zoom in (16.0, 18.0, 21.0):
+        dash, gap = _dash_at(paint["line-dasharray"], zoom)
+        # Qt draws a square cap on every dash: one width added to it here.
+        assert (dash - 1) * width == pytest.approx(10 * _px_per_metre(zoom), rel=0.19)
+        assert (gap + 1) * width == pytest.approx(10 * _px_per_metre(zoom), rel=0.19)
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.Millimeters, Qgis.RenderUnit.MapUnits])
+def test_dashes_in_the_line_width_unit_stay_one_array(mc, unit):
+    line = _dashed_line(1.0, unit, [3.0, 2.0], unit)
+    width = mc.LinePropertyExtractor.get_line_width(line)
+    assert mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 24) == [3.0, 2.0]

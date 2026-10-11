@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import decimal
 import json
 import math
 import re
@@ -27,14 +28,15 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
+from qgis.core import NULL, Qgis, QgsExpressionContext, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
-from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages
+from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
 from .fidelity import expressions as ex
 from .fidelity import feature_order
 from .fidelity import html_labels
 from .fidelity import materialize as mat
+from .fidelity import zoom as fidelity_zoom
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
@@ -58,6 +60,11 @@ def _enum_int(value, default=None):
     if isinstance(inner, int):
         return inner
     return default
+
+
+def _is_map_unit(unit) -> bool:
+    """Map units or meters at scale: lengths that grow with the map."""
+    return normalize_unit(unit) in ("map", "m")
 
 
 def _label_enum(settings, name: str, default=None):
@@ -344,6 +351,24 @@ class PropertyExtractor:
         zoom = cls.context.reference_zoom if reference_zoom is None else reference_zoom
         return ex.evaluate_zoom_curve(result, zoom)
 
+    @classmethod
+    def translate(cls, x: float, y: float, unit_obj=None, map_unit_scale=None) -> Union[List, Any]:
+        """``*-translate`` for a QGIS offset (x right, y down): ``[x, y]`` in
+        pixels, or for map units and meters at scale a zoom curve of ``[x, y]``
+        that grows with the map (also when overzoomed), limited by the map
+        unit scale like QgsRenderContext::convertToPainterUnits."""
+        if normalize_unit(unit_obj) not in ("map", "m"):
+            return [cls.static_pixels(x, unit_obj), cls.static_pixels(y, unit_obj)]
+        curves = [cls.length(value, unit_obj, None, map_unit_scale) if value else 0.0
+                  for value in (x, y)]
+        if all(ex.is_number(curve) for curve in curves):
+            return [float(curve) for curve in curves]
+        zooms = sorted({zoom for curve in curves if ex.is_zoom_curve(curve)
+                        for zoom in curve[3::2]})
+        return ex.exponential_zoom_curve(
+            [(zoom, ["literal", [round(ex.evaluate_zoom_curve(curve, zoom), 6)
+                                 for curve in curves]]) for zoom in zooms])
+
     @staticmethod
     def opacity(symbol=None, symbol_layer=None) -> Union[float, List]:
         """Symbol opacity × data-defined opacity (QGIS 0–100 → MapLibre 0–1)."""
@@ -448,13 +473,17 @@ class LinePropertyExtractor:
 
     @staticmethod
     def get_line_dasharray(
-        symbol_layer: QgsSimpleLineSymbolLayer, width_px: float
-    ) -> Optional[List[float]]:
+        symbol_layer: QgsSimpleLineSymbolLayer, width_px, min_zoom: float = 0.0,
+        max_zoom: float = 24.0,
+    ) -> Optional[Union[List[float], List]]:
         """Return ``line-dasharray`` from a custom dash vector or pen-style preset.
 
         MapLibre dash lengths are multiples of the line width. QGIS custom
         dash lengths are absolute, so they are converted to pixels and divided
-        by the static line width. Qt pen-style presets are already relative.
+        by the line width (a number or a zoom curve). Qt pen-style presets are
+        already relative. When the dashes and the width do not scale alike
+        with the zoom (map-unit dashes on a screen-unit line or the other way
+        round), the ratio is a zoom step over the layer's zooms.
         """
         try:
             custom_dash_enabled = bool(symbol_layer.useCustomDashPattern())
@@ -462,35 +491,104 @@ class LinePropertyExtractor:
         except (RuntimeError, AttributeError):
             custom_dash_enabled, dash_vector = False, None
 
+        square = _enum_int(symbol_layer.penCapStyle()) == 0x10  # Qt::SquareCap
         if custom_dash_enabled and dash_vector:
-            # QGIS divides by max(1, width) and Qt scales the pattern back by
-            # the same clamped width, so on screen a dash is its own length;
-            # MapLibre multiplies by the line width.
-            width = width_px if ex.is_number(width_px) and width_px > 0 else 1.0
             unit = symbol_layer.customDashPatternUnit()
-            pattern = [max(0.0, PropertyExtractor.static_pixels(d, unit)) / width
-                       for d in dash_vector]
-        else:
-            # Qt pen styles, in pen widths (QPen::dashPattern).
-            pattern = {
-                2: [4, 2],               # DashLine
-                3: [1, 2],               # DotLine
-                4: [4, 2, 1, 2],         # DashDotLine
-                5: [4, 2, 1, 2, 1, 2],   # DashDotDotLine
-            }.get(_enum_int(symbol_layer.penStyle()))
-            if pattern is None:
-                return None
+            dashes = [PropertyExtractor.length(d, unit) for d in dash_vector]
+            if not ex.is_number(width_px) and not ex.is_zoom_curve(width_px):
+                width_px = 1.0
+            if all(ex.is_number(v) for v in dashes + [width_px]):
+                return LinePropertyExtractor._dash_widths(
+                    [max(0.0, d) for d in dashes], width_px, square)
+            try:
+                return LinePropertyExtractor._dash_step(
+                    dashes, width_px, square, min_zoom, max_zoom,
+                    _enum_int(symbol_layer.penCapStyle()) == 0x20)
+            except ex.ExpressionError:
+                # Curves that cannot be sampled: their reference-zoom value.
+                try:
+                    width_px = ex.evaluate_zoom_curve(
+                        width_px, PropertyExtractor.context.reference_zoom)
+                except ex.ExpressionError:
+                    width_px = 1.0
+                return LinePropertyExtractor._dash_widths(
+                    [max(0.0, PropertyExtractor.static_pixels(d, unit)) for d in dash_vector],
+                    width_px, square)
+        # Qt pen styles, in pen widths (QPen::dashPattern).
+        pattern = {
+            2: [4, 2],               # DashLine
+            3: [1, 2],               # DotLine
+            4: [4, 2, 1, 2],         # DashDotLine
+            5: [4, 2, 1, 2, 1, 2],   # DashDotDotLine
+        }.get(_enum_int(symbol_layer.penStyle()))
+        if pattern is None:
+            return None
+        return LinePropertyExtractor._dash_pattern(pattern, square)
+
+    @staticmethod
+    def _dash_widths(dashes_px: List[float], width_px: float, square: bool) -> List[float]:
+        """Dash lengths in CSS px as ``line-dasharray`` (multiples of the width)."""
+        # QGIS divides by max(1, width) and Qt scales the pattern back by
+        # the same clamped width, so on screen a dash is its own length;
+        # MapLibre multiplies by the line width.
+        width = width_px if ex.is_number(width_px) and width_px > 0 else 1.0
+        return LinePropertyExtractor._dash_pattern([d / width for d in dashes_px], square)
+
+    @staticmethod
+    def _dash_pattern(pattern: List[float], square: bool) -> List[float]:
         if len(pattern) % 2:
             pattern = pattern + pattern
         pattern = LinePropertyExtractor._without_empty_dashes(pattern)
         # Qt draws square and round caps on every dash (one line width longer,
         # gaps one width shorter); MapLibre does so for round caps only
         # (measured), so square-capped dashes are lengthened here.
-        if _enum_int(symbol_layer.penCapStyle()) == 0x10:  # Qt::SquareCap
+        if square:
             pattern = [value + 1.0 if i % 2 == 0 and value > 0 else
                        value if i % 2 == 0 else max(0.0, value - 1.0)
                        for i, value in enumerate(pattern)]
         return [round(v, 4) for v in pattern]
+
+    # Dash periods outside this range (CSS px) look alike at every zoom
+    # (a tint or a solid line, one dash wider than the screen): the zoom
+    # step stops changing there, which keeps MapLibre's line atlas small.
+    _DASH_PERIOD_PX = (1.0, 8192.0)
+
+    @staticmethod
+    def _dash_step(dashes, width, square: bool, min_zoom: float, max_zoom: float,
+                   round_cap: bool):
+        """``line-dasharray`` as a zoom step: dash / width sampled in the
+        middle of every half zoom (within 2^0.25 of QGIS), every whole zoom
+        for round caps (whose dashes take 15 rows of MapLibre's 512-row line
+        atlas each). The patched MapLibre multiplies by the width at the
+        current zoom (tools/patch_maplibre.py)."""
+        low, high = LinePropertyExtractor._DASH_PERIOD_PX
+        step = 1.0 if round_cap else 0.5
+        start = math.floor(max(0.0, min_zoom) / step) * step
+        end = min(max_zoom if max_zoom is not None and max_zoom > start else 24.0, 24.0)
+        stops = []
+        zoom = start
+        while zoom < end - 1e-9:
+            mid = zoom + step / 2
+            dash_px = [max(0.0, ex.evaluate_zoom_curve(d, mid)) for d in dashes]
+            width_px = ex.evaluate_zoom_curve(width, mid)
+            useful = low <= sum(dash_px) <= high and width_px >= 0.05
+            stops.append((zoom, LinePropertyExtractor._dash_widths(dash_px, width_px, square),
+                          useful))
+            zoom += step
+        if not stops:
+            return None
+        useful = [i for i, stop in enumerate(stops) if stop[2]]
+        first, last = (useful[0], useful[-1]) if useful else (len(stops) - 1, len(stops) - 1)
+        arrays = [stops[min(max(i, first), last)][1] for i in range(len(stops))]
+        # Every gap closed by the caps: a solid line, whatever the dashes.
+        arrays = [[1.0, 0.0] if not any(a[1::2]) else a for a in arrays]
+        if all(a == arrays[0] for a in arrays):
+            return arrays[0]
+        expression: List[Any] = ["step", ["zoom"], ["literal", arrays[0]]]
+        for (zoom, _, _), array, previous in zip(stops[1:], arrays[1:], arrays):
+            if array != previous:
+                expression += [zoom, ["literal", array]]
+        return expression
 
     @staticmethod
     def _without_empty_dashes(pattern: List[float]) -> List[float]:
@@ -631,11 +729,13 @@ class LinePropertyExtractor:
         return "line"
 
     @staticmethod
-    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer) -> Union[float, List]:
+    def get_marker_line_spacing(symbol_layer: QgsSymbolLayer,
+                                zooms: Optional[Tuple[float, float]] = None) -> Union[float, List]:
         """Return ``symbol-spacing`` in CSS px from the marker-line interval.
 
         Map-unit intervals become zoom curves; a data-defined interval that
         depends only on ``@map_scale`` has been resolved per zoom band.
+        ``zooms``: the style layer's (minzoom, maxzoom).
         """
         placements = LinePropertyExtractor.marker_line_placements(symbol_layer)
         try:
@@ -655,9 +755,15 @@ class LinePropertyExtractor:
                 # MapLibre lays line symbols out once per tile, at the tile's
                 # integer zoom, so a screen-size spacing grows up to 2x until
                 # the next zoom. Laying out at s/sqrt(2) centres that error
-                # (0.71x-1.41x of QGIS instead of 1x-2x). Map-unit spacings
-                # grow with the map like QGIS and need no correction.
-                spacing = ex.mul(spacing, 1.0 / math.sqrt(2.0))
+                # (0.71x-1.41x of QGIS instead of 1x-2x). A layer shown
+                # within one whole zoom (bands past the last tiles) is laid
+                # out for the middle of its zooms. Map-unit spacings grow
+                # with the map like QGIS and need no correction.
+                factor = 1.0 / math.sqrt(2.0)
+                if zooms is not None and zooms[0] is not None and zooms[1] is not None \
+                        and 0 <= zooms[0] < zooms[1] <= math.floor(zooms[0]) + 1.0 + 1e-9:
+                    factor = 2.0 ** (math.floor(zooms[0]) - (zooms[0] + zooms[1]) / 2.0)
+                spacing = ex.mul(spacing, factor)
             return ex.clamp(spacing, 1.0, None)
 
         # Vertex-type placements have no MapLibre equivalent; a small spacing
@@ -846,16 +952,31 @@ class IconPropertyExtractor:
             size = 1.0
         context = PropertyExtractor.context
         unit_name = "map" if unit not in ("map", "m") else unit
-        reference_px = max(1.0, PropertyExtractor.static_pixels(size, unit_name, context.reference_zoom))
+        unclamped_px = PropertyExtractor.static_pixels(size, unit_name, context.reference_zoom)
+        reference_px = max(1.0, unclamped_px)
         map_units_per_pixel = size / reference_px
+        # QGIS applies the size's QgsMapUnitScale (min/max mm, scale range)
+        # when it draws the sprite (at the scale of map_units_per_pixel), so
+        # the sprite is the limited size at that scale: icon-size is relative
+        # to it, or the limits would apply twice.
+        mus = symbol.sizeMapUnitScale()
+        px = PropertyExtractor.length(value, unit_name, None, mus)
+        sprite_px = reference_px
+        if unclamped_px > 0 and (mus.minScale or mus.maxScale or mus.minSizeMMEnabled
+                                 or mus.maxSizeMMEnabled):
+            sprite_zoom = context.reference_zoom + math.log2(reference_px / unclamped_px)
+            limited = PropertyExtractor.length(size, unit_name, None, mus)
+            limited = limited if ex.is_number(limited) else \
+                ex.evaluate_zoom_curve(limited, sprite_zoom)
+            if limited > 0:
+                sprite_px = limited
         span = max(0.0, min(3.0, context.reference_zoom_span))
         oversampling = max(float(_SPRITE_QUALITY),
-                           min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / reference_px))
+                           min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / sprite_px))
         if context.sprite_oversampling:
             # Very large markers far into overzoom: a smaller image, scaled up.
-            oversampling = min(context.sprite_oversampling, 256.0 / reference_px)
-        px = PropertyExtractor.length(value, unit_name, None, symbol.sizeMapUnitScale())
-        return ex.clamp(ex.mul(px, 1.0 / reference_px), 0, None), \
+            oversampling = min(context.sprite_oversampling, 256.0 / sprite_px)
+        return ex.clamp(ex.mul(px, 1.0 / sprite_px), 0, None), \
             map_units_per_pixel, oversampling
 
     @staticmethod
@@ -1421,15 +1542,15 @@ class TextPropertyExtractor:
         """``text-offset`` in ems moving an above/below line label by the
         label distance away from the line."""
         side = TextPropertyExtractor.line_side(label_settings)
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
         try:
             distance = float(label_settings.dist or 0)
         except (AttributeError, TypeError, ValueError):
             distance = 0.0
-        if side == "on" or not distance or size <= 0:
+        if side == "on" or not distance:
             return [0, 0]
-        em = PropertyExtractor.static_pixels(distance, label_settings.distUnits) / size
-        return [0, -em if side == "above" else em]
+        pixels = PropertyExtractor.length(distance, label_settings.distUnits)
+        return TextPropertyExtractor.label_ems(
+            [0, ex.mul(pixels, -1 if side == "above" else 1)], text_size_px, limit=True)
 
     @staticmethod
     def get_text_justify(label_settings: QgsPalLayerSettings) -> Union[str, List]:
@@ -1474,14 +1595,50 @@ class TextPropertyExtractor:
         y_offset = label_settings.yOffset
         if x_offset == 0 and y_offset == 0:
             return [0, 0]
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
-        if size <= 0:
-            return [0, 0]
         unit = label_settings.offsetUnits
-        return [
-            PropertyExtractor.static_pixels(x_offset, unit) / size,
-            PropertyExtractor.static_pixels(y_offset, unit) / size,
-        ]
+        return TextPropertyExtractor.label_ems(
+            [PropertyExtractor.length(x_offset, unit), PropertyExtractor.length(y_offset, unit)],
+            text_size_px, limit=True)
+
+    @staticmethod
+    def get_text_offset_translate(label_settings: QgsPalLayerSettings) -> Optional[List]:
+        """The over-point X/Y offset as ``text-translate`` px, or None (an
+        offset that is no plain zoom curve).
+
+        For an offset whose unit scales unlike the text (map-unit offset, mm
+        text or the other way round): text-translate is drawn at the camera
+        zoom, exact at every zoom, and has no limit. In ems (text-offset) it
+        was a per-zoom step, and MapLibre bakes text-offset into each glyph's
+        16-bit position: beyond ~42 em with the glyph's own position, a long
+        label wrapped round to the far side of its point. Not turned with the
+        label: QGIS adds the offset after turning the label (pal
+        createCandidatesOverPoint), MapLibre turns text-offset with it."""
+        unit = label_settings.offsetUnits
+        lengths = [PropertyExtractor.length(label_settings.xOffset, unit),
+                   PropertyExtractor.length(label_settings.yOffset, unit)]
+        zooms = set()
+        for length in lengths:
+            if ex.is_number(length):
+                continue
+            if not ex.is_zoom_curve(length) or length[0] != "interpolate" \
+                    or length[1] != ["exponential", 2]:
+                return None
+            zooms.update(length[3::2])
+
+        def at(zoom):
+            try:
+                return [float(f"{float(ex.evaluate_zoom_curve(v, zoom)):.6g}") + 0.0 for v in lengths]
+            except ex.ExpressionError:
+                return None
+        if not zooms:
+            return at(0)
+        stops = [(zoom, at(zoom)) for zoom in sorted(zooms)]
+        if any(value is None for _, value in stops):
+            return None
+        out = ["interpolate", ["exponential", 2], ["zoom"]]
+        for zoom, value in stops:
+            out += [zoom, ["literal", value]]
+        return out
 
     @staticmethod
     def get_text_radial_offset(label_settings: QgsPalLayerSettings,
@@ -1497,10 +1654,45 @@ class TextPropertyExtractor:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):
             return base
-        size = text_size_px if ex.is_number(text_size_px) else 16.0
-        if not distance or size <= 0:
+        if not distance:
             return base
-        return base + PropertyExtractor.static_pixels(distance, label_settings.distUnits) / size
+        ems = TextPropertyExtractor.label_ems(
+            [PropertyExtractor.length(distance, label_settings.distUnits)], text_size_px, plus=base)
+        if ex.is_zoom_curve(ems):  # a step of one-number lists
+            return ems[:2] + [v[1][0] if isinstance(v, list) else v for v in ems[2:]]
+        return ems[0]
+
+    # text-offset is stored per glyph vertex in 1/32 px of a 24 px em as a
+    # 16-bit integer (MapLibre symbol layout): beyond ~42 em it wraps around.
+    MAX_TEXT_OFFSET_EM = 40.0
+
+    @staticmethod
+    def label_ems(lengths: list, size, plus: float = 0.0, limit: bool = False):
+        """Label offsets ``lengths`` (px: numbers or zoom curves) in ems of the
+        text size ``size`` (px: a number or a zoom curve), ``plus`` added: a
+        list, or a zoom step of lists when offset and size do not scale alike
+        (map-unit text with a mm offset, mm text with a map-unit distance).
+        MapLibre multiplies the ems by the drawn text size but lays them out at
+        the tile's whole zoom only: each zoom takes the ratio of its middle
+        (exact there, within sqrt(2) at its ends). One ratio taken at the
+        style's min zoom was ~1e5 em from zoom 0 (or 0 em the other way round).
+        ``limit``: kept within MAX_TEXT_OFFSET_EM (text-offset; the zooms
+        where it applies draw text too small to see or far off screen)."""
+        if ex.is_number(size) and all(ex.is_number(v) for v in lengths):
+            return [v / size + plus if size > 0 else plus for v in lengths]
+        top = TextPropertyExtractor.MAX_TEXT_OFFSET_EM if limit else float("inf")
+        steps = []
+        for zoom in range(0, 24):
+            den = ex.evaluate_zoom_curve(size, zoom + 0.5)
+            steps.append([round(max(-top, min(top, ex.evaluate_zoom_curve(v, zoom + 0.5) / den)) + plus, 4)
+                          if den > 0 else plus for v in lengths])
+        if all(step == steps[0] for step in steps):
+            return steps[0]
+        expression = ["step", ["zoom"], ["literal", steps[0]]]
+        for zoom in range(1, len(steps)):
+            if steps[zoom] != steps[zoom - 1]:
+                expression += [zoom, ["literal", steps[zoom]]]
+        return expression
 
     @staticmethod
     def get_text_variable_anchor(label_settings: QgsPalLayerSettings = None) -> Optional[List[str]]:
@@ -1592,6 +1784,18 @@ class TextPropertyExtractor:
         return _enum_int(handling, 0) != 0  # Qgis.LabelOverlapHandling.PreventOverlap
 
     @staticmethod
+    def overlap_at_no_cost(label_settings: QgsPalLayerSettings = None) -> bool:
+        """True for QGIS labels placed whatever they overlap ("Allow overlap
+        at no cost"): not moved aside for other labels."""
+        if label_settings is None:
+            return False
+        try:
+            handling = label_settings.placementSettings().overlapHandling()
+        except AttributeError:  # QGIS < 3.26
+            return False
+        return _enum_int(handling, 0) == 2  # Qgis.LabelOverlapHandling.AllowOverlapAtNoCost
+
+    @staticmethod
     def get_text_ignore_placement() -> bool:
         """Return ``text-ignore-placement`` (MapLibre default: ``False``)."""
         return False
@@ -1677,6 +1881,99 @@ class TextPropertyExtractor:
         )
         return PropertyExtractor.get_value_or_expression(base_rotation, rotation_prop, "number")
 
+    _MIRRORED_ANCHOR = {"top": "bottom", "bottom": "top", "left": "right", "right": "left",
+                        "top-left": "bottom-right", "bottom-right": "top-left",
+                        "top-right": "bottom-left", "bottom-left": "top-right"}
+
+    @staticmethod
+    def flips_upside_down(label_settings: QgsPalLayerSettings) -> bool:
+        """QGIS turns a straight label whose angle reads upside down by 180
+        degrees within its box ("Show upside-down labels: never", the
+        default; pal LabelPosition, FeaturePart::onlyShowUprightLabels).
+        "When rotation defined" keeps every defined rotation as it is, and
+        an undefined one is 0, which never reads upside down."""
+        if TextPropertyExtractor.placement_name(label_settings) in ("Curved", "PerimeterCurved"):
+            return False
+        try:
+            mode = _enum_int(label_settings.upsidedownLabels, 0)
+        except AttributeError:
+            return False
+        return mode == 0
+
+    @staticmethod
+    def keep_upright(layout: dict) -> None:
+        """Turn ``text-rotate`` (clockwise degrees) by 180 where it lies in
+        [90, 270), as QGIS does: the label keeps its box, so its anchor and
+        offset (in the label's turned frame) are mirrored with it."""
+        rotate = layout.get("text-rotate", 0)
+        anchor = layout.get("text-anchor", "center")
+        offset = layout.get("text-offset")
+        mirror = TextPropertyExtractor._MIRRORED_ANCHOR
+        if ex.is_number(rotate):
+            angle = float(rotate) % 360
+            if not 90 <= angle < 270:
+                return
+            angle -= 180
+            layout["text-rotate"] = round(angle, 6) if angle != int(angle) else int(angle)
+            if isinstance(anchor, str) and anchor in mirror:
+                layout["text-anchor"] = mirror[anchor]
+            if offset is not None:
+                layout["text-offset"] = TextPropertyExtractor._negated(offset)
+            variable = layout.get("text-variable-anchor")
+            if isinstance(variable, list):
+                layout["text-variable-anchor"] = [mirror.get(a, a) for a in variable]
+            return
+        if not ex.is_expression(rotate) or ex.contains_zoom(rotate):
+            return
+        r = ["var", "q2vt_r"]
+        normal = ["%", ["+", ["%", ["to-number", rotate, 0], 360], 360], 360]
+        flipped = ["all", [">=", r, 90], ["<", r, 270]]
+        layout["text-rotate"] = ["let", "q2vt_r", normal,
+                                 ["case", flipped, ["-", r, 180], r]]
+        flip = ["let", "q2vt_r", normal, flipped]
+        if isinstance(anchor, str) and anchor in mirror:
+            layout["text-anchor"] = ["case", flip, mirror[anchor], anchor]
+        if offset is not None:
+            layout["text-offset"] = TextPropertyExtractor._flip_case(offset, flip)
+
+    @staticmethod
+    def _negated(value):
+        """``value`` (an ``[x, y]`` offset, a literal or a zoom curve of
+        them) pointing the other way."""
+        if isinstance(value, list) and len(value) == 2 and all(ex.is_number(v) for v in value):
+            return [-v if v else 0 for v in value]
+        if ex.is_expression(value) and value[0] == "literal":
+            return ["literal", TextPropertyExtractor._negated(value[1])]
+        if ex.is_zoom_curve(value):
+            head = 3 if value[0] == "interpolate" else 2
+            out = list(value[:head])
+            if value[0] == "step":
+                out.append(TextPropertyExtractor._negated(value[2]))
+                head = 3
+            for i in range(head, len(value)):
+                out.append(value[i] if (i - head) % 2 == 0
+                           else TextPropertyExtractor._negated(value[i]))
+            return out
+        return value
+
+    @staticmethod
+    def _flip_case(value, flip):
+        """``value`` negated where ``flip`` holds (inside a zoom curve's
+        outputs: MapLibre wants the zoom curve outermost)."""
+        if ex.is_zoom_curve(value):
+            head = 3 if value[0] == "interpolate" else 2
+            out = list(value[:head])
+            if value[0] == "step":
+                out.append(TextPropertyExtractor._flip_case(value[2], flip))
+                head = 3
+            for i in range(head, len(value)):
+                out.append(value[i] if (i - head) % 2 == 0
+                           else TextPropertyExtractor._flip_case(value[i], flip))
+            return out
+        literal = (lambda v: ["literal", v]) if isinstance(value, list) and \
+            all(ex.is_number(v) for v in value) else (lambda v: v)
+        return ["case", flip, literal(TextPropertyExtractor._negated(value)), literal(value)]
+
     @staticmethod
     def get_text_rotation_alignment() -> str:
         """Return ``text-rotation-alignment`` (default ``"map"``)."""
@@ -1736,6 +2033,8 @@ class QgisMapLibreStyleExporter:
         feature_filters: Optional[Dict[str, list]] = None,
         label_windows: Optional[set] = None,
         layer_opacities: Optional[Dict[str, float]] = None,
+        disjoint_bands: Optional[set] = None,
+        view_max_zoom: Optional[int] = None,
     ):
         """Initialise the exporter.
 
@@ -1758,8 +2057,12 @@ class QgisMapLibreStyleExporter:
             ordered_styles:  Style names whose features carry a QGIS
                              drawing rank (renderer order-by) to sort by.
             visible_polygons: Style name -> (polygon source layer, label per
-                             part) of labels placed on the visible part of
-                             their polygon by the viewer.
+                             part[, kind, merge connected lines]) of labels
+                             placed on the visible part of their polygon or
+                             line by the viewer.
+            view_max_zoom:   The browser's zoom limit (None: the profile's,
+                             MapLibre's 22 by default): map-unit textures
+                             with screen-unit lengths get one per zoom up to it.
         """
         self.visible_polygons = visible_polygons or {}
         # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
@@ -1779,15 +2082,22 @@ class QgisMapLibreStyleExporter:
         self.label_windows = label_windows or set()
         # Style name -> the QGIS layer's opacity (Layer Rendering), below 1.
         self.layer_opacities = layer_opacities or {}
+        # Style names of gradient / shapeburst bands that do not overlap
+        # (materialize.color_bands_disjoint): filled without anti-aliased
+        # outlines, which would cover the neighbouring bands.
+        self.disjoint_bands = disjoint_bands or set()
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
+        # Sprite variant names by what draws them (see _marker_variants).
+        self.variant_sprites: dict = {}
         self.pattern_images: Dict[str, PatternImages] = {}
         self.marker_counter = 0
         self.glyphs = {}
         self.viewer = viewer
         self.minzoom = minzoom
         self.maxzoom = maxzoom
+        self._view_max_zoom_override = view_max_zoom
         self.diagnostics = diagnostics or DiagnosticCollector()
         self.profile = profile or ExportProfile()
         self.visibility = visibility or {}
@@ -1846,6 +2156,10 @@ class QgisMapLibreStyleExporter:
             background_type: ``0`` for OSM, ``1`` for NASA Blue Marble; any
                              other value emits a solid-colour background
                              using the project's background colour.
+
+        The layer has no zoom range: QGIS draws the background at every
+        scale, and MapLibre hides a layer at its ``maxzoom`` (the browser
+        may zoom to 24). Raster sources overzoom their deepest tiles.
         """
         if background_type == 0:
             self.style["sources"]["osm"] = {
@@ -1856,13 +2170,13 @@ class QgisMapLibreStyleExporter:
                     "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
                 ],
                 "tileSize": 256,
+                "maxzoom": 19,
                 "attribution": (
                     '&copy; <a href="https://www.openstreetmap.org/copyright">'
                     "OpenStreetMap</a> contributors"
                 ),
             }
-            return {"id": "osm-background", "type": "raster", "source": "osm",
-                    "minzoom": 0, "maxzoom": 22}
+            return {"id": "osm-background", "type": "raster", "source": "osm"}
 
         if background_type == 1:
             self.style["sources"]["bluemarbel"] = {
@@ -1872,15 +2186,15 @@ class QgisMapLibreStyleExporter:
                     "BlueMarble_ShadedRelief/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg"
                 ],
                 "tileSize": 256,
+                "maxzoom": 8,
             }
-            return {"id": "bluemarbel-background", "type": "raster", "source": "bluemarbel",
-                    "minzoom": 0, "maxzoom": 22}
+            return {"id": "bluemarbel-background", "type": "raster", "source": "bluemarbel"}
 
         bg_color = PropertyExtractor.convert_qcolor_to_maplibre(
             QgsProject.instance().backgroundColor()
         )
         return {
-            "id": "background", "type": "background", "minzoom": 0, "maxzoom": 22,
+            "id": "background", "type": "background",
             "paint": {"background-color": bg_color},
         }
 
@@ -1937,6 +2251,10 @@ class QgisMapLibreStyleExporter:
         first = len(self.style["layers"])
         try:
             self._convert_style_layers(style, bounds, first)
+            if style.styleName() in getattr(self, "disjoint_bands", ()):
+                for layer_def in self.style["layers"][first:]:
+                    if layer_def.get("type") == "fill":
+                        layer_def.setdefault("paint", {})["fill-antialias"] = False
         finally:
             opacity = self.layer_opacities.get(style.styleName())
             if opacity is not None:
@@ -2030,21 +2348,29 @@ class QgisMapLibreStyleExporter:
     def _apply_translate(self, layer_defs, translate) -> None:
         """Shift the style's layers on screen like a QGIS fill offset (painter
         coordinates: x right, y down, not turned with the map)."""
-        x, y, unit_name = translate
+        x, y, unit_name = translate[:3]
         unit, ok = QgsUnitTypes.decodeRenderUnit(unit_name)
         if not ok:
             return
-        shift = [PropertyExtractor.static_pixels(x, unit), PropertyExtractor.static_pixels(y, unit)]
+        # Map units and meters at scale grow with the map (a zoom curve).
+        shift = PropertyExtractor.translate(x, y, unit, translate[3] if len(translate) > 3 else None)
         for layer_def in layer_defs:
             prefix = self._TRANSLATE.get(layer_def.get("type"))
             if prefix is None:
                 continue
             paint = layer_def.setdefault("paint", {})
             current = paint.get(f"{prefix}-translate")
+            moved = shift
             if isinstance(current, list) and len(current) == 2 and \
-                    all(isinstance(v, (int, float)) for v in current):
-                shift = [shift[0] + current[0], shift[1] + current[1]]
-            paint[f"{prefix}-translate"] = shift
+                    all(isinstance(v, (int, float)) for v in current) and any(current):
+                if ex.is_zoom_curve(shift):  # stops: zoom, ["literal", [x, y]]
+                    moved = shift[:3] + [
+                        item if index % 2 == 0 else
+                        ["literal", [item[1][0] + current[0], item[1][1] + current[1]]]
+                        for index, item in enumerate(shift[3:])]
+                else:
+                    moved = [shift[0] + current[0], shift[1] + current[1]]
+            paint[f"{prefix}-translate"] = moved
             paint[f"{prefix}-translate-anchor"] = "viewport"
 
     def _heatmap_layer(self, style, spec: dict, bounds) -> None:
@@ -2230,6 +2556,24 @@ class QgisMapLibreStyleExporter:
         self.marker_counter += 1
         return name
 
+    def _shared_sprite(self, name: str) -> str:
+        """``name``, or the name of an image registered before with the same
+        request (symbol, scale, oversampling): style layers that differ only
+        in their data or zooms (copies of a rule past the last tile zoom)
+        share one image, which is dropped from ``marker_symbols``."""
+        request = self.marker_symbols[name]
+        if request.attributes:
+            return name
+        key = (QgsSymbolLayerUtils.symbolProperties(request.symbol), request.bake_rotation,
+               repr(request.map_units_per_pixel), repr(request.oversampling))
+        shared = self.__dict__.setdefault("_sprite_requests", {})
+        known = shared.get(key)
+        if known is not None and known in self.marker_symbols:
+            del self.marker_symbols[name]
+            return known
+        shared[key] = name
+        return name
+
     def _register_pattern(self, symbol_or_layer) -> str:
         """Register a pattern preview (symbol or symbol layer) in the sprite registry.
 
@@ -2267,7 +2611,7 @@ class QgisMapLibreStyleExporter:
 
         def screen_px(value, unit, what):
             unit_name = normalize_unit(unit)
-            if unit_name in ("map", "m"):
+            if unit_name in ("map", "m") and not self._pattern_zoom_bands:
                 self.context.report(
                     "Q2VT_PATTERN_MAP_UNITS",
                     f"Hatch {what} in map units is frozen at zoom "
@@ -2480,14 +2824,36 @@ class QgisMapLibreStyleExporter:
         return seen
 
     def _variant_images(self, fields: List[str], combos: list, make_name) -> list:
-        """``["match", key, value, name, ..., default]`` pieces for combos."""
-        key = ex.get(fields[0]) if len(fields) == 1 else \
+        """``["match", key, value, name, ..., default]`` pieces for combos.
+        Numbers are matched as the viewer writes them (``to-string``): a
+        tile carries 4.0 as the integer 4, never the text "4.0"."""
+        def text(value):
+            if not isinstance(value, float) or not math.isfinite(value):
+                return str(value)
+            if value.is_integer() and abs(value) < 1e16:
+                return str(int(value))
+            # JavaScript's shortest form: plain digits from 1e-6 to 1e21,
+            # an exponent with its sign and no padding outside.
+            shortest = repr(value)
+            if "e" not in shortest:
+                return shortest
+            if 1e-6 <= abs(value) < 1e21:
+                return format(decimal.Decimal(shortest), "f")
+            mantissa, exponent = shortest.split("e")
+            return f"{mantissa}e{'+' if int(exponent) > 0 else '-'}{abs(int(exponent))}"
+        numeric = any(isinstance(v, (int, float)) and not isinstance(v, bool)
+                      for combo in combos for v in combo)
+        key = (["to-string", ex.get(fields[0])] if numeric else ex.get(fields[0])) \
+            if len(fields) == 1 else \
             ["concat"] + sum(([["to-string", ex.get(f)], "|"] for f in fields), [])[:-1]
-        cases = []
+        cases, seen = [], set()
         for combo in combos:
             if any(v is None for v in combo):
                 continue
-            value = str(combo[0]) if len(fields) == 1 else "|".join(str(v) for v in combo)
+            value = "|".join(text(v) for v in combo)
+            if value in seen:
+                continue
+            seen.add(value)
             cases += [value, make_name(combo)]
         return key, cases
 
@@ -2519,62 +2885,285 @@ class QgisMapLibreStyleExporter:
         # at the reference zoom (scaling both factors keeps map pixels).
         scale = self._screen_scale()
         reference = self._reference_map_units_per_px() * scale
-        one = SymbolImage(marker, "pattern-marker", scale, True, reference).img
-        two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference).img
+        map_scale = fidelity_zoom.scale_of_map_units_per_px(self._reference_map_units_per_px())
+        one = SymbolImage(marker, "pattern-marker", scale, True, reference,
+                          renderer_scale=map_scale).img
+        two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference,
+                          renderer_scale=map_scale).img
         return one, two
 
     @staticmethod
-    def _pattern_uses_map_units(layer) -> bool:
-        units = []
-        for getter in ("distanceXUnit", "distanceYUnit", "patternWidthUnit", "widthUnit",
-                       "densityAreaUnit"):
-            if hasattr(layer, getter):
-                units.append(getattr(layer, getter)())
+    def _map_length(value, unit) -> bool:
+        """Whether a length is drawn in map units (or meters at scale): a
+        zero length draws nothing in any unit (styles often set every unit
+        selector to map units, the unused ones too)."""
+        from qgis.PyQt.QtCore import QPointF  # pylint: disable=import-outside-toplevel
+        if isinstance(value, QPointF):
+            value = not value.isNull()
+        elif isinstance(value, (list, tuple)):
+            value = any(value)
+        return bool(value) and normalize_unit(unit) in ("map", "m")
+
+    # (length, unit) getters of a pattern fill drawn into its texture, and
+    # those of its repeat (spacing, displacement, cell size or density).
+    _PATTERN_LENGTHS = (
+        ("distance", "distanceUnit"), ("offset", "offsetUnit"), ("lineWidth", "lineWidthUnit"),
+        ("distanceX", "distanceXUnit"), ("distanceY", "distanceYUnit"),
+        ("displacementX", "displacementXUnit"), ("displacementY", "displacementYUnit"),
+        ("offsetX", "offsetXUnit"), ("offsetY", "offsetYUnit"),
+        ("maximumRandomDeviationX", "randomDeviationXUnit"),
+        ("maximumRandomDeviationY", "randomDeviationYUnit"),
+        ("patternWidth", "patternWidthUnit"), ("svgStrokeWidth", "svgStrokeWidthUnit"),
+        ("width", "widthUnit"), ("densityArea", "densityAreaUnit"))
+    _PATTERN_REPEAT_LENGTHS = ("distance", "distanceX", "distanceY", "displacementX",
+                               "displacementY", "patternWidth", "width", "densityArea")
+    # Length getters of sub-symbol layers not named after their unit getter.
+    _LENGTH_OF_UNIT = {"customDashPatternUnit": "customDashVector",
+                       "averageAngleUnit": "averageAngleLength",
+                       "randomDeviationXUnit": "maximumRandomDeviationX",
+                       "randomDeviationYUnit": "maximumRandomDeviationY"}
+
+    @classmethod
+    def _symbol_layer_uses_map_units(cls, layer) -> bool:
+        """``usesMapUnits()`` of a marker or line symbol layer (sub-symbols
+        included) counting only lengths it draws: a zero length or a stroke
+        with no pen is none. A unit without a known length counts as in
+        QGIS."""
+        no_pen = Qt.PenStyle.NoPen
+        for unit_getter in dir(layer):
+            if not unit_getter.endswith("Unit") or not unit_getter[:1].islower() or \
+                    unit_getter.startswith("set") or unit_getter == "outputUnit":
+                continue
+            try:
+                unit = getattr(layer, unit_getter)()
+            except TypeError:
+                continue
+            if normalize_unit(unit) not in ("map", "m"):
+                continue
+            value_getter = cls._LENGTH_OF_UNIT.get(unit_getter, unit_getter[:-4])
+            if unit_getter in ("customDashPatternUnit", "dashPatternOffsetUnit") and \
+                    not layer.useCustomDashPattern():
+                continue
+            if unit_getter == "strokeWidthUnit" and hasattr(layer, "strokeStyle") and \
+                    layer.strokeStyle() == no_pen:
+                continue
+            if unit_getter == "widthUnit" and hasattr(layer, "penStyle") and \
+                    layer.penStyle() == no_pen:
+                continue
+            if not hasattr(layer, value_getter) or \
+                    cls._map_length(getattr(layer, value_getter)(), unit):
+                return True
         sub = layer.subSymbol()
-        if sub is not None:
-            units += [sub.symbolLayer(i).outputUnit() for i in range(sub.symbolLayerCount())]
-        return any(normalize_unit(unit) in ("map", "m") for unit in units)
+        return sub is not None and any(cls._symbol_layer_uses_map_units(sub.symbolLayer(i))
+                                       for i in range(sub.symbolLayerCount()))
 
-    # Upper bound on per-zoom textures of one map-unit pattern.
+    @classmethod
+    def _pattern_uses_map_units(cls, layer) -> bool:
+        """Whether any length drawn into the pattern's texture is in map units
+        (or meters at scale): the layer's own (a hatch's distance and offset,
+        a grid's spacing, displacement, offset ...), or any length of the
+        marker or line it repeats. Lengths are paired with their values, as
+        QGIS draws them: a zero displacement whose unit is map units draws
+        nothing in map units (``usesMapUnits()`` reads the units alone).
+        ``outputUnit()`` of a sub-symbol layer is no help: it is Unknown
+        when that layer mixes units (a map-unit size with a millimetre
+        offset)."""
+        if any(hasattr(layer, value) and cls._map_length(getattr(layer, value)(),
+                                                         getattr(layer, unit)())
+               for value, unit in cls._PATTERN_LENGTHS):
+            return True
+        # An SVG fill's sub-symbol is its outline, not part of the texture.
+        sub = layer.subSymbol() if layer.layerType() != "SVGFill" else None
+        return sub is not None and any(cls._symbol_layer_uses_map_units(sub.symbolLayer(i))
+                                       for i in range(sub.symbolLayerCount()))
+
+    @classmethod
+    def _pattern_spacing_in_map_units(cls, layer) -> bool:
+        """Whether the pattern's repeat (spacing, displacement, cell size or
+        density) is in map units or meters at scale (zero lengths count as
+        none). When it is not, only the marker or line it repeats has
+        map-unit lengths."""
+        return any(value in cls._PATTERN_REPEAT_LENGTHS and hasattr(layer, value) and
+                   cls._map_length(getattr(layer, value)(), getattr(layer, unit)())
+                   for value, unit in cls._PATTERN_LENGTHS)
+
+    @staticmethod
+    def _pattern_has_screen_lengths(layer) -> bool:
+        """Whether a pattern with a map-unit spacing also draws lengths in
+        screen units (a mm line width or marker size, a hairline or mm
+        stroke): scaled with the map above its last texture, they would
+        grow 2x per zoom, so such patterns get textures up to the viewer's
+        last zoom. Unknown symbol layers count as having them."""
+        def screen(value, unit) -> bool:
+            return bool(value) and normalize_unit(unit) not in ("map", "m")
+
+        kind = layer.layerType()
+        if kind == "RasterFill":  # width 0: the image's own pixel size
+            return not layer.width() or screen(1, layer.widthUnit())
+        if kind == "SVGFill":
+            return screen(layer.patternWidth(), layer.patternWidthUnit()) or \
+                screen(layer.svgStrokeWidth(), layer.svgStrokeWidthUnit())
+        if any(hasattr(layer, value) and screen(getattr(layer, value)(), getattr(layer, unit)())
+               for value, unit in (("distance", "distanceUnit"), ("distanceX", "distanceXUnit"),
+                                   ("distanceY", "distanceYUnit"),
+                                   ("displacementX", "displacementXUnit"),
+                                   ("displacementY", "displacementYUnit"))):
+            return True
+        sub = layer.subSymbol()
+        for i in range(sub.symbolLayerCount() if sub is not None else 0):
+            sl = sub.symbolLayer(i)
+            if sl.layerType() == "SimpleMarker":
+                pen = sl.strokeStyle() != Qt.PenStyle.NoPen and sl.strokeColor().alpha() > 0
+                if screen(sl.size(), sl.sizeUnit()) or \
+                        screen(not sl.offset().isNull(), sl.offsetUnit()) or \
+                        (pen and (not sl.strokeWidth() or screen(1, sl.strokeWidthUnit()))):
+                    return True
+            elif sl.layerType() == "SimpleLine":
+                if (sl.penStyle() != Qt.PenStyle.NoPen and
+                        (not sl.width() or screen(1, sl.widthUnit()))) or \
+                        screen(sl.offset(), sl.offsetUnit()) or \
+                        (sl.useCustomDashPattern() and screen(1, sl.customDashPatternUnit())):
+                    return True
+            elif normalize_unit(sl.outputUnit()) not in ("map", "m"):
+                return True
+        return False
+
+    # Upper bound on per-zoom textures of one map-unit pattern up to tile
+    # zoom + 3 (the overzoom ones, up to the viewer's last zoom, come on top).
     MAX_PATTERN_ZOOMS = 12
+    # Largest per-zoom texture (CSS px a side, twice that in the 2x sprite):
+    # above it the last smaller one serves the higher zooms, scaled with the
+    # map (PATTERN_ZOOM_FLAG).
+    MAX_PATTERN_TEXTURE_PX = 512
+    # Budget for all per-zoom textures of the style (CSS px², four times that
+    # in the 2x sprite): past it each pattern keeps the textures it has. A
+    # sprite over the browser's canvas limit (about 16.7 Mpx on iOS Safari)
+    # does not load, and every icon and pattern of the map is lost.
+    MAX_PATTERN_SPRITE_PX = 1_500_000
+    _pattern_sprite_px = 0
+    # Textures above tile zoom + 3 of a pattern that scales with the map
+    # only keep its thin strokes sharp (the last one scaled would do
+    # otherwise): they have a budget of their own, so the exported zooms of
+    # the patterns after keep theirs, and cells up to half
+    # MAX_PATTERN_TEXTURE_PX, so that several patterns get them. Both
+    # budgets together are 7.6 Mpx in the 2x sprite, under half the
+    # browser's canvas limit.
+    MAX_OVERZOOM_PATTERN_SPRITE_PX = 400_000
+    _overzoom_pattern_px = 0
+    # Style layer metadata: the zoom of the last per-zoom texture, which the
+    # patched MapLibre (tools/patch_maplibre.py) keeps scaling with the map
+    # above it (stock MapLibre draws it in the pixels of the view's integer
+    # zoom: 2x too small one zoom deeper, 4x two zooms deeper ...).
+    PATTERN_ZOOM_FLAG = "q2vt:pattern-zoom"
+    # Largest 2x cell of a texture (MAX_PATTERN_TEXTURE_PX in the 2x
+    # sprite): past it, a coarse pattern (tiles, bricks) would outgrow the
+    # sprite renderer; the last texture under it serves the zooms above.
+    MAX_OVERZOOM_CELL_PX = 2 * MAX_PATTERN_TEXTURE_PX
 
-    def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float):
-        """One texture per integer zoom for a pattern sized in map units.
+    def _per_zoom_pattern(self, register, min_zoom: float, max_zoom: float,
+                          screen_spacing: bool = False, screen_lengths: bool = False):
+        """One texture per integer zoom for a pattern with map-unit lengths.
 
         MapLibre draws ``fill-pattern`` in the pixels of the tile's integer
         zoom, so a texture grows with the map until the next zoom, exactly
         like map-unit sizes in QGIS: each zoom's texture is rendered at that
         integer zoom (screen-unit parts, see ``TEXTURE_SCREEN_SCALE``, stay
-        within about ±41 %); ``fill-pattern`` steps between them.
+        within about ±41 %); ``fill-pattern`` steps between them. A first
+        zoom between integers (a rule's scale limit) is rendered at the
+        integer zoom below, whose pixels MapLibre draws it in. Textures go
+        up to the viewer's last zoom (or the size budgets); above the last
+        one, ``self._last_pattern_zoom``, the patched MapLibre scales it with
+        the map (PATTERN_ZOOM_FLAG). Above tile zoom + 3 they only keep
+        thin strokes sharp (magnified, a sub-pixel stroke became a wide pale
+        band), within MAX_OVERZOOM_PATTERN_SPRITE_PX; with
+        ``screen_lengths`` (screen-unit lengths, which would grow with the
+        map) they go on within the size budgets.
+
+        ``screen_spacing``: the repeat is in screen units and only the marker
+        or line has map-unit lengths. The textures are then exact screen
+        textures (``SCREEN_PATTERN_FLAG``: the spacing is exact at every
+        zoom), each rendered in the middle of its zoom, so only the map-unit
+        sizes are off, within about ±41 %. A screen texture cannot scale with
+        the map, so these go up to the highest zoom the viewer shows
+        (overzoomed tiles too); their cells are a screen-unit spacing. A
+        marker too large for the sprite renderer stops growing at the last
+        texture that could be drawn.
         """
+        self._last_pattern_zoom = None
         low = max(float(self.context.reference_zoom), float(min_zoom if min_zoom >= 0 else 0))
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
-        top = min(top, float(self.maxzoom) + 3.0)
+        tiles_top = min(top, float(self.maxzoom) + 3.0)
+        top = min(top, max(tiles_top, self._view_max_zoom() + 1.0))
+        sharper_only = not (screen_spacing or screen_lengths)
         # Over the cap, the highest zooms get their own texture (zoomed out,
         # a map-unit pattern is a tint of sub-pixel cells): the lowest of
         # them also serves the zooms below. Counted from the lowest zoom
         # instead, a map exported from zoom 0 had no texture above zoom 11.
-        low = max(low, math.ceil(top) - self.MAX_PATTERN_ZOOMS)
+        low = max(low, math.ceil(tiles_top) - self.MAX_PATTERN_ZOOMS)
         saved = self.context.reference_zoom
         self._pattern_zoom_bands = True
+        self._exact_screen_texture = screen_spacing
         stops = []
         try:
             zoom = low
             while zoom < top - 1e-9:
                 upper = min(math.floor(zoom) + 1.0, top)
-                self.context.reference_zoom = zoom
-                name = register()
+                # MapLibre draws a map-unit texture in the pixels of the
+                # tile's integer zoom (up to 2x too large from a rule's
+                # 1:5000, zoom 15.85, rendered for 15.85 instead of 15).
+                self.context.reference_zoom = (zoom + upper) / 2 if screen_spacing else \
+                    math.floor(zoom)
+                try:
+                    name = register()
+                except SpriteRenderError:
+                    if not stops:
+                        raise
+                    # A marker (or cell) too large for the sprite renderer:
+                    # the last texture serves the zooms above.
+                    if screen_spacing:
+                        self.context.report(
+                            "Q2VT_PATTERN_MAP_UNITS",
+                            "Map-unit marker of a screen-unit pattern stops growing above zoom "
+                            f"{math.floor(stops[-1][0]) + 1:g} (sprite size limit).",
+                            strategy=Strategy.APPROXIMATE.value)
+                    break
                 if name is None:
-                    return None
+                    if stops:
+                        break  # the last texture serves the zooms above
+                    zoom = upper
+                    continue  # the first texture serves the zooms below
+                width, height = self.pattern_images[name].img_1x.size
+                sharper = sharper_only and zoom >= tiles_top - 1e-9
+                if sharper:
+                    largest, used, budget = (self.MAX_PATTERN_TEXTURE_PX // 2,
+                                             self._overzoom_pattern_px,
+                                             self.MAX_OVERZOOM_PATTERN_SPRITE_PX)
+                else:
+                    largest, used, budget = (self.MAX_PATTERN_TEXTURE_PX, self._pattern_sprite_px,
+                                             self.MAX_PATTERN_SPRITE_PX)
+                if stops and (max(width, height) > largest or used + width * height > budget):
+                    del self.pattern_images[name]
+                    break
+                if sharper:
+                    self._overzoom_pattern_px += width * height
+                else:
+                    self._pattern_sprite_px += width * height
                 stops.append((zoom, name))
                 zoom = upper
         finally:
             self.context.reference_zoom = saved
             self._pattern_zoom_bands = False
+            self._exact_screen_texture = False
         if not stops:
             return None
+        # The zoom whose pixels the last texture is drawn in (a whole one).
+        self._last_pattern_zoom = stops[-1][0] if screen_spacing else math.floor(stops[-1][0])
         self.context.report(
             "Q2VT_PATTERN_MAP_UNITS",
+            "Pattern with map-unit sizes on a screen-unit spacing drawn with one texture per "
+            "zoom level (map-unit sizes exact in the middle of each zoom, within about ±41 % "
+            "of QGIS at integer zooms)."
+            if screen_spacing else
             "Pattern in map units drawn with one texture per zoom level (screen-unit "
             "parts within about ±41 % of QGIS between integer zooms).",
             strategy=Strategy.APPROXIMATE.value)
@@ -2586,6 +3175,15 @@ class QgisMapLibreStyleExporter:
         return expr
 
     _pattern_zoom_bands = False
+    _last_pattern_zoom = None
+    _view_max_zoom_override = None
+
+    def _view_max_zoom(self) -> float:
+        """The browser's zoom limit: the one given to the converter, else the
+        profile's (MapLibre's 22)."""
+        if self._view_max_zoom_override is not None:
+            return float(self._view_max_zoom_override)
+        return float(getattr(self.profile, "view_max_zoom", 22.0))
 
     # MapLibre draws fill-pattern in the pixels of the tile's integer zoom: a
     # texture grows 2x with the map until the next zoom, while QGIS keeps
@@ -2673,8 +3271,11 @@ class QgisMapLibreStyleExporter:
         dy = self._pattern_px(layer.distanceY(), layer.distanceYUnit(), "spacing")
         if dx <= 0 or dy <= 0:
             return None
-        disp_x = self._pattern_px(layer.displacementX(), layer.displacementXUnit(), "displacement")
-        disp_y = self._pattern_px(layer.displacementY(), layer.displacementYUnit(), "displacement")
+        # Percentages are of the spacing (applyPattern: of twice the spacing / 200).
+        disp_x = self._pattern_offset_px(layer.displacementX(), layer.displacementXUnit(), 2 * dx,
+                                         "displacement")
+        disp_y = self._pattern_offset_px(layer.displacementY(), layer.displacementYUnit(), 2 * dy,
+                                         "displacement")
         # QgsPointPatternFillSymbolLayer::applyPattern shifts the markers in
         # the cell by the offset (x right, y down; percentages of the cell).
         off_x, off_y = (self._pattern_offset_px(layer.offsetX(), layer.offsetXUnit(), 2 * dx),
@@ -2694,10 +3295,6 @@ class QgisMapLibreStyleExporter:
             # drawing order, so overlapping markers stack as in QGIS. (QGIS
             # draws the markers one by one when that image would be empty or
             # over 2000 px.)
-            disp_x, disp_y = (self._pattern_offset_px(layer.displacementX(),
-                                                      layer.displacementXUnit(), 2 * dx),
-                              self._pattern_offset_px(layer.displacementY(),
-                                                      layer.displacementYUnit(), 2 * dy))
             snap = self._cached_marker_image(marker)
             for ratio, image in ((1, one), (2, two)):
                 width, height, positions = apply_pattern_positions(
@@ -2796,6 +3393,10 @@ class QgisMapLibreStyleExporter:
         # Large enough that the repetition is not obvious: 128 px, or a few
         # dozen markers for sparse fills (at most 512 px).
         cell = int(min(512, max(128, math.ceil(math.sqrt(40 / per_px)))))
+        if per_px * cell * cell > self.RANDOM_MAX_MARKERS:
+            # Over a marker per pixel (a density in map units zoomed out:
+            # billions of markers per cell): QGIS draws a uniform speckle.
+            return self._random_tint(marker, per_px)
         count = max(1, round(per_px * cell * cell))
         rng = random.Random(int(layer.seed()) or 1)
         positions = [(rng.uniform(0, cell), rng.uniform(0, cell)) for _ in range(count)]
@@ -2805,13 +3406,54 @@ class QgisMapLibreStyleExporter:
         error = abs(count - per_px * cell * cell) / (per_px * cell * cell)
         return self._textures(cells[0], cells[1], error, "Random marker fill")
 
-    def _pattern_offset_px(self, value, unit, cell_px: float) -> float:
+    # Markers in one random fill texture cell; denser fills are a tint.
+    RANDOM_MAX_MARKERS = 20000
+
+    def _random_tint(self, marker, per_px: float) -> str:
+        """Uniform texture of a random marker fill with ``per_px`` markers
+        per texture pixel: the marker's average colour, covering
+        ``1 - exp(-per_px * ink)`` of the area (``ink``: the marker's alpha
+        summed over its pixels; the expected cover of randomly placed
+        markers). A marker of a pixel or less is measured enlarged, where
+        its antialiased ink is its true area."""
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SpriteRenderError, SymbolImage  # pylint: disable=import-outside-toplevel
+        scale = self._screen_scale()
+        reference = self._reference_map_units_per_px() * scale
+        magnify, ink, color = 1.0, 0.0, (0.0, 0.0, 0.0)
+        while True:
+            try:
+                image = SymbolImage(marker, "pattern-marker", scale * magnify, True, reference).img
+            except SpriteRenderError:
+                break
+            sums = [0.0, 0.0, 0.0, 0.0]
+            for red, green, blue, alpha in image.getdata():
+                if alpha:
+                    sums[0] += red * alpha
+                    sums[1] += green * alpha
+                    sums[2] += blue * alpha
+                    sums[3] += alpha
+            if sums[3]:
+                ink = sums[3] / 255.0 / magnify ** 2
+                color = (sums[0] / sums[3], sums[1] / sums[3], sums[2] / sums[3])
+            if sums[3] / 255.0 >= 64 or magnify >= 4096:
+                break
+            magnify *= 16 if not sums[3] else min(16.0, max(2.0, math.sqrt(64 * 255.0 / sums[3])))
+        alpha = round(255 * (1.0 - math.exp(-per_px * ink)))
+        rgba = tuple(round(c) for c in color) + (alpha,)
+        self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                            "Random marker fill with more than one marker per pixel drawn as "
+                            "the markers' average colour.", strategy=Strategy.APPROXIMATE.value)
+        return self._textures(Image.new("RGBA", (8, 8), rgba),
+                              Image.new("RGBA", (16, 16), rgba), 0.0, "Random marker fill")
+
+    def _pattern_offset_px(self, value, unit, cell_px: float, what: str = "offset") -> float:
         if not value:
             return 0.0
-        if normalize_unit(unit) in ("percentage", "percent", "%") or \
+        if normalize_unit(unit) == "pct" or \
                 _enum_int(unit) == _enum_int(Qgis.RenderUnit.Percentage):
             return cell_px * value / 200.0
-        return self._pattern_px(value, unit, "offset")
+        return self._pattern_px(value, unit, what)
 
     def _register_svg_pattern(self, layer) -> Optional[str]:
         """Seamless texture for an SVG fill: one SVG per cell, as QGIS tiles it."""
@@ -3022,18 +3664,57 @@ class QgisMapLibreStyleExporter:
 
     _SPRITE_INDEPENDENT = frozenset({"size", "angle", "opacity", "layerenabled"})
 
+    def _stroke_sized(self, symbol, symbol_layer, source_layer):
+        """``(symbol, symbol layer, sprite-independent properties)`` that
+        size the icon. A line marker (a hash) with a data-defined size: QGIS
+        draws each length with the same pen width, which scaling one image
+        by the length would widen (an 8 mm hash of a 3 mm image drawn 2.7
+        times as wide), so each distinct length is its own sprite, scaled
+        with the map only. Over the variant budget the image is scaled
+        (reported)."""
+        if symbol.symbolLayerCount() != 1:
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        layer = symbol.symbolLayer(0)
+        size_key = QgsSymbolLayer.Property.PropertySize
+        try:
+            line = layer.layerType() == "SimpleMarker" and layer.shape() == Qgis.MarkerShape.Line
+        except (AttributeError, RuntimeError):
+            line = False
+        prop = layer.dataDefinedProperties().property(size_key)
+        if not line or prop is None or not prop.isActive() or ex.is_number(
+                PropertyExtractor.get_value_or_expression(layer.size(), prop, "number")):
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        independent = self._SPRITE_INDEPENDENT - {"size"}
+        fields = self._variant_fields(layer, independent)
+        why = "it reads no attribute" if not fields else \
+            f"more than {self.MAX_VARIANTS} distinct sizes" \
+            if self._distinct_values(source_layer, fields) is None else ""
+        if why:
+            self.context.report(
+                "Q2VT_MARKER_PLACEMENT_APPROX",
+                f"Data-defined size of a line marker (or hash length): {why}, so the browser "
+                "scales the marker's image and its stroke width changes with the size.")
+            return symbol, symbol_layer, self._SPRITE_INDEPENDENT
+        static = symbol.clone()
+        static.symbolLayer(0).setDataDefinedProperty(size_key, QgsProperty())
+        return static, static.symbolLayer(0), independent
+
     def _marker_variants(self, symbol, marker_name, source_layer, map_units_per_pixel,
-                         oversampling):
+                         oversampling, independent=_SPRITE_INDEPENDENT):
         """``icon-image``: one sprite per distinct data-defined appearance.
 
         Size, angle and opacity are applied by the style; every other
         data-defined property (colours, SVG path, shape, stroke width...)
         changes the image, so each distinct value combination in the data is
-        rendered by QGIS with those attribute values.
+        rendered by QGIS with those attribute values. So does the opacity of
+        one raster layer among several (see _marker_opacity).
         """
+        several = symbol.symbolLayerCount() > 1
         fields = sorted({f for i in range(symbol.symbolLayerCount())
-                         for f in self._variant_fields(symbol.symbolLayer(i),
-                                                       self._SPRITE_INDEPENDENT)})
+                         for f in self._variant_fields(
+                             symbol.symbolLayer(i), independent - {"opacity"}
+                             if several and symbol.symbolLayer(i).layerType() == "RasterMarker"
+                             else independent)})
         if not fields:
             return marker_name
         combos = self._distinct_values(source_layer, fields)
@@ -3044,13 +3725,22 @@ class QgisMapLibreStyleExporter:
                 "the static symbol is used for all features.")
             return marker_name
         names = {}
+        # Per-zoom rules of one symbol often draw the same images (screen
+        # sizes): one sprite each, shared. Layer ids differ between copies.
+        drawn = (re.sub(r' id="\{[^"]*\}"', "", QgsSymbolLayerUtils.symbolProperties(symbol)),
+                 repr(map_units_per_pixel), repr(oversampling), tuple(fields))
+        shared_names = vars(self).setdefault("variant_sprites", {})
 
         def make(combo):
+            shared = shared_names.get(drawn + (combo,))
+            if shared is not None:
+                return shared
             name = f"{marker_name}_v{len(names)}"
             names[combo] = name
             self.marker_symbols[name] = SpriteRequest(
                 symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
                 attributes=dict(zip(fields, combo)), oversampling=oversampling)
+            shared_names[drawn + (combo,)] = name
             return name
         key, cases = self._variant_images(fields, combos, make)
         if not cases:
@@ -3178,6 +3868,46 @@ class QgisMapLibreStyleExporter:
             bands.append((zoom, high, self.SPRITE_OVERZOOM_OVERSAMPLING))
         return bands
 
+    # Largest logical size of a map-unit marker image drawn at the zoom a
+    # style past the last tiles starts at (overzoom copies, one style a
+    # zoom): the sprite renderer's canvas (sprite_generator._MAX_CANVAS_PX)
+    # must hold it oversampled at 2x.
+    MAX_OVERZOOM_SPRITE_PX = 512.0
+
+    def _map_unit_sprite_bands(self, symbol: QgsSymbol, min_zoom: float, max_zoom: float):
+        """``[(low, high, oversampling, reference zoom)]``: the style layers of
+        a marker sized in map units (_sprite_bands), each image drawn at its
+        reference zoom and scaled from there with the map (icon-size). Once
+        the marker is large (MAX_BAND_SPRITE_PX), one last image is scaled
+        up from there on. A style past the last tile zoom where the marker
+        is large already (an overzoom copy of a rule: one style a zoom) draws
+        its image at the zoom it got large at, past the last tiles, like
+        the one image of a rule drawn on to the last zoom: an image drawn at
+        its own zoom doubles at every zoom and outgrows the sprite."""
+        bands = self._sprite_bands(min_zoom, max_zoom)
+        growth, extent = IconPropertyExtractor.map_growth(symbol)
+        px0 = extent * PropertyExtractor.static_pixels(1.0, "map", 0.0)
+        if growth <= 1.7 or px0 <= 0:
+            return [(low, high, quality, low) for low, high, quality in bands]
+        out = []
+        for index, (low, high, quality) in enumerate(bands):
+            if extent * PropertyExtractor.static_pixels(1.0, "map", low) <= self.MAX_BAND_SPRITE_PX:
+                out.append((low, high, quality, low))
+                continue
+            if index < len(bands) - 1:
+                # Large already: one last image, scaled up from here on.
+                out.append((low, bands[-1][1], self.SPRITE_BAND_OVERSAMPLING, low))
+                break
+            reference = low
+            if low > self.maxzoom + 1e-9:
+                large = math.floor(math.log2(self.MAX_BAND_SPRITE_PX / px0)) + 1.0
+                fits = math.floor(math.log2(self.MAX_OVERZOOM_SPRITE_PX / px0))
+                reference = min(low, max(large, float(self.maxzoom + 1)), fits)
+                if reference < low:
+                    quality = self.SPRITE_BAND_OVERSAMPLING
+            out.append((low, high, quality, reference))
+        return out
+
     def _convert_marker_symbol(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -3197,23 +3927,28 @@ class QgisMapLibreStyleExporter:
         context = self.context
         saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
         try:
-            bands = self._sprite_bands(min_zoom, max_zoom)
-            growth, extent = IconPropertyExtractor.map_growth(symbol)
-            for index, (low, high, quality) in enumerate(bands):
-                if growth > 1.7 and index < len(bands) - 1 and extent * \
-                        PropertyExtractor.static_pixels(1.0, "map", low) > self.MAX_BAND_SPRITE_PX:
-                    # Large already: one last image, scaled up from here on.
-                    high, quality = bands[-1][1], self.SPRITE_BAND_OVERSAMPLING
-                    bands = bands[:index + 1]
-                context.reference_zoom, context.reference_zoom_span = low, high - low
+            for low, high, quality, reference in self._map_unit_sprite_bands(
+                    symbol, min_zoom, max_zoom):
+                context.reference_zoom, context.reference_zoom_span = reference, high - reference
                 context.sprite_oversampling = quality
                 self._marker_layer(symbol_layer, symbol, f"{style_name}_z{int(low)}",
                                    source_layer_name, source_name, low, high)
-                if index == len(bands) - 1:
-                    break
         finally:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved
+
+    @staticmethod
+    def _symbol_opacity(symbol: QgsSymbol):
+        """A symbol's opacity as QGIS applies it (QgsSymbol::renderFeature):
+        its data-defined Opacity (0-100) replaces the static one, which
+        stays where the value is NULL."""
+        prop = symbol.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY)
+        if prop is None or not prop.isActive():
+            return max(0.0, min(1.0, float(symbol.opacity())))
+        value = PropertyExtractor.get_value_or_expression(symbol.opacity() * 100.0, prop, "number")
+        if ex.is_number(value):
+            return max(0.0, min(1.0, value / 100.0))
+        return ex.clamp(ex.div(value, 100.0), 0, 1)
 
     def _marker_layer(
         self,
@@ -3232,13 +3967,18 @@ class QgisMapLibreStyleExporter:
 
         marker_name = self._next_name("marker")
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
+        scaled_symbol, scaled_layer, independent = self._stroke_sized(
+            symbol, symbol_layer, source_layer_name)
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
-            symbol, symbol_layer)
+            scaled_symbol, scaled_layer)
+        sprite_symbol, icon_opacity = self._marker_opacity(symbol)
         self.marker_symbols[marker_name] = SpriteRequest(
-            symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
+            sprite_symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
-        icon_image = self._marker_variants(symbol, marker_name, source_layer_name,
-                                           map_units_per_pixel, oversampling)
+        icon_image = self._marker_variants(sprite_symbol, marker_name, source_layer_name,
+                                           map_units_per_pixel, oversampling, independent)
+        if icon_image == marker_name:
+            icon_image = marker_name = self._shared_sprite(marker_name)
 
         layer_def["layout"].update({
             "icon-image": icon_image,
@@ -3262,7 +4002,7 @@ class QgisMapLibreStyleExporter:
             "visibility": "visible",
         })
         layer_def["paint"].update({
-            "icon-opacity": IconPropertyExtractor.get_icon_opacity(),
+            "icon-opacity": icon_opacity,
             "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(),
             "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),
@@ -3271,6 +4011,51 @@ class QgisMapLibreStyleExporter:
         })
 
         self.style["layers"].append(layer_def)
+
+    @staticmethod
+    def _marker_opacity(symbol):
+        """(symbol drawn into the sprite, ``icon-opacity``) of a marker.
+
+        QgsMarkerSymbol::renderPoint replaces the symbol's opacity by its
+        data-defined Opacity per feature, and QgsRasterMarkerSymbolLayer (the
+        only marker layer reading one) its own opacity likewise. A sprite is
+        drawn without a feature, so these opacities are left out of it and
+        applied by ``icon-opacity``; static opacities stay in the sprite.
+        A raster layer's opacity in a symbol of several layers cannot be
+        applied to the whole icon: it changes the image (sprite variants).
+        """
+        def replaced(static, prop):
+            # valueAsDouble(PropertyOpacity, ..., static * 100) / 100: a NULL
+            # value keeps the static opacity.
+            value = ex.div(PropertyExtractor.get_value_or_expression(
+                float(static) * 100.0, prop, "number"), 100.0)
+            return max(0.0, min(1.0, value)) if ex.is_number(value) else ex.clamp(value, 0, 1)
+
+        props = symbol.dataDefinedProperties()
+        prop = props.property(_SYMBOL_OPACITY_KEY) if props else None
+        sprite_symbol, opacity = symbol, IconPropertyExtractor.get_icon_opacity()
+        if prop is not None and prop.isActive():
+            opacity = replaced(symbol.opacity(), prop)
+            # The sprite is drawn opaque and without the data-defined value:
+            # one read without a feature (e.g. a parent opacity folded in as
+            # coalesce(..., 30), see materializer.inherit_opacity) was
+            # applied twice, in the sprite and by icon-opacity.
+            sprite_symbol = symbol.clone()
+            sprite_symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty())
+            sprite_symbol.setOpacity(1.0)
+        if symbol.symbolLayerCount() == 1:
+            layer = sprite_symbol.symbolLayer(0)
+            layer_prop = layer.dataDefinedProperties().property(
+                QgsSymbolLayer.Property.PropertyOpacity)
+            if layer.layerType() == "RasterMarker" and layer_prop is not None \
+                    and layer_prop.isActive():
+                if sprite_symbol is symbol:
+                    sprite_symbol = symbol.clone()
+                    layer = sprite_symbol.symbolLayer(0)
+                opacity = ex.mul(opacity, replaced(layer.opacity(), layer_prop))
+                layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOpacity, QgsProperty())
+                layer.setOpacity(1.0)
+        return sprite_symbol, opacity
 
     def _convert_line_symbol(
         self,
@@ -3294,7 +4079,7 @@ class QgisMapLibreStyleExporter:
             if LinePropertyExtractor.is_marker_line(symbol_layer):
                 self._convert_marker_line_symbol_layer(
                     symbol_layer, layer_id, source_layer_name, source_name,
-                    min_zoom, max_zoom,
+                    min_zoom, max_zoom, symbol,
                 )
             else:
                 self._convert_simple_or_pattern_line_symbol_layer(
@@ -3310,13 +4095,15 @@ class QgisMapLibreStyleExporter:
         source_name: str,
         min_zoom: float = -1,
         max_zoom: float = -1,
+        symbol: Optional[QgsSymbol] = None,
     ):
         """Convert a QGIS ``QgsMarkerLineSymbolLayer`` into a MapLibre ``symbol`` layer.
 
         The marker sub-symbol is rendered to a sprite (with its own angle
         baked in, since MapLibre rotates it by the line bearing only);
         placements are mapped by named flags, and the perpendicular offset
-        is reproduced through ``icon-offset``.
+        is reproduced through ``icon-offset``. QGIS draws the markers with
+        the line ``symbol``'s opacity multiplied in (``icon-opacity``).
         """
         sub_symbol = None
         try:
@@ -3325,7 +4112,33 @@ class QgisMapLibreStyleExporter:
             pass
         if sub_symbol is None or sub_symbol.symbolLayerCount() == 0:
             return
+        if not IconPropertyExtractor.uses_map_units(sub_symbol):
+            self._marker_line_layer(symbol_layer, sub_symbol, style_name, source_layer_name,
+                                    source_name, min_zoom, max_zoom, symbol)
+            return
+        # Map-unit details (size, stroke): one sprite per zoom band, drawn at
+        # the band's scale, as for point markers (_convert_marker_symbol); a
+        # single sprite drawn at the style's first zoom (zoom 0 in a map from
+        # zoom 0) lost them.
+        context = self.context
+        saved = (context.reference_zoom, context.reference_zoom_span, context.sprite_oversampling)
+        try:
+            for low, high, quality, reference in self._map_unit_sprite_bands(
+                    sub_symbol, min_zoom, max_zoom):
+                context.reference_zoom, context.reference_zoom_span = reference, high - reference
+                context.sprite_oversampling = quality
+                self._marker_line_layer(symbol_layer, sub_symbol, f"{style_name}_z{int(low)}",
+                                        source_layer_name, source_name, low, high, symbol)
+        finally:
+            context.reference_zoom, context.reference_zoom_span, \
+                context.sprite_oversampling = saved
 
+    def _marker_line_layer(self, symbol_layer, sub_symbol, style_name: str,
+                           source_layer_name: str, source_name: str,
+                           min_zoom: float = -1, max_zoom: float = -1,
+                           symbol: Optional[QgsSymbol] = None):
+        """One MapLibre ``symbol`` layer (and its sprite) of a marker line
+        (``symbol``: the line symbol, whose opacity the markers take)."""
         layer_def = self._base_layer_def(
             "symbol", style_name, source_layer_name, source_name, min_zoom, max_zoom
         )
@@ -3339,6 +4152,7 @@ class QgisMapLibreStyleExporter:
         self.marker_symbols[marker_name] = SpriteRequest(
             sub_symbol.clone(), bake_rotation=True, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
+        marker_name = self._shared_sprite(marker_name)
         rotate_with_line = LinePropertyExtractor.get_marker_line_rotate_symbols(symbol_layer)
         offset_px = LinePropertyExtractor.get_marker_line_offset(symbol_layer)
 
@@ -3360,7 +4174,8 @@ class QgisMapLibreStyleExporter:
             "icon-optional": IconPropertyExtractor.get_icon_optional(),
             "icon-keep-upright": False,
             "symbol-placement": LinePropertyExtractor.get_marker_line_symbol_placement(symbol_layer),
-            "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(symbol_layer),
+            "symbol-spacing": LinePropertyExtractor.get_marker_line_spacing(
+                symbol_layer, (min_zoom, max_zoom)),
             "symbol-avoid-edges": IconPropertyExtractor.get_symbol_avoid_edges(),
             "symbol-sort-key": IconPropertyExtractor.get_symbol_sort_key(),
             "symbol-z-order": IconPropertyExtractor.MARKER_Z_ORDER,
@@ -3370,7 +4185,8 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-offset"] = self._icon_offset(offset_px, icon_size)
 
         layer_def["paint"].update({
-            "icon-opacity": IconPropertyExtractor.get_icon_opacity(),
+            "icon-opacity": self._symbol_opacity(symbol) if symbol is not None
+            else IconPropertyExtractor.get_icon_opacity(),
             "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(),
             "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),
@@ -3400,6 +4216,25 @@ class QgisMapLibreStyleExporter:
         for zoom, item in zip(value[3::2], value[4::2]):
             out.extend([zoom, ["literal", [0, item]]])
         return out
+
+    @staticmethod
+    def _offset_join(layer_def: dict) -> None:
+        """A line drawn with ``line-offset`` joins mitred, limit 2: QGIS
+        strokes the offset curve GEOS builds mitred with that limit
+        (QgsSymbolLayerUtils::offsetLine). MapLibre's bevel and round joins
+        move the offset vertex at a 35-120 degree turn only part of the way,
+        so an offset several times the width tapers to a sliver there. A
+        data-defined offset keeps the pen join on features it leaves at 0
+        (QGIS strokes those lines unchanged)."""
+        offset = layer_def["paint"].get("line-offset")
+        if offset is None:
+            return
+        pen = layer_def["layout"].get("line-join", "miter")
+        if isinstance(offset, list) and pen != "miter" and not ex.contains_zoom(offset):
+            layer_def["layout"]["line-join"] = ["case", ["==", offset, 0], pen, "miter"]
+        else:
+            layer_def["layout"]["line-join"] = "miter"
+        layer_def["layout"]["line-miter-limit"] = 2.0
 
     def _convert_simple_or_pattern_line_symbol_layer(
         self,
@@ -3436,9 +4271,14 @@ class QgisMapLibreStyleExporter:
             width_value = layer_def["paint"]["line-width"]
             layer_def["paint"]["line-opacity"] = thin_line_opacity(
                 width_value, layer_def["paint"]["line-opacity"])
-            width_px = width_value if ex.is_number(width_value) else \
-                PropertyExtractor.static_pixels(symbol_layer.width(), symbol_layer.widthUnit())
-            dasharray = LinePropertyExtractor.get_line_dasharray(symbol_layer, width_px)
+            # A data-defined width: the dashes follow the static one.
+            width_px = width_value if ex.is_number(width_value) or (
+                ex.is_zoom_curve(width_value) and ex.is_camera_only(width_value)) \
+                else hairline(PropertyExtractor.length(
+                    symbol_layer.width(), symbol_layer.widthUnit(),
+                    map_unit_scale=symbol_layer.widthMapUnitScale()))
+            dasharray = LinePropertyExtractor.get_line_dasharray(
+                symbol_layer, width_px, min_zoom, max_zoom)
             if dasharray:
                 layer_def["paint"]["line-dasharray"] = dasharray
 
@@ -3449,6 +4289,7 @@ class QgisMapLibreStyleExporter:
                 "line-round-limit": LinePropertyExtractor.get_line_round_limit(),
                 "visibility": "visible",
             })
+            self._offset_join(layer_def)
         elif symbol_layer.layerType() in ("RasterLine", "Lineburst") and \
                 (raster_pattern := (self._register_raster_line(symbol_layer)
                                     if symbol_layer.layerType() == "RasterLine"
@@ -3469,6 +4310,7 @@ class QgisMapLibreStyleExporter:
                 "line-join": LinePropertyExtractor.get_line_join(symbol_layer),
                 "visibility": "visible",
             })
+            self._offset_join(layer_def)
         elif LinePropertyExtractor.is_pattern_line(symbol_layer):
             self.context.report("Q2VT_PATTERN_APPROXIMATE",
                                 f"{symbol_layer.layerType()} exported from a symbol preview.",
@@ -3627,12 +4469,12 @@ class QgisMapLibreStyleExporter:
                     "fill-translate-anchor": FillPropertyExtractor.get_fill_translate_anchor(),
                 })
                 offset = symbol_layer.offset()
-                if (abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9) and \
-                        normalize_unit(symbol_layer.offsetUnit()) not in ("map", "m"):
-                    # QGIS shifts the fill on screen (x right, y down).
-                    layer_def["paint"]["fill-translate"] = [
-                        PropertyExtractor.static_pixels(offset.x(), symbol_layer.offsetUnit()),
-                        PropertyExtractor.static_pixels(offset.y(), symbol_layer.offsetUnit())]
+                if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
+                    # QGIS shifts the fill on screen (x right, y down), in any
+                    # unit (map units grow with the map).
+                    layer_def["paint"]["fill-translate"] = PropertyExtractor.translate(
+                        offset.x(), offset.y(), symbol_layer.offsetUnit(),
+                        symbol_layer.offsetMapUnitScale())
                     layer_def["paint"]["fill-translate-anchor"] = "viewport"
                 if brush is not None:
                     # The pattern image carries the colour; it starts at the
@@ -3678,10 +4520,19 @@ class QgisMapLibreStyleExporter:
                 return None
             map_units = self._pattern_uses_map_units(symbol_layer)
             viewport = pattern_in_viewport(symbol_layer)
-            if map_units and (kind != "LinePatternFill" or viewport):
-                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom)
+            if map_units and not self._pattern_spacing_in_map_units(symbol_layer):
+                # Screen-unit spacing, map-unit marker or line: exact spacing.
+                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, True)
+                if pattern_name is not None:
+                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
             elif map_units:
-                pattern_name = register()
+                pattern_name = self._per_zoom_pattern(
+                    register, min_zoom, max_zoom,
+                    screen_lengths=self._pattern_has_screen_lengths(symbol_layer))
+                if pattern_name is not None:
+                    # Above its last texture the pattern scales with the map.
+                    layer_def.setdefault("metadata", {})[self.PATTERN_ZOOM_FLAG] = \
+                        self._last_pattern_zoom
             else:
                 self._exact_screen_texture = True
                 try:
@@ -3751,8 +4602,16 @@ class QgisMapLibreStyleExporter:
         else:
             self.glyphs[font] = [dataset]
         text_size = TextPropertyExtractor.get_text_size(text_format, label_settings, self.viewer)
-        em_size = text_size if ex.is_number(text_size) else \
-            PropertyExtractor.static_pixels(text_format.size(), text_format.sizeUnit())
+        # The size offsets are measured in: a number, or a zoom curve for
+        # map-unit text (a data-defined size: its static size).
+        em_size = text_size
+        try:
+            ex.evaluate_zoom_curve(em_size, 0)
+        except ex.ExpressionError:
+            em_size = PropertyExtractor.length(text_format.size(), text_format.sizeUnit(), None,
+                                               text_format.sizeMapUnitScale())
+            if self.viewer == 0:
+                em_size = ex.div(em_size, _MAPLIBRE_LABELS_FACTOR)
         placement = TextPropertyExtractor.placement_name(label_settings)
         layer_def["layout"].update({
             "text-font": [font],
@@ -3784,6 +4643,13 @@ class QgisMapLibreStyleExporter:
         # mode; MapLibre lets some of them override each other.
         variable_anchor = TextPropertyExtractor.get_text_variable_anchor(label_settings)
         pinned = self._is_pinned(label_settings)
+        translate = None
+        visible = tuple(self.visible_polygons.get(style_name) or ())
+        # A line label at its line's middle (rules_exporter
+        # _single_line_label_as_point): turned to the line by a data-defined
+        # rotation, its above/below distance is a Y offset.
+        line_midpoint = visible[2:3] == ("line",)
+        frame_offset = None
         if pinned:
             # Data-defined position: the label's alignment point sits on the
             # exported point; offsets and candidate positions do not apply.
@@ -3801,22 +4667,47 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["text-radial-offset"] = 1
         elif variable_anchor:
             layer_def["layout"]["text-variable-anchor"] = variable_anchor
-            layer_def["layout"]["text-radial-offset"] = \
-                TextPropertyExtractor.get_text_radial_offset(label_settings, em_size)
+            layer_def["layout"]["text-radial-offset"] = self._layer_zoom_step(
+                layer_def, TextPropertyExtractor.get_text_radial_offset(label_settings, em_size))
         elif placement == "OverPoint":
             offset = TextPropertyExtractor.get_text_offset(label_settings, em_size)
+            background = text_format.background()
+            if offset != [0, 0] and line_midpoint:
+                # The distance points out from the line, as pal places the
+                # label: text-offset, which MapLibre turns with the label
+                # (text-translate is never turned, and cannot follow each
+                # line's angle). A frame not fitted to the text follows by
+                # icon-offset, turned with it too.
+                if background.enabled() and not IconPropertyExtractor.get_icon_text_fit(background):
+                    frame_offset = [PropertyExtractor.length(label_settings.xOffset, label_settings.offsetUnits),
+                                    PropertyExtractor.length(label_settings.yOffset, label_settings.offsetUnits)]
+            elif offset != [0, 0] and (
+                    ex.is_zoom_curve(offset) or layer_def["layout"]["text-rotate"] != 0
+                    or (background.enabled() and not IconPropertyExtractor.get_icon_text_fit(background))):
+                # px drawn at the camera zoom: offset and text scale unlike, a
+                # turned label (MapLibre turned text-offset with it, QGIS does
+                # not) or a frame not fitted to the text (text-offset did not
+                # move it).
+                translate = TextPropertyExtractor.get_text_offset_translate(label_settings)
+                if translate is not None:
+                    offset = [0, 0]
             if offset != [0, 0]:
-                layer_def["layout"]["text-offset"] = offset
+                layer_def["layout"]["text-offset"] = self._layer_zoom_step(layer_def, offset)
         elif placement in ("Line", "Curved"):
             offset = TextPropertyExtractor.get_line_text_offset(label_settings, em_size)
             if offset != [0, 0]:
-                layer_def["layout"]["text-offset"] = offset
+                layer_def["layout"]["text-offset"] = self._layer_zoom_step(layer_def, offset)
         if style_name in self.label_windows and not pinned:
             # Each feature is the window of one label, laid out as QGIS lays
             # it out: the label is centred on it ("line" would place its own
             # anchors along it, half a label + 2 em from its start).
             layer_def["layout"]["symbol-placement"] = "line-center"
             layer_def["layout"].pop("symbol-spacing", None)
+        if layer_def["layout"]["symbol-placement"] == "point" and not line_midpoint and \
+                TextPropertyExtractor.flips_upside_down(label_settings):
+            # Line labels at a line's middle come upright already. Before the
+            # background takes the text's angle (icon-rotate).
+            TextPropertyExtractor.keep_upright(layer_def["layout"])
 
         layer_def["paint"].update({
             "text-color": TextPropertyExtractor.get_text_color(text_format, label_settings),
@@ -3825,7 +4716,7 @@ class QgisMapLibreStyleExporter:
                 text_format, label_settings
             ),
             "text-halo-width": TextPropertyExtractor.get_text_halo_width(text_format, label_settings),
-            "text-translate": TextPropertyExtractor.get_text_translate(),
+            "text-translate": translate or TextPropertyExtractor.get_text_translate(),
             "text-translate-anchor": TextPropertyExtractor.get_text_translate_anchor(),
         })
 
@@ -3840,6 +4731,19 @@ class QgisMapLibreStyleExporter:
 
         if background.enabled():
             self._apply_icon_from_background(layer_def, background, style_name, label_settings)
+            if translate and "icon-image" in layer_def["layout"]:
+                # The frame goes with its text.
+                layer_def["paint"]["icon-translate"] = translate
+            if frame_offset and "icon-image" in layer_def["layout"]:
+                # icon-offset is in px of the icon, multiplied by icon-size:
+                # the frame's own offset (turned with it too) plus the
+                # distance, or the text left its frame.
+                own, unit = background.offset(), background.offsetUnit()
+                total = [ex.add(frame_offset[0], PropertyExtractor.length(own.x(), unit)),
+                         ex.add(frame_offset[1], PropertyExtractor.length(own.y(), unit))]
+                layer_def["layout"]["icon-offset"] = self._layer_zoom_step(
+                    layer_def, TextPropertyExtractor.label_ems(
+                        total, layer_def["layout"].get("icon-size", 1)))
         else:
             self._apply_default_icon_props(layer_def)
 
@@ -3869,10 +4773,25 @@ class QgisMapLibreStyleExporter:
                 # "line": a line label put at the middle of the line's visible part.
                 "q2vt:visible-kind": polygons[2] if len(polygons) > 2 else "polygon",
             })
+            if not pinned and TextPropertyExtractor.overlap_at_no_cost(label_settings):
+                # Placed by the viewer at its best spot whatever it overlaps.
+                layer_def["metadata"]["q2vt:overlap-at-no-cost"] = True
             if layer_def["metadata"]["q2vt:visible-kind"] == "line" and self._allow_degraded(label_settings):
                 # A line too short for its label: QGIS draws it level at a
                 # point of the line ("Allow degraded placement").
                 layer_def["metadata"]["q2vt:line-degraded"] = True
+            if layer_def["metadata"]["q2vt:visible-kind"] == "line":
+                if ex.is_number(layer_def["layout"].get("text-rotate", 0)):
+                    # Horizontal placement on lines: level, not along the line
+                    # (a line label along it reads its angle from a field).
+                    layer_def["metadata"]["q2vt:line-orient"] = "horizontal"
+                repeat = self._line_label_repeat(label_settings)
+                if repeat:
+                    layer_def["metadata"]["q2vt:repeat"] = repeat
+                if len(polygons) > 3 and polygons[3]:
+                    # "Merge connected lines": one label for the lines of one
+                    # text that meet end to end (pal joinConnectedFeatures).
+                    layer_def["metadata"]["q2vt:merge-lines"] = True
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around
@@ -3895,27 +4814,122 @@ class QgisMapLibreStyleExporter:
     LINE_LABEL_FIT_ZOOM = 18
 
     @staticmethod
+    def _layer_zoom_step(layer_def: dict, value):
+        """A ``step`` on the zoom (per-zoom label offsets) cut to the layer's
+        zooms: the stops below its min zoom and from its max zoom on dropped."""
+        if not ex.is_zoom_curve(value) or value[0] != "step":
+            return value
+        low = layer_def.get("minzoom", 0)
+        high = layer_def.get("maxzoom", 24)
+        default, kept = value[2], []
+        for zoom, output in zip(value[3::2], value[4::2]):
+            if zoom <= low:
+                default = output
+            elif zoom < high:
+                kept += [zoom, output]
+        if not kept:
+            return default[1] if isinstance(default, list) and default[:1] == ["literal"] else default
+        return ["step", ["zoom"], default] + kept
+
+    @staticmethod
     def _label_around(label_settings: QgsPalLayerSettings, placement: str) -> Optional[dict]:
         """For an "around point" polygon label placed by the viewer: the
         candidate positions (MapLibre anchor names, in QGIS's order) and the
         QGIS label distance from the point, in pixels at ``zoom`` (map-unit
-        distances scale with the zoom; otherwise the size is fixed)."""
-        if placement not in ("AroundPoint", "OrderedPositionsAroundPoint"):
+        distances scale with the zoom; otherwise the size is fixed). "Outside
+        polygons" (``outside``): the same distance from the polygon's edge."""
+        if placement not in ("AroundPoint", "OrderedPositionsAroundPoint", "OutsidePolygons"):
             return None
-        anchors = TextPropertyExtractor.get_text_variable_anchor(label_settings)
+        outside = placement == "OutsidePolygons"
+        # "Outside polygons" (pal createCandidatesOutsidePolygon): beside the
+        # polygon's edge, on whichever side the edge faces.
+        anchors = list(TextPropertyExtractor.AROUND_POINT_ANCHORS) if outside else \
+            TextPropertyExtractor.get_text_variable_anchor(label_settings)
         try:
             distance = float(label_settings.dist)
         except (AttributeError, TypeError, ValueError):
             distance = 0.0
         pixels = PropertyExtractor.length(distance, label_settings.distUnits) if distance else 0.0
         around = {"anchors": anchors}
+        if outside:
+            around["outside"] = True
         if ex.is_number(pixels):
             around["px"] = round(max(0.0, float(pixels)), 3)
+        elif len(pixels) == 7:
+            # Map units: doubles with each zoom level. Taken at zoom 24: at
+            # the style's min zoom (0 in a Publish export) it rounded to 0.
+            around["px"] = round(max(0.0, float(ex.evaluate_zoom_curve(pixels, 24))), 3)
+            around["zoom"] = 24
         else:
-            zoom = float(PropertyExtractor.context.reference_zoom)
-            around["px"] = round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3)
-            around["zoom"] = zoom  # map units: doubles with each zoom level
+            # Kept within a map unit scale's limits: the curve itself.
+            around["px"] = pixels
+        # QGIS (QgsPalLayerSettings::registerFeature) forces a distance of
+        # at least 2 painter px on "Outside polygons", and on "Around point"
+        # when placement outside the polygon is allowed: then no label is
+        # centred on the point (pal tries that only at distance 0).
+        try:
+            outside_allowed = bool(int(label_settings.polygonPlacementFlags())
+                                   & int(Qgis.LabelPolygonPlacementFlag.AllowPlacementOutsideOfPolygon))
+        except (AttributeError, TypeError, ValueError):
+            outside_allowed = False
+        overridden = QgisMapLibreStyleExporter._outside_override(label_settings)
+        if overridden is not None:
+            outside_allowed = overridden
+        if outside or (placement == "AroundPoint" and outside_allowed):
+            around["min_px"] = 2.0
         return around
+
+    @staticmethod
+    def _outside_override(label_settings) -> Optional[bool]:
+        """The data-defined "Allow outside" (PolygonLabelOutside) of a
+        polygon label, as QGIS's registerFeature reads it: "yes" / "force"
+        (or true) allow placement outside the polygon, "no" (or false)
+        blocks it. None: not set, or varying per feature (from a field or an
+        expression of one: the layer's static flags stand for it)."""
+        try:
+            prop = label_settings.dataDefinedProperties().property(QgsPalLayerSettings.Property.PolygonLabelOutside)
+            if not prop or not prop.isActive():
+                return None
+            if prop.propertyType() == QgsProperty.Type.StaticProperty:
+                value = prop.staticValue()
+            elif prop.propertyType() == QgsProperty.Type.ExpressionBasedProperty:
+                expression = QgsExpression(prop.expressionString())
+                if expression.hasParserError() or expression.referencedColumns() or expression.needsGeometry():
+                    return None
+                value = expression.evaluate(QgsExpressionContext())
+                if expression.hasEvalError():
+                    return None
+            else:
+                return None
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        if value is None or (hasattr(value, "isNull") and value.isNull()):
+            return None
+        if isinstance(value, str):
+            word = value.strip().lower()
+            return True if word in ("yes", "force") else False if word == "no" else None
+        return bool(value)
+
+    @staticmethod
+    def _line_label_repeat(label_settings) -> Optional[dict]:
+        """The repeat distance of a line label the viewer lays out on the
+        visible line: CSS px, at ``zoom`` for map units (doubling with each
+        zoom level)."""
+        try:
+            distance = float(label_settings.repeatDistance or 0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if distance <= 0:
+            return None
+        pixels = PropertyExtractor.length(distance, label_settings.repeatDistanceUnit,
+                                          map_unit_scale=label_settings.repeatDistanceMapUnitScale)
+        if ex.is_number(pixels):
+            return {"px": round(max(0.0, float(pixels)), 3)}
+        # Map units: px at zoom 24, as the symbol-spacing curve ends - at the
+        # export's first zoom (0) it is a fraction of a pixel, which the
+        # style's 4 decimals rounded off (30 m: none).
+        zoom = 24.0
+        return {"px": round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3), "zoom": zoom}
 
     def _line_label_zoom_split(self, layer_def: dict) -> list:
         """A label with a zoom-curve ``text-size`` as one style layer per
@@ -3950,7 +4964,10 @@ class QgisMapLibreStyleExporter:
         low = layer_def.get("minzoom", 0)
         high = layer_def.get("maxzoom", 24)
         fit = self.LINE_LABEL_FIT_ZOOM
-        top = fit if not framed else min(24, max(fit, int(self.maxzoom) + 4))
+        # A frame needs its ramp at every zoom: MapLibre lays out overscaled
+        # tiles again at each zoom (one curve above the tiles' max zoom drew
+        # frames 8x too large 4 zooms higher).
+        top = fit if not framed else 24
         if low >= top:
             return [layer_def]
         out = []
@@ -3973,31 +4990,77 @@ class QgisMapLibreStyleExporter:
                 part["layout"]["icon-size"] = ["interpolate", ["exponential", 2], ["zoom"],
                                                zoom, 0.5, zoom + 1, 1.0]
                 if frame is not None:
-                    part["layout"]["icon-image"] = self._map_unit_frame(frame, zoom)
+                    part["layout"]["icon-image"] = self._map_unit_frame(frame, zoom, size)
             out.append(part)
         if high > top:
             rest = copy.deepcopy(layer_def)
             rest["minzoom"] = max(low, top)
             if frame is not None:
-                rest["layout"]["icon-image"] = self._map_unit_frame(frame, top)
+                rest["layout"]["icon-image"] = self._map_unit_frame(frame, top, size)
             out.append(rest)
         return out
 
-    def _map_unit_frame(self, background, zoom: int) -> Optional[str]:
+    def _map_unit_frame(self, frame, zoom: int, size=None) -> Optional[str]:
         """Frame image with the map-unit stroke for [zoom, zoom + 1).
 
-        A text-fitted rectangle's border lies in the image's fixed (not
-        stretched) margin, which MapLibre draws in image pixels whatever the
-        icon-size: the border cannot grow within the zoom, so it is drawn at
-        the stroke of zoom + 0.5, within sqrt(2) of QGIS's at either end (a
-        doubled stroke was twice QGIS's at the whole zoom). An ellipse is
-        scaled whole with the icon (icon-size 0.5 -> 1): its stroke stays
-        doubled."""
-        ellipse = _enum_int(background.type(), 0) in (2, 3)
+        ``frame``: (background, text box in ems or None), ``size``: the
+        text-size curve. A text-fitted rectangle's border lies in the image's
+        fixed (not stretched) margin, which MapLibre draws in image pixels
+        whatever the icon-size: the border cannot grow within the zoom, so it
+        is drawn at the stroke of zoom + 0.5, within sqrt(2) of QGIS's at
+        either end (a doubled stroke was twice QGIS's at the whole zoom). An
+        ellipse is scaled whole with the icon: its ring is drawn at the
+        stroke's share of the frame (_ellipse_ring)."""
+        background, text_ems = frame
+        if _enum_int(background.type(), 0) in (2, 3):
+            ring = self._ellipse_ring(background, text_ems, size, zoom) if text_ems else None
+            if ring is not None:
+                return self._background_image(background, stroke_px=ring)
+            stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
+                                                     background.strokeWidthUnit(), reference_zoom=zoom)
+            return self._background_image(background, stroke_px=2.0 * stroke)
         stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
-                                                 background.strokeWidthUnit(),
-                                                 reference_zoom=zoom if ellipse else zoom + 0.5)
-        return self._background_image(background, stroke_px=2.0 * stroke if ellipse else stroke)
+                                                 background.strokeWidthUnit(), reference_zoom=zoom + 0.5)
+        return self._background_image(background, stroke_px=stroke)
+
+    # Characters an ellipse frame's ring is drawn for (the label text is not
+    # known when the image is drawn): a house or parcel number.
+    ELLIPSE_TEXT_CHARS = 4
+
+    def _ellipse_text_ems(self, label_settings, layout: dict):
+        """The text box an ellipse frame is fitted around, (width, height) in
+        ems: ELLIPSE_TEXT_CHARS of the font's mean width, one line high."""
+        line_height = layout.get("text-line-height", 1.2)
+        char_width = self._char_width(label_settings) if label_settings is not None else None
+        return ((char_width or 0.6) * self.ELLIPSE_TEXT_CHARS,
+                line_height if ex.is_number(line_height) else 1.2)
+
+    @staticmethod
+    def _ellipse_ring(background, text_ems, size, zoom: int):
+        """``(x, y, side)``: the stroke of a ``side`` px ellipse frame image
+        (frame_image) for [zoom, zoom + 1). MapLibre scales the whole image to the text box
+        plus the buffer, so the ring is drawn at the stroke's share of that
+        box at the zoom's middle (``text_ems``: the text box in ems of the
+        text size ``size`` px). A stroke in image px grew with the frame: from
+        zoom 20 a map-unit buffer drew a red disc around the text."""
+        mid = zoom + 0.5
+        try:
+            text = float(ex.evaluate_zoom_curve(size, mid))
+        except ex.ExpressionError:
+            return None
+        stroke = PropertyExtractor.static_pixels(background.strokeWidth(), background.strokeWidthUnit(), mid)
+        buffer = background.size()
+        # The text box as QGIS bounds it by the ellipse (or circle).
+        width, height = QgisMapLibreStyleExporter._frame_text_box(
+            background, text_ems[0] * text, text_ems[1] * text)
+        width += 2 * PropertyExtractor.static_pixels(buffer.width(), background.sizeUnit(), mid)
+        height += 2 * PropertyExtractor.static_pixels(buffer.height(), background.sizeUnit(), mid)
+        if width <= 0 or height <= 0 or stroke <= 0:
+            return None
+        # About the frame's own size: MapLibre draws a text-fitted icon
+        # unfiltered, so a much smaller image showed its pixels as steps.
+        side = float(min(256, max(32, 16 * math.ceil(max(width, height) / 16))))
+        return (round(side * stroke / width, 2), round(side * stroke / height, 2), side)
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:
@@ -4036,9 +5099,14 @@ class QgisMapLibreStyleExporter:
                             (parts[0], "|", parts[1])]
         return ["match", key] + cases + ["bottom-left"]
 
-    def _background_image(self, background, stroke_px: Optional[float] = None) -> Optional[str]:
+    def _background_image(self, background, stroke_px: Optional[float] = None,
+                          zoom: Optional[float] = None, radius_px: Optional[float] = None,
+                          density: int = 1) -> Optional[str]:
         """Sprite for a label background shape (rectangle/ellipse/SVG/marker).
-        ``stroke_px`` overrides the frame stroke (per-zoom map-unit frames)."""
+        ``stroke_px`` / ``radius_px`` override the frame stroke / corner
+        radius (per-zoom frames); ``zoom``: the zoom map-unit sizes are drawn
+        at (a fixed map-unit frame, scaled by icon-size); ``density``: image
+        px per logical px (a frame scaled up by icon-size)."""
         from .fidelity.patterns import frame_image  # pylint: disable=import-outside-toplevel
         shape = _enum_int(background.type(), 0)
         names = {0: "rectangle", 1: "rectangle", 2: "ellipse", 3: "ellipse", 4: "svg", 5: "marker"}
@@ -4060,31 +5128,37 @@ class QgisMapLibreStyleExporter:
             name = self._next_name("marker")
             self.marker_symbols[name] = SpriteRequest(QgsMarkerSymbol([svg]), bake_rotation=True)
             return name
-        if shape in (1, 3):
-            self.context.report("Q2VT_PATTERN_APPROXIMATE",
-                                "Square/circle label backgrounds are fitted to the text box "
-                                "(width and height may differ).")
         fill = background.fillColor()
         stroke = background.strokeColor()
         if stroke_px is None:
             stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
-                                                        background.strokeWidthUnit())
-        radii = background.radii()
-        radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
-                                                    background.radiiUnit()) if kind == "rectangle" else 0
+                                                        background.strokeWidthUnit(), zoom)
+        if kind != "rectangle":
+            radius_px = 0
+        elif radius_px is None:
+            radii = background.radii()
+            radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
+                                                        background.radiiUnit(), zoom)
         fixed = 0
-        if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed
+        if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed: QGIS's width x height
+            # QGIS strokes the outline centred on it: half the stroke outside
+            # (the image's stroke lies inside its edge).
             size = background.size()
-            fixed = max(1, round(PropertyExtractor.static_pixels(
-                max(size.width(), size.height()), background.sizeUnit())))
+            fixed = tuple(max(1, round((PropertyExtractor.static_pixels(side, background.sizeUnit(), zoom)
+                                        + max(stroke_px, 0.0)) * density)) / density
+                          for side in (size.width(), size.height()))
+            if density == 1:
+                fixed = tuple(int(side) for side in fixed)
         rgba = lambda c: (c.red(), c.green(), c.blue(), c.alpha())  # noqa: E731
-        one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 1, fixed)
-        two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2, fixed)
+        one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, density, fixed)
+        two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2 * density, fixed)
         name = self._next_name("frame")
-        self.pattern_images[name] = PatternImages(one, two, meta)
+        self.pattern_images[name] = PatternImages(one, two, meta, density)
         return name
 
-    def _frame_variants(self, background, label_settings, base: str, source_layer: str):
+    def _frame_variants(self, background, label_settings, base: str, source_layer: str,
+                        zoom: Optional[float] = None, stroke_px: Optional[float] = None,
+                        radius_px: Optional[float] = None, density: int = 1):
         """Frame per distinct data-defined frame fill/border colour."""
         from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
         props = label_settings.dataDefinedProperties()
@@ -4116,7 +5190,8 @@ class QgisMapLibreStyleExporter:
                     variant.setStrokeColor(color)
                 else:
                     variant.setFillColor(color)
-            return self._background_image(variant)
+            return self._background_image(variant, stroke_px=stroke_px, zoom=zoom,
+                                          radius_px=radius_px, density=density)
         key, cases = self._variant_images(names, combos, make)
         return ["match", key] + cases + [base] if cases else base
 
@@ -4126,13 +5201,13 @@ class QgisMapLibreStyleExporter:
         With a zoom-dependent ``text-size`` MapLibre fits the icon to the text
         box shaped at ``tile zoom + 1``; map-unit sizes double per zoom, so
         the frame is scaled by ``2^(z - tile_zoom - 1)``: a sawtooth per zoom
-        level up to the archive's max zoom, then smooth overzoom.
+        level, above the archive's max zoom too (overscaled tiles are laid out
+        again at each zoom).
         """
-        top = int(self.maxzoom)
         stops = []
-        for level in range(0, top):
+        for level in range(0, 24):
             stops += [level, 0.5, level + 0.999, 2 ** -0.001]
-        stops += [top, 0.5, 24, 2.0 ** (24 - top - 1)]
+        stops += [24, 0.5]
         return ["interpolate", ["exponential", 2], ["zoom"]] + stops
 
     @staticmethod
@@ -4168,7 +5243,14 @@ class QgisMapLibreStyleExporter:
     def _apply_icon_from_background(self, layer_def: dict, background, style_name: str,
                                     label_settings=None):
         """Configure icon layout/paint from a label background shape."""
-        image = self._background_image(background)
+        fixed_zoom = self._fixed_frame_zoom(background)
+        shape = _enum_int(background.type(), 0)
+        if _enum_int(background.sizeType(), 0) == 0 and shape in self.FRAME_SHAPES:
+            # QGIS bounds the text by the shape, then adds the buffer: the
+            # patched MapLibre enlarges the fitted text box (tools/patch_maplibre.py).
+            layer_def.setdefault("metadata", {})["q2vt:frame-shape"] = self.FRAME_SHAPES[shape]
+            background = self._stroke_centred_buffer(background)
+        image = self._background_image(background, zoom=fixed_zoom)
         if image is None:
             self.context.report("Q2VT_UNSUPPORTED_SYMBOL_LAYER",
                                 "Label background shape could not be exported.")
@@ -4176,7 +5258,7 @@ class QgisMapLibreStyleExporter:
         is_frame = image.startswith("frame_")
         if is_frame and label_settings is not None:
             image = self._frame_variants(background, label_settings, image,
-                                         layer_def.get("source-layer", ""))
+                                         layer_def.get("source-layer", ""), fixed_zoom)
         layer_def["layout"]["icon-image"] = image
 
         text_fit = IconPropertyExtractor.get_icon_text_fit(background)
@@ -4205,13 +5287,26 @@ class QgisMapLibreStyleExporter:
         if is_frame:
             layer_def["layout"]["icon-allow-overlap"] = True
             layer_def["layout"]["icon-ignore-placement"] = True
-            if isinstance(image, str) and _enum_int(background.strokeWidthUnit(), 0) == 1 \
-                    and background.strokeWidth() > 0:
+            map_stroke = _is_map_unit(background.strokeWidthUnit()) and background.strokeWidth() > 0
+            # An ellipse is scaled whole to the text: its ring is drawn per zoom.
+            ring = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0
+            text_curve = ex.is_zoom_curve(layer_def["layout"].get("text-size"))
+            if fixed_zoom is not None:
+                # A fixed map-unit frame: drawn at fixed_zoom, scaled with the
+                # map (drawn at the style's min zoom it was 1 px).
+                self._scale_fixed_frame(layer_def, background, fixed_zoom)
+                self._paper_border_of_fixed_frame(layer_def, background, label_settings, fixed_zoom)
+            elif text_fit and not text_curve:
+                # Screen text: the map-unit buffer and stroke grow, not the text.
+                self._grow_screen_text_frame(layer_def, background, label_settings, map_stroke)
+            elif text_fit and (map_stroke or ring) and isinstance(image, str):
                 # Map-unit frame stroke: one frame image per zoom
                 # (_line_label_zoom_split); one image drew a hairline.
                 from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
-                layer_def["_q2vt_frame"] = QgsTextBackgroundSettings(background)
-            if ex.is_zoom_curve(layer_def["layout"].get("text-size")):
+                layer_def["_q2vt_frame"] = (QgsTextBackgroundSettings(background),
+                                            self._ellipse_text_ems(label_settings, layer_def["layout"])
+                                            if ring else None)
+            if text_fit and text_curve:
                 layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
                 padding = self._text_fit_padding_curve(background)
                 if padding is None:
@@ -4227,6 +5322,227 @@ class QgisMapLibreStyleExporter:
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
         })
+
+    # Buffer frames QGIS fits around the text bounded by their shape
+    # (qgstextrenderer drawBackground): square, ellipse, circle.
+    FRAME_SHAPES = {1: "square", 2: "ellipse", 3: "circle"}
+
+    @staticmethod
+    def _frame_text_box(background, width: float, height: float):
+        """The box a buffer frame of QGIS is fitted around for a text box of
+        ``width`` x ``height``: times sqrt(2) for an ellipse, its diagonal
+        both ways for a circle, its longer side both ways for a square."""
+        shape = _enum_int(background.type(), 0)
+        if shape == 2:
+            return width * math.sqrt(2), height * math.sqrt(2)
+        if shape == 3:
+            side = math.hypot(width, height)
+            return side, side
+        if shape == 1:
+            side = max(width, height)
+            return side, side
+        return width, height
+
+    @staticmethod
+    def _stroke_centred_buffer(background):
+        """An ellipse / circle buffer frame whose border is in the buffer's
+        unit, with the buffer grown by half the border: QGIS strokes the
+        outline centred on it, the frame image keeps its border inside its
+        edge (the whole image is fitted to the text plus the buffer).
+        Borders in another unit: _grow_screen_text_frame adds the half per zoom."""
+        if _enum_int(background.type(), 0) not in (2, 3) or background.strokeWidth() <= 0 \
+                or normalize_unit(background.strokeWidthUnit()) != normalize_unit(background.sizeUnit()):
+            return background
+        from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QSizeF  # pylint: disable=import-outside-toplevel
+        grown = QgsTextBackgroundSettings(background)
+        half = background.strokeWidth() / 2.0
+        size = background.size()
+        grown.setSize(QSizeF(size.width() + half, size.height() + half))
+        return grown
+
+    # A fixed map-unit frame is drawn at the zoom where its longer side is at
+    # most this many px, then scaled by icon-size (MapLibre stores icon
+    # vertices as 16-bit 1/32 px).
+    FIXED_FRAME_PX = 128.0
+
+    def _fixed_frame_zoom(self, background) -> Optional[int]:
+        """The zoom a fixed-size map-unit frame (rectangle or ellipse) is drawn
+        at, or None for any other background."""
+        if _enum_int(background.sizeType(), 0) != 1 or _enum_int(background.type(), 0) > 3 \
+                or not _is_map_unit(background.sizeUnit()):
+            return None
+        size = background.size()
+        side = PropertyExtractor.length(max(size.width(), size.height()), background.sizeUnit())
+        try:
+            top = float(ex.evaluate_zoom_curve(side, 24))
+        except ex.ExpressionError:
+            return None
+        if top <= 0:
+            return None
+        return int(max(0, min(24, math.floor(24 - math.log2(top / self.FIXED_FRAME_PX)))))
+
+    def _scale_fixed_frame(self, layer_def: dict, background, zoom: int):
+        """``icon-size`` of a fixed map-unit frame drawn at ``zoom``: doubles
+        per zoom like the map; its offset (multiplied by icon-size) divided by it."""
+        size = ex.exponential_zoom_curve([(0, 2.0 ** -zoom), (24, 2.0 ** (24 - zoom))])
+        layer_def["layout"]["icon-size"] = size
+        offset = background.offset()
+        if offset.x() or offset.y():
+            unit = background.offsetUnit()
+            layer_def["layout"]["icon-offset"] = TextPropertyExtractor.label_ems(
+                [PropertyExtractor.length(offset.x(), unit), PropertyExtractor.length(offset.y(), unit)],
+                size)
+
+    # Most image px per logical px of a fixed map-unit frame image (one
+    # drawn 128 px wide: up to 512 px, 1024 in the @2x sheet).
+    FIXED_FRAME_MAX_DENSITY = 4
+    # Image px (1x sheet; the @2x sheet holds 4x) the per-zoom images of one
+    # such frame may take, all its data-defined colours together: past it the
+    # images get less dense, then the frame keeps its one image.
+    FIXED_FRAME_SPRITE_PIXELS = 1_000_000
+
+    def _paper_border_of_fixed_frame(self, layer_def: dict, background, label_settings, fixed_zoom: int):
+        """A fixed map-unit frame with a border or corner radius in paper
+        units (mm, pt, px): one frame image per tile zoom (a ``step``: MapLibre
+        lays the image out at the tile's zoom). The image drawn at fixed_zoom
+        is scaled by icon-size 2^(zoom - fixed_zoom), so the border is drawn
+        at its px divided by that scale at the zoom's middle (within sqrt(2)
+        of QGIS's at its ends), the image denser above fixed_zoom so a thin
+        border stays sharp. One image scaled the border with the map: 0.5 mm
+        was ~6x QGIS's at zoom 20.5, a hairline below fixed_zoom."""
+        stroke_paper = background.strokeWidth() > 0 and not _is_map_unit(background.strokeWidthUnit())
+        radii = background.radii()
+        radius = max(radii.width(), radii.height())
+        rectangle = _enum_int(background.type(), 0) in (0, 1)
+        radius_paper = rectangle and radius > 0 and not _is_map_unit(background.radiiUnit())
+        if not (stroke_paper or radius_paper):
+            return
+        layout = layer_def["layout"]
+        low = int(math.floor(max(0, layer_def.get("minzoom", 0))))
+        high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
+        zooms = list(range(low, max(low + 1, high)))
+        size = background.size()
+        sides = [PropertyExtractor.static_pixels(side, background.sizeUnit(), fixed_zoom)
+                 for side in (size.width(), size.height())]
+        image = layout["icon-image"]
+        variants = isinstance(image, list)
+        count = len(image[3::2]) + 1 if variants else 1
+
+        def plan(top_density):
+            # (stroke, corner, density) per zoom: a border of at least the
+            # shorter side fills the frame (alike from there down), one under
+            # half an image px is drawn at that (alike from there up).
+            keys = []
+            for zoom in zooms:
+                scale = 2.0 ** (zoom + 0.5 - fixed_zoom)  # icon-size at the zoom's middle
+                density = int(min(top_density, 2 ** max(0, zoom + 1 - fixed_zoom)))
+                stroke = min(min(sides), PropertyExtractor.static_pixels(
+                    background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5) / scale)
+                if stroke_paper:
+                    stroke = max(stroke, 0.5 / density)
+                corner = min(max(sides), PropertyExtractor.static_pixels(
+                    radius, background.radiiUnit(), zoom + 0.5) / scale) if rectangle else 0.0
+                if corner * density < 0.5:
+                    corner = 0.0
+                keys.append((round(stroke, 3), round(corner, 3), density))
+            return keys
+
+        def pixels(keys):
+            return count * sum((sides[0] + stroke) * (sides[1] + stroke) * density ** 2
+                               for stroke, _, density in set(keys))
+
+        top_density = self.FIXED_FRAME_MAX_DENSITY
+        keys = plan(top_density)
+        while pixels(keys) > self.FIXED_FRAME_SPRITE_PIXELS and top_density > 1:
+            top_density //= 2
+            keys = plan(top_density)
+        if pixels(keys) > self.FIXED_FRAME_SPRITE_PIXELS:
+            self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                "A fixed map-unit label frame with a paper-unit border and many "
+                                "frame colours: one image per colour, its border scaled with the map.")
+            return
+        for name in (image[3::2] + image[-1:] if variants else [image]):
+            self.pattern_images.pop(name, None)
+        images, names = {}, []
+        for key in keys:
+            if key not in images:
+                stroke, corner, density = key
+                base = self._background_image(background, stroke_px=stroke, zoom=fixed_zoom,
+                                              radius_px=corner, density=density)
+                images[key] = self._frame_variants(
+                    background, label_settings, base, layer_def.get("source-layer", ""), zoom=fixed_zoom,
+                    stroke_px=stroke, radius_px=corner, density=density) \
+                    if variants and label_settings is not None else base
+            names.append(images[key])
+        layout["icon-image"] = self._zoom_step(zooms, names)
+
+    def _grow_screen_text_frame(self, layer_def: dict, background, label_settings, map_stroke: bool):
+        """A text-fitted frame around screen-size text with a map-unit buffer or
+        stroke: its padding and frame image per tile zoom (a ``step``: MapLibre
+        lays both out at the tile's zoom), at the zoom's middle (within sqrt(2)
+        of QGIS's at its ends). Converted once at the style's min zoom, the
+        buffer and stroke were 0 at every zoom."""
+        layout = layer_def["layout"]
+        low = int(math.floor(max(0, layer_def.get("minzoom", 0))))
+        high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
+        zooms = list(range(low, max(low + 1, high)))
+        # An ellipse / circle border in another unit than the buffer: half of
+        # it outside the buffer, per zoom (_stroke_centred_buffer).
+        centred = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0 \
+            and normalize_unit(background.strokeWidthUnit()) != normalize_unit(background.sizeUnit())
+        if _enum_int(background.sizeType(), 0) == 0 and (_is_map_unit(background.sizeUnit()) or centred):
+            size = background.size()
+            steps = []
+            for zoom in zooms:
+                half = PropertyExtractor.static_pixels(background.strokeWidth(), background.strokeWidthUnit(),
+                                                       zoom + 0.5) / 2 if centred else 0.0
+                x = PropertyExtractor.static_pixels(size.width(), background.sizeUnit(), zoom + 0.5) + half
+                y = PropertyExtractor.static_pixels(size.height(), background.sizeUnit(), zoom + 0.5) + half
+                padding = [y, x, y, x]
+                if label_settings is not None:
+                    padding = self._frame_fit_padding(padding, label_settings.format(), layout)
+                steps.append([round(v, 4) for v in padding])
+            layout["icon-text-fit-padding"] = self._zoom_step(zooms, steps, literal=True)
+        ellipse = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0
+        text_ems = self._ellipse_text_ems(label_settings, layout) if ellipse else None
+        if map_stroke or ellipse:
+            # The frame shown at icon-size 1: the stroke of the zoom's middle
+            # (an ellipse, whatever its units: its share of the frame,
+            # _ellipse_ring; a border in image px grew with the frame); zooms whose
+            # strokes round alike share an image (data-defined colours: a
+            # match of variants per stroke).
+            image = layout["icon-image"]
+            variants = isinstance(image, list)
+            for name in (image[3::2] + image[-1:] if variants else [image]):
+                self.pattern_images.pop(name, None)
+            images, names = {}, []
+            for zoom in zooms:
+                stroke = self._ellipse_ring(background, text_ems, layout.get("text-size"), zoom) \
+                    if ellipse else None
+                if stroke is None:
+                    stroke = round(PropertyExtractor.static_pixels(
+                        background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5), 2)
+                if stroke not in images:
+                    base = self._background_image(background, stroke_px=stroke)
+                    images[stroke] = self._frame_variants(
+                        background, label_settings, base, layer_def.get("source-layer", ""),
+                        stroke_px=stroke) if variants and label_settings is not None else base
+                names.append(images[stroke])
+            layout["icon-image"] = self._zoom_step(zooms, names)
+
+    @staticmethod
+    def _zoom_step(zooms: list, values: list, literal: bool = False):
+        """A ``step`` on the zoom: ``values[i]`` from ``zooms[i]`` (the first
+        below it too); equal values as the value itself."""
+        wrap = (lambda v: ["literal", v]) if literal else (lambda v: v)  # noqa: E731
+        if all(value == values[0] for value in values):
+            return values[0]
+        out = ["step", ["zoom"], wrap(values[0])]
+        for zoom, previous, value in zip(zooms[1:], values, values[1:]):
+            if value != previous:
+                out += [zoom, wrap(value)]
+        return out
 
     # Text whose mean character width stands for label text (lower case,
     # Hungarian accents, digits, spaces and punctuation).

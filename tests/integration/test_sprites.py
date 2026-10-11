@@ -5,6 +5,7 @@ import json
 import pytest
 from qgis.core import (Qgis, QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsMarkerSymbol,
                        QgsSimpleMarkerSymbolLayer)
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from fidelity.diagnostics import DiagnosticCollector
@@ -214,3 +215,83 @@ def test_data_defined_stroke_width_is_kept_in_sprites(sg):
     symbol = QgsMarkerSymbol([layer])
     sg._hairlines_to_one_pixel(symbol)  # pylint: disable=protected-access
     assert symbol.symbolLayer(0).strokeWidth() == 0
+
+
+def _limited_scale(kind):
+    from qgis.core import QgsMapUnitScale
+    if kind == "range":
+        return QgsMapUnitScale(50000, 5000)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    return limits
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+@pytest.mark.parametrize("reference_zoom", [6, 12, 15, 19])
+def test_map_unit_marker_limits_apply_once(plugin, sg, kind, reference_zoom):
+    """A map-unit square with min/max sizes or a scale range: QGIS limits the
+    size when it draws the sprite, and icon-size applied the limits again
+    against the unlimited size (a blob at mid zooms, specks when zoomed in);
+    with a scale range the sprite's render context had scale 1 and the
+    marker came out empty."""
+    import math
+    from fidelity import expressions as ex
+    from fidelity.zoom import scale_to_zoom
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    layer = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 100)
+    layer.setColor(QColor("black"))
+    layer.setStrokeStyle(Qt.PenStyle.NoPen)
+    layer.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    layer.setSizeMapUnitScale(_limited_scale(kind))
+    symbol = QgsMarkerSymbol([layer])
+    mc.PropertyExtractor.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context.reference_zoom = float(reference_zoom)
+    icon_size, map_units_per_pixel, oversampling = mc.IconPropertyExtractor.marker_scale(
+        symbol, layer)
+    image = sg.SymbolImage(symbol, "m", oversampling, False, map_units_per_pixel)
+    assert not image.transparent
+    sprite_px = image.img.width / oversampling
+    for zoom in (reference_zoom, reference_zoom + 0.5, reference_zoom + 3):
+        clamped_zoom = zoom
+        if kind == "range":
+            clamped_zoom = min(max(zoom, scale_to_zoom(50000)), scale_to_zoom(5000))
+        expected = 100 * 512 * 2 ** clamped_zoom / 40075016.68557849
+        if kind == "mm":
+            expected = min(max(expected, 96 / 25.4), 4 * 96 / 25.4)
+        drawn = sprite_px * ex.evaluate_zoom_curve(icon_size, zoom)
+        assert drawn == pytest.approx(expected, rel=0.15, abs=1.0), (zoom, sprite_px)
+    assert math.isfinite(sprite_px)
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_percentage_pattern_offsets_match_the_absolute_texture(plugin, monkeypatch, exact):
+    """Percentage displacement and offset of a point pattern texture are
+    shares of the spacing (applyPattern) and are not reported as units
+    without a reference dimension."""
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from qgis.core import QgsPointPatternFillSymbolLayer, Qgis
+    from PIL import ImageChops
+    exporter = QgisMapLibreStyleExporter.__new__(QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_counter = {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context = exporter.context
+    monkeypatch.setattr(exporter, "TEXTURE_SCREEN_SCALE", 1.0)
+    # QGIS's own texture brush (screen patterns) or the generic cell builder.
+    monkeypatch.setattr(exporter, "_exact_screen_texture", exact, raising=False)
+    cells = []
+    for value, unit in ((50.0, Qgis.RenderUnit.Percentage), (8.0, Qgis.RenderUnit.Pixels)):
+        layer = QgsPointPatternFillSymbolLayer()
+        layer.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer()]))
+        for name in ("DistanceX", "DistanceY"):
+            getattr(layer, f"set{name}")(16.0)
+            getattr(layer, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+        for name in ("DisplacementX", "OffsetY"):
+            getattr(layer, f"set{name}")(value)
+            getattr(layer, f"set{name}Unit")(unit)
+        cells.append(exporter.pattern_images[exporter._register_point_pattern(layer)].img_1x)
+    assert cells[0].size == cells[1].size
+    assert ImageChops.difference(cells[0], cells[1]).getbbox() is None
+    assert not exporter.context.diagnostics.by_code("Q2VT_UNIT_PERCENTAGE")

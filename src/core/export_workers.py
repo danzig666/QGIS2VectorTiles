@@ -128,6 +128,7 @@ def worker_state(exporter) -> dict:
         "missing_variables": sorted(set(global_missing) | set(project_missing)),
         "layer_names": dict(exporter._layer_names),
         "top_scale": fidelity_zoom.TOP_SCALE,
+        "map_units_per_mm_0": fidelity_zoom.MAP_UNITS_PER_MM_0,
     }
 
 
@@ -297,7 +298,7 @@ def _build_exporter(state: dict):
     from ..utils.zoom_levels import ZoomLevels
     from .fidelity.diagnostics import DiagnosticCollector
     from .rules_exporter import RulesExporter
-    ZoomLevels.configure(state["top_scale"])
+    ZoomLevels.configure(state["top_scale"], state.get("map_units_per_mm_0"))
     document = QDomDocument()
     document.setContent(state["transform_context"])
     transform_context = QgsCoordinateTransformContext()
@@ -373,13 +374,13 @@ def serve(stdin, stdout) -> None:
                 break
             continue
         if kind == "source":  # read a source (unless read already), build its base layer
-            _, layer_id, source, materialized, target, keep, anchored = message
+            _, layer_id, source, materialized, target, keep, anchored, parts = message
             began = time.perf_counter()
             try:
                 path = materialized if source is None else exporter._materialize_one(source)
                 if not path:
                     raise RuntimeError(f"source {layer_id} not read")
-                exporter._build_base_layer(path, target, keep, anchored)
+                exporter._build_base_layer(path, target, keep, anchored, parts)
                 send(stdout, ("base-done", layer_id, None, time.perf_counter() - began,
                               _messages(exporter)))
             except Exception:  # noqa: BLE001

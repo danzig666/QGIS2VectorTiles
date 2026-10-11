@@ -50,8 +50,9 @@ class FlattenedRule:
     # params...) applied to the whole layer before anything else (see
     # RulesExporter._point_groups).
     point_group: Optional[tuple] = None
-    # Shift on screen (x, y, QGIS unit name), y down: drawn with a viewport
-    # translate (an arrow fill layer's offset, e.g. a drop shadow).
+    # Shift on screen (x, y, QGIS unit name[, QgsMapUnitScale]), y down:
+    # drawn with a viewport translate (a fill layer's offset, e.g. a drop
+    # shadow; map units grow with the map).
     translate: Optional[tuple] = None
     # Paint effects drawn for this component: "outer" only its outer effects
     # (glow, drop shadow; the line itself is another component), "none" no
@@ -67,6 +68,29 @@ class FlattenedRule:
     # only the features lifted into it, or (stratum 0) all the others; None
     # draws every feature.
     feature_filter: Optional[list] = None
+    # Zoom whose map scale the scale-dependent expressions of the rule
+    # (@map_scale, @zoom_level) are evaluated at; None: its first tile zoom
+    # ("o"). Set where they differ: a piece of a rule split at a scale
+    # threshold, or a zoom beyond the archive's last one, drawn from the
+    # last zoom's tiles.
+    scale_zoom: Optional[float] = None
+    # The rule filter before @map_scale was bound for this piece (labels
+    # are matched to the features of the renderer rule, then bound at their
+    # own zoom); None: the filter itself.
+    unbound_filter: Optional[str] = None
+    # Renderer rule filter before a symbol layer's data-defined *enabled*
+    # was folded into it: the features QGIS labels (it labels every feature
+    # the rule renders, whichever symbol layers are enabled). None: the
+    # rule's own filter.
+    label_filter: Optional[str] = None
+    # (dx, dy) in project map units (y up) added to the exported geometry: a
+    # simple fill's offset in map units, exact at every zoom (a translate
+    # would show tile edges where it exceeds the tile buffer).
+    shift: Optional[tuple] = None
+    # A repeated line label placed by the web viewer on the visible part of
+    # its line (RulesFlattener._split_line_label_windows), one label per
+    # repeat part, as QGIS chops the line clipped to the map extent.
+    visible_repeat: bool = False
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -75,8 +99,22 @@ class FlattenedRule:
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
-            self.z_order, self.feature_filter,
+            self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
+            self.label_filter, self.shift, self.visible_repeat,
         )
+
+    def evaluation_zoom(self) -> float:
+        """The zoom whose map scale this rule's scale-dependent values use."""
+        if self.scale_zoom is not None:
+            return float(self.scale_zoom)
+        view = self.get_attr("v")  # a rule made for a zoom past the last tiles
+        return float(view if view is not None else self.get_attr("o"))
+
+    def renderer_filter(self) -> str:
+        """The rule's filter, @map_scale unbound (see ``unbound_filter``)."""
+        if self.unbound_filter is not None:
+            return self.unbound_filter
+        return self.rule.filterExpression()
 
     @property
     def rule_id(self) -> str:
@@ -91,7 +129,7 @@ class FlattenedRule:
         match = re.search(f"{char}(\\d+)", self.rule.description())
         return int(match.group(1)) if match else None
 
-    def set_attr(self, char: str, value: int, geom_generator=None):
+    def set_attr(self, char: str, value: int):
         """Set rule attribute in description (two digits, more when needed)."""
         new_attr = f"{char}{int(value):02d}"
         desc = self.rule.description()
@@ -101,8 +139,6 @@ class FlattenedRule:
 
         self.rule.setDescription(desc)
         self.output_dataset = desc
-        if geom_generator:
-            self.output_dataset = re.sub(r"s\d+", "s00", desc, count=1)
 
     def get_description(self):
         """Construct rule description for labeling or renderer rule."""

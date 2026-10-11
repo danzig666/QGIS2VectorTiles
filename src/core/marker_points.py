@@ -172,42 +172,74 @@ def interval_positions(line: Line, interval: float, along: float,
         offset = math.fmod(along, length)
     else:
         offset = along
-    if offset > length or offset < 0 or not math.isfinite(offset):
+    if offset > length or not math.isfinite(offset):
         return None
     last = math.floor((length - offset) / interval + 1e-9)
     if last > 10_000_000:
         return None  # the expression's integer series; not worth emulating
     half = average / 2.0
+    # a negative offset on an open line: the azimuth of its first segment of
+    # non-zero length (the expression's @q2vt_a0)
+    head = _head_angle(line) if along < 0 and not closed else None
     out = []
     for element in range(int(last) + 1):
         position = offset + element * interval
         if closed and element > 0 and abs(position - length) < 1e-6:
             continue
         distance = min(position, length)
-        point = line.point(distance)
+        # a negative offset on an open line: markers before its start
+        point = line.point(distance) if distance >= 0 else _before(line, distance, head)
         if point is None:
             return None
         if average > 0:
-            angle = _averaged_angle(line, distance, half)
+            angle = _averaged_angle(line, distance, half, head)
         else:
-            angle = line.angle(distance)
+            angle = _local_angle(line, distance, head)
         out.append((point[0], point[1], angle))
     return out
 
 
-def _averaged_angle(line: Line, distance: float, half: float) -> float:
-    """coalesce(degrees(azimuth(at(d - half), at(d + half))), line_interpolate_angle(d))."""
+def _head_angle(line: Line) -> float:
+    """line_interpolate_angle(make_line(start, first vertex not equal to it), 0):
+    QGIS skips repeated vertices and extends the line along that segment."""
+    xs, ys = line.xs, line.ys
+    k = next((i for i in range(1, len(xs)) if xs[i] != xs[0] or ys[i] != ys[0]), 1)
+    return _line_angle(xs[0], ys[0], xs[k], ys[k]) * 180.0 / math.pi
+
+
+def _local_angle(line: Line, distance: float, head: Optional[float]) -> float:
+    """The expression's line_interpolate_angle at the marker, or ``head`` at
+    or before the start of an open line with a negative offset."""
+    if head is not None:
+        return head if distance <= 0 else line.angle(distance)
+    return line.angle(max(0, distance))
+
+
+def _before(line: Line, distance: float, head: float) -> Tuple[float, float]:
+    """The point ``distance`` (negative) before the start of an open line,
+    along its first segment (the expression's make_point with sin / cos of
+    radians(@q2vt_a0))."""
+    radians = (head * math.pi) / 180
+    return line.xs[0] + distance * math.sin(radians), line.ys[0] + distance * math.cos(radians)
+
+
+def _averaged_angle(line: Line, distance: float, half: float, head: Optional[float]) -> float:
+    """coalesce(degrees(azimuth(at(d - half), at(d + half))), line_interpolate_angle(d));
+    on an open line with a negative offset the end of the span is not
+    stopped at the line's start."""
     length = line.length
 
-    def at(value):
+    def at(value, extend=False):
         if line.closed:
             value = math.fmod(value + length, length)
+        elif extend and head is not None and value < 0:
+            return _before(line, value, head)
         else:
             value = max(0, min(length, value))
         return line.point(value)
-    start, end = at(distance - half), at(distance + half)
+    start, end = at(distance - half), at(distance + half, True)
     if start is None or end is None:  # a NULL point: azimuth is NULL, coalesce goes on
-        return line.angle(distance)
+        return _local_angle(line, distance, head)
     return _azimuth(start[0], start[1], end[0], end[1]) * 180 / math.pi
 
 
@@ -330,3 +362,57 @@ def interval_points_layer(source, recipe, export_crs: str, expression_context, e
     for batch in batches:
         out.dataProvider().addFeatures(batch)
     return out
+
+
+def vertex_markers(xs: Sequence[float], ys: Sequence[float],
+                   placement: str) -> List[Tuple[int, float]]:
+    """[(vertex index, azimuth in degrees)] of the vertex markers QGIS draws
+    on one line part (map y up) for one vertex placement ("Vertex",
+    "CurvePoint", "FirstVertex", "LastVertex", "InnerVertices"), the way
+    QgsTemplatedLineSymbolLayerBase::renderPolylineVertex / markerAngle
+    turn them: towards the nearest neighbours that differ from the vertex
+    (repeated points skipped), averaged at inner vertices and, for
+    "Vertex" on a closed line, at its start (whose last vertex then gets no
+    marker of its own). A vertex without such neighbours (a repeat of the
+    start) keeps markerAngle's angle 0: east (azimuth 90)."""
+    count = len(xs)
+    if not count:
+        return []
+    every = placement in ("Vertex", "CurvePoint")
+    ring = every and count > 1 and xs[0] == xs[-1] and ys[0] == ys[-1]
+
+    def same(i: int, j: int) -> bool:
+        return xs[i] == xs[j] and ys[i] == ys[j]
+
+    def screen_angle(i: int, j: int) -> float:
+        # Screen y points down (QGIS's MyLine works on screen points).
+        return math.atan2(ys[i] - ys[j], xs[j] - xs[i])
+
+    def angle(vertex: int) -> float:
+        if ring or 0 < vertex < count - 1:
+            prev, nxt = vertex - 1, vertex + 1
+            if ring and vertex in (0, count - 1):
+                prev, nxt = count - 2, 1
+            while prev >= 0 and same(prev, vertex):
+                prev -= 1
+            while nxt < count and same(nxt, vertex):
+                nxt += 1
+            if prev < 0 or nxt >= count:
+                return 0.0
+            a1, a2 = screen_angle(prev, vertex), screen_angle(vertex, nxt)
+            return math.atan2(math.sin(a1) + math.sin(a2), math.cos(a1) + math.cos(a2))
+        if vertex == 0:
+            other = next((j for j in range(1, count) if not same(j, 0)), None)
+            return 0.0 if other is None else screen_angle(0, other)
+        other = next((j for j in range(vertex - 1, -1, -1) if not same(j, vertex)), None)
+        return 0.0 if other is None else screen_angle(other, vertex)
+
+    if placement == "FirstVertex":
+        indices = [0]
+    elif placement == "LastVertex":
+        indices = [count - 1]
+    elif placement == "InnerVertices":
+        indices = list(range(1, count - 1))
+    else:
+        indices = list(range(count - 1 if ring else count))
+    return [(i, (90.0 + math.degrees(angle(i))) % 360.0) for i in indices]

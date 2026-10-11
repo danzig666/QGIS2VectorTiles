@@ -37,6 +37,7 @@ from qgis.core import (Qgis, QgsEllipseSymbolLayer, QgsExpressionContext, QgsExp
 from qgis.PyQt.QtCore import qVersion
 
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
+from .fidelity import zoom as fidelity_zoom
 from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
@@ -98,6 +99,9 @@ class PatternImages:
     img_2x: Img
     # Stretch metadata (logical px), e.g. for label background frames.
     metadata: Optional[Dict[str, object]] = None
+    # Image px per logical px of the 1x image (its declared pixelRatio; the
+    # 2x image: twice it). A frame scaled up by icon-size keeps sharp edges.
+    density: float = 1.0
 
 
 def _pixels_to_millimeters(symbol: QgsSymbol) -> None:
@@ -165,6 +169,9 @@ class SymbolImage:
     bake_rotation: bool = True
     map_units_per_pixel: float = 1.0
     attributes: Optional[Dict[str, object]] = None
+    # Map scale of the render context (QgsMapUnitScale scale ranges read
+    # it); None: the scale of map_units_per_pixel per CSS pixel.
+    renderer_scale: Optional[float] = None
     img: Img = field(init=False)
     width: int = field(init=False)
     height: int = field(init=False)
@@ -226,6 +233,10 @@ class SymbolImage:
         context = QgsRenderContext.fromQPainter(painter)
         context.setScaleFactor(_PX_PER_MM * self.scale_factor)
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
+        # Left at 1, a scale range of a map-unit size (QgsMapUnitScale::
+        # computeMapUnitsPerPixel) shrank the marker thousands of times.
+        context.setRendererScale(self.renderer_scale
+                                 or fidelity_zoom.scale_of_map_units_per_px(self.map_units_per_pixel))
         context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
         return context
 
@@ -391,8 +402,9 @@ class SpriteGenerator:
             if entry:
                 entries.append(entry)
         for name, images in self.pattern_images.items():
-            entries.append(AtlasEntry(name, {1: (images.img_1x, 1),
-                                             self.lower_factor: (images.img_2x, self.lower_factor)},
+            density = images.density
+            entries.append(AtlasEntry(name, {1: (images.img_1x, density),
+                                             self.lower_factor: (images.img_2x, self.lower_factor * density)},
                                       dict(images.metadata or {})))
         if not entries:
             return None

@@ -215,6 +215,125 @@ def test_zooms_above_16_are_generated(export, tmp_path):
     assert not exporter.diagnostics.by_code("Q2VT_TILES_ZOOM_MISMATCH")
 
 
+def test_generator_fill_stroke_and_map_unit_offset_with_publish_zooms(export, tmp_path):
+    """Publish window zooms (0-16, the map overzooms past 16): a fill
+    generator's dashed 1.2 mm stroke is a line layer with its width and
+    dashes (not a one-pixel fill-outline), and a fill offset in map units
+    moves the exported polygons instead of being dropped."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import QPointF, Qt
+    layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
+    shadow = QgsSimpleFillSymbolLayer(QColor(80, 80, 80), Qt.BrushStyle.SolidPattern,
+                                      QColor("black"), Qt.PenStyle.NoPen)
+    shadow.setOffset(QPointF(20, 20))
+    shadow.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.DashLine, 1.2)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -50)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([shadow, generator])))
+    exporter, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    fills = [l for l in style["layers"] if l["type"] == "fill"]
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    assert not [l for l in fills if "fill-outline-color" in l["paint"]]
+    assert len(lines) == 1 and lines[0]["paint"]["line-width"] == pytest.approx(1.2 * 96 / 25.4,
+                                                                               abs=1e-3)
+    assert lines[0]["paint"]["line-color"] == "rgba(200, 0, 0, 1.0)"
+    assert lines[0]["paint"].get("line-dasharray") and lines[0]["maxzoom"] > 16
+    assert all(l["paint"].get("fill-translate", [0, 0]) == [0, 0] for l in fills)
+    # The shadow's polygons are moved 20 m right and down in the tiles.
+    assert {r.shift for r in exporter.rules if r.shift} == {(20.0, -20.0)}
+    assert len([r for r in exporter.rules if r.pre_generator]) == 2  # fill + its stroke
+
+
+def test_generator_sub_symbols_ignore_the_parent_opacity_with_publish_zooms(export, tmp_path):
+    """A 0.4 symbol with a fill generator: QGIS draws the generated fill and
+    its stroke opaque (the sub-symbol's own opacity) and only the plain
+    fill at 0.4. The style drew both generated layers at 0.4."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
+    base = QgsSimpleFillSymbolLayer(QColor(200, 200, 200), Qt.BrushStyle.SolidPattern,
+                                    QColor("black"), Qt.PenStyle.NoPen)
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, 2.0)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -50)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    symbol = QgsFillSymbol([base, generator])
+    symbol.setOpacity(0.4)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    exporter, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    generated = {r.output_dataset for r in exporter.rules if r.pre_generator}
+    opacities = sorted((l["type"], l["source-layer"] in generated,
+                        l["paint"].get(f"{l['type']}-opacity", 1))
+                       for l in style["layers"] if l.get("source-layer"))
+    assert opacities == [("fill", False, pytest.approx(0.4)), ("fill", True, 1),
+                         ("line", True, 1)], opacities
+
+
+def test_marker_generator_on_points_keeps_the_source_points_with_publish_zooms(export, tmp_path):
+    """A simple marker and a marker geometry generator moving the point on a
+    point layer, exported 0-16: both style layers read the generated points
+    of one dataset, so the simple marker was drawn at the moved position
+    (hidden under the generator's marker). Each has its own data now."""
+    import sqlite3
+    from qgis.core import (QgsGeometryGeneratorSymbolLayer, QgsMarkerSymbol,
+                           QgsSimpleMarkerSymbolLayer, QgsVectorLayer)
+    from fidelity.validation import tile_layers
+    from q2vt_fixtures import to_geopackage
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({EXTENT.center().x()} "
+                                            f"{EXTENT.center().y()})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 30, 0)", "SymbolType": "Marker"})
+    generator.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([
+        QgsSimpleMarkerSymbolLayer.create({"name": "circle", "color": "255,0,0"}), generator])))
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    sources = [l["source-layer"] for l in style["layers"] if l.get("source-layer")]
+    assert len(sources) == 2 and len(set(sources)) == 2, sources
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        found = {name for zoom, data in conn.execute("SELECT zoom_level, tile_data FROM tiles")
+                 if zoom == 16 for name in tile_layers(bytes(data))}
+    assert set(sources) <= found
+
+
+def test_marker_generator_ignores_a_data_defined_parent_opacity(export, tmp_path):
+    """QGIS evaluates a symbol's data-defined opacity only for the symbol
+    itself; the generator's marker is drawn opaque. Its style layer took
+    the parent's 40 % opacity."""
+    from qgis.core import (QgsGeometryGeneratorSymbolLayer, QgsMarkerSymbol, QgsProperty,
+                           QgsSimpleMarkerSymbolLayer, QgsSymbol, QgsVectorLayer)
+    from q2vt_fixtures import to_geopackage
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({EXTENT.center().x()} "
+                                            f"{EXTENT.center().y()})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 30, 0)", "SymbolType": "Marker"})
+    generator.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"}))
+    symbol = QgsMarkerSymbol([
+        QgsSimpleMarkerSymbolLayer.create({"name": "circle", "color": "255,0,0"}), generator])
+    symbol.setDataDefinedProperty(QgsSymbol.Property.PropertyOpacity, QgsProperty.fromExpression("40"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    opacities = {l["source-layer"][-3:]: l["paint"].get("icon-opacity", 1)
+                 for l in style["layers"] if l.get("source-layer")}
+    # s00: the circle (40 %); s01: the generator's square (opaque).
+    assert opacities == {"s00": pytest.approx(0.4), "s01": 1}, opacities
+
+
 def test_geometry_generator_uses_layer_crs_for_both_geometry_spellings(plugin):
     from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
 
@@ -383,6 +502,53 @@ def test_workers_never_touch_the_live_project(export, tmp_path, monkeypatch):
     assert texts == {"Z-K1", "Z-K2", "Z-Lk"}, texts
 
 
+def test_visible_polygons_tell_the_parts_of_a_feature_apart(export, tmp_path):
+    """The viewer labels each part of a multi-part feature ("Label every
+    part") or only its biggest, so the parts in the ``_vp`` tiles differ in
+    q2vt_part. A single-part feature needs no unique value: the values
+    repeat from feature to feature (a small tile value table)."""
+    from osgeo import gdal  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("MultiPolygon?crs=EPSG:3857", "parts", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    square = "(({0} {1}, {2} {1}, {2} {3}, {0} {3}, {0} {1}))"
+    shapes = {"a": [(2120000, 6020000)], "b": [(2120600, 6020000)],
+              "c": [(2121200, 6020000), (2121200, 6020600)],
+              "d": [(2121800, 6020000)], "e": [(2120000, 6020600)]}
+    features = []
+    for name, corners in shapes.items():
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([name])
+        rings = ", ".join(square.format(x, y, x + 400, y + 400) for x, y in corners)
+        feature.setGeometry(QgsGeometry.fromWkt(f"MULTIPOLYGON({rings})"))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    layer = to_geopackage(layer, str(tmp_path / "parts.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.centroidWhole = False
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    polygons = labels[0]["metadata"]["q2vt:visible-polygons"]
+    tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), gdal.OF_VECTOR,
+                        open_options=["ZOOM_LEVEL=14"])
+    parts = {}
+    for feature in tiles.GetLayerByName(polygons):
+        parts.setdefault(feature.GetField("q2vt_label"), set()).add(feature.GetField("q2vt_part"))
+    assert set(parts) == set(shapes), parts
+    assert len(parts["c"]) == 2 and all(len(parts[name]) == 1 for name in "abde"), parts
+    single = {next(iter(parts[name])) for name in "abde"}
+    assert len(single) < 4, parts
+
+
 def test_viewer_starts_on_the_exported_area(export, tmp_path):
     """With minimum zoom 0 the viewer opened on the whole earth."""
     layer = zoning_layer(path=str(tmp_path / "view.gpkg"))
@@ -436,6 +602,8 @@ def test_polygon_labels_on_the_visible_part_ship_their_polygons(export, tmp_path
     archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
     assert polygons in archive["vector_layers"]
     assert "q2vt_label" in archive["vector_layers"][polygons]["fields"]
+    # Each single part is told apart ("Label every part" / the biggest part).
+    assert "q2vt_part" in archive["vector_layers"][polygons]["fields"]
 
     layer = zoning_layer(path=str(tmp_path / "vp_whole.gpkg"))  # the project owned the first
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
@@ -496,18 +664,18 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
     """QGIS "Around point" on polygons: the label goes beside its point at
     the label distance (the viewer places it, see visible_labels.mjs), not
     on it; other placements carry no such hint."""
-    def labels_for(placement, name):
+    def labels_for(placement, name, dist=3, units=Qgis.RenderUnit.Millimeters, **kwargs):
         layer = zoning_layer(path=str(tmp_path / f"{name}.gpkg"))
         layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
         settings = QgsPalLayerSettings()
         settings.fieldName = "zone"
         settings.placement = placement
-        settings.dist = 3
-        settings.distUnits = Qgis.RenderUnit.Millimeters
+        settings.dist = dist
+        settings.distUnits = units
         settings.centroidWhole = False
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
-        _, result = export(layer)
+        _, result = export(layer, **kwargs)
         style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
         return [l for l in style["layers"] if "text-field" in l.get("layout", {})]
 
@@ -516,6 +684,16 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
     assert around["anchors"][0] == "bottom-left"  # first try: above right of the point, as QGIS
     over = labels_for(Qgis.LabelPlacement.OverPoint, "over")[0]["metadata"]
     assert "q2vt:visible-polygons" in over and "q2vt:label-around" not in over
+    # "Outside polygons": the same distance, from the polygon's edge (it was
+    # drawn on the polygon's centroid).
+    outside = labels_for(Qgis.LabelPlacement.OutsidePolygons, "outside")[0]["metadata"]["q2vt:label-around"]
+    assert outside["outside"] is True and outside["px"] == pytest.approx(3 * 96 / 25.4, rel=0.01)
+    assert len(outside["anchors"]) == 8
+    # A map-unit distance survives an export from zoom 0: it was taken at
+    # zoom 0 and rounded to 0 px (10 m: about 8.4 px at zoom 16).
+    metres = labels_for(Qgis.LabelPlacement.OutsidePolygons, "outside_mu", dist=10,
+                        units=Qgis.RenderUnit.MapUnits, min_zoom=0, max_zoom=2)[0]["metadata"]["q2vt:label-around"]
+    assert metres["px"] * 2 ** (16 - metres["zoom"]) == pytest.approx(10 * 512 * 2 ** 16 / 40075016.686, rel=0.01)
 
 
 def test_detail_below_a_metre_survives_at_the_max_zoom(export, tmp_path):
@@ -583,6 +761,153 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
     assert lines in archive["vector_layers"]
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
+
+
+def _line_label_above(export, tmp_path, dist, unit, frame=None):
+    """The style layer of a 10 pt label above a 60 degree line, drawn once
+    per line, exported from zoom 0 as the Publish window does."""
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "roads", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Alpha Lane"])
+    feature.setGeometry(QgsGeometry.fromWkt("LineString (2120500 6020000, 2121000 6020866)"))  # 60 degrees
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "roads.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "black"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Line
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(Qgis.LabelLinePlacementFlags(2))  # above the line
+    settings.setLineSettings(line_settings)
+    settings.dist, settings.distUnits = dist, unit
+    text_format = QgsTextFormat()
+    text_format.setSize(10)
+    text_format.setSizeUnit(Qgis.RenderUnit.Points)
+    if frame is not None:
+        text_format.setBackground(frame)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    return [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+
+
+@pytest.mark.parametrize("dist,unit", [(3, Qgis.RenderUnit.Millimeters), (10, Qgis.RenderUnit.MapUnits)])
+def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, unit):
+    """A line label above its line, drawn once per line: exported at the
+    line's middle, turned to the line, the distance a Y offset. As
+    text-translate (never turned) it went straight up the screen: on a
+    sloped line the label touched the line, on an upright one the distance
+    was lost. It stays text-offset, which MapLibre turns with the label."""
+    label = _line_label_above(export, tmp_path, dist, unit)
+    assert label["metadata"]["q2vt:visible-kind"] == "line"
+    assert "labelrotation" in json.dumps(label["layout"]["text-rotate"])
+    assert label["paint"]["text-translate"] == [0, 0]
+    offset = label["layout"]["text-offset"]
+    size = label["layout"]["text-size"]
+    if unit == Qgis.RenderUnit.Millimeters:
+        assert offset == pytest.approx([0, -3 * 96 / 25.4 / size], abs=1e-3)
+    else:  # map units: per tile zoom, the ratio of the zoom's middle
+        for zoom in (17, 19):
+            stops = dict(zip(offset[3::2], (value[1] for value in offset[4::2])))
+            px = 10 * 512 / 40075016.68557849 * 2 ** (zoom + 0.5)
+            assert stops[zoom] == pytest.approx([0, -px / size], rel=1e-3)
+
+
+def test_a_line_label_frame_with_its_own_offset_keeps_the_distance_too(export, tmp_path):
+    """A fixed 10 x 5 mm frame offset 2 mm right, around a label 3 mm above
+    its line: the frame's own offset left out the distance, so the text was
+    drawn outside its frame. icon-offset (turned with the label, multiplied
+    by icon-size) is now the frame's offset plus the distance."""
+    from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QPointF, QSizeF  # pylint: disable=import-outside-toplevel
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeFixed)
+    frame.setSize(QSizeF(10, 5))
+    frame.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    frame.setStrokeWidth(0.4)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    frame.setOffset(QPointF(2, 0))
+    frame.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    label = _line_label_above(export, tmp_path, 3, Qgis.RenderUnit.Millimeters, frame)
+    mm = 96 / 25.4
+    size = label["layout"].get("icon-size", 1)
+    assert label["layout"]["icon-offset"] == pytest.approx([2 * mm / size, -3 * mm / size], abs=1e-3)
+    assert label["layout"]["text-offset"] == pytest.approx([0, -3 * mm / label["layout"]["text-size"]], abs=1e-3)
+
+
+def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp_path):
+    """Horizontal placement on a line was a point label on the line itself
+    (MapLibre: at its first vertex, none once that is off the screen); a
+    label repeated every 300 mm got MapLibre anchors 1134 px apart, most
+    views had none. Both are exported at the line's middle with their lines
+    for the viewer: level (q2vt:line-orient), or chopped at the repeat
+    (q2vt:repeat), as QGIS lays them out on the line clipped to the map.
+    Exported from zoom 0, as the Publish window does."""
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+
+    def labels_for(name, placement, repeat, unit=Qgis.RenderUnit.Millimeters, merge=False):
+        layer = QgsVectorLayer("LineString?crs=EPSG:3857", name, "memory")
+        layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes(["Alpha Lane"])
+        feature.setGeometry(QgsGeometry.fromWkt(
+            "LineString (2119500 6019500, 2121000 6021000, 2122500 6020000)"))
+        layer.dataProvider().addFeatures([feature])
+        layer = to_geopackage(layer, str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "name"
+        settings.placement = placement
+        settings.repeatDistance = repeat
+        settings.repeatDistanceUnit = unit
+        line_settings = settings.lineSettings()
+        line_settings.setMergeLines(merge)
+        settings.setLineSettings(line_settings)
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        _, result = export(layer, min_zoom=0, max_zoom=14)
+        style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+        return [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+
+    for labels in (labels_for("level", Qgis.LabelPlacement.Horizontal, 0),
+                   labels_for("level_repeated", Qgis.LabelPlacement.Horizontal, 300)):
+        assert len(labels) == 1 and labels[0]["layout"]["symbol-placement"] == "point"
+        assert labels[0]["layout"]["text-rotate"] == 0
+        assert labels[0]["metadata"]["q2vt:visible-kind"] == "line"
+        assert labels[0]["metadata"]["q2vt:line-orient"] == "horizontal"
+    assert labels[0]["metadata"]["q2vt:repeat"] == {"px": pytest.approx(300 * 96 / 25.4, abs=0.01)}
+    sparse = labels_for("sparse", Qgis.LabelPlacement.Line, 300)
+    assert len(sparse) == 1 and sparse[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert "q2vt:line-orient" not in sparse[0]["metadata"]
+    assert sparse[0]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(300 * 96 / 25.4, abs=0.01)
+    assert "q2vt:merge-lines" not in sparse[0]["metadata"]
+    # "Merge connected lines": the viewer labels connected lines of one text
+    # as one line (a river split into short features).
+    merged = labels_for("merged", Qgis.LabelPlacement.Line, 300, merge=True)
+    assert len(merged) == 1 and merged[0]["metadata"]["q2vt:merge-lines"] is True
+    # A map-unit repeat: px at zoom 24. At the export's first zoom (0) it was
+    # a fraction of a pixel, rounded to 3 decimals: 30 m became no repeat.
+    meters = labels_for("level_meters", Qgis.LabelPlacement.Horizontal, 30, unit=Qgis.RenderUnit.MapUnits)
+    repeat = meters[0]["metadata"]["q2vt:repeat"]
+    assert repeat["zoom"] == 24
+    assert repeat["px"] == pytest.approx(30 / (2 * 20037508.342789244) * 512 * 2 ** 24, rel=1e-6)
+    # A small repeat keeps MapLibre's spacing over the tile zooms, the viewer
+    # takes over while the map overzooms.
+    dense = sorted(labels_for("dense", Qgis.LabelPlacement.Line, 20), key=lambda l: l["minzoom"])
+    assert [l["layout"]["symbol-placement"] for l in dense] == ["line", "point"]
+    assert dense[0]["maxzoom"] == 15 and dense[1]["minzoom"] == 15
+    assert dense[1]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(20 * 96 / 25.4, abs=0.01)
 
 
 def test_perimeter_labels_follow_the_polygon_outline(export, tmp_path):
@@ -713,10 +1038,17 @@ def test_curved_repeated_line_labels_are_placed_per_zoom(export, tmp_path):
     layer.setLabelsEnabled(True)
     _, result = export(layer, min_zoom=11, max_zoom=13)
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
-    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    texts = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    labels = [l for l in texts if l["layout"]["symbol-placement"] == "line-center"]
     assert sorted(l["minzoom"] for l in labels) == [11, 12, 13]   # one layer per zoom
-    assert {l["layout"]["symbol-placement"] for l in labels} == {"line-center"}
+    assert max(l["maxzoom"] for l in labels) == 14   # the last tile zoom only
     assert labels[0]["layout"]["text-max-angle"] == 25
+    # Overzoomed, the web viewer chops the visible part of the river.
+    viewer = [l for l in texts if l not in labels]
+    assert [l["minzoom"] for l in viewer] == [14]
+    assert viewer[0]["layout"]["symbol-placement"] == "point"
+    assert viewer[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert viewer[0]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(70 * 96 / 25.4, abs=0.01)
 
     from q2vt_plugin.src.core import label_lines  # pylint: disable=import-error,import-outside-toplevel
     layout = labels[0]["layout"]
@@ -768,8 +1100,22 @@ def test_labels_avoid_each_other_and_overlap_only_if_required(export, tmp_path):
     [label] = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
     assert label["layout"]["text-allow-overlap"] is False
     assert label["metadata"]["q2vt:overlap"] == "if-required"
+    assert "q2vt:overlap-at-no-cost" not in label["metadata"]
     assert label["layout"]["text-variable-anchor"][0] == "center"
     assert label["layout"]["text-radial-offset"] == 1
+
+    # "Allow overlap at no cost": the viewer does not move it aside.
+    layer = zoning_layer(path=str(tmp_path / "ov_free.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    placement.setOverlapHandling(Qgis.LabelOverlapHandling.AllowOverlapAtNoCost)
+    settings.setPlacementSettings(placement)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    [label] = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    assert label["metadata"]["q2vt:overlap"] == "if-required"
+    assert label["metadata"]["q2vt:overlap-at-no-cost"] is True
 
 
 def test_properties_on_missing_fields_are_ignored_as_in_qgis(export, tmp_path):

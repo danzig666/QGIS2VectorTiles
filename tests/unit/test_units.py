@@ -91,3 +91,66 @@ def test_projected_crs_uses_reference_latitude():
 def test_device_pixel_ratio_does_not_change_css_size():
     # Sizes are CSS px; there is no DPR parameter by design.
     assert u.LengthConverter(dpi=96).static(1, "mm") == pytest.approx(3.7795, rel=1e-4)
+
+
+def test_geographic_top_scale_is_qgis_metric_scale():
+    """QGIS reports metric scales in a degree CRS (QgsScaleCalculator:
+    haversine metres of a degree at the middle latitude). Zoom 0 was set to
+    295.8M / 111319 = 2657, so every scale range landed ~15 zooms too low."""
+    from fidelity.zoom import WEB_MERCATOR_TOP_SCALE
+    ctx = u.MapUnitContext.for_project(False, "degrees", 47.5)
+    metres_per_degree = u.qgis_metres_per_degree(47.5)
+    assert metres_per_degree == pytest.approx(52.5e3, rel=0.01)
+    # QGIS's scale of the browser's ground resolution (360/512 degrees per
+    # px at zoom 0, 96 dpi).
+    qgis_scale = 360.0 / 512.0 * metres_per_degree / 0.0254 * 96.0
+    assert ctx.top_scale == pytest.approx(qgis_scale, rel=1e-9)
+    assert ctx.top_scale == pytest.approx(1.4e8, rel=0.02)
+    # A 1:5000 rule switches near zoom 14.6, not near zoom 0.
+    assert 14.4 < math.log2(ctx.top_scale / 5000) < 14.9
+    assert u.MapUnitContext.for_project(True, "meters", 47.5).top_scale == WEB_MERCATOR_TOP_SCALE
+
+
+@pytest.mark.parametrize("units,per_unit", [("degrees", 360.0 / 40075016.68557849),
+                                            ("feet", 1.0 / 0.3048), ("meters", 1.0)])
+def test_screen_mm_in_map_units_do_not_go_through_the_scale(units, per_unit):
+    """QGIS's scale counts metres; a screen mm in project map units is the
+    browser's Mercator metres per mm over the Mercator units per map unit
+    (degrees and feet were taken from the metric scale as if metres)."""
+    from fidelity import zoom
+    cos = math.cos(math.radians(47.5))
+    ctx = u.MapUnitContext.for_project(False, units, 47.5)
+    try:
+        zoom.configure(ctx.top_scale, ctx.map_units_per_mm_0)
+        mercator_per_mm = 40075016.68557849 / 512 / 2 ** 15 * 96 / 25.4
+        expected = mercator_per_mm * per_unit * (1.0 if units == "degrees" else cos)
+        assert zoom.map_units_per_mm(15) == pytest.approx(expected, rel=1e-6)
+        if units == "meters":
+            assert zoom.map_units_per_mm(15) == pytest.approx(zoom.zoom_to_scale(15) / 1000)
+    finally:
+        zoom.configure(zoom.WEB_MERCATOR_TOP_SCALE)
+    assert zoom.map_units_per_mm(0) == pytest.approx(zoom.WEB_MERCATOR_TOP_SCALE / 1000)
+
+
+def test_projected_top_scale_counts_the_crs_unit():
+    from fidelity.zoom import WEB_MERCATOR_TOP_SCALE
+    cos = math.cos(math.radians(47.5))
+    metres = u.MapUnitContext.for_project(False, "meters", 47.5)
+    feet = u.MapUnitContext.for_project(False, "feet", 47.5)
+    assert metres.top_scale == pytest.approx(WEB_MERCATOR_TOP_SCALE * cos)
+    # QgsScaleCalculator converts feet to inches: same ground scale.
+    assert feet.top_scale == pytest.approx(WEB_MERCATOR_TOP_SCALE * cos)
+
+
+def test_meters_at_scale_are_mercator_units_in_web_mercator():
+    """QgsRenderContext::convertMetersToMapUnits returns meters unchanged in
+    a metre CRS: in EPSG:3857 8 'meters at scale' draw as 8 map units (they
+    were 1/cos(lat) = 1.48x too wide at 47.5 N)."""
+    ctx = u.MapUnitContext.for_project(True, "meters", 47.5)
+    assert ctx.mercator_per_meter == 1.0
+    lengths = u.LengthConverter(map_context=ctx)
+    assert lengths.static(8, "m") == lengths.static(8, "map")
+    # Elsewhere ground meters keep the latitude factor (QGIS measures them
+    # on the ellipsoid in a degree CRS, by the unit factor in a projected one).
+    geographic = u.MapUnitContext.for_project(False, "degrees", 47.5)
+    assert geographic.mercator_per_meter == pytest.approx(1 / math.cos(math.radians(47.5)))

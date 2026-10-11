@@ -307,32 +307,49 @@ def point_pattern_cell(dx: float, dy: float, disp_x: float, disp_y: float):
 
 
 def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px: float,
-                pixel_ratio: float, size_px: int = 0):
+                pixel_ratio: float, size_px=0):
     """Label background frame and its stretch metadata (logical pixels).
 
     ``shape``: "rectangle" (stretchable: corners and border keep their size
     when MapLibre fits the frame around the text) or "ellipse" (the whole
-    image is scaled). Returns ``(image, metadata)``.
+    image is scaled). ``size_px``: a fixed-size frame, ``(width, height)``
+    or one side of a square. An ellipse's ``stroke_px`` may be ``(x, y,
+    side)``: the ring of a ``side`` px image that MapLibre stretches unevenly
+    to the text.
+    Returns ``(image, metadata)``.
     """
     from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel
 
+    ring = None
+    if isinstance(stroke_px, (tuple, list)):
+        side = stroke_px[2]
+        ring = tuple(min(max(v, 0.0), 0.47 * side) for v in stroke_px[:2])
+        stroke_px, size_px = 0.0, size_px or int(side)
     edge = max(stroke_px, 0.0)
     radius = max(radius_px, 0.0)
     logical = size_px or int(max(32, 2 * math.ceil(radius + edge) + 16))
-    ss = 4  # supersampling for anti-aliased edges
+    # A fixed-size frame: (width, height), as QGIS draws it (one number: square).
+    width_px, height_px = logical if isinstance(logical, (tuple, list)) else (logical, logical)
+    # Supersampling for anti-aliased edges (less for a large dense image).
+    ss = max(1, min(4, int(4096 // max(1.0, max(width_px, height_px) * pixel_ratio))))
     scale = pixel_ratio * ss
-    big = max(1, round(logical * scale))
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    big_w, big_h = max(1, round(width_px * scale)), max(1, round(height_px * scale))
+    img = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     # PIL draws an outline inside the box: the stroke covers [0, edge] from
     # the image edge, inside the fixed (non-stretched) border below. An inset
     # of half the stroke pushed thick map-unit strokes into the stretched
     # middle, which then filled the whole frame.
-    box = [0, 0, big - 1, big - 1]
+    box = [0, 0, big_w - 1, big_h - 1]
     width = max(0, round(edge * scale))
     fill = tuple(fill_rgba)
     outline = tuple(stroke_rgba) if width else None
-    if shape == "ellipse":
+    if shape == "ellipse" and ring is not None:
+        inner = [ring[0] * scale, ring[1] * scale, big_w - 1 - ring[0] * scale, big_h - 1 - ring[1] * scale]
+        draw.ellipse(box, fill=tuple(stroke_rgba) if any(ring) else fill)
+        if any(ring):
+            draw.ellipse(inner, fill=fill)
+    elif shape == "ellipse":
         draw.ellipse(box, fill=fill, outline=outline, width=width)
     else:
         # QGIS strokes the rounded rectangle centred on its outline: the
@@ -343,7 +360,8 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
                                width=width)
     # Area average of the supersampled image (Lanczos overshoots: a darker
     # stroke with a light line just inside it).
-    out = img.resize((max(1, round(logical * pixel_ratio)),) * 2, Image.BOX)
+    out = img.resize((max(1, round(width_px * pixel_ratio)), max(1, round(height_px * pixel_ratio))),
+                     Image.BOX)
     metadata = {}
     if shape != "ellipse" and not size_px:
         fixed = math.ceil(radius + edge) + 1

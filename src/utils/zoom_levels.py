@@ -30,9 +30,10 @@ class ZoomLevels:
     SCALES = [_zoom.TOP_SCALE / (2**zoom) for zoom in range(_zoom.MAX_TILE_ZOOM + 1)]
 
     @classmethod
-    def configure(cls, top_scale: float) -> None:
-        """Set the map scale of zoom 0 for the current export."""
-        _zoom.configure(top_scale)
+    def configure(cls, top_scale: float, map_units_per_mm_0: Optional[float] = None) -> None:
+        """Set the map scale of zoom 0 for the current export (and the
+        project map units per mm at zoom 0, see ``fidelity.zoom.configure``)."""
+        _zoom.configure(top_scale, map_units_per_mm_0)
         cls.SCALES = [_zoom.TOP_SCALE / (2**zoom) for zoom in range(_zoom.MAX_TILE_ZOOM + 1)]
 
     @classmethod
@@ -41,6 +42,11 @@ class ZoomLevels:
         if edge == "o":
             return _zoom.tile_min_zoom(scale)
         return _zoom.tile_max_zoom(scale)
+
+    @staticmethod
+    def map_units_per_mm(zoom: float) -> float:
+        """Project map units of one screen millimetre at (fractional) ``zoom``."""
+        return _zoom.map_units_per_mm(zoom)
 
     @classmethod
     def zoom_to_scale(cls, zoom: int) -> Optional[float]:

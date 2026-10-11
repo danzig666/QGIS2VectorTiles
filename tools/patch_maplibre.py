@@ -44,6 +44,34 @@ a double-size copy after every whole zoom. The patch:
    a closed path, instead of drawing two caps there; a ring's dashes start
    at its first vertex (stock MapLibre counted the closing segment first).
 
+7. fill patterns of style layers flagged ``metadata: {"q2vt:pattern-zoom": z}``
+   (map-unit textures, the last one rendered for zoom ``z``) keep growing
+   with the map above zoom ``z``: they are scaled with that zoom instead of
+   the tile's integer zoom, without the double-size cross-fade copy;
+
+8. the line atlas holding dash patterns (512 rows; a round-cap pattern takes
+   15) grows to 4096 rows when full, then starts over, instead of returning
+   no pattern, which threw and stopped the whole map from drawing (a dash
+   array per zoom of a few layers fills it within a session);
+
+9. tells a polygon's shells from its holes by the winding of its largest
+   ring, not of its first: GDAL's MVT writer can put a tiny hole-wound
+   sliver before the shell, and the shell then became that sliver's hole;
+
+10. a label whose collision box covers the whole collision grid (the view plus
+    100 px around it) collides only with the boxes placed in it: stock
+    MapLibre counted it as colliding with everything, so big map-unit text
+    (laid out at the size of the next zoom) vanished when zoomed in, even
+    alone, while QGIS draws it.
+
+11. a label frame fitted to its text (``icon-text-fit``) of a style layer
+    flagged ``metadata: {"q2vt:frame-shape": "ellipse" | "circle" | "square"}``
+    is fitted around the text box as QGIS bounds the text by that shape
+    (qgstextrenderer drawBackground): the box times sqrt(2) (ellipse), its
+    diagonal both ways (circle) or its longer side both ways (square), then
+    the padding (the frame's buffer) around it. Stock MapLibre fitted every
+    frame to the bare text box: ellipses were 20-25 % smaller than QGIS's.
+
 Idempotent; run after updating MapLibre:
 
     python3 tools/patch_maplibre.py [--check]
@@ -69,6 +97,23 @@ SAMPLING_NEW = (SAMPLING_MARK + "vec2 pos_a=vec2(mix(pattern_tl_a.x,pattern_br_a
                 "mix(pattern_tl_a.y+0.5,pattern_br_a.y-0.5,y))*texel_size;"
                 "vec2 pos_b=vec2(mix(pattern_tl_b.x,pattern_br_b.x,x_b),"
                 "mix(pattern_tl_b.y+0.5,pattern_br_b.y-0.5,y))*texel_size;")
+
+
+GRID_MARK = "/*q2vt-grid-hit-test*/"
+# GridIndex._query: a query covering the whole grid returns every box, and a
+# hit test one "collision" whatever the grid holds.
+GRID_HIT = re.compile(r"if\((\w)<=0&&(\w)<=0&&this\.width<=(\w)&&this\.height<=(\w)\)\{"
+                      r"if\((\w)\)return\[\{key:null,x1:\1,y1:\2,x2:\3,y2:\4\}\];")
+
+
+def _grid_patch(text: str) -> str:
+    found = list(GRID_HIT.finditer(text))
+    if len(found) != 1:
+        raise SystemExit(f"grid index hit test: {len(found)} matches (expected 1)")
+    m = found[0]
+    # Hit tests go on to the per-cell query (cells clamped to the grid).
+    return (text[:m.start()] + f"if({GRID_MARK}!{m.group(5)}&&{m.group(1)}<=0&&{m.group(2)}<=0&&"
+            f"this.width<={m.group(3)}&&this.height<={m.group(4)}){{" + text[m.end():])
 
 
 WIDTH_MARK = "/*q2vt-current-width*/"
@@ -155,6 +200,61 @@ def _fill_patch(text: str) -> str:
     if text.count(draw) != 1:
         raise SystemExit("fill draw: expected exactly one match")
     return text.replace(draw, "S.layoutVertexBuffer,g,_,n.paint,e.transform.zoom,w,d&&S.q2anchorBuffer||void 0)")
+
+
+PATTERN_ZOOM_MARK = "/*q2vt-pattern-zoom*/"
+
+
+def _pattern_zoom_patch(text: str) -> str:
+    """Main bundle, after ``_fill_patch``: map-unit fill textures flagged
+    ``q2vt:pattern-zoom`` scale with that zoom above it (a texture pixel is a
+    pixel of that zoom, so the pattern grows with the map like QGIS map
+    units), and both cross-fade sides there are the same image."""
+    zoom = re.compile(r"q2z=q2s\?(\w+)\.transform\.zoom:\1\.transform\.tileZoom,")
+    found = zoom.findall(text)
+    if len(found) != 1:
+        raise SystemExit(f"fill pattern zoom: {len(found)} matches (expected 1)")
+    painter = found[0]
+    text = zoom.sub(lambda m: (
+        f"q2P=q2l&&q2l.metadata&&q2l.metadata[\"q2vt:pattern-zoom\"],{PATTERN_ZOOM_MARK}"
+        f"q2O=!q2s&&typeof q2P==\"number\"&&{painter}.transform.tileZoom>q2P,"
+        f"q2z=q2s?{painter}.transform.zoom:q2O?q2P:{painter}.transform.tileZoom,"), text)
+    scale = re.compile(r"u_scale:\[(\w+),q2s\?(\w+)\.toScale:\2\.fromScale,\2\.toScale\]")
+    if len(scale.findall(text)) != 1:
+        raise SystemExit("fill pattern scale: expected exactly one match")
+    return scale.sub(lambda m: f"u_scale:[{m.group(1)},q2s||q2O?{m.group(2)}.toScale:"
+                               f"{m.group(2)}.fromScale,{m.group(2)}.toScale]", text)
+
+
+ATLAS_MARK = "/*q2vt-line-atlas*/"
+ATLAS_ADD = re.compile(r"addDash\((\w),(\w)\)\{let (\w)=\2\?7:0,(\w)=2\*\3\+1;"
+                       r"if\(this\.nextRow\+\4>this\.height\)return")
+ATLAS_BIND = "bind(e){let t=e.gl;this.texture?(t.bindTexture(t.TEXTURE_2D,this.texture),this.dirty"
+ATLAS_DRAW = re.compile(r"(\w)=(\w)\.lineAtlas\.getDash\((\w)\.to,(\w)\),(\w)=\2\.lineAtlas\.getDash\(\3\.from,\4\);")
+
+
+def _line_atlas_patch(text: str) -> str:
+    """Main bundle: the dash atlas grows (up to 4096 rows), then starts over,
+    instead of running out of space (a null pattern threw in the draw)."""
+    if len(ATLAS_ADD.findall(text)) != 1 or text.count(ATLAS_BIND) != 1 \
+            or len(ATLAS_DRAW.findall(text)) != 1:
+        raise SystemExit("line atlas: expected exactly one addDash, bind and draw lookup")
+    text = ATLAS_ADD.sub(lambda m: (
+        f"q2grow(){{{ATLAS_MARK}if(this.height<4096){{let e=new Uint8Array(this.width*this.height*2);"
+        f"e.set(this.data),this.data=e,this.height*=2}}else{{this.data.fill(0),this.nextRow=0;"
+        f"for(let e in this.dashEntry)delete this.dashEntry[e]}}this.q2resize=!0,this.dirty=!0}}"
+        f"addDash({m.group(1)},{m.group(2)}){{let {m.group(3)}={m.group(2)}?7:0,{m.group(4)}=2*{m.group(3)}+1;"
+        f"if(this.nextRow+{m.group(4)}>this.height&&this.q2grow(),this.nextRow+{m.group(4)}>this.height)return"),
+        text)
+    # A larger atlas is a new texture.
+    text = text.replace(ATLAS_BIND, "bind(e){let t=e.gl;this.q2resize&&this.texture&&(t.deleteTexture("
+                        "this.texture),this.texture=null),this.q2resize=!1;" + ATLAS_BIND[len("bind(e){let t=e.gl;"):])
+    # Starting over may drop the pattern looked up just before: the "from"
+    # side is looked up again after the "to" side.
+    return ATLAS_DRAW.sub(lambda m: (
+        f"{m.group(1)}=({m.group(2)}.lineAtlas.getDash({m.group(3)}.from,{m.group(4)}),"
+        f"{m.group(2)}.lineAtlas.getDash({m.group(3)}.to,{m.group(4)})),"
+        f"{m.group(5)}={m.group(2)}.lineAtlas.getDash({m.group(3)}.from,{m.group(4)});"), text)
 
 
 ANCHOR_MARK = "/*q2vt-feature-anchor*/"
@@ -314,21 +414,103 @@ def _rotated_stretch_patch(text: str) -> str:
     return text[:q.end()] + "q2px:q2Q," + segment + text[end:]
 
 
+RINGS_MARK = "/*q2vt-ring-winding*/"
+# Fill bucket: let n=[],r,i;for(let t of e){let e=oi(t);e!==0&&(t.area=Math.abs(e),
+#   i===void 0&&(i=e<0),i===e<0?(r&&n.push(r),r=[t]):r.push(t))}
+FILL_RINGS = re.compile(
+    r"let (\w)=\[\],(\w),(\w);for\(let (\w) of (\w)\)\{let (\w)=(\w+)\(\4\);\6!==0&&"
+    r"\(\4\.area=Math\.abs\(\6\),\3===void 0&&\(\3=\6<0\),\3===\6<0\?\(\2&&\1\.push\(\2\),"
+    r"\2=\[\4\]\):\2\.push\(\4\)\)\}")
+# Vector tile feature (toGeoJSON): let n=[],r,i;for(let a=0;a<t;a++){let t=Op(e[a]);
+#   t!==0&&(i===void 0&&(i=t<0),...
+TILE_RINGS = re.compile(
+    r"let (\w)=\[\],(\w),(\w);(for\(let (\w)=0;\5<(\w);\5\+\+\)\{let (\w)=(\w+)\((\w)\[\5\]\);"
+    r"\7!==0&&\(\3===void 0&&\(\3=\7<0\),)")
+
+
+def _ring_winding_patch(text: str) -> str:
+    """Shared bundle: a polygon's rings are told apart by the winding of
+    its largest ring (always a shell: a hole is smaller than its shell),
+    not of its first one. GDAL's MVT writer can put a sliver of a few
+    square tile units, wound as a hole, before the shell (MakeValid after
+    quantizing): stock MapLibre then took the shell for that sliver's hole
+    and filled a large wrong area. Hole-wound rings before any shell are
+    dropped (invisible slivers)."""
+    fills, tiles = FILL_RINGS.findall(text), TILE_RINGS.findall(text)
+    if len(fills) != 1 or len(tiles) != 1:
+        raise SystemExit(f"classifyRings: {len(fills)} fill / {len(tiles)} tile matches "
+                         "(expected 1 each)")
+
+    def fill(m):
+        rings, current, winding, ring, all_rings, area, signed = m.groups()
+        return (f"let {rings}=[],{current},{winding},q2M=0;{RINGS_MARK}"
+                f"for(let {ring} of {all_rings}){{let {area}={signed}({ring});{ring}.q2a={area};"
+                f"Math.abs({area})>q2M&&(q2M=Math.abs({area}),{winding}={area}<0)}}"
+                f"for(let {ring} of {all_rings}){{let {area}={ring}.q2a;{area}!==0&&"
+                f"({ring}.area=Math.abs({area}),{winding}==={area}<0?"
+                f"({current}&&{rings}.push({current}),{current}=[{ring}]):"
+                f"{current}&&{current}.push({ring}))}}")
+
+    def tile(m):
+        rings, current, winding, loop, index, count, _area, signed, all_rings = m.groups()
+        return (f"let {rings}=[],{current},{winding},q2M=0;{RINGS_MARK}"
+                f"for(let {index}=0;{index}<{count};{index}++){{let q2s={signed}({all_rings}[{index}]);"
+                f"Math.abs(q2s)>q2M&&(q2M=Math.abs(q2s),{winding}=q2s<0)}}{loop}")
+    return TILE_RINGS.sub(tile, FILL_RINGS.sub(fill, text))
+
+
+FRAME_MARK = "/*q2vt-frame-shape*/"
+# fitIconToText(shapedIcon, shapedText, textFit, padding, iconOffset, fontScale)
+FIT_ICON = re.compile(r"function (\w+)\(e,t,n,r,i,a\)\{let o=e\.image,s;if\(o\.content\)")
+FIT_CALL = "(r,{text},k,m.get(`icon-text-fit-padding`),h,_)"
+
+
+def _frame_shape_patch(text: str) -> str:
+    """Shared bundle: a text-fitted frame of a layer flagged
+    ``q2vt:frame-shape`` is fitted around the text box enlarged as QGIS
+    bounds the text by an ellipse, circle or square."""
+    fits = list(FIT_ICON.finditer(text))
+    if len(fits) != 1:
+        raise SystemExit(f"fitIconToText: {len(fits)} matches (expected 1)")
+    fit = fits[0].group(1)
+    helper = (f"function q2FrameBox(t,l){{{FRAME_MARK}let s=l&&l.metadata&&l.metadata[\"q2vt:frame-shape\"];"
+              "if(!t||!s)return t;let w=t.right-t.left,h=t.bottom-t.top,x=(t.left+t.right)/2,y=(t.top+t.bottom)/2;"
+              "s===`ellipse`?(w*=Math.SQRT2,h*=Math.SQRT2):s===`circle`?(w=h=Math.hypot(w,h)):"
+              "s===`square`&&(w=h=Math.max(w,h));return{left:x-w/2,right:x+w/2,top:y-h/2,bottom:y+h/2}}")
+    text = text[:fits[0].start()] + helper + text[fits[0].start():]
+    for shaped in ("n.vertical", "g"):
+        call = fit + FIT_CALL.format(text=shaped)
+        if text.count(call) != 1:
+            raise SystemExit(f"fitIconToText call with {shaped}: expected exactly one match")
+        text = text.replace(call, fit + FIT_CALL.format(text=f"q2FrameBox({shaped},e.layers[0])"))
+    return text
+
+
 def _shared_patch(text: str) -> str:
+    if FRAME_MARK not in text:
+        text = _frame_shape_patch(text)
     if BUCKET_MARK not in text:
         text = _bucket_patch(text)
     if CLOSED_MARK not in text:
         text = _closed_line_patch(text)
     if ROTATED_MARK not in text:
         text = _rotated_stretch_patch(text)
+    if RINGS_MARK not in text:
+        text = _ring_winding_patch(text)
     return text
 
 
 def patch(text: str) -> str:
     if FILL_MARK not in text:
         text = _fill_patch(text)
+    if PATTERN_ZOOM_MARK not in text:
+        text = _pattern_zoom_patch(text)
+    if ATLAS_MARK not in text:
+        text = _line_atlas_patch(text)
     if ANCHOR_MARK not in text:
         text = _anchor_patch(text)
+    if GRID_MARK not in text:
+        text = _grid_patch(text)
     if WIDTH_MARK not in text:
         for old, new, count in WIDTH_EDITS:
             if text.count(old) != count:
@@ -368,9 +550,10 @@ def main() -> int:
     with open(SHARED, encoding="utf-8") as handle:
         shared = handle.read()
     if "--check" in sys.argv:
-        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK)) \
+        done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK,
+                                             PATTERN_ZOOM_MARK, ATLAS_MARK, GRID_MARK)) \
             and BUCKET_MARK in shared and CLOSED_MARK in shared \
-            and ROTATED_MARK in shared
+            and ROTATED_MARK in shared and RINGS_MARK in shared and FRAME_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
     for path, old, new in ((BUNDLE, text, patch(text)),

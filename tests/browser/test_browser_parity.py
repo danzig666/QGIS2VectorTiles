@@ -53,31 +53,44 @@ def _polygon_layer(path, clockwise):
     return to_geopackage(layer, path)
 
 
-def _compare(tmp_path, layer, metric="near", center=CENTER):
+def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None,
+             before=(), zoom=None, prepare=None):
+    """Export ``layer`` with tile zooms ``zooms`` (or ``zoom_range``) and
+    capture QGIS and the browser at ``zoom`` (``prepare(export_dir)``
+    first, when given); ``before``: view zooms shown first in the same page
+    (one session)."""
+    zoom_range = zooms or zoom_range
+    zoom = ZOOM if zoom is None else zoom  # read now: tests patch the module's ZOOM
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
-    half = SIZE / 2 * gallery.EARTH / (512 * 2 ** ZOOM)
+    half = SIZE / 2 * gallery.EARTH / (512 * 2 ** zoom)
     extent = QgsRectangle(center[0] - 2 * half, center[1] - 2 * half,
                           center[0] + 2 * half, center[1] + 2 * half)
     out = tmp_path / "out"
     out.mkdir()
-    export_dir = QGIS2VectorTiles(min_zoom=15, max_zoom=17, extent=extent, output_dir=str(out),
+    export_dir = QGIS2VectorTiles(min_zoom=zoom_range[0], max_zoom=zoom_range[1], extent=extent,
+                                  output_dir=str(out),
                                   feedback=QgsProcessingFeedback(), serve=False,
                                   background_type=2).convert_project_to_vector_tiles()
     to_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
                                     QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
     point = to_wgs.transform(*center)
     views = tmp_path / "views.json"
-    views.write_text(json.dumps([{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": ZOOM,
-                                  "width": SIZE, "height": SIZE}]))
+    views.write_text(json.dumps([{"id": f"before{i}", "lon": point.x(), "lat": point.y(), "zoom": z,
+                                  "width": SIZE, "height": SIZE} for i, z in enumerate(before)]
+                                + [{"id": "v", "lon": point.x(), "lat": point.y(), "zoom": zoom,
+                                    "width": SIZE, "height": SIZE}]))
     qgis_png = str(tmp_path / "v_qgis.png")
-    gallery.qgis_render(layer, center, ZOOM, SIZE, qgis_png)
+    gallery.qgis_render(layer, center, zoom, SIZE, qgis_png)
+    if prepare is not None:
+        prepare(export_dir)
     server = _serve(export_dir)
     try:
         run = subprocess.run(["node", os.path.join(HERE, "gallery_capture.mjs"), export_dir,
                               str(server.port), str(views), str(tmp_path)],
                              capture_output=True, text=True, cwd=HERE, timeout=120)
         assert run.returncode == 0, run.stderr
+        assert not json.loads(run.stdout.strip().splitlines()[-1]).get("timeouts"), run.stdout
     finally:
         server.kill()
     browser_png = str(tmp_path / "v_browser.png")
@@ -149,6 +162,66 @@ def test_polygon_outline_screen_offsets_follow_qgis(tmp_path, clockwise, offset)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
     # The wrong side is 6 mm (about 22 px) away from QGIS's outline.
     assert _compare(tmp_path, layer) > 0.95
+
+
+@pytest.mark.parametrize("zoom", [15.5, 18.5])
+def test_a_line_drawn_only_inside_polygons_stays_inside(tmp_path, monkeypatch, zoom):
+    """"Draw line only inside polygon" (a translucent 4 mm band): QGIS shows
+    the inner half of the stroke, the browser drew all of it, half over the
+    neighbour. A map from zoom 0 with tiles to 16, inside the tiles and
+    overzoomed."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+
+    def polygon(*rings):
+        return "POLYGON(" + ", ".join("(" + ", ".join(
+            f"{CENTER[0] + x} {CENTER[1] + y}" for x, y in ring + ring[:1]) + ")"
+            for ring in rings) + ")"
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "inside", "memory")
+    for wkt in (polygon([(-150, -90), (0, -90), (0, 80), (-150, 80)],
+                        [(-110, -40), (-40, -40), (-40, 30), (-110, 30)]),
+                polygon([(0, -90), (150, -90), (150, 80), (0, 80)])):
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(wkt))
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "inside.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor(0, 0, 255, 140), 4.0)
+    line.setDrawInsidePolygon(True)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    qgis, browser = _compare(tmp_path, layer, "darkness", zoom_range=(0, 16))
+    # The whole stroke had about 1.5x the ink at zoom 15.5; MapLibre's
+    # antialiased edge of a translucent fill adds a darker pixel around the
+    # band (about 9 % at zoom 15.5).
+    assert browser == pytest.approx(qgis, rel=0.15)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 18.0])
+def test_data_defined_hash_lengths_keep_the_stroke_width(tmp_path, zoom):
+    """Hashes 2, 4 and 8 m long on three lines (a 3 m static length, a
+    0.6 mm pen): the browser scaled one hash image by length / 3, so the
+    8 m hashes were drawn 2.7 times as wide as QGIS's (2.4 times its ink at
+    zoom 18). A map from zoom 0 with tiles to 16, inside the tiles and
+    overzoomed."""
+    from qgis.core import QgsHashedLineSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857&field=len:double", "hashes", "memory")
+    for (y0, y1), length in (((-40, -40), 4.0), ((0, 30), 8.0), ((40, 45), 2.0)):
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(QgsGeometry.fromWkt(
+            f"LINESTRING({CENTER[0] - 60} {CENTER[1] + y0}, {CENTER[0] + 60} {CENTER[1] + y1})"))
+        feature["len"] = length
+        layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "hashes.gpkg"))
+    hashes = QgsHashedLineSymbolLayer()
+    hashes.setInterval(6)
+    hashes.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    hashes.setHashLength(3)
+    hashes.setHashLengthUnit(Qgis.RenderUnit.MapUnits)
+    hashes.subSymbol().setColor(QColor(200, 0, 0))
+    hashes.subSymbol().setWidth(0.6)
+    hashes.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLineDistance,
+                                  QgsProperty.fromExpression('"len"'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hashes])))
+    qgis, browser = _compare(tmp_path, layer, "ink", zoom_range=(0, 16), zoom=zoom)
+    assert browser == pytest.approx(qgis, rel=0.25)
 
 
 @pytest.mark.parametrize("cap", ["flat", "square", "round"])
@@ -384,6 +457,62 @@ def test_overlapping_markers_stack_in_feature_order(tmp_path):
     colours = [Image.open(str(tmp_path / f"v_{n}.png")).convert("RGB").getpixel((middle, middle))
                for n in ("qgis", "browser")]
     assert colours[0][2] > 200 and colours[1][2] > 200, colours  # blue (the later one) on top
+
+
+@pytest.mark.parametrize("zoom", [16.0, 18.0])
+@pytest.mark.parametrize("width,offset", [(2.0, 6.0), (0.5, 1.5)])
+def test_screen_offset_lines_keep_their_width_at_turns(tmp_path, width, offset, zoom):
+    """A millimetre offset three times the line width, default bevel join,
+    on a line turning about 45 degrees, exported 0-16 (the Publish
+    defaults) and seen at and above the last tile zoom: the browser's bevel
+    join tapered the offset line to a sliver at the vertex (25-45 % less ink
+    than QGIS), a mitred join draws QGIS's mitred offset curve."""
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "bend", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 150} {CENTER[1] - 30}, {CENTER[0]} {CENTER[1] + 30}, "
+        f"{CENTER[0] + 150} {CENTER[1] - 20})"))
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "bend.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), width)
+    line.setOffset(offset)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    qgis, browser = _compare(tmp_path, layer, metric="darkness", zoom=zoom, zooms=(0, 16))
+    assert browser == pytest.approx(qgis, rel=0.06)
+
+
+def test_a_data_defined_offset_of_zero_keeps_the_pen_join(tmp_path):
+    """A data-defined offset that leaves a feature on its line: QGIS
+    strokes it with the pen's round join. Mitring every feature of a layer
+    with an offset expression squared that feature's sharp corner."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "corner", "memory")
+    memory.dataProvider().addAttributes([QgsField("v", QVariant.Double)])
+    memory.updateFields()
+    feature = QgsFeature(memory.fields())
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 100} {CENTER[1] - 60}, {CENTER[0]} {CENTER[1] + 40}, "
+        f"{CENTER[0] + 100} {CENTER[1] - 60})"))
+    feature.setAttributes([0.0])
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "corner.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 4.0)
+    line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOffset,
+                                QgsProperty.fromExpression('"v" * 1.5'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    assert _compare(tmp_path, layer, metric="shape") < 0.03
+    from PIL import Image
+    # Ink just outside the corner (above the vertex): a mitred corner of
+    # the 15 px line reaches about 3 px further there than the round one.
+    scale = gallery.EARTH / (512 * 2 ** ZOOM)
+    x, y = round(SIZE / 2), round(SIZE / 2 - 40 / scale)
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L")
+                         .crop((x - 8, y - 14, x + 8, y - 4)).getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.15)
 
 
 def _black_box(tmp_path, name):
@@ -711,6 +840,267 @@ def test_pattern_textures_keep_the_qgis_spacing_between_zooms(tmp_path, monkeypa
     assert browser == pytest.approx(qgis, rel=0.12 if unit == "map" else 0.03), (qgis, browser)
 
 
+@pytest.mark.parametrize("zoom", [19.5, 21.5])
+def test_map_unit_patterns_keep_growing_on_overzoomed_tiles(tmp_path, monkeypatch, zoom):
+    """A map exported with the Publish window's zooms (tiles 0-16, the map
+    zooms on to 22): map-unit pattern textures stopped at zoom 18, so above
+    it the pattern kept its zoom-18 size, 2x too dense at 19, 8x at 21."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    spacing = 3.0 if zoom < 20 else 1.0  # a few repeats in the view
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 0.4 * spacing)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(spacing)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.12), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [19.5, 20.5, 21.5])
+def test_map_unit_patterns_grow_above_their_last_texture(tmp_path, monkeypatch, zoom):
+    """Map-unit textures stop at tile zoom + 3 (18 from a 0-16 export) while
+    the web map goes to 22. The last texture stayed at its pixel size above
+    it (2x too small at zoom 19, 16x at 22); flagged with its zoom, the
+    patched MapLibre scales it with the map. (Without a budget for them,
+    there are no sharper textures above tile zoom + 3.)"""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    monkeypatch.setattr(mc.QgisMapLibreStyleExporter, "MAX_OVERZOOM_PATTERN_SPRITE_PX", 0)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 1.2)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(3.0)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 18
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.05), (qgis, browser)
+
+
+def _point_pattern(spacing, unit, size, size_unit):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, size)
+    marker.setSizeUnit(size_unit)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(spacing)
+        getattr(pattern, f"set{name}Unit")(unit)
+    return pattern
+
+
+@pytest.mark.parametrize("zoom", [16.1, 16.9, 19.5])
+def test_zero_map_unit_displacement_keeps_a_screen_grid_exact(tmp_path, monkeypatch, zoom):
+    """A 4 mm grid of 1.5 mm squares whose zero displacement has map units
+    as its unit, exported 0-16: taken for a map-unit pattern, its textures
+    scaled with the map (11.25 px instead of QGIS's 15 at zoom 16.1, 20 px
+    at 16.9). QGIS draws nothing of it in map units."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    pattern = _point_pattern(4, Qgis.RenderUnit.Millimeters, 1.5, Qgis.RenderUnit.Millimeters)
+    pattern.setDisplacementXUnit(Qgis.RenderUnit.MapUnits)
+    pattern.setDisplacementYUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["metadata"]["q2vt:screen-pattern"] is True
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.03), (qgis, browser)
+
+
+@pytest.mark.parametrize("spacing,scales,zoom", [
+    (12.0, (2000, 5000), 15.95),  # shown from zoom 15.85
+    (3.0, (300, 1000), 18.6),  # shown from zoom 18.17, on overzoomed tiles
+])
+def test_map_unit_pattern_of_a_rule_matches_qgis_from_its_first_zoom(tmp_path, monkeypatch,
+                                                                     spacing, scales, zoom):
+    """A map-unit pattern in a rule shown from 1:5000 (zoom 15.85), exported
+    0-16: its first texture was rendered for zoom 15.85 and drawn in zoom
+    15's pixels, 1.8x too large up to zoom 16 (1.2x from 1:1000 at 18.6)."""
+    from qgis.core import QgsRuleBasedRenderer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    pattern = _point_pattern(spacing, Qgis.RenderUnit.MapUnits, 0.4 * spacing,
+                             Qgis.RenderUnit.MapUnits)
+    root = QgsRuleBasedRenderer.Rule(None)
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol([pattern]), scales[0], scales[1],
+                                               "", "detail"))
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.06), (qgis, browser)
+
+
+@pytest.mark.parametrize("zoom", [20.5, 21.5])
+def test_thin_map_unit_hatch_strokes_stay_sharp_in_overzoom(tmp_path, monkeypatch, zoom):
+    """Line markers 5 m apart with a 0.1 m stroke, all in map units,
+    exported 0-16: the zoom-18 texture (a sub-pixel stroke) was magnified
+    up to zoom 22, a wide pale band (no pixel darker than 220) where QGIS
+    draws a thin red line. Textures go on above tile zoom + 3."""
+    from PIL import Image
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 7)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setAngle(45)
+    marker.setStrokeColor(QColor("red"))
+    marker.setStrokeWidth(0.1)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(5)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    darkness = _compare(tmp_path, layer, metric="darkness", zooms=(0, 16))
+    assert darkness[1] == pytest.approx(darkness[0], rel=0.15), darkness
+    darkest = [min(Image.open(str(tmp_path / f"v_{n}.png")).convert("L").getdata())
+               for n in ("qgis", "browser")]
+    assert darkest[1] < 128, darkest  # an opaque red stroke (L 76) somewhere
+
+
+@pytest.mark.parametrize("zoom", [20.5, 21.5])
+def test_millimetre_hatch_lines_keep_their_width_above_tile_zoom_3(tmp_path, monkeypatch, zoom):
+    """A viewport hatch 3 m apart with 0.4 mm lines, exported 0-16: scaled
+    with the map above the last texture (zoom 18), the lines grew with it
+    (15x QGIS's ink at 21.5). Such patterns get textures up to the web
+    map's last zoom."""
+    from qgis.core import QgsLinePatternFillSymbolLayer
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "hatch.gpkg"), False)
+    pattern = QgsLinePatternFillSymbolLayer()
+    pattern.setLineAngle(45)
+    pattern.setDistance(3)
+    pattern.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    pattern.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("red"), 0.4)]))
+    pattern.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    qgis_ink, browser_ink = _compare(tmp_path, layer, metric="ink", zooms=(0, 16))
+    style = json.loads(next((tmp_path / "out").glob("*/style/style.json")).read_text())
+    fill = next(l for l in style["layers"] if "fill-pattern" in l.get("paint", {}))
+    assert fill["paint"]["fill-pattern"][-2] == fill["metadata"]["q2vt:pattern-zoom"] == 22
+    assert 0.5 * qgis_ink < browser_ink < 3 * qgis_ink, (qgis_ink, browser_ink)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 17.5, 19.0])
+def test_map_unit_markers_in_a_screen_unit_grid(tmp_path, monkeypatch, zoom):
+    """1.5 m markers 4 mm apart, exported from zoom 0: the map-unit marker
+    was drawn at zoom 0 (an empty texture), then the whole texture scaled
+    with the map (the 4 mm grid off by up to sqrt(2), the dots merging).
+    The grid is exact at every zoom; the dots are sized for the middle of
+    the zoom (exact there, within sqrt(2) at its ends)."""
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    layer = _polygon_layer(str(tmp_path / "pp.gpkg"), False)
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1.5)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    marker.setColor(QColor("black"))
+    marker.setStrokeStyle(0)
+    pattern = QgsPointPatternFillSymbolLayer()
+    pattern.setSubSymbol(QgsMarkerSymbol([marker]))
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pattern, f"set{name}")(4.0)
+        getattr(pattern, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pattern])))
+    qgis_ink, browser_ink = _compare(tmp_path, layer, metric="darkness", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.03), (qgis, browser)
+    if zoom % 1:  # the middle of the zoom
+        assert browser_ink == pytest.approx(qgis_ink, rel=0.15), (qgis_ink, browser_ink)
+    else:  # dot area 2x at most
+        assert qgis_ink < browser_ink < 2.2 * qgis_ink, (qgis_ink, browser_ink)
+
+
+def test_dash_arrays_of_every_zoom_fit_the_line_atlas(tmp_path, monkeypatch):
+    """Round-cap mm dashes on map-unit lines get a dash array per zoom; each
+    takes 15 rows of MapLibre's 512-row line atlas, never cleared. Zooming
+    in one page through 12-22 with a few such lines filled it: no dash
+    pattern was returned, the draw threw and the map stopped drawing."""
+    from qgis.PyQt.QtCore import Qt
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 21.0)
+    source = QgsVectorLayer("LineString?crs=EPSG:3857", "dashes", "memory")
+    source.dataProvider().addAttributes([QgsField("v", QVariant.Int)])
+    source.updateFields()
+    patterns = [[3.0, 2.0], [2.0, 2.0], [4.0, 1.0], [1.0, 3.0]]
+    categories = []
+    for i, dashes in enumerate(patterns):
+        feature = QgsFeature(source.fields())
+        feature.setGeometry(QgsGeometry.fromWkt(
+            f"LINESTRING({CENTER[0] - 150} {CENTER[1] - 3 + 2 * i}, "
+            f"{CENTER[0] + 150} {CENTER[1] - 3 + 2 * i})"))
+        feature.setAttributes([i])
+        source.dataProvider().addFeature(feature)
+        line = QgsSimpleLineSymbolLayer(QColor("black"), 1.0)
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setUseCustomDashPattern(True)
+        line.setCustomDashVector(dashes)
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Millimeters)
+        categories.append(QgsRendererCategory(i, QgsLineSymbol([line]), str(i)))
+    layer = to_geopackage(source, str(tmp_path / "dashes.gpkg"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("v", categories))
+    qgis, browser = _compare(tmp_path, layer, metric="ink", zooms=(0, 16),
+                             before=list(range(12, 23)))
+    assert browser == pytest.approx(qgis, rel=0.15), (qgis, browser)
+
+
+@pytest.mark.parametrize("case", ["map_dash_tweak", "mm_dash_map_width"])
+def test_dashes_in_another_unit_than_the_width_from_zoom_0(tmp_path, monkeypatch, case):
+    """Map-unit dashes on a mm line (with "tweak dash pattern at corners",
+    not cut into dash geometry) and mm dashes on a map-unit line, exported
+    from zoom 0: the dash / width ratio was taken at zoom 0 and both were
+    drawn as solid lines at every zoom."""
+    from qgis.PyQt.QtCore import Qt
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 18.0)
+    source = QgsVectorLayer("LineString?crs=EPSG:3857", "dashes", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 150} {CENTER[1]}, {CENTER[0] + 150} {CENTER[1] + 1})"))
+    source.dataProvider().addFeature(feature)
+    layer = to_geopackage(source, str(tmp_path / "dashes.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 0.5)
+    line.setUseCustomDashPattern(True)
+    if case == "map_dash_tweak":  # QGIS's default square cap
+        line.setCustomDashVector([10.0, 10.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.MapUnits)
+        line.setTweakDashPatternOnCorners(True)
+    else:
+        line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+        line.setWidth(1.0)
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setCustomDashVector([3.0, 2.0])
+        line.setCustomDashPatternUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    _compare(tmp_path, layer, metric="shape", zooms=(0, 16))
+    qgis, browser = (_period(str(tmp_path / f"v_{n}.png"), axis=0) for n in ("qgis", "browser"))
+    # Within 2^0.25 (half-zoom steps).
+    assert browser == pytest.approx(qgis, rel=0.2), (qgis, browser)
+    # A solid line has about twice the ink of the dashed one.
+    result = gallery.score(str(tmp_path / "v_qgis.png"), str(tmp_path / "v_browser.png"))
+    assert result["ink_browser"] == pytest.approx(result["ink_qgis"], rel=0.25), result
+
+
 @pytest.mark.parametrize("kind", ["hatch", "points"])
 def test_viewport_aligned_patterns_start_at_the_view_corner(tmp_path, kind):
     """QGIS "Align pattern to: Viewport" starts the pattern at the corner of
@@ -767,6 +1157,82 @@ def test_a_fill_offset_moves_its_outline_too(tmp_path):
     symbol.symbolLayer(0).setOffsetUnit(Qgis.RenderUnit.Pixels)
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     assert _compare(tmp_path, layer, metric="shape") < 0.05
+
+
+def _mvt_polygon_tile(layer_name, rings):
+    """A vector tile (extent 4096) of one polygon feature with ``rings`` (tile
+    units, in the order given)."""
+    def varint(value):
+        out = bytearray()
+        while True:
+            byte, value = value & 0x7F, value >> 7
+            out.append(byte | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+
+    def field(number, payload):  # length-delimited
+        return varint(number << 3 | 2) + varint(len(payload)) + payload
+
+    def zigzag(value):
+        return (value << 1) ^ (value >> 31)
+
+    commands, cursor = [], (0, 0)
+    for ring in rings:
+        commands += [9, zigzag(ring[0][0] - cursor[0]), zigzag(ring[0][1] - cursor[1]),
+                     2 | (len(ring) - 1) << 3]
+        for previous, point in zip(ring, ring[1:]):
+            commands += [zigzag(point[0] - previous[0]), zigzag(point[1] - previous[1])]
+        commands.append(15)
+        cursor = ring[-1]
+    feature = varint(3 << 3) + varint(3) + field(4, b"".join(varint(c) for c in commands))
+    layer = (field(1, layer_name.encode()) + field(2, feature) + varint(5 << 3) + varint(4096)
+             + varint(15 << 3) + varint(2))
+    return field(3, layer)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 17.5])
+def test_a_tiny_reversed_first_ring_does_not_hollow_the_polygon(tmp_path, zoom):
+    """GDAL's MVT writer can put a sliver ring of a few square tile units,
+    wound as a hole, before a polygon's shell (MakeValid of a quantized
+    outline). MapLibre took the polygon orientation from that first ring:
+    the shell became its hole and the fill went wrong (a large black
+    segment inside a curved arrow) at the last tile zoom and in all its
+    overzoom. The largest ring now gives the orientation, as QGIS reads the
+    shell as the shell."""
+    import gzip
+    import sqlite3
+    half_world = gallery.EARTH / 2
+    size = gallery.EARTH / 2 ** 16  # a z16 tile, metres
+    column = int((CENTER[0] + half_world) // size)
+    row = int((half_world - CENTER[1]) // size)
+    left, top = column * size - half_world, half_world - row * size
+    shell = [(1000, 1000), (3000, 1000), (3000, 3000), (1000, 3000)]  # positive area: a shell
+
+    def at(u, v):
+        return f"{left + u * size / 4096} {top - v * size / 4096}"
+    memory = QgsVectorLayer("Polygon?crs=EPSG:3857", "square", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "POLYGON((" + ", ".join(at(u, v) for u, v in shell + shell[:1]) + "))"))
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "square.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol.createSimple({"color": "0,0,0", "outline_style": "no"})))
+
+    def reversed_first_ring(export_dir):
+        with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+            fill = next(l for l in json.load(handle)["layers"] if l["type"] == "fill")
+        sliver = [(1500, 1500), (1500, 1502), (1502, 1500)]  # area -2: hole winding
+        tile = gzip.compress(_mvt_polygon_tile(fill["source-layer"], [sliver, shell]))
+        with sqlite3.connect(os.path.join(export_dir, "tiles.mbtiles")) as tiles:
+            changed = tiles.execute(
+                "UPDATE tiles SET tile_data=? WHERE zoom_level=16 AND tile_column=? AND tile_row=?",
+                (tile, column, 2 ** 16 - 1 - row)).rowcount
+        assert changed == 1
+    middle = (left + 2000 * size / 4096, top - 2000 * size / 4096)
+    qgis, browser = _compare(tmp_path, layer, metric="darkness", center=middle, zoom=zoom,
+                             zooms=(0, 16), prepare=reversed_first_ring)
+    assert browser == pytest.approx(qgis, rel=0.03)
 
 
 @pytest.mark.parametrize("join", ["miter", "bevel"])
@@ -1091,3 +1557,396 @@ def test_free_label_frame_turns_with_its_label(tmp_path):
     browser = _red_axis_degrees(str(tmp_path / "v_browser.png"))
     assert qgis == pytest.approx(30, abs=6)
     assert browser == pytest.approx(qgis, abs=6)
+
+
+# A Publish export: tiles from zoom 0 to 16, the web map zoomed in to 22.
+PUBLISH_ZOOMS = (0, 16)
+
+
+def _label_point(tmp_path, settings, text="N0"):
+    """A hidden point at the centre, labelled with ``settings``."""
+    from qgis.core import QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    memory = QgsVectorLayer("Point?crs=EPSG:3857&field=t:string", "p", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes([text])
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({CENTER[0]} {CENTER[1]})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "p.gpkg"))
+    hidden = QgsMarkerSymbol.createSimple({"size": "0"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings.fieldName = "t"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return layer
+
+
+def _blue_box(path):
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    mask = Image.new("L", image.size)
+    mask.putdata([255 if p[2] > 150 and p[0] < 150 and p[1] < 150 else 0 for p in image.getdata()])
+    return mask.getbbox()
+
+
+@pytest.mark.parametrize("case,zoom", [("mu_text_mm_offset", 17.5), ("mu_text_mm_offset", 19.0),
+                                       ("mu_text_mm_offset", 19.5), ("pt_text_mu_offset", 17.5),
+                                       ("pt_text_mu_offset", 19.0), ("pt_text_mu_offset", 19.5)])
+def test_label_offsets_in_other_units_than_the_text_follow_qgis(tmp_path, monkeypatch, case, zoom):
+    """Text and offset in different units, exported from zoom 0: the offset
+    was one em ratio taken at zoom 0, so map-unit text with a 3 mm offset was
+    drawn ~1e5 em away (not at all) and 10 pt text with a 15 map-unit offset
+    stayed on its point. Over point it is now text-translate px, exact at
+    whole zooms too."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setColor(QColor("blue"))
+    if case == "mu_text_mm_offset":
+        fmt.setSize(3)
+        fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 8, -5, Qgis.RenderUnit.Millimeters
+    else:
+        fmt.setSize(10)
+        fmt.setSizeUnit(Qgis.RenderUnit.Points)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    for a, b in zip(qgis, browser):  # the text where QGIS draws it, within 3 px
+        assert abs(a - b) <= 3, (qgis, browser)
+
+
+def test_a_long_label_far_off_its_point_stays_in_one_piece(tmp_path, monkeypatch):
+    """10 pt text 15, -10 map units off its point at zoom 21.5 (~43 em): as
+    text-offset, baked into each glyph's 16-bit position, the end of a long
+    label wrapped round to the far side of the point."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 21.5)
+    monkeypatch.setattr(sys.modules[__name__], "SIZE", 1400)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    fmt.setSizeUnit(Qgis.RenderUnit.Points)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    layer = _label_point(tmp_path, settings, text="Alpha Beta Gamma Delta")
+    _compare(tmp_path, layer, metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    assert qgis[0] > 900  # QGIS: the whole label right of the point (x 700)
+    for a, b in zip(qgis, browser):  # one piece where QGIS draws it
+        assert abs(a - b) <= 6, (qgis, browser)
+
+
+def test_a_map_unit_around_point_distance_at_a_whole_zoom(tmp_path, monkeypatch):
+    """10 pt text 20 map units around its point, zoom 19.0: text-radial-offset
+    is laid out per tile zoom with the ratio of the zoom's middle, so at a
+    whole zoom the distance is up to sqrt(2) QGIS's (exact at 19.5)."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 19.0)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.AroundPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    fmt.setSizeUnit(Qgis.RenderUnit.Points)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    settings.dist, settings.distUnits = 20, Qgis.RenderUnit.MapUnits
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    middle = SIZE / 2
+
+    def gap(box):  # from the point to the label's nearest corner (top right: its bottom left)
+        return ((box[0] - middle) ** 2 + (middle - box[3]) ** 2) ** 0.5
+    assert _box_quadrant(qgis, middle) == _box_quadrant(browser, middle) == (1, -1)
+    assert gap(qgis) / 2 ** 0.5 - 3 <= gap(browser) <= gap(qgis) * 2 ** 0.5 + 3, (qgis, browser)
+
+
+def _box_quadrant(box, middle):
+    """The side of the point a box lies on: (+1 right / -1 left, -1 above / +1 below)."""
+    return (1 if box[0] > middle else -1, -1 if box[3] < middle else 1)
+
+
+def _framed_settings(text_size, text_unit, size_type, size, stroke):
+    from qgis.core import QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat
+    from qgis.PyQt.QtCore import QSizeF
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(text_size)
+    fmt.setSizeUnit(text_unit)
+    fmt.setColor(QColor("blue"))
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    frame.setSizeType(size_type)
+    frame.setSize(QSizeF(*size))
+    frame.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    frame.setFillColor(QColor(255, 255, 255, 0))
+    frame.setStrokeColor(QColor("red"))
+    frame.setStrokeWidth(stroke)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    return settings
+
+
+@pytest.mark.parametrize("zoom", [20.0, 20.5, 21.5])
+def test_frames_of_map_unit_text_keep_their_size_above_the_tiles(tmp_path, monkeypatch, zoom):
+    """A frame fitted to map-unit text, tiles to zoom 16: above zoom 20 one
+    icon-size curve drew it 8x, 16x... too large (MapLibre lays overscaled
+    tiles out again at each zoom); each zoom now has its own ramp."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(1, Qgis.RenderUnit.MapUnits,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (0.25, 0.25), 0.1)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # frame edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)
+
+
+@pytest.mark.parametrize("kind", ["buffer", "buffer_dd", "fixed"])
+@pytest.mark.parametrize("zoom", [17.5, 19.5])
+def test_map_unit_frames_of_screen_text_grow_with_the_map(tmp_path, monkeypatch, kind, zoom):
+    """10 pt text in a map-unit frame, exported from zoom 0: the frame was
+    converted at zoom 0 (a fixed frame: a 1 px sprite; a buffer frame: no
+    margin and no border at any zoom; with a data-defined fill colour the
+    colour variants kept no border)."""
+    from qgis.core import QgsPalLayerSettings, QgsProperty, QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    if kind.startswith("buffer"):
+        settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                    QgsTextBackgroundSettings.SizeType.SizeBuffer, (4, 2), 0.6)
+        if kind == "buffer_dd":
+            settings.dataDefinedProperties().setProperty(
+                QgsPalLayerSettings.Property.ShapeFillColor, QgsProperty.fromExpression(
+                    "CASE WHEN \"t\" = 'N0' THEN '0,200,0,255' ELSE '200,200,0,255' END"))
+    else:
+        settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                    QgsTextBackgroundSettings.SizeType.SizeFixed, (16, 6), 0.6)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # frame edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)
+
+
+def test_a_map_unit_frame_moves_with_its_offset_text(tmp_path, monkeypatch):
+    """10 pt text in a map-unit buffer frame, 6, -4 map units off its point:
+    the offset is text-translate px, the frame follows it (icon-translate)."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 19.5)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (2, 1), 0.4)
+    settings.xOffset, settings.yOffset, settings.offsetUnits = 6, -4, Qgis.RenderUnit.MapUnits
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qf[0] > SIZE / 2  # QGIS: right of the point
+    for a, b in zip(qf + qt, bf + bt):  # frame and text edges within 3 px
+        assert abs(a - b) <= 3, (qf, qt, bf, bt)
+
+
+@pytest.mark.parametrize("case", ["pt_text_mu_offset", "mm_text_mm_offset"])
+def test_an_over_point_offset_is_not_turned_with_its_label(tmp_path, monkeypatch, case):
+    """A label turned 30 degrees with an X/Y offset: QGIS adds the offset
+    after turning the label (pal createCandidatesOverPoint), MapLibre turns
+    text-offset with the text (~60 px off at zoom 19). Drawn as text-translate."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 19.0)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.angleOffset = 30
+    fmt = QgsTextFormat()
+    fmt.setColor(QColor("blue"))
+    if case == "pt_text_mu_offset":
+        fmt.setSize(10)
+        fmt.setSizeUnit(Qgis.RenderUnit.Points)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    else:
+        fmt.setSize(4)
+        fmt.setSizeUnit(Qgis.RenderUnit.Millimeters)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 8, -5, Qgis.RenderUnit.Millimeters
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    for a, b in zip(qgis, browser):  # the turned text where QGIS draws it
+        assert abs(a - b) <= 4, (qgis, browser)
+
+
+def test_a_fixed_frame_moves_with_its_offset_text(tmp_path, monkeypatch):
+    """10 pt text 6, -4 mm off its point in a fixed 16 x 6 map-unit frame:
+    text-offset moved only the text (the frame stayed on the point)."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 18.5)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeFixed, (16, 6), 0.6)
+    settings.xOffset, settings.yOffset, settings.offsetUnits = 6, -4, Qgis.RenderUnit.Millimeters
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qf[0] > SIZE / 2 - 30  # QGIS: the frame around the offset text
+    for a, b in zip(qf + qt, bf + bt):  # frame and text edges within 3 px
+        assert abs(a - b) <= 3, (qf, qt, bf, bt)
+
+
+def _red_pixels(path):
+    from PIL import Image
+    return sum(1 for p in Image.open(path).convert("RGB").getdata()
+               if p[0] > 150 and p[1] < 150 and p[2] < 150)
+
+
+@pytest.mark.parametrize("text_unit,text_size", [(Qgis.RenderUnit.Points, 10),
+                                                 (Qgis.RenderUnit.MapUnits, 1.5)])
+@pytest.mark.parametrize("zoom", [19.5, 20.5])
+def test_a_map_unit_ellipse_frame_keeps_a_thin_ring(tmp_path, monkeypatch, text_unit, text_size, zoom):
+    """An ellipse frame (3 x 2 map-unit buffer, 0.5 map-unit border): MapLibre
+    scales the whole ellipse image to the text plus the buffer, so a border
+    drawn in image px grew with it, a red disc from zoom 20 where QGIS
+    draws a thin ring."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(text_size, text_unit,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_red_pixels(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qgis > 500 and 0.6 * qgis <= browser <= 1.6 * qgis, (qgis, browser)
+
+
+def test_huge_map_unit_text_is_drawn_when_zoomed_in(tmp_path, monkeypatch):
+    """25 map-unit text at zoom 20.5: MapLibre lays it out at the next zoom's
+    size, its collision box then covered the whole view, which stock MapLibre
+    counted as a collision (nothing drawn, even alone). QGIS draws it."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 20.5)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(25)
+    fmt.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    qgis, browser = _compare(tmp_path, _label_point(tmp_path, settings), metric="ink",
+                             zooms=PUBLISH_ZOOMS)
+    assert qgis > 10000 and browser > 0.7 * qgis, (qgis, browser)
+
+
+@pytest.mark.parametrize("unit,dist,zoom", [(Qgis.RenderUnit.Millimeters, 3, 17.5),
+                                            (Qgis.RenderUnit.Millimeters, 3, 19.5),
+                                            (Qgis.RenderUnit.MapUnits, 10, 17.5),
+                                            (Qgis.RenderUnit.MapUnits, 10, 19.5)])
+def test_a_line_label_keeps_its_distance_out_from_a_sloped_line(tmp_path, monkeypatch, unit, dist, zoom):
+    """10 pt text above a 60 degree line (drawn once, at the line's middle):
+    the distance points out from the line, as pal places the label. As an
+    unturned text-translate it went straight up the screen: the label
+    touched the line (3 mm) or slid along it (10 map units)."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=t:string", "lines", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["N0"])
+    dx, dy = 250 * 0.5, 250 * 3 ** 0.5 / 2
+    feature.setGeometry(QgsGeometry.fromWkt(f"LINESTRING({CENTER[0] - dx} {CENTER[1] - dy}, "
+                                            f"{CENTER[0] + dx} {CENTER[1] + dy})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    hidden = QgsLineSymbol.createSimple({"color": "0,0,0", "width": "0.3"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.Line
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(Qgis.LabelLinePlacementFlags(2))  # above the line
+    settings.setLineSettings(line_settings)
+    settings.dist, settings.distUnits = dist, unit
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    fmt.setSizeUnit(Qgis.RenderUnit.Points)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    middle = SIZE / 2
+    normal = (-(3 ** 0.5) / 2, -0.5)  # on screen: the line's left
+
+    def part(box, axis):
+        x, y = (box[0] + box[2]) / 2 - middle, (box[1] + box[3]) / 2 - middle
+        return x * axis[0] + y * axis[1]
+    gap = dist * 96 / 25.4 if unit == Qgis.RenderUnit.Millimeters else dist * 512 * 2 ** zoom / gallery.EARTH
+    # Only across the line: the viewer keeps a spot along it while that stays
+    # near the middle of the visible stretch (visible_labels.mjs placeOnLine),
+    # chosen before every tile loaded.
+    assert part(qgis, normal) > gap
+    # Out from the line by the distance (QGIS also adds half the text height).
+    assert gap - 3 <= part(browser, normal) <= part(qgis, normal) + 3, (qgis, browser, gap)
+
+
+def _border_across(path):
+    """Red border px (red over the yellow fill or white ground) along the
+    image's middle row, from its left edge to near the middle."""
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    row = [image.getpixel((x, image.height // 2)) for x in range(image.width // 2 - 12)]
+    return sum((255 - p[1]) / 255 for p in row if p[0] > 200 and p[2] < 100)
+
+
+@pytest.mark.parametrize("zoom", [17.5, 19.5])
+def test_a_mm_border_of_a_fixed_map_unit_frame_stays_mm_wide(tmp_path, monkeypatch, zoom):
+    """10 pt text in a fixed 20 x 8 map-unit frame with a 0.5 mm border,
+    tiles to zoom 16: the frame image (drawn for zoom 18) was scaled with the
+    map, border and all - ~3x QGIS's border at zoom 19.5, ~6x at 20.5,
+    thinner below zoom 18."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeFixed, (20, 8), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setFillColor(QColor(255, 255, 0))
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_border_across(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qgis == pytest.approx(0.5 * 96 / 25.4, abs=0.2)
+    assert browser == pytest.approx(qgis, abs=0.5), (qgis, browser)
+
+
+@pytest.mark.parametrize("unit,zoom", [(Qgis.RenderUnit.Millimeters, 18.5), (Qgis.RenderUnit.MapUnits, 20.5)])
+def test_an_ellipse_buffer_frame_is_as_large_as_qgis(tmp_path, monkeypatch, unit, zoom):
+    """10 pt text in an ellipse with a 3 x 2 buffer and a 0.5 border (same
+    unit): QGIS bounds the text by an ellipse (the text box times sqrt(2))
+    before adding the buffer and centres the border on the outline. The web
+    frame hugged the bare text box: 41 x 31 px against QGIS's 50 x 40."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    frame.setSizeUnit(unit)
+    frame.setStrokeWidthUnit(unit)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # the ellipse's edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)

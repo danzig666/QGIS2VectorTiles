@@ -63,6 +63,9 @@ class ExportProfile:
     max_pattern_cell_px: int = 256
     # Reference latitude for map-unit sizes in non-Mercator projected CRSs.
     reference_latitude: float = 0.0
+    # Highest zoom the web map shows (overzooming the last tiles): map-unit
+    # pattern textures are made up to it.
+    view_max_zoom: float = 22.0
 
     @property
     def strict(self) -> bool:

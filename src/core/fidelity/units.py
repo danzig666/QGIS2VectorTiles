@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from . import expressions as ex
-from .zoom import scale_to_zoom
+from .zoom import WEB_MERCATOR_TOP_SCALE, scale_to_zoom
 
 EARTH_CIRCUMFERENCE = 40075016.68557849
 WORLD_SIZE_PX = 512.0
@@ -88,17 +88,46 @@ def physical_factor(unit: str, dpi: float = 96.0) -> Optional[float]:
     }.get(unit)
 
 
+def qgis_metres_per_degree(latitude: float) -> float:
+    """Ground metres QGIS counts for one degree of longitude when it computes
+    the map scale of a geographic CRS (QgsScaleCalculator::
+    calculateGeographicDistance: haversine at the middle latitude on an
+    ellipsoid-corrected radius)."""
+    rads = math.pi / 180.0
+    a = math.cos(latitude * rads) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    ra, e = 6378000.0, 0.0810820288
+    radius = ra * (1.0 - e * e) / (1.0 - e * e * math.sin(latitude * rads) ** 2) ** 1.5
+    return radius * c / 180.0
+
+
 @dataclass(frozen=True)
 class MapUnitContext:
     """How project map units and ground meters relate to Web Mercator units.
 
     ``exact`` is False when a reference-latitude approximation was needed.
+    ``scale_metres_per_map_unit`` is what QGIS's scale calculator counts per
+    map unit (1 for metre CRSs, the unit length for feet, the haversine
+    length of a degree for geographic CRSs).
     """
 
     mercator_per_map_unit: float
     mercator_per_meter: float
     exact: bool
     description: str
+    scale_metres_per_map_unit: float = 1.0
+
+    @property
+    def top_scale(self) -> float:
+        """QGIS map scale of MapLibre zoom 0 in the project CRS: the scale
+        QGIS shows for the browser's ground resolution (map units per px =
+        Mercator units per px / mercator_per_map_unit)."""
+        return WEB_MERCATOR_TOP_SCALE / self.mercator_per_map_unit * self.scale_metres_per_map_unit
+
+    @property
+    def map_units_per_mm_0(self) -> float:
+        """Project map units of one screen mm at MapLibre zoom 0."""
+        return WEB_MERCATOR_TOP_SCALE / 1000.0 / self.mercator_per_map_unit
 
     @classmethod
     def for_project(cls, crs_is_web_mercator: bool, map_units: str,
@@ -107,15 +136,18 @@ class MapUnitContext:
         mercator_per_meter = 1.0 / math.cos(math.radians(lat))
         units = (map_units or "").lower()
         if crs_is_web_mercator:
-            return cls(1.0, mercator_per_meter, True,
-                       "Web Mercator project: map units are Mercator units")
+            # QgsRenderContext::convertMetersToMapUnits returns meters as they
+            # are in a metre CRS: 1 meter at scale is 1 Mercator unit here.
+            return cls(1.0, 1.0, True,
+                       "Web Mercator project: map units and meters at scale are Mercator units")
         if units.startswith("deg"):
             return cls(MERCATOR_UNITS_PER_DEGREE, mercator_per_meter, False,
-                       "Geographic project: 1 degree = Mercator x-extent of 1 degree")
+                       "Geographic project: 1 degree = Mercator x-extent of 1 degree",
+                       qgis_metres_per_degree(lat))
         feet = {"feet": 0.3048, "usfeet": 1200.0 / 3937.0}.get(units.replace(" ", ""))
         unit_m = feet or 1.0
         return cls(unit_m * mercator_per_meter, mercator_per_meter, False,
-                   f"Projected project CRS; scale factor at latitude {lat:.4f}")
+                   f"Projected project CRS; scale factor at latitude {lat:.4f}", unit_m)
 
 
 @dataclass(frozen=True)

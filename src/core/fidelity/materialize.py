@@ -42,8 +42,13 @@ VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVe
                                "CurvePoint"})
 POINT_PLACEMENTS = VERTEX_PLACEMENTS | {"CentralPoint", "SegmentCenter"}
 
-# Hatch budget: lines per feature before the recipe refuses (reported).
-MAX_HATCH_LINES = 20000
+# Hatch lines one feature may generate: the materializer's pattern budget
+# (lines of the whole layer) keeps exports below it, so a hatch is never
+# silently dropped.
+MAX_HATCH_LINES = 2000000
+# Hatch lines clipped to the polygon at a time: GEOS clips a multiline in
+# quadratic time (20,000 lines took 1.5 minutes), chunks in linear time.
+HATCH_CHUNK_LINES = 32
 
 
 @dataclass(frozen=True)
@@ -77,27 +82,57 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
     """Multipoint of interval marker positions with the line azimuth as Z.
 
     Positions are measured in the recipe CRS (the project's map units). A
-    closed ring does not repeat the marker at its start point.
+    closed ring does not repeat the marker at its start point. On an open
+    line a negative offset along it places the first markers before its
+    start, on the extension of the first segment (renderPolylineInterval).
     """
     interval = float(recipe.param("interval"))
     along = float(recipe.param("along", 0.0))
     average = float(recipe.param("average", 0.0) or 0.0)
     crs = recipe.param("crs") or export_crs
 
+    def head(line):
+        """Azimuth (degrees) of the first segment of non-zero length: QGIS
+        skips repeated vertices (``lastPt == pt``) and extends the line before
+        its start along that segment. Only needed for a negative offset."""
+        return (f"line_interpolate_angle(make_line(start_point({line}), coalesce(array_first("
+                f"array_filter(array_foreach(generate_series(2, num_points({line})), "
+                f"point_n({line}, @element)), x(@element) <> x(start_point({line})) "
+                f"OR y(@element) <> y(start_point({line})))), point_n({line}, 2))), 0)")
+
+    def before(line, distance):
+        """The point ``distance`` (negative) before the start of an open
+        line, along its first segment (azimuth @q2vt_a0, see head())."""
+        return (f"make_point(x(start_point({line})) + ({distance}) * sin(radians(@q2vt_a0)), "
+                f"y(start_point({line})) + ({distance}) * cos(radians(@q2vt_a0)))")
+
+    def local_angle(line):
+        """line_interpolate_angle at the marker; at or before the start of an
+        open line (negative offsets only), the first segment's azimuth."""
+        if along < 0:
+            return f"if(@q2vt_d <= 0, @q2vt_a0, line_interpolate_angle({line}, @q2vt_d))"
+        return f"line_interpolate_angle({line}, max(0, @q2vt_d))"
+
     def angle(line):
         """Marker azimuth: QGIS averages the direction over ``average``
         (``averageAngleLength``) centred on the marker, i.e. +-average / 2
-        along the line, wrapping around closed rings."""
+        along the line, wrapping around closed rings. On an open line the
+        start of that span stops at the line's start, its end does not
+        (collectOffsetPoints): a marker more than half of it before the start
+        is turned around, as in QGIS."""
         if average <= 0:
-            return f"line_interpolate_angle({line}, @q2vt_d)"
+            return local_angle(line)
         half = average / 2.0
 
-        def at(distance):
-            return (f"line_interpolate_point({line}, if(is_closed({line}), "
-                    f"({distance} + @q2vt_len) % @q2vt_len, "
-                    f"max(0, min(@q2vt_len, {distance}))))")
+        def at(distance, extend=False):
+            point = (f"line_interpolate_point({line}, if(is_closed({line}), "
+                     f"({distance} + @q2vt_len) % @q2vt_len, "
+                     f"max(0, min(@q2vt_len, {distance}))))")
+            if not extend or along >= 0:  # only a negative offset reaches before the start
+                return point
+            return f"if(NOT is_closed({line}) AND {distance} < 0, {before(line, distance)}, {point})"
         return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {half!r}')}, "
-                f"{at(f'@q2vt_d + {half!r}')})), line_interpolate_angle({line}, @q2vt_d))")
+                f"{at(f'@q2vt_d + {half!r}', True)})), {local_angle(line)})")
 
     def turned(point, azimuth):
         """The azimuth in the export CRS: a step along it from the point,
@@ -113,17 +148,21 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
                 f"transform({ahead}, '{crs}', '{export_crs}'))) - @q2vt_a + 540) % 360 - 180)")
 
     def body(line):
-        return (
-            f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
-            f"if(is_closed({line}) AND {along!r} < 0, @q2vt_len - (({-along!r}) % @q2vt_len), "
-            f"if(is_closed({line}), {along!r} % @q2vt_len, {along!r})), "
-            f"if(@q2vt_off > @q2vt_len OR @q2vt_off < 0, NULL, collect_geometries(array_foreach("
+        points = (
+            f"if(@q2vt_off > @q2vt_len, NULL, collect_geometries(array_foreach("
             f"array_filter(generate_series(0, floor((@q2vt_len - @q2vt_off) / {interval!r} + 1e-9)), "
             f"NOT (is_closed({line}) AND @element > 0 AND "
             f"abs(@q2vt_off + @element * {interval!r} - @q2vt_len) < 1e-6)), "
             f"with_variable('q2vt_d', min(@q2vt_off + @element * {interval!r}, @q2vt_len), "
-            f"with_variable('q2vt_p', line_interpolate_point({line}, @q2vt_d), "
-            f"make_point(x(@q2vt_p), y(@q2vt_p), {turned('@q2vt_p', angle(line))}))))))))")
+            f"with_variable('q2vt_p', if(@q2vt_d < 0, {before(line, '@q2vt_d')}, "
+            f"line_interpolate_point({line}, @q2vt_d)), "
+            f"make_point(x(@q2vt_p), y(@q2vt_p), {turned('@q2vt_p', angle(line))}))))))")
+        if along < 0:
+            points = f"with_variable('q2vt_a0', if(is_closed({line}), 0, {head(line)}), {points})"
+        return (
+            f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
+            f"if(is_closed({line}) AND {along!r} < 0, @q2vt_len - (({-along!r}) % @q2vt_len), "
+            f"if(is_closed({line}), {along!r} % @q2vt_len, {along!r})), {points}))")
     if crs == export_crs:
         return body("@geometry")
     # Positions and azimuths in the project CRS (QGIS draws in it), the
@@ -149,20 +188,6 @@ def offset_line_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str
         f"reverse(@q2vt_off), @q2vt_off)))"
     )
     return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
-
-
-def vertex_filter(placement: str) -> Optional[str]:
-    """Filter over ``native:extractvertices`` output for one placement.
-
-    Requires ``LENGTH_FIELD``/``COUNT_FIELD`` computed on the original line.
-    """
-    return {
-        "Vertex": "TRUE",
-        "CurvePoint": "TRUE",
-        "FirstVertex": '"vertex_index" = 0',
-        "LastVertex": f'"vertex_index" = "{COUNT_FIELD}" - 1',
-        "InnerVertices": f'"vertex_index" > 0 AND "vertex_index" < "{COUNT_FIELD}" - 1',
-    }.get(placement)
 
 
 def marker_rotation_expression(base_angle: float) -> str:
@@ -209,27 +234,39 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     crs = recipe.param("crs")
     if not d or d <= 0:
         raise ValueError("Hatch spacing must be positive")
+    chunk = HATCH_CHUNK_LINES
     feature_anchor = recipe.param("anchor") == "feature"
     origin_x = "x_min(@q2vt_g)" if feature_anchor else "0"
     origin_y = "y_min(@q2vt_g)" if feature_anchor else "0"
     geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    # Few nested calls: QGIS parses deeply nested function calls in
+    # exponential time (a second per dataset at 20 levels).
     body = (
         f"with_variable('q2vt_g', {geom}, "
-        f"with_variable('q2vt_ox', {origin_x}, with_variable('q2vt_oy', {origin_y}, "
         f"with_variable('q2vt_c', centroid(bounds(@q2vt_g)), "
         f"with_variable('q2vt_r', 0.5 * sqrt(bounds_width(@q2vt_g)^2 + bounds_height(@q2vt_g)^2) + {d!r}, "
-        f"with_variable('q2vt_s0', {nx!r} * (x(@q2vt_c) - @q2vt_ox) + {ny!r} * (y(@q2vt_c) - @q2vt_oy), "
-        f"with_variable('q2vt_k0', floor((@q2vt_s0 - @q2vt_r - {p!r}) / {d!r}), "
-        f"with_variable('q2vt_k1', ceil((@q2vt_s0 + @q2vt_r - {p!r}) / {d!r}), "
-        f"if(@q2vt_k1 - @q2vt_k0 > {MAX_HATCH_LINES}, NULL, "
+        f"with_variable('q2vt_s0', {nx!r} * (x(@q2vt_c) - {origin_x}) + {ny!r} * (y(@q2vt_c) - {origin_y}), "
+        f"with_variable('q2vt_k', array(floor((@q2vt_s0 - @q2vt_r - {p!r}) / {d!r}), "
+        f"ceil((@q2vt_s0 + @q2vt_r - {p!r}) / {d!r})), "
+        f"if(@q2vt_k[1] - @q2vt_k[0] > {MAX_HATCH_LINES}, NULL, "
+        # Only the clipped line work: a line that merely touches the polygon
+        # at a vertex (the k = 0 line through the bounding box corner of a
+        # rectangle at 90-180 or 270-360 degrees) adds a point, and a mixed
+        # collection cannot be written to the line dataset (the whole hatch
+        # was lost). collect_geometries takes its type from the first part,
+        # so an empty multi-line leads (a chunk that is only that point
+        # would make a multi-point, dropping every line after it).
+        f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_prepend(array_foreach("
+        f"generate_series(@q2vt_k[0], @q2vt_k[1], {chunk}), "
         f"intersection(@q2vt_g, collect_geometries(array_foreach("
-        f"generate_series(@q2vt_k0, @q2vt_k1), "
-        f"with_variable('q2vt_t', {p!r} + @element * {d!r} - @q2vt_s0, "
+        f"generate_series(@element, min(@q2vt_k[1], @element + {chunk - 1})), "
         f"make_line("
-        f"make_point(x(@q2vt_c) + {nx!r} * @q2vt_t - {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * @q2vt_t - {uy!r} * @q2vt_r), "
-        f"make_point(x(@q2vt_c) + {nx!r} * @q2vt_t + {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * @q2vt_t + {uy!r} * @q2vt_r)))))))))))))))"
+        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {ux!r} * @q2vt_r, "
+        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {uy!r} * @q2vt_r), "
+        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {ux!r} * @q2vt_r, "
+        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {uy!r} * @q2vt_r)))))), "
+        f"geom_from_wkt('MULTILINESTRING EMPTY')))), "
+        f"geometry_type(@element) = 'Line' AND NOT is_empty(@element)))))))))"
     )
     if crs == export_crs:
         return body
@@ -747,6 +784,93 @@ def polygon_offset_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> 
             f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
 
 
+def inside_band(inner: float, outer: float, ring_filter: int, join: str, crs: str) -> Recipe:
+    """The visible part of a polygon outline drawn only inside the polygon:
+    between ``inner`` and ``outer`` map units inwards from its rings."""
+    return Recipe("inside_band", params=(
+        ("inner", float(inner)), ("outer", float(outer)), ("ring_filter", int(ring_filter)),
+        ("join", join), ("crs", crs)))
+
+
+def inside_band_geometry(recipe: Recipe, geometry):
+    """Polygons of an outline stroke with "Draw line only inside polygon"
+    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``) for one feature's
+    (multi)polygon in the recipe's CRS: QGIS offsets every stroked ring by o
+    (positive inwards; ``QgsSymbolLayerUtils::offsetLine`` buffers the ring
+    as its own polygon, mitred with limit 2, holes the other way), strokes
+    each ring of that offset polygon with width w and the pen's join, and
+    clips the strokes to the polygon part, holes left out. All rings are
+    stroked, or the exterior only for ``ring_filter`` 1. Every stroked ring
+    is its own piece, so a translucent stroke darkens where the bands of the
+    exterior and a hole overlap, as in QGIS. With o = 0 the band is the
+    part's points within w/2 of a ring, its corners sharp; with o > 0 the
+    pen's join cuts the offset ring's corners and a ring whose offset
+    collapses (parts narrower than 2o) draws nothing. Computed with GEOS
+    directly: the same steps as one geometry expression nest too deeply
+    for QGIS's parser, which took half a second per band to read it.
+    A MultiPolygon, or None when nothing is drawn."""
+    from qgis.core import Qgis, QgsGeometry, QgsPolygon, QgsWkbTypes  # pylint: disable=import-outside-toplevel
+    inner = float(recipe.param("inner"))
+    outer = float(recipe.param("outer"))
+    offset, half = (inner + outer) / 2.0, (outer - inner) / 2.0
+    ring_filter = int(recipe.param("ring_filter", 0) or 0)
+    join = {"bevel": Qgis.JoinStyle.Bevel, "round": Qgis.JoinStyle.Round}.get(
+        recipe.param("join", "bevel"), Qgis.JoinStyle.Miter)
+    flat = Qgis.EndCapStyle.Flat
+
+    def usable(piece) -> bool:
+        return piece is not None and not piece.isNull() and not piece.isEmpty()
+
+    def grown(shape, distance):
+        return shape.buffer(distance, 8, flat, join, 2)
+
+    def strokes(part, ring_polygon, distance):
+        """The clipped strokes of the rings of one ring's offset polygon."""
+        shifted = ring_polygon.buffer(distance, 8, flat, Qgis.JoinStyle.Miter, 2)
+        if not usable(shifted):
+            return []
+        # A closed line's buffer is the ring's stroke, joined at its start.
+        # buffer 0: only the polygons of an intersection that also touches
+        # along edges or at points (a collection, dropped from the tiles).
+        boundary = QgsGeometry(shifted.constGet().boundary())
+        return [part.intersection(grown(ring, half)).buffer(0, 8)
+                for ring in boundary.asGeometryCollection()]
+
+    def ring_polygon(ring):
+        shape = QgsPolygon()
+        shape.setExteriorRing(ring.clone())
+        return QgsGeometry(shape)
+
+    def band(part):
+        polygon = part.constGet()
+        exterior = ring_polygon(polygon.exteriorRing())
+        if offset:
+            pieces = strokes(part, exterior, -offset)
+        else:  # the same, cheaper: within w/2 of the ring, inside the part
+            pieces = [part.difference(grown(exterior, -half))]
+        if ring_filter != 1:
+            for index in range(polygon.numInteriorRings()):
+                hole = ring_polygon(polygon.interiorRing(index))
+                pieces += strokes(part, hole, offset) if offset else \
+                    [part.intersection(grown(hole, half)).buffer(0, 8)]
+        return pieces
+
+    if geometry is None or geometry.isEmpty():
+        return None
+    if geometry.constGet().hasCurvedSegments():
+        geometry = QgsGeometry(geometry.constGet().segmentize())
+    pieces = []
+    for part in geometry.asGeometryCollection():
+        if QgsWkbTypes.geometryType(part.wkbType()) == QgsWkbTypes.PolygonGeometry:
+            pieces += [piece for piece in band(part) if usable(piece)]
+    polygons = [p for piece in pieces for p in piece.asGeometryCollection()
+                if QgsWkbTypes.geometryType(p.wkbType()) == QgsWkbTypes.PolygonGeometry
+                and not p.isEmpty()]
+    if not polygons:
+        return None
+    result = QgsGeometry.collectGeometry(polygons)
+    result.convertToMultiType()
+    return result
 
 
 def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:
@@ -816,14 +940,16 @@ def gradient_band_recipe(gradient_type: int, ref1, ref2, centroid1: bool, centro
 
 
 def shapeburst_band_recipe(distance: float, whole_shape: bool, ignore_rings: bool, band: int,
-                           bands: int, construction_crs: str) -> Recipe:
+                           bands: int, construction_crs: str, overlap: bool = True) -> Recipe:
     """Band ``band`` of a shapeburst fill: t = distance to the boundary /
     ``distance`` (map units of ``construction_crs``), or / the largest
-    distance inside the polygon (``whole_shape``). Bands overlap (inset
-    polygons drawn from the edge inwards)."""
+    distance inside the polygon (``whole_shape``). ``overlap``: inset
+    polygons drawn from the edge inwards (opaque colours); otherwise rings
+    between this band's inset and the next one's."""
     return Recipe("shapeburst_band", (), (
         ("distance", float(distance)), ("whole", bool(whole_shape)), ("ignore_rings", bool(ignore_rings)),
-        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs)))
+        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs),
+        ("overlap", bool(overlap))))
 
 
 def _band_interval(band: int, bands: int, overlap: bool):
@@ -840,6 +966,17 @@ def color_bands_recipe(band_recipes, colors) -> Recipe:
     feature and band (fidelity.bands) with BAND_FIELD and COLOR_FIELD; the
     style draws them in band order."""
     return Recipe("color_bands", (), (("bands", tuple(band_recipes)), ("colors", tuple(colors))))
+
+
+def color_bands_disjoint(recipe) -> bool:
+    """Whether a color_bands recipe's bands do not overlap (translucent
+    colours or opacity): each pixel is in one band, drawn without
+    anti-aliased outlines (they would cover the neighbouring bands). Opaque
+    bands grown under their neighbour (``extend``) are not."""
+    if recipe is None or recipe.kind != "color_bands" or not recipe.param("bands"):
+        return False
+    band = recipe.param("bands")[0]
+    return band.param("overlap") is False and not band.param("extend")
 
 
 

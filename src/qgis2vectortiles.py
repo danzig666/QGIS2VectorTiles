@@ -53,6 +53,7 @@ from .utils.config import _EPSG_CRS
 from .utils import crash_log, main_thread
 from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
+from .core.fidelity import materialize
 from .core.fidelity import zoom as fidelity_zoom
 from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
@@ -185,6 +186,7 @@ class QGIS2VectorTiles:
         scale_limits=None,
         background_tiles: bool = False,
         fast_markers: bool = False,
+        view_max_zoom: int = 22,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -199,7 +201,11 @@ class QGIS2VectorTiles:
         publishing identity/filter fields (see RulesExporter).
         ``background_tiles``: convert_project_to_vector_tiles() returns once
         the tile processes are started; finish_tiles() waits for them and
-        completes the export (the publishing workflow goes on meanwhile)."""
+        completes the export (the publishing workflow goes on meanwhile).
+        ``view_max_zoom``: the highest zoom the web map shows, overzooming
+        the last tiles: map-unit pattern textures are made up to it, and
+        screen-size symbols drawn as geometry (and values that depend on the
+        scale) keep following the zoom up to it."""
         self.min_zoom = min_zoom - viewer
         self.max_zoom = max_zoom - viewer
         self.extent = extent or iface.mapCanvas().extent()
@@ -240,12 +246,19 @@ class QGIS2VectorTiles:
             mode=FidelityMode.from_index(fidelity_mode),
             overzoom=[OverzoomPolicy.PERSIST, OverzoomPolicy.STOP][int(overzoom)],
             reference_latitude=self._reference_latitude(),
+            # Nothing is drawn past the last tile zoom when overzoom stops.
+            view_max_zoom=float(self.max_zoom if int(overzoom) else
+                                max(view_max_zoom - viewer, self.max_zoom)),
         )
+        # Overzoom stopped: nothing is drawn past the last tile zoom.
+        self.view_max_zoom = self.max_zoom if self.profile.overzoom == OverzoomPolicy.STOP \
+            else int(self.profile.view_max_zoom)
         self.lengths = self._length_converter()
         # zoom <-> scale: QGIS's scale for the browser's ground resolution in
-        # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.).
-        ZoomLevels.configure(
-            fidelity_zoom.WEB_MERCATOR_TOP_SCALE / self.lengths.map_context.mercator_per_map_unit)
+        # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.;
+        # the metric ground scale QgsScaleCalculator gives a geographic CRS).
+        ZoomLevels.configure(self.lengths.map_context.top_scale,
+                             self.lengths.map_context.map_units_per_mm_0)
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
@@ -563,7 +576,8 @@ class QGIS2VectorTiles:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
-            fast_markers=self.fast_markers, lengths=self.lengths,
+            fast_markers=self.fast_markers, lengths=self.lengths, overzoom=self.profile.overzoom,
+            overzoom_to=self.view_max_zoom,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).
@@ -604,8 +618,10 @@ class QGIS2VectorTiles:
         context = QgsRenderContext()
         context.setScaleFactor(96.0 / 25.4)
         context.setRendererScale(scale)
-        metres_per_px = scale * 0.0254 / 96.0 / self.lengths.map_context.mercator_per_map_unit
-        context.setMapToPixel(QgsMapToPixel(metres_per_px))
+        # Project map units per CSS px at the minimum zoom (512 px tiles).
+        units_per_px = 40075016.68557849 / (512.0 * 2 ** self.min_zoom) / \
+            self.lengths.map_context.mercator_per_map_unit
+        context.setMapToPixel(QgsMapToPixel(units_per_px))
         reach = 0.0
         for rule in rules:
             symbol = rule.rule.symbol() if rule.get_attr("t") == 0 else None
@@ -663,6 +679,8 @@ class QGIS2VectorTiles:
             layer_zooms=layer_zooms, cache=self.cache, dataset_keys=self.dataset_keys,
             layer_groups=export_cache.source_layer_groups(rules or []),
             progress_range=(33.0, 97.0),
+            exact_datasets={rule.output_dataset for rule in rules or []
+                            if materialize.color_bands_disjoint(rule.recipe)},
         )
         self.min_zoom = generator._get_global_min_zoom()  # pylint: disable=protected-access
         return generator
@@ -722,7 +740,8 @@ class QGIS2VectorTiles:
             visibility=self._visibility_by_style(rules or []),
             visible_polygons={rule.rule.description(): (rule.visible_polygons,
                                                         rule.label_per_part,
-                                                        getattr(rule, "visible_kind", "polygon"))
+                                                        getattr(rule, "visible_kind", "polygon"),
+                                                        bool(getattr(rule, "merge_lines", False)))
                               for rule in rules or [] if getattr(rule, "visible_polygons", None)},
             lengths=self.lengths,
             ordered_styles={rule.rule.description() for rule in rules or []
@@ -740,10 +759,13 @@ class QGIS2VectorTiles:
                              for rule in rules or [] if getattr(rule, "feature_filter", None)},
             label_windows={rule.rule.description() for rule in rules or []
                            if rule.recipe is not None and rule.recipe.kind == "label_windows"},
+            disjoint_bands={rule.rule.description() for rule in rules or []
+                            if materialize.color_bands_disjoint(rule.recipe)},
             # QGIS layer opacity applies to the features, not to the labels.
             layer_opacities={rule.rule.description(): rule.layer.opacity() for rule in rules or []
                              if rule.layer is not None and rule.get_attr("t") == 0
                              and rule.layer.opacity() < 1.0},
+            view_max_zoom=self.view_max_zoom,
         )
         exporter.export()
         return exporter

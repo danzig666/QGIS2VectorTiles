@@ -61,14 +61,17 @@ def _export(layer, tmp_path, low, high):
     return rendered, rules, diags
 
 
-def _compare(plugin, tmp_path, renderer):
+def _compare(plugin, tmp_path, renderer, below=-1):
+    """QGIS vs the exported groups at the test scale; exported up to
+    ``below`` zooms under it (from 1: drawn from overzoomed tiles)."""
     layer = _layer("Point", POINTS, str(tmp_path / "pts.gpkg"))
     renderer.setEmbeddedRenderer(QgsSingleSymbolRenderer(
         QgsMarkerSymbol.createSimple({"name": "circle", "size": "2", "color": "#2b83ba"})))
     layer.setRenderer(renderer)
     expected = render([layer], EXTENT)
     zoom = _zoom(EXTENT)
-    rendered, rules, diags = _export(layer, tmp_path, int(zoom) - 1, int(zoom) + 1)
+    rendered, rules, diags = _export(layer, tmp_path, int(zoom) - 1 - max(below, 0),
+                                     int(zoom) - below)
     visible = [(out, rule) for out, rule in zip(rendered, rules)
                if rule.point_group and rule.visibility is not None and rule.visibility.contains(zoom)]
     assert visible, [r.visibility for r in rules]
@@ -81,6 +84,21 @@ def test_point_cluster_groups_like_qgis(plugin, tmp_path):
     roles = {rule.point_group[1] for rule in rules}
     assert roles == {"cluster", "members"}, roles
     # Two clusters (6 and 2 points) and the lone point, like QGIS.
+    assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
+
+
+def test_point_cluster_past_the_last_tiles_groups_like_qgis(plugin, tmp_path):
+    """Exported three zooms below the test scale: the browser overzooms the
+    last tiles, where the grouping goes on per zoom (a 1 mm distance splits
+    the pair within the overzoom); the lone point (no other within the
+    grouping distance of the first overzoom written) is written once for
+    all of them, the others per zoom."""
+    renderer = QgsPointClusterRenderer()
+    renderer.setTolerance(1)
+    expected, got, rules, _ = _compare(plugin, tmp_path, renderer, below=3)
+    stable = [rule for rule in rules if dict(rule.point_group[3]).get("part") == "stable"]
+    assert len(stable) == 1 and stable[0].visibility.max_zoom is None
+    assert {rule.get_attr("v") is not None for rule in rules} == {True}
     assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
 
 
@@ -99,6 +117,16 @@ def test_point_displacement_grid(plugin, tmp_path):
     expected, got, rules, _ = _compare(plugin, tmp_path, renderer)
     assert "grid" in {rule.point_group[1] for rule in rules}
     assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
+
+
+def test_isolated_points_stay_alone_at_smaller_tolerances():
+    from fidelity import point_groups as pg
+    points = [(0, 0), (4, 0), (20, 0), (20, 30), (50, 5)]
+    assert pg.isolated(points, 5) == {2, 3, 4}
+    assert pg.isolated(points, 30) == set()  # (20, 30) is 30 from (20, 0)
+    for tolerance in (5, 3, 1):
+        alone = {g[0] for g in pg.group_points(points, tolerance) if len(g) == 1}
+        assert pg.isolated(points, 5) <= alone
 
 
 def test_grouping_follows_qgis_order_and_tolerance():
@@ -237,6 +265,37 @@ def test_heatmap_becomes_a_maplibre_heatmap(plugin, tmp_path):
     assert paint["heatmap-radius"] == pytest.approx(10 * 96 / 25.4 * 1.33, rel=0.01)
 
 
+def test_heatmap_intensity_follows_the_overzoomed_map(plugin, tmp_path):
+    """Exported 0-16 and viewed up to zoom 22: QGIS scales the screen-radius
+    kernel to the densest spot at every zoom. The intensity stops ended at
+    the max tile zoom, so zoomed in past it MapLibre kept zoom 16's maximum
+    (a kernel 64 times wider in map units at zoom 22): a pale heatmap."""
+    from qgis.core import QgsGradientColorRamp, QgsHeatmapRenderer, QgsProcessingFeedback
+    from qgis.PyQt.QtGui import QColor
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    from fidelity.heatmap import GAUSS, max_density, map_units_per_css_px
+    from q2vt_fixtures import reset_project
+    layer = _layer("Point", POINTS, str(tmp_path / "hm.gpkg"))
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setColorRamp(QgsGradientColorRamp(QColor(0, 0, 255, 0), QColor("red")))
+    heatmap.setRadius(10)
+    heatmap.setRadiusUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(heatmap)
+    reset_project(layer)
+    rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           extent=EXTENT).flatten_all_rules()
+    stops = dict(rules[0].heatmap["intensity_stops"])
+    assert sorted(stops) == list(range(0, 25))
+    points = [(f.geometry().asPoint().x(), f.geometry().asPoint().y(), 1.0)
+              for f in layer.getFeatures()]
+    for zoom in (17, 20, 22):
+        radius = 10 * 96 / 25.4 * map_units_per_css_px(zoom)
+        assert stops[zoom] == pytest.approx(1 / (GAUSS * max_density(points, radius)), rel=1e-4)
+    # Zoomed in, points stop overlapping: the maximum falls towards one point.
+    assert stops[22] > stops[16] * 1.5
+
+
 @pytest.mark.parametrize("weight,expected", [('w', [2.0, 0.0, 0.0]), ('"w"', [2.0, 0.0, 0.0]),
                                               ('"w" * 1', [2.0, None, 0.0])])
 def test_heatmap_null_weight_follows_qgis(plugin, tmp_path, weight, expected):
@@ -309,6 +368,43 @@ def test_lineburst_is_a_line_pattern_with_colour_one_on_the_left(plugin):
     assert top[2] < 30 and top[0] > 220 and bottom[2] > 220 and bottom[0] < 30
 
 
+def test_random_fill_in_map_units_from_zoom_0_is_a_tint_when_dense(plugin):
+    """Ten markers per 400 map units², 4 map units wide, exported from zoom
+    0: zoomed out, a texture cell held up to billions of markers (the export
+    ran out of memory). Over a marker per pixel it is a uniform tint, as
+    dense as the scattered markers of the zooms above it."""
+    import time
+    from qgis.core import QgsFillSymbol, QgsRandomMarkerFillSymbolLayer
+    exporter = _converter()
+    exporter.maxzoom = 16
+    exporter.context.reference_zoom = 0  # the rule's min zoom
+    random_fill = QgsRandomMarkerFillSymbolLayer(10, Qgis.PointCountMethod.DensityBased, 400, 3)
+    random_fill.setDensityAreaUnit(Qgis.RenderUnit.MapUnits)
+    random_fill.setSubSymbol(QgsMarkerSymbol.createSimple(
+        {"size": "4", "size_unit": "MapUnit", "color": "255,0,0", "outline_style": "no"}))
+    started = time.time()
+    exporter._convert_symbol(QgsFillSymbol([random_fill]), "s", "src", "q2vt", 0, 16)
+    assert time.time() - started < 30
+    pattern = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    assert pattern[:2] == ["step", ["zoom"]]
+    names = [pattern[2]] + pattern[4::2]
+
+    def cover(image):
+        alpha = image.getchannel("A")
+        return sum(alpha.getdata()) / 255 / (image.width * image.height)
+
+    tints, scattered = [], []
+    for name in names:
+        image = exporter.pattern_images[name].img_1x
+        assert image.width <= 512 and image.height <= 512
+        (tints if image.width <= 16 else scattered).append(cover(image))
+    assert tints and scattered
+    # The expected cover of the markers (1 - exp(-density * marker area)).
+    expected = 1 - math.exp(-10 / 400 * math.pi * 2 ** 2)
+    assert all(t == pytest.approx(expected, abs=0.03) for t in tints)
+    assert scattered[0] == pytest.approx(tints[-1], abs=0.04)
+
+
 def test_raster_line_repeats_like_qgis(plugin, tmp_path):
     from PIL import Image
     from qgis.core import QgsLineSymbol, QgsRasterLineSymbolLayer
@@ -332,3 +428,28 @@ def test_raster_line_repeats_like_qgis(plugin, tmp_path):
     assert period == pytest.approx(round(width_px * 3), rel=0.004)
     # QGIS draws the image's top on the left of the line: flipped for MapLibre.
     assert one.getpixel((one.width // 2, one.height - 1))[0] > 200
+
+
+def test_marker_line_with_map_unit_details_gets_a_sprite_per_zoom(plugin):
+    """A screen-size marker with a map-unit outline along a map-unit
+    interval (the native part of a map exported from zoom 0): one sprite per
+    zoom, drawn at that zoom's scale. One sprite drawn at the style's first
+    zoom had an outline of 1e-5 px there, transparent at every zoom."""
+    from qgis.core import QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsSimpleMarkerSymbolLayer
+    from q2vt_plugin.src.core.maplibre_converter import PropertyExtractor
+    exporter = _converter()
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 3)
+    marker.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    marker.setStrokeWidth(2)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    line = QgsMarkerLineSymbolLayer(True, 20)
+    line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    line.setSubSymbol(QgsMarkerSymbol([marker]))
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 0, 15)
+    layers = {layer["id"]: layer for layer in exporter.style["layers"]}
+    assert {"s_z0", "s_z12", "s_z14"} <= set(layers)
+    assert (layers["s_z12"]["minzoom"], layers["s_z12"]["maxzoom"]) == (12, 13)
+    for zoom in (12, 13, 14):
+        request = exporter.marker_symbols[layers[f"s_z{zoom}"]["layout"]["icon-image"]]
+        assert request.map_units_per_pixel == pytest.approx(
+            1.0 / PropertyExtractor.static_pixels(1.0, "map", zoom), rel=1e-6)

@@ -34,7 +34,6 @@ from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, Qgs
                        QgsExpressionContext, QgsExpressionContextUtils, QgsFeatureRequest,
                        QgsRectangle, QgsUnitTypes, QgsVectorLayer)
 
-from ..core.fidelity import zoom as fidelity_zoom
 from ..core.fidelity.units import MapUnitContext
 
 EARTH = 40075016.68557849          # Web Mercator x-extent
@@ -95,7 +94,7 @@ def zoom_scale_factor(project, extent_3857: QgsRectangle) -> float:
     units = "degrees" if crs.isGeographic() else getattr(crs.mapUnits(), "name", "meters")
     context = MapUnitContext.for_project(crs.authid() in ("EPSG:3857", "EPSG:900913"), str(units),
                                          latitude)
-    return fidelity_zoom.WEB_MERCATOR_TOP_SCALE / context.mercator_per_map_unit
+    return context.top_scale
 
 
 def scale_for_zoom(factor: float, zoom: int) -> float:

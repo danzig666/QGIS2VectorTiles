@@ -120,7 +120,6 @@ from qgis.core import (
 from ..utils import crash_log, main_thread
 from ..utils.config import _DATA_SIMPLIFICATION_TOLERANCE, _EPSG_CRS, _FIELD_PREFIX
 from ..utils.flattened_rule import FlattenedRule
-from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
 from .datasets import DatasetInfo, ExportedDataset, gpkg_info
@@ -128,7 +127,9 @@ from . import label_lines
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity import feature_order as fo
-from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
+from .fidelity.qgis_expr import (bind_geometry, in_layer_crs, substitute_geometry, uses_map_scale,
+                                 with_map_scale)
+from .fidelity import zoom as fidelity_zoom
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .materializer import pattern_anchor_kind
@@ -225,6 +226,9 @@ _EXPRESSION_PARAMETERS = {"fieldcalculator": "FORMULA", "extractbyexpression": "
 # (main angle), in EPSG:3857 metres / degrees: the viewer puts a label that
 # cannot fit there at once instead of searching (a narrow or tiny parcel).
 LABEL_ANCHOR_MARKER = "q2vt:label-anchor"
+# The single part of a feature a visible-label polygon / line is (unique per
+# part; read by resources/ml_viewer/visible_labels.mjs).
+PART_FIELD = "q2vt_part"
 _POLE = "pole_of_inaccessibility($geometry, 0.2)"
 LABEL_ANCHOR_FIELDS = [
     (6, f"round(x({_POLE}), 2)", "q2vt_pole_x"),
@@ -311,6 +315,9 @@ class _RuleGroupSnapshot:
     # Lowest tile zoom of the data ("o"): colour band edges keep clear of
     # vertices at its coordinate grid.
     data_min_zoom: int = 0
+    # Highest zoom of the rule ("i"): colour bands of a rule drawn below the
+    # archive's last zoom (a shapeburst set per zoom) are merged at it.
+    data_max_zoom: Optional[int] = None
     # Feature-aligned pattern fill (materializer.pattern_anchor_kind) and the
     # map CRS its anchor is measured in: each feature carries the anchor.
     pattern_anchor: str = ""
@@ -439,6 +446,9 @@ class RulesExporter:
         # (QgsProcessingFeedback keeps a log that is not thread-safe).
         self._messages: "queue.SimpleQueue[Tuple[str, str]]" = queue.SimpleQueue()
         self._layer_names: Dict[str, str] = {}
+        # Layers whose base layer numbers the parts of each feature (those
+        # exported for viewer-placed labels, PART_FIELD).
+        self._part_layers: set = set()
         # QgsRectangle is a value type — safe to share across threads.
         self.extent = extent
         self.include_required_fields_only = include_required_fields_only
@@ -536,6 +546,7 @@ class RulesExporter:
             cached_outputs = self._reuse_cached(sources, rule_groups)
             pending = [grp for grp in rule_groups if grp.output_dataset not in cached_outputs]
             needed = {grp.layer_id for grp in pending}
+            self._part_layers = {grp.layer_id for grp in pending if grp.visible_polygons}
 
             # Phase 1 — serial source materialisation (caller thread).
             if self._is_cancelled():
@@ -711,6 +722,7 @@ class RulesExporter:
                 merge=primary.merge,
                 point_group=primary.point_group,
                 data_min_zoom=int(primary.get_attr("o") or 0),
+                data_max_zoom=None if primary.get_attr("i") is None else int(primary.get_attr("i")),
                 pattern_anchor=self._pattern_anchor(primary, geom_target),
                 anchor_crs=self._map_crs if self._pattern_anchor(primary, geom_target) else "",
             ))
@@ -948,7 +960,7 @@ class RulesExporter:
             futures: Dict[Future, str] = {
                 pool.submit(
                     self._build_one_base_layer, src_path, target_paths[lid], lid in keep,
-                    lid in anchored
+                    lid in anchored, lid in self._part_layers
                 ): lid
                 for lid, src_path in todo.items()
             }
@@ -1021,16 +1033,17 @@ class RulesExporter:
                 f"'{crs}', '{export}'))")
 
     def _build_one_base_layer(self, src_path: str, dst_path: str,
-                              keep_vertices: bool = False, feature_anchor: bool = False) -> None:
+                              keep_vertices: bool = False, feature_anchor: bool = False,
+                              number_parts: bool = False) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
         began = time.perf_counter()
         try:
-            self._build_base_layer(src_path, dst_path, keep_vertices, feature_anchor)
+            self._build_base_layer(src_path, dst_path, keep_vertices, feature_anchor, number_parts)
         finally:
             self._spent(os.path.basename(dst_path)[len("map_layer_"):].rsplit(".", 1)[0], began)
 
     def _build_base_layer(self, src_path: str, dst_path: str, keep_vertices: bool,
-                          feature_anchor: bool) -> None:
+                          feature_anchor: bool, number_parts: bool = False) -> None:
         self._check_cancel()
         crash_log.note(f"Base layer {dst_path}")
         transform_extent = self.transform_extent(src_path)
@@ -1087,6 +1100,13 @@ class RulesExporter:
         singleparted = self._run_alg_safe(
             "multiparttosingleparts", "native", INPUT=orig_id
         )
+        if number_parts and geometry_type in (1, 2):  # lines and polygons (visible-label datasets)
+            # The part of its feature each single part is, numbered here,
+            # where the order is that of the split: later steps (a filter
+            # writing a memory layer) renumber the feature ids.
+            singleparted = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=singleparted, FIELD_NAME=PART_FIELD,
+                FIELD_TYPE=0, FORMULA=f'@row_number - "{_FIELD_PREFIX}_orig_id"')
         self._check_cancel()
         if keep_vertices:
             self._run_alg_safe("savefeatures", "native", INPUT=singleparted, OUTPUT=dst_path)
@@ -1292,7 +1312,7 @@ class RulesExporter:
             if exists(targets[lid]) or (src.read_in_main and lid not in materialized):
                 continue
             tasks.append((("source", lid, None if src.read_in_main else src, materialized.get(lid),
-                           targets[lid], lid in keep, lid in anchored), [lid]))
+                           targets[lid], lid in keep, lid in anchored, lid in self._part_layers), [lid]))
         done, left = [0], {}
 
         def handle(message, task):
@@ -1493,6 +1513,7 @@ class RulesExporter:
             # Only colour bands depend on the first zoom (bands under a pixel
             # there are merged); other datasets are reused under a new range.
             group.pop("data_min_zoom", None)
+            group.pop("data_max_zoom", None)
         source = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)
                   if f.name not in ("layer_id", "name", "feature_key", "key_uri")}
         if src.key_uri:  # a per-export copy: the layer's own URI
@@ -1636,15 +1657,17 @@ class RulesExporter:
                 return None
             current_input = filt
 
-        if grp.pre_generator:
-            current_input = self._generated_lines(current_input, grp)
+        # Merged features / inverted polygons: the symbol's features drawn
+        # together, before any recipe (a gradient fills the merged shape)
+        # and before a geometry generator (QGIS renders the symbol, generator
+        # included, on the merged or inverted geometry).
+        if grp.merge and grp.rule_type == 0:
+            current_input = self._merged_features(current_input, grp)
             if current_input is None:
                 return None
 
-        # Merged features / inverted polygons: the symbol's features drawn
-        # together, before any recipe (a gradient fills the merged shape).
-        if grp.merge and grp.rule_type == 0:
-            current_input = self._merged_features(current_input, grp)
+        if grp.pre_generator:
+            current_input = self._generated_lines(current_input, grp)
             if current_input is None:
                 return None
 
@@ -1668,9 +1691,14 @@ class RulesExporter:
             if not check.isValid() or check.featureCount() <= 0:
                 return None
         elif grp.recipe is not None and grp.recipe.kind == "color_bands":
-            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom)
+            current_input = self._color_bands(current_input, grp.recipe, grp.data_min_zoom,
+                                              grp.data_max_zoom)
             if current_input is None:
                 return None
+        elif grp.recipe is not None and grp.recipe.kind == "inside_band":
+            current_input = self._inside_bands(current_input, grp.recipe)
+            if current_input is None:
+                return None  # every ring's band collapsed: QGIS draws nothing
         elif grp.recipe is not None and grp.recipe.kind == "interpolated_segments":
             current_input = self._interpolated_segments(current_input, grp.recipe)
             if current_input is None:
@@ -1799,12 +1827,14 @@ class RulesExporter:
         return out
 
     def _generated_lines(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
-        """Worker: the lines of a line-symbol geometry generator, one feature
-        per part (QGIS draws the sub-symbol on every part), with the
-        geometry-dependent properties evaluated on each part."""
-        # geometrybyexpression: OUTPUT_GEOMETRY 1 = line
+        """Worker: the lines (polygons) of a line-symbol (fill-symbol)
+        geometry generator, one feature per part (QGIS draws the sub-symbol
+        on every part), with the geometry-dependent properties evaluated on
+        each part."""
+        # geometrybyexpression: OUTPUT_GEOMETRY 0 = polygon, 1 = line
         out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
-                                 OUTPUT_GEOMETRY=1, EXPRESSION=grp.pre_generator)
+                                 OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
+                                 EXPRESSION=grp.pre_generator)
         out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
         out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
         for ftype, expr, name in grp.generated_fields:
@@ -1818,6 +1848,8 @@ class RulesExporter:
         return out
 
     def _report_empty_output(self, grp: _RuleGroupSnapshot, source: str) -> None:
+        if self._offset_drawn_nowhere(grp, source):
+            return
         matched = self._open(source, "matched")
         count = matched.featureCount() if matched.isValid() else 0
         if count > 0:
@@ -1827,6 +1859,39 @@ class RulesExporter:
                 f"expression produced no geometry.",
                 layer_id=grp.layer_id, component=grp.output_dataset,
                 detail=grp.geometry_expression)
+
+    def _offset_drawn_nowhere(self, grp: _RuleGroupSnapshot, source: str) -> bool:
+        """Worker: whether an empty offset line, ring or marker output is what
+        QGIS draws inside the export extent too, nothing: the rings it keeps
+        collapsed (a positive offset wider than the polygon) or do not exist
+        (interior rings of polygons without holes), or the offset geometry
+        lies wholly outside the extent (a few-pixel extent at a low zoom, or
+        features at its edge offset outwards)."""
+        recipe = grp.recipe
+        if recipe is None:
+            return False
+        if recipe.kind in ("marker_points", "inside_band"):
+            # Positions and bands are computed before the extent clip (and
+            # an empty result is dropped silently there): only the clip
+            # emptied them.
+            return True
+        if recipe.kind != "line_offset" and recipe.kind != "polygon_offset":
+            return False
+        if recipe.kind == "polygon_offset" and (
+                float(recipe.param("offset", 0.0) or 0.0) > 0
+                or int(recipe.param("ring_filter", 0) or 0) == 2):
+            return True
+        crs = f"EPSG:{_EPSG_CRS}"
+        if recipe.kind == "line_offset":
+            expression = mat.offset_line_expression(recipe, crs)
+        else:
+            expression = mat.polygon_offset_expression(recipe, crs)
+        unclipped = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
+                                       OUTPUT_GEOMETRY=1, EXPRESSION=expression)
+        unclipped = self._run_alg_safe("removenullgeometries", "native", INPUT=unclipped,
+                                       REMOVE_EMPTY=True)
+        check = self._open(unclipped, "unclipped")
+        return check.isValid() and check.featureCount() > 0  # only the extent clip emptied it
 
     def _ranked_points(self, source: str) -> Optional[str]:
         """Worker: pattern markers as single points in QGIS's drawing order,
@@ -1906,18 +1971,24 @@ class RulesExporter:
                                  MAX_NODES=mat.PIECE_MAX_NODES)
         return self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
 
-    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0) -> Optional[str]:
+    def _color_bands(self, source: str, recipe: Recipe, min_zoom: int = 0,
+                     max_zoom: Optional[int] = None) -> Optional[str]:
         """Worker: every colour band of a gradient / shapeburst fill as its
         own polygon (BAND_FIELD, COLOR_FIELD), all in one dataset, bands in
-        order (see materialize.color_bands_recipe)."""
+        order (see materialize.color_bands_recipe). ``max_zoom``: the rule's
+        last zoom."""
         from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry,  # pylint: disable=import-outside-toplevel
                                QgsProject, QgsVectorFileWriter, QgsWkbTypes)
         from .fidelity.bands import BandBuilder  # pylint: disable=import-outside-toplevel
         layer = self._open(source, "bands_src")
         if not layer.isValid():
             return None
-        # Bands under a pixel wide are merged, two zooms past the archive.
-        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", float(self.max_zoom) + 2.0, float(min_zoom))
+        # Bands under a pixel wide are merged, two zooms past the archive, or
+        # one past a rule that ends below it (drawn up to that zoom only).
+        detail = float(self.max_zoom) + 2.0
+        if max_zoom is not None and max_zoom < self.max_zoom:
+            detail = max(float(min_zoom), float(max_zoom)) + 1.0
+        builder = BandBuilder(recipe, f"EPSG:{_EPSG_CRS}", detail, float(min_zoom))
         colors = recipe.param("colors")
         fields = QgsFields()
         for field in layer.fields():
@@ -1962,6 +2033,58 @@ class RulesExporter:
         del writer
         return out if written else None
 
+    def _inside_bands(self, source: str, recipe: Recipe) -> Optional[str]:
+        """Worker: the band of an outline drawn only inside its polygon, per
+        feature (mat.inside_band_geometry, built in the recipe's CRS); None
+        when no feature's band is drawn."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeature, QgsFields, QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        layer = self._open(source, "inside_src")
+        if not layer.isValid():
+            return None
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        crs = recipe.param("crs") or export_crs
+        to_crs = from_crs = None
+        if crs != export_crs:
+            context = QgsProject.instance().transformContext()
+            to_crs = QgsCoordinateTransform(QgsCoordinateReferenceSystem(export_crs),
+                                            QgsCoordinateReferenceSystem(crs), context)
+            from_crs = QgsCoordinateTransform(QgsCoordinateReferenceSystem(crs),
+                                              QgsCoordinateReferenceSystem(export_crs), context)
+        fields = QgsFields()
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid"):
+                fields.append(field)
+        out = self._temp_path("inside")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        written = 0
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            if to_crs is not None:
+                geometry.transform(to_crs)
+            band = mat.inside_band_geometry(recipe, geometry)
+            if band is None:
+                continue
+            if from_crs is not None:
+                band.transform(from_crs)
+            out_feature = QgsFeature(fields)
+            for field in fields:
+                out_feature[field.name()] = feature[field.name()]
+            out_feature.setGeometry(band)
+            writer.addFeature(out_feature)
+            written += 1
+        del writer
+        return out if written else None
+
     def _point_grouping(self, source: str, zoom: int, params: dict):
         """(layer, features in drawing order, their points and groups in the
         grouping CRS, transforms) of a point cluster / displacement layer at
@@ -2003,7 +2126,9 @@ class RulesExporter:
         zoom (FlattenedRule.point_group = (mode, role, zoom, params)):
 
         * members: cluster - the points left alone; displacement - every
-          point, the grouped ones moved around their group's centre;
+          point, the grouped ones moved around their group's centre (param
+          "stable": without the points alone within that distance, which
+          the rule with "part" "stable" writes alone);
         * cluster / center: one point per group of two or more at its
           centroid, with CLUSTER_SIZE_FIELD (the first member's attributes);
         * circle / grid: the displacement circle or grid lines."""
@@ -2048,12 +2173,21 @@ class RulesExporter:
 
         written = 0
         placement = params.get("placement", pg.RING)
+        stable, only_stable = set(), params.get("part") == "stable"
+        if params.get("stable") is not None:
+            key = ("stable", source, params["stable"], params.get("crs"))
+            with self._point_group_lock:
+                if key not in self._point_group_cache:
+                    self._point_group_cache[key] = pg.isolated(points, float(params["stable"]))
+                stable = self._point_group_cache[key]
         for members in groups:
             self._check_cancel()
             if len(members) < 2:
-                if role == "members":
+                if role == "members" and (members[0] in stable) == only_stable:
                     write(features[members[0]], features[members[0]].geometry())
                     written += 1
+                continue
+            if only_stable:
                 continue
             center = pg.centroid(points, members)
             if role in ("cluster", "center"):
@@ -2096,8 +2230,9 @@ class RulesExporter:
         self._check_cancel()
         union = QgsGeometry.unaryUnion(geometries) if geometries else QgsGeometry()
         kind = QgsWkbTypes.geometryType(layer.wkbType())
-        if grp.merge == "invert" and grp.geometry_target == 1:
-            # The outline of the inverted area is the polygons' own edge.
+        if grp.merge == "invert" and grp.geometry_target == 1 and not grp.pre_generator:
+            # The outline of the inverted area is the polygons' own edge
+            # (a generator needs the inverted area itself).
             if union.isEmpty():
                 return None
             result = union
@@ -2256,11 +2391,15 @@ class RulesExporter:
     def _arrow_polygons(self, source: str, recipe: Recipe) -> Optional[str]:
         """Worker: the polygons QGIS fills for an arrow symbol layer
         (``fidelity/arrows.py``), built in painter pixels (y down) of the
-        recipe's zoom in the recipe CRS (the project CRS, like QGIS)."""
+        recipe's zoom in the recipe CRS (the project CRS, like QGIS).
+        Recipe part "body": the bodies' centre lines instead; "heads": a
+        point at every head's tip with its azimuth (mat.ANGLE_FIELD), only
+        those pointing back or forward with param "backward"."""
         from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
-                               QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProject,
-                               QgsVectorFileWriter, QgsWkbTypes)
-        from .fidelity.arrows import arrow_polygons  # pylint: disable=import-outside-toplevel
+                               QgsFeature, QgsField, QgsFields, QgsGeometry, QgsPointXY,
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+        from .fidelity.arrows import arrow_polygons, arrow_skeletons  # pylint: disable=import-outside-toplevel
         layer = self._open(source, "arrows")
         if layer is None or not layer.isValid():
             return None
@@ -2274,17 +2413,22 @@ class RulesExporter:
             context = QgsProject.instance().transformContext()
             to_crs = QgsCoordinateTransform(layer.crs(), crs, context)
             from_crs = QgsCoordinateTransform(crs, layer.crs(), context)
+        drawn = recipe.param("part")
         fields = QgsFields()
         for field in layer.fields():
-            if field.name().lower() not in ("fid", "ogc_fid"):
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD:
                 fields.append(field)
+        if drawn == "heads":
+            fields.append(QgsField(mat.ANGLE_FIELD, QVariant.Double))
         out = self._temp_path("arrows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
         with self._temp_files_lock:
             self._temp_files.add(out)
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "FlatGeobuf"
         options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
-        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+        kind = {"body": QgsWkbTypes.MultiLineString, "heads": QgsWkbTypes.Point}.get(
+            drawn, QgsWkbTypes.MultiPolygon)
+        writer = QgsVectorFileWriter.create(out, fields, kind, layer.crs(),
                                             QgsProject.instance().transformContext(), options)
         # Opaque multi-layer fills: QGIS fills every arrow with all layers
         # before the next arrow, so a later arrow's shadow covers an earlier
@@ -2309,6 +2453,27 @@ class RulesExporter:
                     continue
                 x0, y0 = points[0]
                 pixels = [((x - x0) / pixel, (y0 - y) / pixel) for x, y in points]
+
+                def to_map(x, y, x0=x0, y0=y0):
+                    return QgsPointXY(x0 + x * pixel, y0 - y * pixel)
+                if drawn is not None:
+                    bodies, heads = arrow_skeletons(pixels, curved, repeated, start, width,
+                                                    head_length, head_type, arrow_type, offset)
+                    if drawn == "body":
+                        # Vertices one grid unit of the tiles apart at least:
+                        # an arc's dense vertices snapped to a coarse grid (far
+                        # past the last tiles) step like stairs.
+                        grid = float(recipe.param("grid", 0.0) or 0.0)
+                        shapes.extend(QgsGeometry.fromPolylineXY([to_map(*p) for p in body]).simplify(grid)
+                                      if grid > 0 else QgsGeometry.fromPolylineXY([to_map(*p) for p in body])
+                                      for body in bodies)
+                    else:
+                        # Azimuth: clockwise from north (painter y is down).
+                        shapes.extend((QgsGeometry.fromPointXY(to_map(*tip)),
+                                       math.degrees(math.atan2(dx, -dy)) % 360.0)
+                                      for tip, (dx, dy), back in heads
+                                      if recipe.param("backward") in (None, back))
+                    continue
                 for polygon in arrow_polygons(pixels, curved, repeated, start, width, head_length,
                                               thickness, head_type, arrow_type, offset):
                     shape = QgsGeometry.fromPolygonXY([[
@@ -2317,15 +2482,22 @@ class RulesExporter:
                     shape.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
                     if not shape.isEmpty():
                         shapes.append(shape)
-            if shifts:
+            if shifts and drawn is None:
                 shapes = self._painter_visible(shapes, shifts, target)
             for shape in shapes:
+                angle = None
+                if drawn == "heads":
+                    shape, angle = shape
                 if from_crs is not None:
                     shape.transform(from_crs)
-                shape.convertToMultiType()
+                if drawn != "heads":
+                    shape.convertToMultiType()
                 out_feature = QgsFeature(fields)
                 for field in fields:
-                    out_feature[field.name()] = feature[field.name()]
+                    if field.name() != mat.ANGLE_FIELD:
+                        out_feature[field.name()] = feature[field.name()]
+                if angle is not None:
+                    out_feature[mat.ANGLE_FIELD] = angle
                 out_feature.setGeometry(shape)
                 writer.addFeature(out_feature)
                 written += 1
@@ -2607,13 +2779,7 @@ class RulesExporter:
         outputs = []
         vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
         if vertex_placements:
-            vertices = self._run_alg_safe("extractvertices", "native", INPUT=lines)
-            expression = " OR ".join(f"({mat.vertex_filter(p)})" for p in vertex_placements)
-            selected = self._run_alg_safe("extractbyexpression", "native",
-                                          INPUT=vertices, EXPRESSION=expression)
-            outputs.append(self._run_alg_safe(
-                "fieldcalculator", "native", INPUT=selected, FIELD_NAME=mat.ANGLE_FIELD,
-                FIELD_TYPE=0, FORMULA='"angle"'))
+            outputs.append(self._vertex_points(lines, vertex_placements))
         if "Interval" in recipe.placements and self._memory_active:
             outputs.append(self._interval_points_direct(lines, recipe))
         elif "Interval" in recipe.placements:
@@ -2658,7 +2824,7 @@ class RulesExporter:
             tmp = self._open(current_input, "tmp")
             if tmp.isValid():
                 for f in tmp.fields():
-                    if 'ogc_fid' not in f.name().lower():
+                    if 'ogc_fid' not in f.name().lower() and f.name() != PART_FIELD:
                         mapping.append((f.type(), f'"{f.name()}"', f.name()))
 
 
@@ -2666,6 +2832,19 @@ class RulesExporter:
             (6, f'"{_FIELD_PREFIX}_orig_id"', f"{_FIELD_PREFIX}_orig_id")
         )
         source_fields = self._open(current_input, "fields").fields()
+        if grp.visible_polygons:
+            # Each part of a multi-part feature (the base datasets are single
+            # parts): the viewer labels every part ("Label every part") or
+            # only the biggest, and joins only the tile pieces of one part.
+            # Distinct within a feature (its parts' ids differ, its orig id
+            # does not); the parts of one feature follow each other, so the
+            # value mostly repeats from feature to feature (a small tile
+            # value table, unlike the unique id).
+            # Numbered in the base layer (the same in every chain mode: a
+            # filter writing a memory layer renumbers $id); $id only for a
+            # base layer without the field.
+            mapping.append((4, f'"{PART_FIELD}"' if source_fields.indexFromName(PART_FIELD) >= 0
+                            else f'$id - "{_FIELD_PREFIX}_orig_id"', PART_FIELD))
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
         if source_fields.indexFromName(FEATURE_KEY_FIELD) >= 0:
@@ -3081,6 +3260,52 @@ class RulesExporter:
             self._group_tokens.append(token)
         return token
 
+    def _vertex_points(self, lines: str, placements: List[str]) -> str:
+        """Worker: the vertex markers of ``lines`` (marker_points.
+        vertex_markers) as points with the line's fields and ``ANGLE_FIELD``:
+        QGIS turns them towards the nearest neighbours that differ from the
+        vertex, where native:extractvertices' angle takes a repeated
+        vertex's zero-length segment (east)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter)
+        self._check_cancel()
+        source = self._open(lines, "vertex_lines")
+        fields = QgsFields()
+        for field in source.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD:
+                fields.append(field)
+        fields.append(QgsField(mat.ANGLE_FIELD, QVariant.Double))
+        out = self._temp_path("vertices")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.Point, source.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        for feature in source.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isNull() or geometry.isEmpty():
+                continue
+            attributes = [feature[field.name()] for field in fields if field.name() != mat.ANGLE_FIELD]
+            for part in geometry.constParts():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                xs = [line.xAt(i) for i in range(line.numPoints())]
+                ys = [line.yAt(i) for i in range(line.numPoints())]
+                drawn = set()
+                for placement in placements:
+                    for index, angle in marker_points.vertex_markers(xs, ys, placement):
+                        if (index, angle) in drawn:
+                            continue  # the same marker of two placements
+                        drawn.add((index, angle))
+                        point = QgsFeature(fields)
+                        point.setAttributes(attributes + [angle])
+                        point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(xs[index], ys[index])))
+                        writer.addFeature(point)
+        del writer
+        return out
+
     def _interval_points_direct(self, lines: str, recipe: Recipe) -> str:
         """The interval markers of ``lines`` computed in Python
         (core.marker_points): the same points and angles as the expression
@@ -3163,11 +3388,13 @@ class RulesExporter:
         """
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
-            zoom_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            zoom_scale = fidelity_zoom.zoom_to_scale(flat_rule.evaluation_zoom())
+            if flat_rule.pre_generator and uses_map_scale(flat_rule.pre_generator):
+                flat_rule.pre_generator = with_map_scale(flat_rule.pre_generator, zoom_scale)
             if rule_type == 1 and flat_rule.rule.settings():
                 settings = flat_rule.rule.settings()
                 label_exp = settings.getLabelExpression().expression()
-                if label_exp and "map_scale" in label_exp:
+                if label_exp and uses_map_scale(label_exp):
                     settings.fieldName = with_map_scale(label_exp, zoom_scale)
                     settings.isExpression = True
                 if settings.geometryGeneratorEnabled:
@@ -3192,7 +3419,7 @@ class RulesExporter:
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
             suffix = flat_rule.get_attr("s") if rule_type == 0 else flat_rule.get_attr("f")
-            min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            min_scale = fidelity_zoom.zoom_to_scale(flat_rule.evaluation_zoom())
             rule_fields = DataDefinedPropertiesFetcher(
                 flat_rule.rule, min_scale, suffix, diagnostics=self.diagnostics
             ).fetch()
@@ -3293,8 +3520,19 @@ class RulesExporter:
             return None
         if not transformation:
             return None
+        if rule_type == 0 and getattr(flat_rule, "shift", None):
+            transformation[1] = self._shifted(transformation[1], *flat_rule.shift)
         transformation[1] = self._clip_to_extent(transformation[1])
         return tuple(transformation)
+
+    def _shifted(self, expression: str, dx: float, dy: float) -> str:
+        """``expression`` moved by (dx, dy) project map units (a fill's map
+        unit offset), measured in the project CRS."""
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        if self._map_crs == export_crs:
+            return f"translate({expression}, {dx!r}, {dy!r})"
+        return (f"transform(translate(transform({expression}, '{export_crs}', "
+                f"'{self._map_crs}'), {dx!r}, {dy!r}), '{self._map_crs}', '{export_crs}')")
 
     def _clip_to_extent(self, expression: str) -> str:
         """``expression`` cut to the export extent. Geometries inside it are
@@ -3334,14 +3572,30 @@ class RulesExporter:
         centres the label on every piece), so the label is exported as the
         line's midpoint instead: an over-point label rotated to the line
         (kept upright), above/below/on the point as the placement flags say.
+        The web viewer moves it to the visible part of the line, and lays
+        out a repeated label there when the flattener says so
+        (FlattenedRule.visible_repeat). Horizontal placement on a line: a
+        level label centred on the line (pal
+        createHorizontalCandidatesAlongLine), not at its first vertex.
         """
         settings = flat_rule.rule.settings()
         if settings is None or flat_rule.get_attr("g") not in (1, 2) or \
                 settings.geometryGeneratorEnabled or self._pinned_position(settings):
             return
-        if not self._labels_along_line(flat_rule):
+        horizontal = flat_rule.get_attr("g") == 1 and \
+            _enum_value(settings.placement) == _enum_value(Qgis.LabelPlacement.Horizontal)
+        if not horizontal and not self._labels_along_line(flat_rule):
             return
-        if float(settings.repeatDistance or 0) > 0:
+        if float(settings.repeatDistance or 0) > 0 and not flat_rule.visible_repeat:
+            return
+        if horizontal:
+            settings.placement = Qgis.LabelPlacement.OverPoint
+            settings.quadOffset = Qgis.LabelQuadrantPosition.Over
+            settings.xOffset = settings.yOffset = 0.0
+            settings.angleOffset = 0.0
+            settings.dataDefinedProperties().setProperty(
+                QgsPalLayerSettings.Property.LabelRotation, QgsProperty())
+            flat_rule.line_label_midpoint = True
             return
         try:
             flags = int(settings.lineSettings().placementFlags())
@@ -3491,11 +3745,17 @@ class RulesExporter:
             return [0, "@geometry"]  # points already materialized (_random_points)
         if recipe is not None and recipe.kind == "polygon_offset":
             return [1, mat.polygon_offset_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "inside_band":
+            return [2, "@geometry"]  # bands already materialized (_inside_bands)
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":
             # Polygons built by _arrow_polygons; the arrow's outline
             # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
+            if recipe.param("part") == "body":
+                return [1, "@geometry"]
+            if recipe.param("part") == "heads":
+                return [0, "@geometry"]
             if flat_rule.get_attr("c") == 1:
                 return [1, "boundary(@geometry)"]
             return [2, "@geometry"]
@@ -3598,6 +3858,12 @@ class RulesExporter:
             rule.visible_polygons = name
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
             rule.visible_kind = "line"
+            # "Merge connected lines" (line layers; not with direction
+            # symbols, QgsVectorLayerLabelProvider): the viewer labels lines
+            # of one text that meet end to end as one line.
+            line_settings = flat_rule.rule.settings().lineSettings()
+            rule.merge_lines = flat_rule.get_attr("g") == 1 and line_settings.mergeLines() \
+                and not line_settings.addDirectionSymbol()
         lines = self._EXTERIOR_RINGS if flat_rule.get_attr("g") == 2 else "@geometry"
         return dataclasses.replace(
             label, output_dataset=name, geometry_target=1,

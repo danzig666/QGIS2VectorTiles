@@ -395,6 +395,213 @@ console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, .
     return {item[0]: item[1:] for item in json.loads(run.stdout)}
 
 
+def _tile_pieces(pieces, view, options, z=1):
+    """labelPoints of one line feature given as tile pieces of zoom z
+    [(tile x, [[x, y], ...] in tile units)]: {key: (x, y, rot)}."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(pieces)}.map(([tx, points]) => ({{
+  _x: tx, _y: 0, _z: {z}, properties: {{ q2vt_orig_id: 5, rot: 99 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), tileZoom: 1,
+  ...{json.dumps(options)} }};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => [...f.geometry.coordinates, f.properties.rot])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def test_line_pieces_of_neighbouring_tiles_are_joined():
+    """Each tile cuts its own rounded, buffered copy of a line: the two cuts
+    on a shared tile edge miss each other by a fraction of a pixel. The
+    pieces were not joined (1e-10 tolerance) and a label longer than either
+    piece, though shorter than the visible line, was dropped."""
+    left = (0, [[2048, 2048], [4096 + 80, 2048]])      # buffered past the tile edge
+    right = (1, [[-80, 2049], [2048, 2049]])           # the same line, rounded a unit lower
+    view, box = [0, 0, 1, 0.5], [0.15, 0.01]           # a label 0.3 long, pieces 0.25
+    labels = _tile_pieces([left, right], view, {"box": box, "precision": 1 / 1000})
+    assert len(labels) == 1 and labels[0][0] == pytest.approx(0.5, abs=0.01)
+    gap = (1, [[-80, 2088], [2048, 2088]])             # 40 units off: a real gap, not joined
+    assert _tile_pieces([left, gap], view, {"box": box, "precision": 1 / 1000}) == []
+    # Overzoomed: z3 tiles cut from z1 data (tileZoom, the source's max
+    # zoom), whose rounding misses by 3 z3 units, several screen pixels at
+    # this precision. The tolerance follows the data's tile unit, not the
+    # screen: the pieces are still joined.
+    left = (0, [[2048, 2048], [4096 + 80, 2048]])
+    right = (1, [[-80, 2051], [2048, 2051]])
+    view, box = [0, 0, 0.25, 0.125], [0.15 / 4, 0.01 / 4]
+    options = {"box": box, "precision": 1 / 4000 / 8 / 4}
+    labels = _tile_pieces([left, right], view, options, z=3)
+    assert len(labels) == 1 and labels[0][0] == pytest.approx(0.125, abs=0.01)
+
+
+def test_horizontal_line_label_is_level_and_centred_on_the_line():
+    """QGIS Horizontal placement on lines: a level label centred on a point
+    of the line near its middle (pal createHorizontalCandidatesAlongLine),
+    on the visible part; it need not fit along the line."""
+    steep = [(1, [[2048, 0], [2048, 4096]])]  # vertical: 0.1 of it on the screen
+    view = [0, 0.2, 1, 0.3]
+    x, y, rotation = _lines(steep, view, {"box": [0.1, 0.01], "level": True})[1]
+    assert (x, y) == pytest.approx((0.5, 0.25)) and rotation == 0  # not turned to the line
+    assert _lines(steep, view, {"box": [0.1, 0.01]}) == {}  # along it: no room
+
+
+def test_level_line_label_wider_than_the_screen_is_kept():
+    """A level (Horizontal) line label wider than the view - map-unit text
+    at a high zoom: QGIS keeps candidates that only overlap the map extent
+    (partial candidates, on by default) and draws it cut by the screen
+    edge, centred on the visible line; it was dropped."""
+    line = [(1, [[0, 2048], [4096, 2048]])]
+    view = [0.4, 0.4, 0.6, 0.6]
+    x, y, rotation = _lines(line, view, {"box": [0.3, 0.01], "level": True})[1]
+    assert (x, y) == pytest.approx((0.5, 0.5)) and rotation == 0
+    assert _lines(line, view, {"box": [0.3, 0.01]}) == {}  # along the line: still no room
+
+
+def _merged(lines, view, options):
+    """labelPoints of line features [(id, name, [[x, y], ...] in z0 tile
+    units[, part])] whose text is their "name": [[x, y, id], ...] sorted by x."""
+    script = f"""
+import {{ labelPoints, newLabelState, textKey }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(lines)}.map(([id, name, points, part]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, name, rot: 99, q2vt_part: part ?? 0 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), ...{json.dumps(options)} }};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+if (options.merge) options.mergeText = textKey(["coalesce", ["get", "name"], ""]);
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => [...f.geometry.coordinates, f.properties.q2vt_orig_id])
+  .sort((a, b) => a[0] - b[0])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def test_connected_lines_of_one_text_are_labelled_as_one_line():
+    """QGIS "Merge connected lines": features of one label text meeting end
+    to end are labelled as one line (pal joinConnectedFeatures). A river
+    split into short features got one label per feature - or none where
+    each feature is shorter than the label."""
+    river = [(k + 1, "Echo", [[512 * k, 2048], [512 * (k + 1), 2048]]) for k in range(8)]
+    view, box = [0, 0, 1, 1], [0.2, 0.01]          # a label 0.4 long, features 0.125
+    assert _merged(river, view, {"box": box}) == []
+    labels = _merged(river, view, {"box": box, "merge": True})
+    assert len(labels) == 1 and labels[0][:2] == pytest.approx([0.5, 0.5])
+    # Short labels: one per feature without merging, one in all with it.
+    assert len(_merged(river, view, {"box": [0.02, 0.01]})) == 8
+    assert len(_merged(river, view, {"box": [0.02, 0.01], "merge": True})) == 1
+    # Repeated: the merged line is chopped at the repeat (0.3: three parts),
+    # not labelled once per feature.
+    labels = _merged(river, view, {"box": [0.02, 0.01], "merge": True, "repeat": 0.3})
+    assert [x for x, _, _ in labels] == pytest.approx([1 / 6, 1 / 2, 5 / 6])
+    # Another text, or the same text not touching: separate lines.
+    other = [(20, "Echo", [[0, 3584], [4096, 3584]]), (21, "Fox", [[4096, 2048], [3584, 0]])]
+    labels = _merged(river + other, view, {"box": [0.02, 0.01], "merge": True})
+    assert sorted(label[2] for label in labels) == [1, 20, 21]
+
+
+def test_connected_parts_of_multi_part_lines_are_merged():
+    """Merge connected lines joins feature parts (pal FeatureParts): the
+    part of a two-part feature touching the river joins it; its other,
+    distant part keeps its own label."""
+    river = [(k + 1, "Echo", [[512 * k, 2048], [512 * (k + 1), 2048]]) for k in range(4)]
+    parts = [(9, "Echo", [[2048, 2048], [4096, 2048]], 0), (9, "Echo", [[0, 3584], [4096, 3584]], 1)]
+    options = {"box": [0.2, 0.01], "merge": True, "perPart": True}
+    labels = _merged(river + parts, [0, 0, 1, 1], options)
+    assert sorted((round(x, 3), round(y, 3)) for x, y, _ in labels) == [(0.5, 0.5), (0.5, 0.875)]
+
+
+def test_merged_lines_stay_simple_lines():
+    """Merge connected lines builds simple lines as pal does: the longest
+    part grows by the longest part ending on one of its ends; a side branch
+    of the same text stays apart with its own label. Every touching part of
+    a network was merged into one entry: one label for a whole network."""
+    main = [(1, "Echo", [[512, 2048], [2048, 2048]]), (2, "Echo", [[2048, 2048], [3584, 2048]])]
+    branch = [(3, "Echo", [[2048, 2048], [2048, 1536]])]
+    labels = _merged(main + branch, [0, 0, 1, 1], {"box": [0.05, 0.01], "merge": True})
+    assert len(labels) == 2
+    on_main = [label for label in labels if label[1] == pytest.approx(0.5)]
+    assert len(on_main) == 1 and on_main[0][0] == pytest.approx(0.5)  # the middle of both main parts
+    assert [label[2] for label in labels if label not in on_main] == [3]
+    # A grid of one text: a label per merged row or column line, not one.
+    step = 4096 // 10
+    grid = [(100 * i + j, "Path", [[step * (j + 1), step * (i + 1)], [step * (j + 2), step * (i + 1)]])
+            for i in range(8) for j in range(8)]
+    grid += [(1000 + 100 * i + j, "Path", [[step * (i + 1), step * (j + 1)], [step * (i + 1), step * (j + 2)]])
+             for i in range(8) for j in range(8)]
+    assert len(_merged(grid, [0, 0, 1, 1], {"box": [0.02, 0.005], "merge": True})) >= 10
+
+
+def test_merging_many_lines_of_one_text_is_fast():
+    """Merge connected lines finds the parts meeting a line end by lookup:
+    testing every pair of the parts of one text took seconds per update
+    for some thousand parts (a class or constant label text)."""
+    script = f"""
+import {{ labelPoints, newLabelState, textKey }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = [];
+for (let i = 0; i < 110; i++) for (let j = 0; j < 110; j++) {{
+  const line = [[36 * j + 20, 36 * i + 20], [36 * j + 40, 36 * i + 30]].map(([x, y]) => ({{ x, y }}));
+  features.push({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 110 * i + j, name: "Path" }},
+    _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [line] }} }});
+}}
+const options = {{ kind: "line", state: newLabelState(), tileZoom: 0, labelBox: () => [0.01, 0.003],
+  mergeText: textKey(["get", "name"]) }};
+const start = performance.now();
+labelPoints(features, [0, 0, 1, 1], maplibregl, options);
+console.log(JSON.stringify(performance.now() - start));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    assert json.loads(run.stdout) < 2000  # 12100 parts: about 0.2 s (all pairs: over 5 s)
+
+
+def test_repeated_line_label_is_chopped_on_the_visible_line():
+    """A repeated line label (QGIS repeat distance): the line clipped to the
+    screen is cut into equal parts at a whole multiple of the repeat at
+    least as long as the label, one label in the middle of each part, as
+    pal chops the line clipped to the map extent. Laid out on the whole
+    line (windows, MapLibre's spacing) most views had none."""
+    script = f"""
+import {{ labelPoints, newLabelState, repeatParts, repeatOption }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const line = [[0, 2048], [4096, 2048]].map(([x, y]) => ({{ x, y }}));
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 3, rot: 0 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [line] }} }};
+const run = (view, repeat) => labelPoints([feature], view, maplibregl, {{ kind: "line",
+  rotationField: "rot", state: newLabelState(), repeat, labelBox: () => [0.05, 0.01] }})
+  .features.map((f) => f.geometry.coordinates[0]);
+console.log(JSON.stringify({{
+  parts: repeatParts(1000, 80, 264.6), long: repeatParts(1000, 300, 200),
+  whole: run([0, 0, 1, 1], 0.3), half: run([0.2, 0, 0.8, 1], 0.3), sparse: run([0.2, 0, 0.8, 1], 2),
+  mapUnits: repeatOption({{ px: 100, zoom: 16 }}, 18, 0.5), screen: repeatOption({{ px: 100 }}, 18, 0.5),
+}}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    out = json.loads(run.stdout)
+    assert [round(b - a, 2) for a, b in out["parts"]] == [333.33] * 3
+    assert out["long"] == [[0, 500], [500, 1000]]
+    assert sorted(out["whole"]) == pytest.approx([1 / 6, 1 / 2, 5 / 6])
+    assert sorted(out["half"]) == pytest.approx([0.35, 0.65])    # the visible 0.6: two parts
+    assert out["sparse"] == pytest.approx([0.5])                 # repeat longer than the view
+    assert out["mapUnits"] == pytest.approx(200) and out["screen"] == pytest.approx(50)
+
+
 def test_free_placement_turns_labels_along_narrow_polygons():
     # A street rising to the right at 30° (narrower than the label is long),
     # a wide square, and a tall narrow strip.
@@ -457,11 +664,14 @@ def test_turned_labels_stay_inside_and_centred():
     nx, ny = -math.sin(a), math.cos(a)
     off = abs((x - 0.5) * nx + (y - 0.5) * ny)
     assert off < 0.25 * 300 / 4096
-    # Too narrow for the label's height, or too short for its length: no label
-    # (QGIS drops candidates that stick out of the polygon).
+    # Too narrow for the label's height, or too short for its length: QGIS
+    # (no "fit in polygon") still labels it, centred inside and sticking out.
     narrow = _strip(2048, 2048, 3000, 60, a)
     short = _strip(2048, 2048, 300, 300, a + 0.0)
-    assert _free([(2, narrow), (3, short)], [0, 0, 1, 1], box) == {}
+    x, y, rotation, _scale = _free([(2, narrow)], [0, 0, 1, 1], box)[2]
+    assert rotation == pytest.approx(-30, abs=1) and abs((x - 0.5) * nx + (y - 0.5) * ny) < 30 / 4096
+    x, y, _rotation, _scale = _free([(3, short)], [0, 0, 1, 1], box)[3]
+    assert math.hypot(x - 0.5, y - 0.5) < 150 / 4096
 
 
 def test_place_turned_keeps_clear_of_other_labels_inside_the_street():
@@ -488,7 +698,10 @@ def test_always_label_shrinks_or_forces_a_label_that_does_not_fit():
     box = [0.03, 0.012]
     polygons = [(1, _band(1000, 1000, 1600, 70)), (2, _band(1000, 2000, 1600, 30))]
     off = _free(polygons, [0, 0, 1, 1], box)
-    assert 1 not in off and 2 not in off  # without the option: no label (as before)
+    # Without the option: full size, centred on the strip and sticking out of
+    # it (QGIS without "fit in polygon").
+    assert off[1][3] == 1 and off[2][3] == 1
+    assert off[2][1] == pytest.approx(2000 / 4096, abs=0.002)
     on = _free(polygons, [0, 0, 1, 1], box, always=True)
     assert on[1][3] < 1 and on[2][3] == pytest.approx(0.5)
     assert on[2][1] == pytest.approx(2000 / 4096, abs=0.002)  # on the strip's middle line
@@ -514,6 +727,15 @@ def test_scaled_text_size_keeps_a_dense_zoom_curve():
     assert stops[0::2] == list(range(0, 25))  # a stop at every whole zoom
     assert stops[1::2][10][1] == pytest.approx(2 ** 10)
     assert stops[1][2][0] == "to-number"
+
+
+def test_label_point_source_is_deep_enough_for_the_deepest_browser_zoom():
+    # Points are rounded to 1/8192 of a maxzoom tile: 2^(z - maxzoom - 4) px
+    # at zoom z, at most half a pixel at the map's maximum zoom.
+    depths = _js("[22, 23.99, 18, 0].map(m.pointMaxzoom)")
+    assert depths == [18, 20, 15, 15]
+    for max_zoom, depth in zip((22, 23.99), depths):
+        assert 2 ** (max_zoom - depth - 4) / 2 <= 0.5
 
 
 # "Around point" polygon labels (QGIS AroundPoint): beside the point at the
@@ -553,12 +775,12 @@ def test_around_point_tries_the_next_position_when_one_does_not_fit_or_is_taken(
 
 
 def test_around_point_label_of_a_polygon_smaller_than_its_label():
-    # A building-sized polygon (0.01 across) with a long name (0.16 x 0.04):
-    # an "over the point" label needs the polygon to hold it (else the
-    # polygon counts as a sliver in view), an "around" label goes beside it.
+    # A building-sized polygon (0.01 across) with a long name (0.16 x 0.04),
+    # wholly on the screen: an "over the point" label goes on its centroid
+    # (QGIS), an "around" label beside it.
     squares = [(1, 0, 0, 0, (2028, 2028, 2068, 2068))]
     box = [0.08, 0.02]
-    assert _points(squares, [0, 0, 1, 1], {"box": box}) == {}
+    assert _points(squares, [0, 0, 1, 1], {"box": box})[1] == pytest.approx([0.5, 0.5])
     x, y = _points(squares, [0, 0, 1, 1], {"box": box, "around": AROUND})[1]
     assert x == pytest.approx(0.5) and y + box[1] == pytest.approx(0.5 - AROUND["distance"])
 
@@ -583,7 +805,17 @@ def test_around_point_distance_in_map_units_follows_the_zoom():
     scaled = _js("m.aroundOption({px: 10, zoom: 14}, 16, 0.001)")
     # Without anchors: QGIS's first candidate, above right of the point.
     assert scaled["distance"] == pytest.approx(0.04) and scaled["anchors"][0] == "bottom-left"
+    # Kept within a map unit scale's limits: the distance's own zoom curve.
+    limited = _js("m.aroundOption({px: ['interpolate', ['exponential', 2], ['zoom'], "
+                  "0, 0.001, 18, 262.144, 24, 262.144]}, 20, 0.001)")
+    assert limited["distance"] == pytest.approx(0.262144)
     assert _js("m.aroundOption(undefined, 16, 0.001)") is None
+    # No distance: centred on the point first (QGIS), then around it.
+    assert _js("m.aroundOption({px: 0, anchors: ['top']}, 16, 0.001)")["anchors"] == ["center", "top"]
+    # Outside the polygon allowed: QGIS's 2 px floor, never centred.
+    floored = _js("m.aroundOption({px: 0, min_px: 2, anchors: ['top']}, 16, 0.001)")
+    assert floored == {"anchors": ["top"], "distance": pytest.approx(0.002)}
+    assert _js("m.aroundOption({px: 5, min_px: 2}, 16, 0.001)")["distance"] == pytest.approx(0.005)
     candidates = _js("m.aroundCandidates([0.5, 0.5], [0.1, 0.02], "
                      "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
     diagonal = 0.04 * math.sqrt(0.5)
@@ -714,7 +946,7 @@ def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
         removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
         addSource: (id, spec) => { sources[id] = spec; }, getSource: (id) => ({setData: (d) => { out[id] = d; }}),
         getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},
-        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0,
+        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0, getMaxZoom: () => 22,
         getContainer: () => ({clientWidth: 1000}),
         getBounds: () => ({getSouthWest: () => ({lng: 0, lat: 1}), getNorthEast: () => ({lng: 1, lat: 0})}),
         querySourceFeatures: (s, {sourceLayer}) => sourceLayer !== 'parks' ? [] : [{_x: 0, _y: 0, _z: 0,
@@ -781,3 +1013,439 @@ def test_rendered_label_boxes_measure_each_label_with_its_own_text():
     long_width, short_width = _js(expr)
     assert long_width == pytest.approx((10 * 0.6 * 10 + 4) * 0.001)
     assert short_width == pytest.approx((2 * 0.6 * 10 + 4) * 0.001)
+
+
+def _place(features, view, options):
+    """labelPoints of z0 features [(id, [[[x, y], ...] rings in tile units], extra
+    properties)]: [(id, x, y, rotation, label box as a world rectangle)]."""
+    script = f"""
+import {{ labelPoints, newLabelState, envelope }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(features)}.map(([id, rings, extra]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, ...extra }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => rings.map((ring) => ring.map(([x, y]) => ({{ x, y }}))) }} }}));
+const options = {{ state: newLabelState(), precision: 0.0005, ...{json.dumps(options)} }};
+const box = options.box;
+if (box && options.text) box.text = options.text;  // the bare text (box: with its margin)
+if (box) options.labelBox = () => box;
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => {{
+  const [x, y] = f.geometry.coordinates;
+  const angle = (Number(f.properties.rot) || 0) * Math.PI / 180;
+  const [hx, hy] = box ? envelope(box, angle) : [0, 0];
+  return [f.properties.q2vt_orig_id, x, y, f.properties.rot ?? 0, [x - hx, y - hy, x + hx, y + hy]];
+}})));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def _square(x0, y0, x1, y1):
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
+def _overlapping(placed):
+    return sum(1 for i, a in enumerate(placed) for b in placed[i + 1:] if _overlaps(a[4], b[4]))
+
+
+@pytest.mark.parametrize("mode", [{}, {"anchor": "pole"}, {"around": {**AROUND, "distance": 0}}])
+def test_polygon_labels_never_overlap_unless_qgis_allows_it(mode):
+    """A grid of strips narrower than their labels (strip parcels zoomed
+    out): with QGIS's default "Never overlap" no two drawn labels overlap
+    (some are left out, as QGIS thins them); "Allow overlap if required"
+    draws every label. Centroid labels were drawn on top of each other."""
+    strips = [(10 * row + col, [_square(400 + 300 * col, 400 + 300 * row, 600 + 300 * col, 650 + 300 * row)], {})
+              for row in range(12) for col in range(10)]
+    box = [0.1, 0.02]  # 819 x 164 tile units: wider than a strip and its gaps
+    never = _place(strips, [0, 0, 1, 1], {**mode, "box": box})
+    assert never and _overlapping(never) == 0
+    assert len(never) < len(strips)
+    allowed = _place(strips, [0, 0, 1, 1], {**mode, "box": box, "overlap": "if-required"})
+    assert len(allowed) == len(strips) and _overlapping(allowed) > 0
+
+
+def test_label_every_part_or_only_the_biggest():
+    """A multi-part feature (one q2vt_orig_id, parts q2vt_part 1 and 2): with
+    "Label every part" one label per part; without it only the biggest part
+    is labelled, at its own centroid. The centroid of both parts together
+    lay between them and the label went to the smaller part."""
+    big, small = _square(400, 400, 2000, 2000), _square(2600, 200, 3000, 3600)
+    feature = [(1, [big], {"q2vt_part": 1}), (1, [small], {"q2vt_part": 2})]
+    one = _place(feature, [0, 0, 1, 1], {"box": [0.02, 0.01]})
+    assert len(one) == 1 and one[0][1:3] == pytest.approx([1200 / 4096, 1200 / 4096])
+    both = _place(feature, [0, 0, 1, 1], {"box": [0.02, 0.01], "perPart": True})
+    assert sorted(round(item[1] * 4096) for item in both) == [1200, 2800]
+    # Lines: the longest part, or each part.
+    lines = [(1, [[[100, 1000], [3900, 1000]]], {"q2vt_part": 1}),
+             (1, [[[100, 3000], [900, 3000]]], {"q2vt_part": 2})]
+    one = _place(lines, [0, 0, 1, 1], {"kind": "line", "box": [0.02, 0.01]})
+    assert len(one) == 1 and one[0][2] == pytest.approx(1000 / 4096)
+    assert len(_place(lines, [0, 0, 1, 1], {"kind": "line", "box": [0.02, 0.01], "perPart": True})) == 2
+
+
+@pytest.mark.parametrize("mode", [{}, {"anchor": "pole"}])
+def test_polygon_smaller_than_its_label_is_labelled_when_wholly_visible(mode):
+    """QGIS (Over point, Horizontal) labels a polygon however small, the
+    label's centre inside it; only a polygon cut by the screen edge with a
+    sliver in view gets no label."""
+    tiny = [(1, [_square(2000, 2000, 2060, 2060)], {})]  # 60 x 60 with a 164 x 66 label
+    [(_, x, y, _rotation, _box)] = _place(tiny, [0, 0, 1, 1], {**mode, "box": [0.02, 0.008]})
+    assert x == pytest.approx(2030 / 4096, abs=0.002) and y == pytest.approx(2030 / 4096, abs=0.002)
+    sliver = [(1, [_square(1980, 1000, 2400, 1400)], {})]  # only 68 tile units of it on the screen
+    assert _place(sliver, [0, 0, 0.5, 1], {**mode, "box": [0.03, 0.0022]}) == []
+
+
+def test_free_label_on_a_strip_narrower_than_the_label():
+    """Free (angled) on a narrow strip at 30°: QGIS turns the label along the
+    strip, centred on it and sticking out (no "fit in polygon"); the viewer
+    drew no label until the strip was as wide as the label."""
+    strip = [(1, [_strip(2048, 2048, 3000, 24, math.radians(-30))], {})]  # the label is 37 high
+    [(_, x, y, rotation, _box)] = _place(strip, [0, 0, 1, 1], {
+        "anchor": "pole", "orient": "free", "rotationField": "rot", "box": [0.03, 0.0045]})
+    assert rotation == pytest.approx(-30, abs=1)
+    nx, ny = -math.sin(math.radians(-30)), math.cos(math.radians(-30))
+    assert abs((x - 0.5) * nx + (y - 0.5) * ny) < 12 / 4096
+
+
+def test_outside_polygons_labels_go_beside_the_polygon():
+    """QGIS "Outside polygons": the label beside the polygon at the label
+    distance, never on it, also for a polygon smaller than the label; a
+    polygon filling the screen has no room outside: no label."""
+    outside = {**AROUND, "outside": True, "distance": 0.01}
+    box = [0.05, 0.01]
+    for square in (_square(1500, 1500, 2600, 2600), _square(2028, 2028, 2068, 2068)):
+        [(_, x, y, _rotation, label)] = _place([(1, [square], {})], [0, 0, 1, 1], {"box": box, "around": outside})
+        polygon = [v / 4096 for v in square[0] + square[2]]
+        gap = max(polygon[0] - label[2], label[0] - polygon[2], polygon[1] - label[3], label[1] - polygon[3])
+        assert gap == pytest.approx(outside["distance"], abs=0.003)
+    assert _place([(1, [_square(0, 0, 4096, 4096)], {})], [0.2, 0.2, 0.8, 0.8],
+                  {"box": box, "around": outside}) == []
+
+
+@pytest.mark.parametrize("distance", [0, 0.001, 0.01])
+def test_outside_polygons_labels_at_a_small_distance(distance):
+    """"Outside polygons" at the QGIS default distance 0 (or a small one):
+    the text beside the polygon's edge at that distance. The candidates were
+    tested with the label's box including its margin for other labels and
+    all touched the polygon: no label at distances below ~4 px."""
+    box, text = [0.052, 0.009], [0.05, 0.007]
+    square = _square(1500, 1500, 2600, 2400)
+    [(_, x, y, _rotation, _label)] = _place([(1, [square], {})], [0, 0, 1, 1],
+                                            {"box": box, "text": text, "precision": 1 / 1024,
+                                             "around": {**AROUND, "outside": True, "distance": distance}})
+    polygon = [v / 4096 for v in square[0] + square[2]]
+    drawn = [x - text[0], y - text[1], x + text[0], y + text[1]]
+    gap = max(polygon[0] - drawn[2], drawn[0] - polygon[2], polygon[1] - drawn[3], drawn[1] - polygon[3])
+    assert gap == pytest.approx(distance, abs=1e-6)
+
+
+def test_outside_polygons_label_kept_after_a_zoom_out_stays_off_the_polygon():
+    """An "Outside polygons" label kept from the last update (not moved
+    unless needed) stays only while its text is still beside the polygon:
+    zooming out the text grows and would reach onto the polygon. The test
+    was inverted: the label was kept just when it lay on the polygon."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const square = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 1 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[1800, 1800], [2300, 1800], [2300, 2200], [1800, 2200]]
+    .map(([x, y]) => ({{ x, y }}))] }} }};
+const state = newLabelState();
+const out = [];
+let perPx = 2 / 4096;
+for (const [step, view] of [[1, [0.3, 0.3, 0.7, 0.7]], [Math.SQRT2, [0.25, 0.25, 0.75, 0.75]],
+                            [1.1, [0.25, 0.25, 0.75, 0.75]], [1.05, [0.25, 0.25, 0.75, 0.75]]]) {{
+  perPx *= step;
+  const text = [30 * perPx, 5 * perPx], box = [32 * perPx, 7 * perPx];
+  box.text = text;
+  const placed = labelPoints([square], view, maplibregl, {{ state, precision: perPx, keepDistance: 24 * perPx,
+    labelBox: () => box, around: {{ anchors: [], distance: 0, outside: true }} }});
+  for (const f of placed.features) {{
+    const [x, y] = f.geometry.coordinates.map((v) => v * 4096);
+    const [tx, ty] = text.map((v) => v * 4096);
+    // How far the text reaches onto the polygon (tile units; <= 0: beside it).
+    const depth = Math.min(x + tx - 1800, 2300 - (x - tx), y + ty - 1800, 2200 - (y - ty));
+    out.push([depth, perPx * 4096]);
+  }}
+}}
+console.log(JSON.stringify(out));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    steps = json.loads(run.stdout)
+    assert len(steps) == 4
+    for depth, pixel in steps:
+        assert depth <= pixel  # at most the 1 px rounding slack
+
+
+@pytest.mark.parametrize("mode", [{}, {"anchor": "pole"}, {"around": {**AROUND, "distance": 0}}])
+def test_labels_whose_margins_alone_meet_do_not_overlap(mode):
+    """QGIS's "Never overlap" compares the bare text: labels side by side
+    with a gap smaller than the two margins round their boxes are all
+    drawn. Every other strip parcel lost its label."""
+    pixel = 4 / 4096
+    strips = [(col, [_square(400 + 134 * col, 1000, 534 + 134 * col, 1640)], {}) for col in range(10)]
+    # Bare text 30 x 12 px in strips 33.5 px wide, with the 2 px margin.
+    placed = _place(strips, [0, 0, 1, 1], {**mode, "precision": pixel, "box": [17 * pixel, 8 * pixel],
+                                           "text": [15 * pixel, 6 * pixel]})
+    assert len(placed) == len(strips)
+    bare = [(fid, x, y, rot, [x - 15 * pixel, y - 6 * pixel, x + 15 * pixel, y + 6 * pixel])
+            for fid, x, y, rot, _box in placed]
+    assert _overlapping(bare) == 0
+
+
+def test_outside_polygons_labels_keep_off_neighbouring_polygons():
+    """"Outside polygons": the layer's other polygons are obstacles, as in
+    QGIS. The label above a wide polygon (its cheapest spot) went over the
+    small polygon just above it."""
+    wide, small = _square(1000, 1000, 1800, 1300), _square(1350, 900, 1450, 970)
+    placed = _place([(1, [wide], {}), (2, [small], {})], [0, 0, 1, 1],
+                    {"box": [0.03, 0.006], "around": {**AROUND, "outside": True, "distance": 0}})
+    label = next(box for (fid, *_rest, box) in placed if fid == 1)
+    shape = [v / 4096 for v in small[0] + small[2]]
+    assert not _overlaps(label, shape)
+
+
+def test_labels_kept_while_moving_are_avoided_by_newcomers():
+    """While the map moves (freeze) the labels already shown stay; a polygon
+    arriving then keeps clear of them ("Never overlap"). It was placed on
+    top of them, and at the next update the label shown first vanished."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const square = (id, x0, y0, x1, y1) => ({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    .map(([x, y]) => ({{ x, y }}))] }} }});
+const options = {{ state: newLabelState(), precision: 0.0002, labelBox: () => [0.05, 0.01] }};
+const a = square(1, 1000, 1000, 1200, 1300), b = square(2, 1250, 1000, 1500, 1350);
+const ids = (out) => out.features.map((f) => f.properties.q2vt_orig_id);
+console.log(JSON.stringify([ids(labelPoints([a], [0, 0, 1, 1], maplibregl, options)),
+  ids(labelPoints([a, b], [0, 0, 1, 1], maplibregl, {{ ...options, freeze: true }}))]));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    alone, moving = json.loads(run.stdout)
+    assert alone == [1] and moving == [1]
+
+
+def test_html_labels_get_a_box():
+    """HTML labels ("format" text-field, one section per style run): measured
+    by their sections (each with its font scale); they had no box, so they
+    were not kept on the screen, clear of other labels or off short lines."""
+    plain = _js("m.layoutBoxes({'text-field': ['get', 't'], 'text-size': 10}, 15, 1)({t: 'Parcel 12'})")
+    fmt = ["format", ["coalesce", ["get", "h0"], ""], {"font-scale": ["to-number", ["get", "s0"], 1]},
+           ["coalesce", ["get", "h1"], ""], {"font-scale": ["to-number", ["get", "s1"], 1]}]
+    same = _js(f"m.layoutBoxes({{'text-field': {json.dumps(fmt)}, 'text-size': 10}}, 15, 1)"
+               "({h0: 'Parcel ', h1: '12'})")
+    assert same == pytest.approx(plain)
+    small = _js(f"m.layoutBoxes({{'text-field': {json.dumps(fmt)}, 'text-size': 10}}, 15, 1)"
+                "({h0: 'Parcel ', h1: '12', s1: 0.5})")
+    assert small[0] == pytest.approx(plain[0] - 2 * 0.6 * 10 / 4) and small[1] == pytest.approx(plain[1])
+    assert _js(f"m.evaluate({json.dumps(fmt)}, 15, {{h0: 'A', h1: 'B'}})") == "AB"
+    # A line label in HTML on a line shorter than the label: no label.
+    script_box = _js(f"m.layoutBoxes({{'text-field': {json.dumps(fmt)}, 'text-size': 10}}, 15, 0.001)"
+                     "({h0: 'Long street ', h1: 'name'})")
+    assert _lines([(1, [[1000, 1000], [1300, 1000]])], [0, 0, 1, 1], {"box": script_box}) == {}
+
+
+def _zoom_chain(anchor, zooms, polygon):
+    """The label of one small polygon (world ring) zoomed in step by step
+    (tiles up to zoom 16, overzoomed above), in screen px from its centroid,
+    with the position kept between the steps."""
+    script = f"""
+import {{ labelPoints, labelPoint, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const ring = {json.dumps(polygon)};
+const [cx, cy] = labelPoint([ring]);
+const tiles = (z) => {{
+  const n = 2 ** z, xs = ring.map((p) => Math.floor(p[0] * n)), ys = ring.map((p) => Math.floor(p[1] * n));
+  const out = [];
+  for (let tx = Math.min(...xs); tx <= Math.max(...xs); tx++) {{
+    for (let ty = Math.min(...ys); ty <= Math.max(...ys); ty++) {{
+      const geometry = ring.map(([x, y]) => ({{ x: Math.round((x * n - tx) * 4096), y: Math.round((y * n - ty) * 4096) }}));
+      out.push({{ _x: tx, _y: ty, _z: z, properties: {{ q2vt_orig_id: 1 }},
+                 _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [geometry] }} }});
+    }}
+  }}
+  return out;
+}};
+const state = newLabelState();
+const out = {json.dumps(zooms)}.map((zoom) => {{
+  const perPx = 1 / (512 * 2 ** zoom);
+  const view = [cx - 300 * perPx, cy - 300 * perPx, cx + 300 * perPx, cy + 300 * perPx];
+  const box = [20 * perPx, 6 * perPx];
+  const [x, y] = labelPoints(tiles(Math.min(16, Math.floor(zoom))), view, maplibregl, {{
+    state, margin: 8 * perPx, tileZoom: Math.min(16, Math.floor(zoom)), precision: perPx,
+    keepDistance: 24 * perPx, labelBox: () => box, anchor: {json.dumps(anchor[0])},
+    orient: {json.dumps(anchor[1])}, rotationField: {json.dumps(anchor[1] == "free" and "q2vt_rot" or None)},
+  }}).features[0].geometry.coordinates;
+  return [(x - cx) / perPx, (y - cy) / perPx];
+}});
+console.log(JSON.stringify(out));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+@pytest.mark.parametrize("anchor", [("centroid", "horizontal"), ("pole", "horizontal"), ("pole", "free")])
+def test_small_polygon_label_labelled_zoomed_out_stays_centred_zooming_in(anchor):
+    """A polygon smaller than its label is labelled once wholly on the screen
+    (zoom 13 for 30 x 22 m). That point, from coarse z13 tiles, was kept as
+    the user zoomed in (within 24 px / 80 % of the room): its rounding error
+    doubled with each zoom, 16 px off the centroid at zoom 22. Finer tiles
+    now refine it; above the tiles' max zoom (16) it stays put."""
+    metre = 1 / (40075016.686 * math.cos(math.radians(47)))  # world units at latitude 47
+    x0, y0 = 0.5537123456, 0.3561234567
+    rectangle = [[x0, y0], [x0 + 30 * metre, y0], [x0 + 30 * metre, y0 + 22 * metre], [x0, y0 + 22 * metre]]
+    chain = _zoom_chain(anchor, [13, 15, 16.5, 18, 20, 22], rectangle)
+    for zoom, (dx, dy) in zip([13, 15, 16.5, 18, 20, 22], chain):
+        # Zoom 22: the z16 tiles' own rounding (1/8 px at z16) is 8 px there.
+        assert math.hypot(dx, dy) < (1.5 if zoom < 22 else 3), (zoom, dx, dy)
+    # A triangle: the centroid of the label point's polygon (labelPoint kept
+    # world units: the cross products of a small polygon cancelled out).
+    triangle = [[x0, y0], [x0 + 30 * metre, y0], [x0 + 10 * metre, y0 + 22 * metre]]
+    if anchor[0] == "centroid":
+        for zoom, (dx, dy) in zip([13, 15, 16.5, 18], _zoom_chain(anchor, [13, 15, 16.5, 18], triangle)):
+            assert math.hypot(dx, dy) < 1.5, (zoom, dx, dy)
+
+
+def test_outside_polygons_update_keeping_every_label_skips_the_candidates():
+    """An update that keeps every "Outside polygons" label (the view did not
+    change) checked each label against all its 64 candidates (each tested
+    against the polygon and its neighbours) only to find one near it: as
+    slow as placing them anew (about a second for 2000 polygons). Kept
+    labels are now checked on their own, and the labels placed so far are
+    looked up in a grid instead of a scan per polygon."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const perPx = 1 / 1024, n = 45, cell = 4096 / n, features = [];
+for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {{
+  const x0 = c * cell + cell * 0.5, y0 = r * cell + cell * 0.5, s = cell * 0.2;
+  const ring = Array.from({{ length: 40 }}, (_, k) => ({{ x: x0 + s * Math.cos(Math.PI * k / 20),
+                                                       y: y0 + s * Math.sin(Math.PI * k / 20) }}));
+  features.push({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: r * n + c }},
+    _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring] }} }});
+}}
+const box = [14 * perPx, 6 * perPx];
+box.text = [12 * perPx, 4 * perPx];
+const options = {{ precision: perPx, keepDistance: 24 * perPx, labelBox: () => box,
+                  around: {{ anchors: [], distance: 2 * perPx, outside: true }} }};
+const where = (out) => JSON.stringify(out.features.map((f) => [f.id, ...f.geometry.coordinates]));
+let first = Infinity, kept = Infinity, same = true, count = 0;
+for (let run = 0; run < 3; run++) {{
+  const state = newLabelState();
+  let t = performance.now();
+  const a = labelPoints(features, [0, 0, 1, 1], maplibregl, {{ ...options, state }});
+  first = Math.min(first, performance.now() - t);
+  t = performance.now();
+  const b = labelPoints(features, [0, 0, 1, 1], maplibregl, {{ ...options, state }});
+  kept = Math.min(kept, performance.now() - t);
+  same = same && where(a) === where(b);
+  count = a.features.length;
+}}
+console.log(JSON.stringify({{ first, kept, same, count }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    assert result["same"] and result["count"] > 1500
+    # Placing builds the candidates; keeping them all must cost much less
+    # (it cost as much as placing them; now about a third).
+    assert result["kept"] < 0.7 * result["first"], result
+
+
+def test_outside_polygons_label_kept_zooming_in_stays_near_the_polygon():
+    """A kept "Outside polygons" label stays only while its text is no
+    farther from the polygon than the label distance plus the keep distance
+    (as near a candidate as it was kept before): zooming in moves it away
+    from the polygon, so it is placed anew beside it (QGIS: the label
+    distance), not kept 30-70 px off it."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const s = 0.05 * 4096, c = 2048;
+const ring = [[c - s / 2, c - s / 2], [c + s / 2, c - s / 2], [c + s / 2, c + s / 2], [c - s / 2, c + s / 2]];
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 1 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring.map(([x, y]) => ({{ x, y }}))] }} }};
+// The text box's gap to the polygon, in px.
+function gap(state, k) {{
+  const perPx = 1 / (1024 * k), h = 0.5 / k;
+  const text = [60 * perPx, 8 * perPx], box = [62 * perPx, 10 * perPx];
+  box.text = text;
+  const out = labelPoints([feature], [0.5 - h, 0.5 - h, 0.5 + h, 0.5 + h], maplibregl, {{
+    state, precision: perPx, keepDistance: 24 * perPx, labelBox: () => box,
+    around: {{ anchors: [], distance: 2 * perPx, outside: true }} }});
+  const [x, y] = out.features[0].geometry.coordinates;
+  const [x0, x1] = [(c - s / 2) / 4096, (c + s / 2) / 4096];
+  return Math.max(x0 - x - text[0], x - text[0] - x1, x0 - y - text[1], y - text[1] - x1) / perPx;
+}}
+const chain = newLabelState();
+const steps = [1, 1.5, 2, 3, 4, 6, 8].map((k) => gap(chain, k));
+const jumps = [4, 8].map((k) => {{ const state = newLabelState(); gap(state, 1); return gap(state, k); }});
+console.log(JSON.stringify({{ steps, jumps }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    # Kept while within 2 + 24 px of the polygon (then placed anew at 2 px).
+    assert all(1.5 <= gap <= 26.5 for gap in result["steps"]), result
+    assert min(result["steps"][1:]) < 2.5, result
+    # Zoomed in 2 or 3 levels at once: placed anew beside the polygon.
+    assert all(abs(gap - 2) < 0.5 for gap in result["jumps"]), result
+
+
+@pytest.mark.parametrize("winding", ["clockwise", "anticlockwise"])
+@pytest.mark.parametrize("hole", [False, True])
+def test_outside_polygons_candidates_beside_a_polygon_with_a_slit_narrower_than_a_pixel(winding, hole):
+    """"Outside polygons" on a parcel (sides of many short edges) with a
+    slit narrower than a pixel, whose two sides are the ring's longest
+    edges: the outer side of the ring was found by one even-odd test
+    beside its longest edge, which crossed the slit, so every candidate fell
+    on the parcel and the label was lost. Either winding, also with a hole
+    (whose outer side is towards its own inside)."""
+    script = f"""
+import {{ outsideCandidates }} from {json.dumps('file://' + MODULE)};
+const perPx = 1 / 1024, c = 0.5, s = 80 * perPx, w = 0.5 * perPx, depth = 150 * perPx;
+const corners = [[c - s, c - s], [c - w / 2, c - s], [c - w / 2, c - s + depth], [c + w / 2, c - s + depth],
+                 [c + w / 2, c - s], [c + s, c - s], [c + s, c + s], [c - s, c + s]];
+let ring = [];
+corners.forEach((a, i) => {{
+  const b = corners[(i + 1) % corners.length], pieces = i === 1 || i === 3 ? 1 : 8;
+  for (let k = 0; k < pieces; k++) ring.push([a[0] + (b[0] - a[0]) * k / pieces, a[1] + (b[1] - a[1]) * k / pieces]);
+}});
+if ({json.dumps(winding)} === "anticlockwise") ring = ring.reverse();
+const rings = [ring];
+// A hole wound the other way, wide enough for a label in it.
+const h = 70 * perPx, hx = c + 400 * perPx;
+if ({json.dumps(hole)}) {{
+  const outer = [[hx - 2 * h, c - 2 * h], [hx + 2 * h, c - 2 * h], [hx + 2 * h, c + 2 * h], [hx - 2 * h, c + 2 * h]];
+  const inner = [[hx - h, c - h], [hx - h, c + h], [hx + h, c + h], [hx + h, c - h]];
+  rings.push(...({json.dumps(winding)} === "anticlockwise" ? [outer.reverse(), inner.reverse()] : [outer, inner]));
+}}
+const text = [30 * perPx, 6 * perPx], half = [32 * perPx, 8 * perPx];
+const candidates = outsideCandidates(rings, rings, text, half, 2 * perPx, perPx, [], [0, 0, 1, 1]);
+const onParcel = candidates.filter(([x, y]) => Math.abs(x - c) < s && Math.abs(y - c) < s).length;
+const inHole = candidates.filter(([x, y]) => Math.abs(x - hx) < h && Math.abs(y - c) < h).length;
+console.log(JSON.stringify({{ count: candidates.length, onParcel, inHole }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    assert result["count"] >= 40 and result["onParcel"] == 0, result
+    if hole:
+        assert result["inHole"] > 0, result
