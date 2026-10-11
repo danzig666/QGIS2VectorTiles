@@ -1095,6 +1095,13 @@ class RulesExporter:
         singleparted = self._run_alg_safe(
             "multiparttosingleparts", "native", INPUT=orig_id
         )
+        if geometry_type in (1, 2):  # lines and polygons (visible-label datasets)
+            # The part of its feature each single part is, numbered here,
+            # where the order is that of the split: later steps (a filter
+            # writing a memory layer) renumber the feature ids.
+            singleparted = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=singleparted, FIELD_NAME=PART_FIELD,
+                FIELD_TYPE=0, FORMULA=f'@row_number - "{_FIELD_PREFIX}_orig_id"')
         self._check_cancel()
         if keep_vertices:
             self._run_alg_safe("savefeatures", "native", INPUT=singleparted, OUTPUT=dst_path)
@@ -2761,13 +2768,14 @@ class RulesExporter:
             tmp = self._open(current_input, "tmp")
             if tmp.isValid():
                 for f in tmp.fields():
-                    if 'ogc_fid' not in f.name().lower():
+                    if 'ogc_fid' not in f.name().lower() and f.name() != PART_FIELD:
                         mapping.append((f.type(), f'"{f.name()}"', f.name()))
 
 
         mapping.append(
             (6, f'"{_FIELD_PREFIX}_orig_id"', f"{_FIELD_PREFIX}_orig_id")
         )
+        source_fields = self._open(current_input, "fields").fields()
         if grp.visible_polygons:
             # Each part of a multi-part feature (the base datasets are single
             # parts): the viewer labels every part ("Label every part") or
@@ -2776,8 +2784,11 @@ class RulesExporter:
             # does not); the parts of one feature follow each other, so the
             # value mostly repeats from feature to feature (a small tile
             # value table, unlike the unique id).
-            mapping.append((4, f'$id - "{_FIELD_PREFIX}_orig_id"', PART_FIELD))
-        source_fields = self._open(current_input, "fields").fields()
+            # Numbered in the base layer (the same in every chain mode: a
+            # filter writing a memory layer renumbers $id); $id only for a
+            # base layer without the field.
+            mapping.append((4, f'"{PART_FIELD}"' if source_fields.indexFromName(PART_FIELD) >= 0
+                            else f'$id - "{_FIELD_PREFIX}_orig_id"', PART_FIELD))
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
         if source_fields.indexFromName(FEATURE_KEY_FIELD) >= 0:
