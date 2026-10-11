@@ -26,13 +26,13 @@ a full web viewer · no map server, database or Docker
 > uninstall *QGIS2VectorTiles (fork)* in *Plugins → Manage and Install Plugins*. Settings saved
 > in your projects, the window position and saved keys carry over.
 
-<a href="docs/media/qwebmap-showcase.mp4">
+<a href="https://danzig666.github.io/QGIS2VectorTiles/">
 <kbd>
 <img width="840" alt="QWebMap showcase: a richly styled QGIS project in QGIS (left) and as the published web map (right) at the same views: rule-based roads with casings, hatched and point-pattern fills, a curved arrow, shapeburst water, lineburst rivers with flow arrows, SVG icons and curved, haloed labels; then a swipe between QGIS and the web map" src="docs/images/qwebmap-showcase.gif" />
 </kbd>
 </a>
 
-<a href="docs/media/qwebmap-showcase.mp4"><b>▶ Watch the full video (MP4, 1080p)</b></a>
+<a href="https://danzig666.github.io/QGIS2VectorTiles/"><b>🗺️ Try the live demo map</b></a> &nbsp;·&nbsp; <a href="https://danzig666.github.io/QGIS2VectorTiles/#video"><b>▶ Watch the full video (1080p)</b></a>
 
 <sub>Demo data: Swellendam from the <a href="https://github.com/qgis/QGIS-Training-Data">QGIS training data</a> (GPL-2.0, from OpenStreetMap).</sub>
 
