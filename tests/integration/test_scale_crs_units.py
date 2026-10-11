@@ -426,3 +426,34 @@ def test_screen_unit_translation_points_down_the_screen(plugin, tmp_path):
         per_px = EARTH / 512 / 2 ** zoom
         assert (moved.x() - CX) / per_px == pytest.approx(15, rel=1e-6)
         assert (moved.y() - CY) / per_px == pytest.approx(-15, rel=1e-6)
+
+
+@pytest.mark.parametrize("crs", ["EPSG:4326", "EPSG:3857"])
+def test_reference_scale_screen_generator_is_round_on_the_web(plugin, tmp_path, crs):
+    """A mm generator under a reference scale is evaluated at that scale
+    (constant map units per mm), round on the painter like QGIS draws it.
+    In a degree CRS it was built round in degrees: 1/cos(latitude) taller
+    than wide on the web map."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.diagnostics import DiagnosticCollector  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.units import LengthConverter, MapUnitContext  # pylint: disable=import-error
+    point = f"POINT({LON} {LAT})" if crs == "EPSG:4326" else f"POINT({CX} {CY})"
+    layer = _layer(str(tmp_path / "g.gpkg"), "Point", [point], crs=crs)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([
+        _generator("buffer($geometry, 3)", Qgis.RenderUnit.Millimeters)])))
+    layer.renderer().setReferenceScale(10000)
+    if crs == "EPSG:4326":
+        _geographic_project(layer)
+        context = MapUnitContext.for_project(False, "degrees", LAT)
+    else:
+        reset_project(layer)
+        context = MapUnitContext.for_project(True, "meters", LAT)
+    rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           lengths=LengthConverter(map_context=context)).flatten_all_rules()
+    assert rules
+    # 6 mm across at 1:10000: 60 m of QGIS's scale, in Mercator units.
+    across = 60.0 / context.scale_metres_per_map_unit * context.mercator_per_map_unit
+    for rule in rules:
+        box = _generated(rule, QgsGeometry.fromWkt(f"POINT({CX} {CY})")).boundingBox()
+        assert box.width() == pytest.approx(across, rel=0.02)
+        assert box.height() == pytest.approx(box.width(), rel=0.02)

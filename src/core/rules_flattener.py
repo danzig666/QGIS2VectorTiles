@@ -247,10 +247,9 @@ class RulesFlattener:
         reference = renderer.referenceScale() if renderer is not None else -1.0
         if not reference or reference <= 0:
             return
-        project_crs = QgsProject.instance().crs()
         converter = ReferenceScaleConverter(
             reference, self.lengths.map_context.scale_metres_per_map_unit,
-            project_crs.authid() if project_crs.isValid() else "", layer.crs().authid())
+            self.lengths.map_context.mercator_per_map_unit, layer.crs().authid())
         apply_to_rules(rule_system, rule_type, converter)
         if converter.unhandled:
             self.diagnostics.add(

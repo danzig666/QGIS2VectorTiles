@@ -104,16 +104,17 @@ class ReferenceScaleConverter:
     """Rewrite screen-unit sizes as map units at ``reference_scale``.
 
     ``scale_metres_per_map_unit``: metres QGIS's scale calculator counts per
-    project map unit (MapUnitContext). ``unhandled`` collects what keeps its
+    project map unit and ``mercator_per_map_unit`` the Web Mercator units
+    of one (MapUnitContext). ``unhandled`` collects what keeps its
     screen size and ``map_unit_sizes`` the map-unit sizes (for one
     diagnostic per layer).
     """
 
     def __init__(self, reference_scale: float, scale_metres_per_map_unit: float = 1.0,
-                 project_crs: str = "", layer_crs: str = ""):
+                 mercator_per_map_unit: float = 1.0, layer_crs: str = ""):
         self.reference_scale = float(reference_scale)
         self.scale_metres_per_map_unit = float(scale_metres_per_map_unit) or 1.0
-        self.project_crs = project_crs
+        self.mercator_per_map_unit = float(mercator_per_map_unit) or 1.0
         self.layer_crs = layer_crs
         self.unhandled: List[str] = []
         # Map-unit sizes: QgsRenderContext::convertToPainterUnits scales
@@ -250,11 +251,16 @@ class ReferenceScaleConverter:
     def _generator(self, layer) -> None:
         """A generator in screen units: its expression evaluated on the
         geometry scaled to those units at the reference scale (constant map
-        units per unit), then a map-unit generator."""
+        units per unit), then a map-unit generator. The screen frame is Web
+        Mercator, as the web map draws it: in a degree CRS a shape round in
+        degrees came out 1/cos(latitude) taller there."""
         per_unit = self.map_units_per(layer.units())
         if per_unit is not None:
+            # (A layer CRS without an id: its own frame.)
+            frame, scale = ("EPSG:3857", self.mercator_per_map_unit) if self.layer_crs \
+                else ("", 1.0)
             layer.setGeometryExpression(in_screen_units(
-                layer.geometryExpression(), per_unit, self.project_crs, self.layer_crs))
+                layer.geometryExpression(), per_unit * scale, frame, self.layer_crs))
             layer.setUnits(Qgis.RenderUnit.MapUnits)
 
     def _effect(self, effect, what: str) -> None:
