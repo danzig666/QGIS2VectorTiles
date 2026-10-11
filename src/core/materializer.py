@@ -208,6 +208,9 @@ class SymbolMaterializer:
         """Return replacement rules for ``flat_rule`` (whose symbol holds only
         ``layer``), or None when the component needs no rewrite."""
         kind = layer.layerType()
+        limited = self._split_map_unit_limits(flat_rule, layer)
+        if limited is not None:
+            return limited
         if kind in ("MarkerLine", "HashLine"):
             per_zoom = self._split_scale_dependent(flat_rule, layer)
             if per_zoom is not None:
@@ -325,6 +328,137 @@ class SymbolMaterializer:
             return None
         parts = []
         for rule, clone, _ in groups:
+            result = self.materialize(rule, clone)
+            parts.extend(result if result is not None else [rule])
+        return parts
+
+    # Map-unit lengths of materialized patterns and intervals whose
+    # QgsMapUnitScale (min/max size in mm, scale range) QGIS applies at
+    # every scale: (getter, data-defined property that overrides it).
+    _LIMITED_LENGTHS = {
+        "LinePatternFill": (("distance", "PropertyLineDistance"), ("offset", "PropertyOffset")),
+        "PointPatternFill": (("distanceX", "PropertyDistanceX"), ("distanceY", "PropertyDistanceY"),
+                             ("displacementX", "PropertyDisplacementX"),
+                             ("displacementY", "PropertyDisplacementY"),
+                             ("offsetX", "PropertyOffsetX"), ("offsetY", "PropertyOffsetY")),
+        "MarkerLine": (("interval", "PropertyInterval"), ("offsetAlongLine", "PropertyOffsetAlongLine"),
+                       ("offset", "PropertyOffset")),
+        "HashLine": (("interval", "PropertyInterval"), ("offsetAlongLine", "PropertyOffsetAlongLine"),
+                     ("offset", "PropertyOffset")),
+        "SimpleLine": (("offset", "PropertyOffset"),),
+    }
+
+    @staticmethod
+    def _brush_point_pattern(layer) -> bool:
+        """Whether QGIS draws a point pattern with its pattern image brush
+        (``QgsPointPatternFillSymbolLayer::startRender`` on screen), not
+        marker by marker."""
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        marker = layer.subSymbol()
+        return not (
+            (marker is not None and marker.hasDataDefinedProperties())
+            or any(props.isActive(k) for k in (P.PropertyMarkerClipping, P.PropertyRandomOffsetX,
+                                               P.PropertyRandomOffsetY, P.PropertyAngle))
+            or int(layer.clipMode()) != int(Qgis.MarkerClipMode.Shape)
+            or layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY()
+            or layer.angle())
+
+    def _split_map_unit_limits(self, flat_rule: FlattenedRule, layer):
+        """Map-unit lengths limited by their QgsMapUnitScale
+        (``QgsRenderContext::convertToPainterUnits``: the scale range clamps
+        the map units per pixel, then the size is clamped to min/max mm):
+        between the limits a length follows the map, beyond them it is
+        constant on screen. The rule is split at the zooms where a limit
+        starts or ends; each part holds the plain map length (no limits) or
+        the constant screen length in millimetres, and is materialized like
+        any other. None when no such length."""
+        from qgis.core import QgsMapUnitScale  # pylint: disable=import-outside-toplevel
+        props = layer.dataDefinedProperties()
+        limits = {}
+        for name, key in self._LIMITED_LENGTHS.get(layer.layerType(), ()):
+            try:
+                value = float(getattr(layer, name)())
+                unit = getattr(layer, f"{name}Unit")()
+                scale = getattr(layer, f"{name}MapUnitScale")()
+                if name == "distanceY" and self._brush_point_pattern(layer):
+                    # QgsPointPatternFillSymbolLayer::applyPattern converts
+                    # the row distance with the Y displacement's scale.
+                    scale = layer.displacementYMapUnitScale()
+            except (AttributeError, TypeError):
+                continue
+            if abs(value) <= 1e-12 or normalize_unit(unit) != "map" or not _limited(scale) or \
+                    props.isActive(getattr(QgsSymbolLayer.Property, key)):
+                continue
+            limits[name] = (value, scale)
+        low, high = self._zoom_range(flat_rule)
+        if not limits or low > high:
+            return None
+        top_scale = ZoomLevels.zoom_to_scale(0) or 0.0
+        px_per_unit0 = 1.0 / (self._map_units_per_mm(flat_rule, 0.0) * 25.4 / 96.0)
+        px_per_mm = 96.0 / 25.4
+
+        def bounds(value, scale):
+            """(first zoom, last zoom, min px, max px) of a length's limits."""
+            first = math.log2(top_scale / scale.minScale) if scale.minScale and top_scale \
+                else -math.inf
+            last = math.log2(top_scale / scale.maxScale) if scale.maxScale and top_scale \
+                else math.inf
+            return (first, last, scale.minSizeMM * px_per_mm if scale.minSizeMMEnabled else None,
+                    scale.maxSizeMM * px_per_mm if scale.maxSizeMMEnabled else None)
+
+        def regime(value, scale, zoom):
+            """("map",): the length follows the map at ``zoom``; ("mm", v):
+            QGIS draws it v millimetres long whatever the zoom nearby."""
+            first, last, min_px, max_px = bounds(value, scale)
+            px = value * px_per_unit0 * 2.0 ** min(max(zoom, first), last)
+            clamped = px
+            if min_px is not None:
+                clamped = max(clamped, min_px)
+            if max_px is not None:
+                clamped = min(clamped, max_px)
+            if first < zoom < last and clamped == px:
+                return ("map",)
+            return ("mm", round(clamped / px_per_mm, 9))
+
+        visible = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
+            ZoomInterval(float(low), None))
+        start, end = visible.min_zoom, visible.max_zoom
+        cuts = {start}
+        for value, scale in limits.values():
+            first, last, min_px, max_px = bounds(value, scale)
+            cuts |= {first, last}
+            for px in (min_px, max_px):
+                if px and value > 0:
+                    cuts.add(math.log2(px / (value * px_per_unit0)))
+        cuts = sorted(z for z in cuts if math.isfinite(z) and z >= start - 1e-9
+                      and (end is None or z < end - 1e-9))
+        pieces = []
+        for index, zoom in enumerate(cuts):
+            stop = cuts[index + 1] if index + 1 < len(cuts) else end
+            middle = (zoom + stop) / 2.0 if stop is not None else zoom + 0.5
+            state = tuple(regime(value, scale, middle) for value, scale in limits.values())
+            if pieces and pieces[-1][2] == state:
+                pieces[-1][1] = stop
+            else:
+                pieces.append([zoom, stop, state])
+        parts = []
+        for index, (zoom, stop, state) in enumerate(pieces):
+            rule = flat_rule.derive()
+            first = min(max(low, int(math.floor(zoom + 1e-9))), high)
+            last = high if stop is None else max(first, min(high, int(math.ceil(stop - 1e-9)) - 1))
+            rule.set_attr("o", first)
+            rule.set_attr("i", last)
+            rule.visibility = visible.intersect(ZoomInterval(zoom, stop))
+            if len(pieces) > 1:
+                rule.set_attr("u", index)
+            clone = rule.rule.symbol().symbolLayer(0)
+            for name, kind in zip(limits, state):
+                setter = f"set{name[:1].upper()}{name[1:]}"
+                getattr(clone, f"{setter}MapUnitScale")(QgsMapUnitScale())
+                if kind[0] == "mm":
+                    getattr(clone, setter)(kind[1])
+                    getattr(clone, f"{setter}Unit")(Qgis.RenderUnit.Millimeters)
             result = self.materialize(rule, clone)
             parts.extend(result if result is not None else [rule])
         return parts
@@ -1290,6 +1424,21 @@ class SymbolMaterializer:
             return None
         symbol = marker.clone()
         rules = []
+        visibility = flat_rule.visibility
+        if visibility is None or visibility.max_zoom is None or visibility.max_zoom > high + 1:
+            # Beyond the archive's last zoom the pattern stays a (true size)
+            # texture: the last band's map spacing spread the markers apart
+            # as the map overzoomed.
+            over = flat_rule.derive()
+            over.set_attr("o", high)
+            over.set_attr("i", high)
+            over.visibility = (visibility or ZoomInterval(float(low), None)).intersect(
+                ZoomInterval(float(high + 1), None))
+            last = zoom_rules[-1]
+            last.visibility = (last.visibility or ZoomInterval(float(high), None)).intersect(
+                ZoomInterval(float(high), float(high + 1)))
+            if not over.visibility.is_empty:
+                rules.append(over)
         for index, rule in enumerate(zoom_rules):
             for band, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
                 per_mm = self._map_units_per_mm(flat_rule, zoom)

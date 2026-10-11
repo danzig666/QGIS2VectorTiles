@@ -1100,6 +1100,7 @@ def test_screen_point_pattern_markers_are_whole_and_in_qgis_order(plugin, tmp_pa
     from q2vt_plugin.src.core.rules_exporter import RulesExporter
     from fidelity import materialize as mat
     from fidelity.diagnostics import DiagnosticCollector
+    from fidelity.model import ZoomInterval
     monkeypatch.setattr(mat, "PIECE_CELLS", 4)  # several pieces
     layer = _layer("Polygon", ["POLYGON((-100 -90, 95 -90, 95 80, -100 80, -100 -90))"],
                    str(tmp_path / "p.gpkg"))
@@ -1115,7 +1116,12 @@ def test_screen_point_pattern_markers_are_whole_and_in_qgis_order(plugin, tmp_pa
     reset_project(layer)
     diags = DiagnosticCollector()
     rules = RulesFlattener(16, 16, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    # Beyond the archive's last zoom: the true-size texture.
+    over = [r for r in rules if r.recipe is None]
+    assert len(over) == 1 and over[0].visibility == ZoomInterval(17.0, None)
+    rules = [r for r in rules if r.recipe is not None]
     assert len(rules) == 8 and all(r.recipe.param("ordered") for r in rules)  # eighths of z16
+    assert max(r.visibility.max_zoom for r in rules) == 17.0
     assert {r.z_order for r in rules} == {"source"}
     utils = tmp_path / "utils"
     utils.mkdir()
@@ -1497,3 +1503,105 @@ def test_replaced_symbol_layer_leaves_no_dangling_wrapper(plugin):
     assert symbol.symbolLayer(0).layerType() == "MarkerLine"
     assert sip.ispyowned(held) and not sip.isdeleted(held)
     assert held.layerType() == "HashLine"
+
+
+def _limits(kind):
+    from qgis.core import QgsMapUnitScale
+    if kind == "range":
+        return QgsMapUnitScale(50000, 5000)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    return limits
+
+
+def _qgis_px(value, kind, zoom):
+    """QgsRenderContext::convertToPainterUnits of a limited map-unit length
+    (Web Mercator project, 96 dpi)."""
+    from fidelity.zoom import scale_to_zoom
+    if kind == "range":
+        zoom = min(max(zoom, scale_to_zoom(50000)), scale_to_zoom(5000))
+    px = value * 512 * 2 ** zoom / 40075016.68557849
+    return min(max(px, 96 / 25.4), 4 * 96 / 25.4) if kind == "mm" else px
+
+
+def _limited_spacing(plugin, layer, recipe_param, getter, zooms, kind):
+    """The spacing the export draws at each zoom (one visible component,
+    materialized in map units or kept in millimetres) against QGIS's."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    reset_project(layer)
+    rules = RulesFlattener(0, 16, "/tmp", QgsProcessingFeedback(),
+                           DiagnosticCollector()).flatten_all_rules()
+    for zoom in zooms:
+        visible = [r for r in rules if r.visibility.contains(zoom)
+                   and (r.recipe is None or r.recipe.param(recipe_param) is not None)]
+        assert len(visible) == 1, (zoom, [r.output_dataset for r in visible])
+        rule = visible[0]
+        if rule.recipe is not None:
+            drawn = rule.recipe.param(recipe_param) * 512 * 2 ** zoom / 40075016.68557849
+        else:
+            # A texture: in millimetres, or in plain map units (no limits).
+            symbol_layer = rule.rule.symbol().symbolLayer(0)
+            scale = getattr(symbol_layer, f"{getter}MapUnitScale")()
+            assert not (scale.minScale or scale.maxScale or scale.minSizeMMEnabled
+                        or scale.maxSizeMMEnabled)
+            drawn = getattr(symbol_layer, getter)()
+            if getattr(symbol_layer, f"{getter}Unit")() == Qgis.RenderUnit.Millimeters:
+                drawn *= 96 / 25.4
+            else:
+                drawn *= 512 * 2 ** zoom / 40075016.68557849
+        # Screen spacings are materialized per eighth of a zoom (+-4.5 %).
+        assert drawn == pytest.approx(_qgis_px(15, kind, zoom), rel=0.05), (zoom, rule.output_dataset)
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+def test_map_unit_hatch_spacing_limits_match_qgis(plugin, tmp_path, kind):
+    """A map-unit hatch with min/max spacing or a scale range: QGIS keeps the
+    spacing between the limits; the hatch kept the plain map spacing (5x
+    too sparse when zoomed in, a smear when zoomed out)."""
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "hatch.gpkg"))
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(45)
+    lp.setDistance(15)
+    lp.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    lp.setDistanceMapUnitScale(_limits(kind))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([lp])))
+    _limited_spacing(plugin, layer, "spacing", "distance",
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind)
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+def test_map_unit_marker_interval_limits_match_qgis(plugin, tmp_path, kind):
+    """A map-unit marker interval with min/max size or a scale range: the
+    markers were spaced by the plain map interval at every zoom."""
+    layer = _layer("LineString", LINES, str(tmp_path / "ml.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    ml.setInterval(15)
+    ml.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    ml.setIntervalMapUnitScale(_limits(kind))
+    ml.setSubSymbol(_marker(Qgis.MarkerShape.Triangle, 6))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    _limited_spacing(plugin, layer, "interval", "interval",
+                     (6, 12.2, 14.5, 15.5, 16.2, 16.5, 17.5, 19, 22), kind)
+
+
+def test_point_pattern_distance_limits_match_qgis(plugin, tmp_path):
+    """A point pattern drawn marker by marker (clip mode "centroid within")
+    with min/max distances: QGIS limits both distances, the grid kept the
+    plain map distances; beyond the archive's last zoom the screen grid
+    stays a true-size texture."""
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "pp.gpkg"))
+    pp = QgsPointPatternFillSymbolLayer()
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(15)
+        getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+        getattr(pp, f"set{name}MapUnitScale")(_limits("mm"))
+    pp.setClipMode(Qgis.MarkerClipMode.CentroidWithin)
+    pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 3))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
+    _limited_spacing(plugin, layer, "dx", "distanceX", (12.2, 15.5, 16.5, 17.5, 19, 22), "mm")
