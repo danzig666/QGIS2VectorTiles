@@ -184,6 +184,41 @@ def test_hash_line_converted_to_markers(plugin, tmp_path):
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.08
 
 
+def _polygon_offset_markers(plugin, tmp_path, line):
+    tmp_path = tmp_path / line.layerType()
+    tmp_path.mkdir()
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "po.gpkg"))
+    line.setInterval(3)
+    line.setOffset(1.5)
+    line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    return _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+
+
+def test_screen_offset_hashes_on_polygons_are_placed_per_zoom(plugin, tmp_path):
+    """Hashes on a polygon outline with a millimetre interval and offset:
+    QGIS buffers each ring by the offset (holes grow, exteriors shrink) and
+    spaces the hashes on screen. A marker line was placed per zoom, at
+    QGIS's positions, a hashed line drawn natively along the unbuffered
+    rings at all zooms, without a report."""
+    hashes = QgsHashedLineSymbolLayer()
+    hashes.subSymbol().symbolLayer(0).setColor(QColor("black"))
+    markers = QgsMarkerLineSymbolLayer()
+    markers.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    _, rules, diags = _polygon_offset_markers(plugin, tmp_path, hashes)
+    _, marker_rules, _ = _polygon_offset_markers(plugin, tmp_path, markers)
+
+    def placed(found):
+        return sorted((r.get_attr("o"), r.visibility.min_zoom, r.recipe.params) for r in found
+                      if r.recipe is not None and r.recipe.kind == "marker_points")
+    assert len({zoom for zoom, _, _ in placed(rules)}) > 3
+    assert placed(rules) == placed(marker_rules)  # the same positions as the markers'
+    native = [r for r in rules if r.recipe is not None and r.recipe.kind == "polygon_offset"]
+    assert all(r.visibility.min_zoom >= 17 for r in native)  # beyond the tiles only
+    assert not [d for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+                if "polygon outline markers" in d.message]
+
+
 def _hash_line(placements):
     hl = QgsHashedLineSymbolLayer()
     hl.setPlacements(placements)

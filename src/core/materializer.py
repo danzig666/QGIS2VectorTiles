@@ -870,9 +870,9 @@ class SymbolMaterializer:
             placements = _flag_names(layer.placements()) if hasattr(layer, "placements") else set()
             if placements & mat.POINT_PLACEMENTS:
                 return None
-            if layer.layerType() == "MarkerLine" and (self._exact_interval(layer)
-                                                      or self._zoom_interval(layer)):
-                return None  # exact interval markers (see _marker_line)
+            if layer.layerType() in ("MarkerLine", "HashLine") and (
+                    self._exact_interval(layer) or self._zoom_interval(layer)):
+                return None  # exact interval markers or hashes (see _marker_line)
         crs = self.project_crs or flat_rule.layer.crs().authid()
         rule = flat_rule.derive()
         clone = rule.rule.symbol().symbolLayer(0)
@@ -887,6 +887,11 @@ class SymbolMaterializer:
                 bands = self._screen_polygon_offset(flat_rule, layer, params)
                 if bands is not None:
                     return bands
+            else:
+                self._report("Q2VT_MARKER_PLACEMENT_APPROX",
+                             "Screen-unit offset of polygon outline markers: drawn by the "
+                             "browser along each ring (QGIS buffers each ring, holes outwards).",
+                             flat_rule)
             params.append(("rhr", True))
         rule.recipe = mat.Recipe("polygon_offset", params=tuple(params))
         rule.set_attr("m", 1)
