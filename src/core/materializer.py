@@ -50,7 +50,7 @@ from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
-from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, physical_factor, normalize_unit, MM, PERCENT
 from .fidelity.zoom import WEB_MERCATOR_TOP_SCALE
 
@@ -3128,9 +3128,13 @@ class SymbolMaterializer:
             symbol = QgsFillSymbol([fill])
             symbol.setOpacity(flat_rule.rule.symbol().opacity())
             rules.append(self._with_symbol(inner, symbol, 2, 1))
+            # A limit of the overzoomed tiles (bands under one unit of their
+            # grid cannot be drawn), not of the conversion: noted, not a loss
+            # that fails a Strict export.
             self._report("Q2VT_GRADIENT_APPROXIMATE",
                          "Shapeburst bands narrower than the last tiles' geometry grid (far past "
-                         "the last tile zoom) are drawn in the inner colour.", flat_rule)
+                         "the last tile zoom) are drawn in the inner colour.", flat_rule,
+                         severity=Severity.INFO)
         return rules
 
     def _hatch(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:

@@ -54,12 +54,13 @@ def _polygon_layer(path, clockwise):
 
 
 def _compare(tmp_path, layer, metric="near", center=CENTER, zoom_range=(15, 17), zooms=None,
-             before=(), zoom=ZOOM, prepare=None):
+             before=(), zoom=None, prepare=None):
     """Export ``layer`` with tile zooms ``zooms`` (or ``zoom_range``) and
     capture QGIS and the browser at ``zoom`` (``prepare(export_dir)``
     first, when given); ``before``: view zooms shown first in the same page
     (one session)."""
     zoom_range = zooms or zoom_range
+    zoom = ZOOM if zoom is None else zoom  # read now: tests patch the module's ZOOM
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
     reset_project(layer)
     half = SIZE / 2 * gallery.EARTH / (512 * 2 ** zoom)
