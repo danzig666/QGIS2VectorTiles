@@ -57,6 +57,12 @@ def map_units_per_mm(zoom: float) -> float:
     return MAP_UNITS_PER_MM_0 / (2.0 ** zoom)
 
 
+def scale_of_map_units_per_px(map_units_per_px: float) -> float:
+    """QGIS map scale at ``map_units_per_px`` project map units per CSS px
+    (96 DPI). It counts metres, so a degree or a foot is not one metre."""
+    return map_units_per_px / (MAP_UNITS_PER_MM_0 * 25.4 / 96.0) * TOP_SCALE
+
+
 def scale_to_zoom(scale: float) -> float:
     if scale <= 0 or not math.isfinite(scale):
         raise ValueError(f"Scale must be positive and finite, got {scale!r}")

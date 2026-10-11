@@ -457,3 +457,89 @@ def test_reference_scale_screen_generator_is_round_on_the_web(plugin, tmp_path, 
         box = _generated(rule, QgsGeometry.fromWkt(f"POINT({CX} {CY})")).boundingBox()
         assert box.width() == pytest.approx(across, rel=0.02)
         assert box.height() == pytest.approx(box.width(), rel=0.02)
+
+
+# --- map-unit scale limits in degree and feet CRSs ----------------------------
+
+def _limited_square(context):
+    """A map-unit square of 30 m (QGIS's scale metres) frozen below 1:5000,
+    at least 3 mm."""
+    from qgis.core import QgsMapUnitScale
+    from qgis.PyQt.QtCore import Qt
+    layer = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square,
+                                       30.0 / context.scale_metres_per_map_unit)
+    layer.setColor(QColor("black"))
+    layer.setStrokeStyle(Qt.PenStyle.NoPen)
+    layer.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    limits = QgsMapUnitScale()
+    limits.maxScale = 5000.0
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 3.0
+    layer.setSizeMapUnitScale(limits)
+    return QgsMarkerSymbol([layer])
+
+
+def _crs_context(units):
+    from q2vt_plugin.src.core.fidelity.units import MapUnitContext  # pylint: disable=import-error
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels  # pylint: disable=import-error
+    context = MapUnitContext.for_project(False, units, LAT)
+    ZoomLevels.configure(context.top_scale, context.map_units_per_mm_0)
+    return context
+
+
+def _qgis_marker_px(symbol, zoom):
+    """The size QGIS draws the marker at the scale of ``zoom``
+    (QgsRenderContext::convertToPainterUnits, which applies the limits)."""
+    from qgis.core import QgsMapToPixel, QgsRenderContext
+    from q2vt_plugin.src.core.fidelity import zoom as fidelity_zoom  # pylint: disable=import-error
+    context = QgsRenderContext()
+    context.setScaleFactor(96 / 25.4)
+    context.setRendererScale(fidelity_zoom.zoom_to_scale(zoom))
+    context.setMapToPixel(QgsMapToPixel(fidelity_zoom.map_units_per_mm(zoom) * 25.4 / 96))
+    layer = symbol.symbolLayer(0)
+    return context.convertToPainterUnits(layer.size(), layer.sizeUnit(), layer.sizeMapUnitScale())
+
+
+@pytest.mark.parametrize("units", ["degrees", "feet", "meters"])
+@pytest.mark.parametrize("reference_zoom", [12, 16, 19])
+def test_map_unit_marker_limits_in_degrees_and_feet(plugin, units, reference_zoom):
+    """The sprite's render context took map units per px x 96 / 0.0254 as
+    its scale, a degree or a foot counted as a metre: in degrees the 1:5000
+    limit always fired (the marker stuck at its 3 mm minimum), in feet it
+    never did (the marker kept growing past it)."""
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from q2vt_plugin.src.core import sprite_generator as sg  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.diagnostics import DiagnosticCollector  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.units import LengthConverter  # pylint: disable=import-error
+    context = _crs_context(units)
+    symbol = _limited_square(context)
+    mc.PropertyExtractor.context = mc.ConversionContext(
+        DiagnosticCollector(), LengthConverter(map_context=context))
+    mc.PropertyExtractor.context.reference_zoom = float(reference_zoom)
+    icon_size, map_units_per_pixel, oversampling = mc.IconPropertyExtractor.marker_scale(
+        symbol, symbol.symbolLayer(0))
+    image = sg.SymbolImage(symbol, "m", oversampling, False, map_units_per_pixel)
+    sprite_px = image.img.width / oversampling
+    assert _qgis_marker_px(symbol, 22) == pytest.approx(30 / (5000 * 0.0254 / 96), rel=0.01)
+    for zoom in (reference_zoom, reference_zoom + 0.5, 17, 19, 22):
+        drawn = sprite_px * _curve_at(icon_size, zoom)
+        assert drawn == pytest.approx(_qgis_marker_px(symbol, zoom), rel=0.1, abs=1.0), \
+            (zoom, sprite_px)
+
+
+@pytest.mark.parametrize("units", ["degrees", "feet", "meters"])
+@pytest.mark.parametrize("reference_zoom", [17, 20])
+def test_map_unit_pattern_marker_limits_in_degrees_and_feet(plugin, units, reference_zoom):
+    """A point pattern's map-unit marker texture is drawn at the scale of the
+    reference zoom: in degrees the 1:5000 limit always fired, in feet never."""
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.diagnostics import DiagnosticCollector  # pylint: disable=import-error
+    from q2vt_plugin.src.core.fidelity.units import LengthConverter  # pylint: disable=import-error
+    context = _crs_context(units)
+    symbol = _limited_square(context)
+    exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
+    exporter.context = mc.ConversionContext(DiagnosticCollector(), LengthConverter(map_context=context))
+    exporter.context.reference_zoom = float(reference_zoom)
+    mc.PropertyExtractor.context = exporter.context
+    one, _ = exporter._marker_images(symbol)  # pylint: disable=protected-access
+    box = one.getchannel("A").point(lambda alpha: 255 if alpha > 127 else 0).getbbox()
+    assert box[2] - box[0] == pytest.approx(_qgis_marker_px(symbol, reference_zoom), abs=1.5)

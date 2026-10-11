@@ -37,6 +37,7 @@ from qgis.core import (Qgis, QgsEllipseSymbolLayer, QgsExpressionContext, QgsExp
 from qgis.PyQt.QtCore import qVersion
 
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
+from .fidelity import zoom as fidelity_zoom
 from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
@@ -231,7 +232,8 @@ class SymbolImage:
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
         # Left at 1, a scale range of a map-unit size (QgsMapUnitScale::
         # computeMapUnitsPerPixel) shrank the marker thousands of times.
-        context.setRendererScale(self.renderer_scale or self.map_units_per_pixel * 96.0 / 0.0254)
+        context.setRendererScale(self.renderer_scale
+                                 or fidelity_zoom.scale_of_map_units_per_px(self.map_units_per_pixel))
         context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
         return context
 

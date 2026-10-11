@@ -35,6 +35,7 @@ from .fidelity import expressions as ex
 from .fidelity import feature_order
 from .fidelity import html_labels
 from .fidelity import materialize as mat
+from .fidelity import zoom as fidelity_zoom
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
@@ -2841,7 +2842,7 @@ class QgisMapLibreStyleExporter:
         # at the reference zoom (scaling both factors keeps map pixels).
         scale = self._screen_scale()
         reference = self._reference_map_units_per_px() * scale
-        map_scale = self._reference_map_units_per_px() * 96.0 / 0.0254
+        map_scale = fidelity_zoom.scale_of_map_units_per_px(self._reference_map_units_per_px())
         one = SymbolImage(marker, "pattern-marker", scale, True, reference,
                           renderer_scale=map_scale).img
         two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference,
