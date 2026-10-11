@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QWebMap live demo</title>
+<meta name="description" content="A QGIS project published as a web map with QWebMap, the QGIS plugin that keeps your symbology: live map, video and embed code.">
+<meta property="og:title" content="QWebMap live demo">
+<meta property="og:description" content="A richly styled QGIS project, published as a web map with QWebMap. Pan, zoom, search and click it.">
+<meta property="og:image" content="https://danzig666.github.io/QGIS2VectorTiles/img/poster.jpg">
+<meta property="og:url" content="https://danzig666.github.io/QGIS2VectorTiles/">
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+:root {
+  --bg: #f4f1ea; --surface: #fffdf8; --ink: #1d2421; --muted: #5d6762; --line: #ddd6c8;
+  --accent: #0f766e; --accent-ink: #ffffff; --accent-soft: #d8ece8; --code-bg: #1d2421; --code-ink: #e9f3ef;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121615; --surface: #1a201e; --ink: #e8ece9; --muted: #9aa6a1; --line: #2c3532;
+    --accent: #2bb3a5; --accent-ink: #06201d; --accent-soft: #163330; --code-bg: #0c0f0e; --code-ink: #d6e6e0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121615; --surface: #1a201e; --ink: #e8ece9; --muted: #9aa6a1; --line: #2c3532;
+  --accent: #2bb3a5; --accent-ink: #06201d; --accent-soft: #163330; --code-bg: #0c0f0e; --code-ink: #d6e6e0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.6 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 20px; }
+a { color: var(--accent); }
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 18px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--ink); }
+.brand img { width: 40px; height: 40px; }
+.brand b { font: 600 22px/1 Fraunces, Georgia, serif; letter-spacing: .01em; }
+nav { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--surface); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:hover { filter: brightness(1.05); }
+.hero { padding-block: 12px 22px; }
+.hero h1 { font: 600 clamp(30px, 4.6vw, 52px)/1.08 Fraunces, Georgia, serif; margin: 0 0 12px; text-wrap: balance; max-width: 22ch; }
+.hero p { margin: 0; max-width: 62ch; color: var(--muted); font-size: 18px; }
+.mapframe { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 18px 50px -24px rgba(0,0,0,.35); }
+.mapframe iframe { display: block; width: 100%; height: min(72vh, 720px); min-height: 420px; border: 0; }
+.mapbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+.mapbar a { font-weight: 600; }
+section { padding-block: 44px 8px; }
+h2 { font: 600 28px/1.2 Fraunces, Georgia, serif; margin: 0 0 6px; text-wrap: balance; }
+.lead { color: var(--muted); margin: 0 0 20px; max-width: 64ch; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+.card h3 { margin: 0 0 4px; font-size: 16px; }
+.card p { margin: 0; color: var(--muted); font-size: 15px; }
+.card kbd { font: 13px "JetBrains Mono", ui-monospace, monospace; background: var(--accent-soft); color: var(--ink); padding: 1px 6px; border-radius: 5px; }
+video { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); background: #000; aspect-ratio: 16 / 9; }
+.figure { margin: 0; }
+.figure img { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); }
+.figure figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; }
+.codebox { position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: 12px; padding: 16px 18px; padding-right: 96px; overflow-x: auto; }
+.codebox pre { margin: 0; font: 14px/1.55 "JetBrains Mono", ui-monospace, monospace; white-space: pre; }
+.copy { position: absolute; top: 10px; right: 10px; border: 0; border-radius: 8px; padding: 7px 12px; font: 600 13px Inter, system-ui, sans-serif; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+footer { padding-block: 44px 36px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); margin-top: 48px; }
+footer p { margin: 4px 0; max-width: 90ch; }
+@media (max-width: 560px) {
+  .wrap { padding-inline: 16px; }
+  .mapframe iframe { height: 70vh; min-height: 360px; }
+  .codebox { padding-right: 18px; padding-top: 52px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="https://github.com/danzig666/QGIS2VectorTiles"><img src="img/icon.svg" alt=""><b>QWebMap</b></a>
+    <nav>
+      <a class="btn" href="#video">Video</a>
+      <a class="btn" href="#embed">Embed</a>
+      <a class="btn primary" href="https://github.com/danzig666/QGIS2VectorTiles/releases/latest">Download the plugin</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>A QGIS project, published as a web map that keeps its look</h1>
+    <p>This map of Swellendam was styled in QGIS and published with QWebMap's <em>Publish Web Map</em> window: no hand-written web style. Pan, zoom, click the features, search for a street.</p>
+  </div>
+
+  <div class="mapframe">
+    <iframe src="demo/?embed#v=1&amp;map=14.7/-34.0232/20.4455" title="QWebMap live demo: Swellendam" allow="fullscreen; geolocation" allowfullscreen loading="eager"></iframe>
+    <div class="mapbar">
+      <span>Vector tiles in one PMTiles file on GitHub Pages: no map server.</span>
+      <a href="demo/#v=1&amp;map=14.7/-34.0232/20.4455" target="_blank" rel="noopener">Open full screen ↗</a>
+    </div>
+  </div>
+
+  <section id="try">
+    <h2>What to look at</h2>
+    <p class="lead">Every symbol below is converted from the QGIS project; what the browser cannot draw natively is rendered by QGIS into sprites or pre-computed geometry.</p>
+    <div class="grid">
+      <div class="card"><h3>Roads</h3><p>Rule-based roads with casings and symbol levels, one-way arrows, dashed footpaths.</p></div>
+      <div class="card"><h3>Fills</h3><p>Hatched and point-pattern fills, SVG tree patterns, shapeburst water, gradients, geometry-generator building shadows.</p></div>
+      <div class="card"><h3>Lines</h3><p>Lineburst rivers with flow arrows, a curved arrow for the heritage walk, an inner band along the park border.</p></div>
+      <div class="card"><h3>Labels</h3><p>Curved river labels, haloed and boxed labels, a letter-spaced town name, SVG icons on circles.</p></div>
+      <div class="card"><h3>Search</h3><p>Use the search box: try <kbd>Voortrek</kbd>, <kbd>Drostdy</kbd> or <kbd>Bontebok</kbd>.</p></div>
+      <div class="card"><h3>Viewer</h3><p>Layers and legend, popups, measuring with snapping, share links, print, dark mode, phone layout.</p></div>
+    </div>
+  </section>
+
+  <section id="video">
+    <h2>QGIS and the web map, side by side</h2>
+    <p class="lead">The same project in QGIS (left) and in the published web map (right), at the same views; then a swipe between the two.</p>
+    <video controls preload="metadata" playsinline poster="img/poster.jpg">
+      <source src="media/qwebmap-showcase.mp4" type='video/mp4; codecs="avc1.640032"'>
+      <source src="media/qwebmap-showcase.webm" type='video/webm; codecs="vp9"'>
+      <a href="media/qwebmap-showcase.mp4">Download the video (MP4)</a>
+    </video>
+  </section>
+
+  <section id="gallery">
+    <h2>Close-ups</h2>
+    <p class="lead">Each pair: QGIS on the left, QWebMap on the right.</p>
+    <figure class="figure">
+      <img src="img/gallery.jpg" alt="Twelve close-up pairs, QGIS on the left and QWebMap on the right of each pair: SVG icons with labels, road casings with one-way arrows, a shapeburst fill, a lineburst river with flow arrows and a curved label, a cross point-pattern fill, an SVG tree pattern, a cross-hatched fill, a park border with an inner band, a letter-spaced town label, a radial gradient and geometry-generator building shadows" loading="lazy" width="1920" height="1776">
+    </figure>
+  </section>
+
+  <section id="embed">
+    <h2>Embed the map</h2>
+    <p class="lead">A published QWebMap map is a static web page, so it can go into any page with an <code>&lt;iframe&gt;</code>. Use your own map's address in place of this demo's; <code>?embed</code> gives the compact embedded view (panel closed, Ctrl + scroll to zoom, a link to the full map).</p>
+    <div class="codebox">
+      <button class="copy" type="button" data-copy="snippet">Copy</button>
+      <pre id="snippet">&lt;iframe src="https://danzig666.github.io/QGIS2VectorTiles/demo/?embed"
+        width="100%" height="520" style="border:0"
+        allow="fullscreen; geolocation" allowfullscreen loading="lazy"
+        title="Swellendam web map"&gt;&lt;/iframe&gt;</pre>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>QWebMap</b> is a QGIS plugin: <a href="https://github.com/danzig666/QGIS2VectorTiles">source and documentation on GitHub</a>, <a href="https://github.com/danzig666/QGIS2VectorTiles/releases/latest">latest release</a>. It started as a fork of <a href="https://github.com/GallPeters/QGIS2VectorTiles">GallPeters/QGIS2VectorTiles</a> by Jossef Kanter.</p>
+    <p>Demo data: Swellendam from the <a href="https://github.com/qgis/QGIS-Training-Data">QGIS training data</a> (GPL-2.0), derived from <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> data.</p>
+  </footer>
+</div>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var el = document.getElementById(btn.dataset.copy);
+    var text = el.textContent;
+    var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { select(el); });
+    } else { select(el); }
+  });
+});
+function select(el) {
+  var r = document.createRange(); r.selectNodeContents(el);
+  var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+}
+</script>
+</body>
+</html>
