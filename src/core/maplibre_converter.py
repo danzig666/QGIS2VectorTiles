@@ -2089,6 +2089,8 @@ class QgisMapLibreStyleExporter:
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
+        # Sprite variant names by what draws them (see _marker_variants).
+        self.variant_sprites: dict = {}
         self.pattern_images: Dict[str, PatternImages] = {}
         self.marker_counter = 0
         self.glyphs = {}
@@ -3723,13 +3725,22 @@ class QgisMapLibreStyleExporter:
                 "the static symbol is used for all features.")
             return marker_name
         names = {}
+        # Per-zoom rules of one symbol often draw the same images (screen
+        # sizes): one sprite each, shared. Layer ids differ between copies.
+        drawn = (re.sub(r' id="\{[^"]*\}"', "", QgsSymbolLayerUtils.symbolProperties(symbol)),
+                 repr(map_units_per_pixel), repr(oversampling), tuple(fields))
+        shared_names = vars(self).setdefault("variant_sprites", {})
 
         def make(combo):
+            shared = shared_names.get(drawn + (combo,))
+            if shared is not None:
+                return shared
             name = f"{marker_name}_v{len(names)}"
             names[combo] = name
             self.marker_symbols[name] = SpriteRequest(
                 symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
                 attributes=dict(zip(fields, combo)), oversampling=oversampling)
+            shared_names[drawn + (combo,)] = name
             return name
         key, cases = self._variant_images(fields, combos, make)
         if not cases:

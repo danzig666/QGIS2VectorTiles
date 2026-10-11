@@ -294,3 +294,20 @@ def test_numeric_sprite_variants_match_the_viewers_number_text(exporter):
         ["q2vt_size"], [(0.00001,), (1e-7,), (4.0,), (2.5,), (1e16,), (1.5e22,)],
         lambda combo: f"v{combo[0]}")
     assert cases[::2] == ["0.00001", "1e-7", "4", "2.5", "10000000000000000", "1.5e+22"]
+
+
+def test_rules_drawing_the_same_hash_lengths_share_their_sprites(exporter, monkeypatch):
+    """Per-zoom rules of one hash symbol with a data-defined length (screen
+    units: the same images at every zoom) each rendered their own sprite
+    per length: 60 lengths made a sprite sheet of about 0.9 MB."""
+    monkeypatch.setattr(exporter, "_distinct_values",
+                        lambda _source, _fields: [(4.0,), (8.0,), (2.5,)])
+    layers = _convert(exporter, _hash_marker()) and _convert(exporter, _hash_marker())
+    first, second = (layer["layout"]["icon-image"] for layer in layers)
+    assert first[2:-1] == second[2:-1]  # the same variant sprites
+    assert first[-1] != second[-1]  # each rule keeps its static image
+    assert len(exporter.marker_symbols) == 3 + 2
+    other = _hash_marker()
+    other.symbolLayer(0).setStrokeWidth(0.9)
+    third = _convert(exporter, other)[-1]["layout"]["icon-image"]
+    assert not set(third[3:-1:2]) & set(first[3:-1:2])  # another pen: its own sprites
