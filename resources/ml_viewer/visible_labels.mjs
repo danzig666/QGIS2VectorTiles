@@ -730,15 +730,15 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       const fits = (p) => fit(...p) >= 0;
       const free = (p) => fits(p) && clear(...p) >= 0;
       const bare = (p) => fits(p) && bareClear(...p);
-      // A kept "outside" label that is still fine beside the polygon, near
-      // its edge (no farther than a candidate it was kept near can be):
-      // kept without building the candidates (64 samples tested against the
-      // polygon and its neighbours, only to find one near it).
+      // A kept "outside" label that is still fine beside the polygon, its
+      // text no farther from the polygon's edge than the label distance plus
+      // the keep distance (as a candidate it was kept near is): kept without
+      // building the candidates (64 samples tested against the polygon and
+      // its neighbours, only to find one near it).
       const text = label.text || half;
       const keptOutside = outside && old && Number.isInteger(old.slot) && within(inner, old.point)
         && bare(old.point) && besidePolygon(loaded, old.point, text, options.around.distance, options.precision)
-        && edgeDistance(loaded, old.point) <= (options.keepDistance ?? Infinity)
-          + Math.hypot(options.around.distance + text[0], options.around.distance + text[1]);
+        && nearEdge(loaded, old.point, text, options.around.distance + (options.keepDistance ?? Infinity));
       if (keptOutside) {
         candidates = [];
       } else if (outside) {
@@ -913,12 +913,16 @@ function besidePolygon(rings, point, [tx, ty], distance, slack = 0) {
                                  point[0] + tx + reach, point[1] + ty + reach]);
 }
 
-// The distance from ``point`` to the polygon's nearest edge (tile cuts are
-// not edges).
-function edgeDistance(rings, [x, y]) {
-  let min = Infinity;
-  for (const [a, b] of realEdges(rings)) min = Math.min(min, segmentDistance(x, y, a, b));
-  return min;
+// Is a polygon edge (tile cuts are not edges) within ``reach`` of the text
+// box centred at ``point`` (half size ``[tx, ty]``)? Apart, a segment and a
+// box are nearest at an end of the one or a corner of the other.
+function nearEdge(rings, [x, y], [tx, ty], reach) {
+  const box = [x - tx, y - ty, x + tx, y + ty];
+  const corners = [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]];
+  const fromBox = ([px, py]) => Math.hypot(Math.max(box[0] - px, 0, px - box[2]), Math.max(box[1] - py, 0, py - box[3]));
+  return realEdges(rings).some(([a, b]) => segmentMeetsBox(a, b, grow(box, reach, reach))
+    && (segmentMeetsBox(a, b, box) || fromBox(a) <= reach || fromBox(b) <= reach
+        || corners.some(([cx, cy]) => segmentDistance(cx, cy, a, b) <= reach)));
 }
 
 // Items ({bounds}) in a grid over ``view`` (those off it are dropped):

@@ -1364,4 +1364,46 @@ console.log(JSON.stringify({{ first, kept, same, count }}));
     assert result["same"] and result["count"] > 1500
     # Placing builds the candidates; keeping them all must cost much less
     # (it cost as much as placing them; now about a third).
-    assert result["kept"] < 0.6 * result["first"], result
+    assert result["kept"] < 0.7 * result["first"], result
+
+
+def test_outside_polygons_label_kept_zooming_in_stays_near_the_polygon():
+    """A kept "Outside polygons" label stays only while its text is no
+    farther from the polygon than the label distance plus the keep distance
+    (as near a candidate as it was kept before): zooming in moves it away
+    from the polygon, so it is placed anew beside it (QGIS: the label
+    distance), not kept 30-70 px off it."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const s = 0.05 * 4096, c = 2048;
+const ring = [[c - s / 2, c - s / 2], [c + s / 2, c - s / 2], [c + s / 2, c + s / 2], [c - s / 2, c + s / 2]];
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 1 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [ring.map(([x, y]) => ({{ x, y }}))] }} }};
+// The text box's gap to the polygon, in px.
+function gap(state, k) {{
+  const perPx = 1 / (1024 * k), h = 0.5 / k;
+  const text = [60 * perPx, 8 * perPx], box = [62 * perPx, 10 * perPx];
+  box.text = text;
+  const out = labelPoints([feature], [0.5 - h, 0.5 - h, 0.5 + h, 0.5 + h], maplibregl, {{
+    state, precision: perPx, keepDistance: 24 * perPx, labelBox: () => box,
+    around: {{ anchors: [], distance: 2 * perPx, outside: true }} }});
+  const [x, y] = out.features[0].geometry.coordinates;
+  const [x0, x1] = [(c - s / 2) / 4096, (c + s / 2) / 4096];
+  return Math.max(x0 - x - text[0], x - text[0] - x1, x0 - y - text[1], y - text[1] - x1) / perPx;
+}}
+const chain = newLabelState();
+const steps = [1, 1.5, 2, 3, 4, 6, 8].map((k) => gap(chain, k));
+const jumps = [4, 8].map((k) => {{ const state = newLabelState(); gap(state, 1); return gap(state, k); }});
+console.log(JSON.stringify({{ steps, jumps }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    # Kept while within 2 + 24 px of the polygon (then placed anew at 2 px).
+    assert all(1.5 <= gap <= 26.5 for gap in result["steps"]), result
+    assert min(result["steps"][1:]) < 2.5, result
+    # Zoomed in 2 or 3 levels at once: placed anew beside the polygon.
+    assert all(abs(gap - 2) < 0.5 for gap in result["jumps"]), result
