@@ -90,6 +90,11 @@ const GUARD_PX = 48; // ... but not so close that their text reaches the screen
 const POINT_MAXZOOM = 15;
 const KEEP_ROOM = 0.8;  // a kept "pole" label keeps >= 80 % of the best room
 const KEEP_PX = 24;     // a kept centroid label stays this close to the centroid
+// A kept point from coarser tile data than is loaded now, this close (tile
+// units of its data, plus twice the precision of its search) to the new
+// spot, is that spot seen through the coarser data: it moves there (else
+// its rounding error doubled with each zoom).
+const REFINE_UNITS = 4;
 
 // The label point source's maxzoom for a map that zooms to maxZoom.
 export function pointMaxzoom(maxZoom) {
@@ -393,6 +398,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   // A tile unit of the data (overzoomed tiles are cut from the max zoom's):
   // neighbouring tiles round a line's cut on their shared edge to it.
   let tileUnit = 0;
+  let dataUnit = 0;  // the tile unit of the deepest data (the label points' precision)
   const loaded = new Set(); // deepest tiles with data
   let byFeature = new Map();
   const excluded = new Set();
@@ -406,6 +412,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const key = String(f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties));
     const tile = f._vectorTileFeature;
     const scale = 1 / (tile.extent * 2 ** f._z);
+    dataUnit = Math.max(dataUnit, scale);
     tileUnit = Math.max(tileUnit, 1 / (tile.extent * 2 ** Math.min(f._z, options.tileZoom ?? f._z)));
     const ox = f._x / 2 ** f._z, oy = f._y / 2 ** f._z;
     const clip = intersect(reach, [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z]);
@@ -507,9 +514,13 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   const lineOptions = { ...options, tileUnit };
   for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
+    // A kept point, or the new spot ``p`` when the kept one is only that
+    // spot computed from coarser tiles (a small polygon labelled zoomed out).
+    const refined = (p) => (old && old.unit > 1.5 * dataUnit && p && Math.hypot(old.point[0] - p[0],
+      old.point[1] - p[1]) <= REFINE_UNITS * old.unit + 2 * (old.prec || 0) ? p : old.point);
     if (old && options.freeze) {
       const kept = old.properties || properties;
-      points.set(key, { point: old.point, properties: kept, orig });
+      points.set(key, { point: old.point, properties: kept, orig, unit: old.unit, prec: old.prec });
       // Its box at this zoom (shrunk and turned as drawn), for the others.
       const label = options.labelBox ? options.labelBox(kept) : null;
       if (label) {
@@ -558,7 +569,9 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     if (!rings.length) {  // off the screen: in advance, away from the screen edge
       if (outside) continue;  // beside the polygon: placed once it is in view
       const point = pole ? roomiestPoint(loaded, options.precision).point : labelPoint(loaded);
-      if (point && !within(guarded, point)) points.set(key, { point, properties, orig });
+      if (point && !within(guarded, point)) {
+        points.set(key, { point, properties, orig, unit: dataUnit, prec: pole ? options.precision : 0 });
+      }
       continue;
     }
     // The label's box (half width/height, world units): it must fit on the
@@ -658,7 +671,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const place = (box, keepOld, loose = false) => {
           const angle = freeAngle(rings, bare(box));
           if (!angle && !loose) {
-            if (keepOld && flatOld) return { point: old.point, angle: 0 };
+            if (keepOld && flatOld) return { point: refined(best.point), angle: 0 };
             if (fitsFlat(rings, best.point, best.room, box) && fit(...best.point) >= 0) {
               return { point: best.point, angle: 0 };
             }
@@ -668,7 +681,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           // a long, even strip.
           return placeTurned(rings, angle, box, view, avoid, labelPoint(rings) || best.point,
                              oldScale === scale ? old : null, field, options.precision,
-                             { overlap: mayOverlap, loose });
+                             { overlap: mayOverlap, loose, refined });
         };
         let placed = place(label, true);
         if (!placed && options.always) {
@@ -698,7 +711,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       } else {
         const keep = old && within(inner, old.point) && (unchecked(old.point)
           || Math.min(roomAt(rings, old.point), score(...old.point)) >= KEEP_ROOM * best.room);
-        point = keep ? old.point : best.point;
+        point = keep ? refined(best.point) : best.point;
       }
     } else if (options.around && half) {
       // "Around point" (QGIS): beside the point at the label distance, the
@@ -742,14 +755,16 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       // Over point (QGIS): its one candidate, dropped where it would overlap
       // a label placed before it ("Never overlap").
       if (!keep && !mayOverlap && !bareClear(...target)) continue;
-      point = keep ? old.point : target;
+      point = keep ? refined(target) : target;
     }
     if (half) {
       const box = [point[0] - half[0], point[1] - half[1], point[0] + half[0], point[1] + half[1]];
       boxes.push(box);
       avoid.push(box);
     }
-    points.set(key, slot === undefined ? { point, properties, orig } : { point, properties, slot, orig });
+    // The precision of the point: its data's, and the roomiest point search's.
+    const placed = { point, properties, orig, unit: dataUnit, prec: pole ? options.precision : 0 };
+    points.set(key, slot === undefined ? placed : { ...placed, slot });
   }
   for (const [key, old] of state.points) {
     if (!points.has(key) && !excluded.has(old.orig ?? baseKey(key)) && (options.freeze || within(inner, old.point))
@@ -1032,9 +1047,10 @@ function boxInside(rings, [x, y], [hx, hy]) {
 // nearly as centred. ``loose``: only the label's centre must be inside (QGIS
 // without "fit in polygon": a label wider than a narrow strip sticks out of
 // it). ``overlap``: with no spot clear of ``avoid``, the best one anyway.
-// Returns {point, angle} or null.
+// ``refined(p)``: the kept spot, or ``p`` when that is the same spot from
+// finer tiles. Returns {point, angle} or null.
 function placeTurned(rings, angle, label, view, avoid, target, old, field, precision = 0,
-                     { overlap = true, loose = false } = {}) {
+                     { overlap = true, loose = false, refined = null } = {}) {
   const [hx, hy] = label;
   const c = Math.cos(angle), s = Math.sin(angle);
   const toFrame = ([x, y]) => [x * c + y * s, -x * s + y * c];
@@ -1110,7 +1126,7 @@ function placeTurned(rings, angle, label, view, avoid, target, old, field, preci
   if (!found) return null;
   if (old && Math.abs(Number(old.properties?.[field]) - angle * 180 / Math.PI) < 3 && ok(old.point)
       && roomAt(rings, old.point) >= KEEP_ROOM * found.room) {
-    return { point: old.point, angle };
+    return { point: refined ? refined(found.p) : old.point, angle };
   }
   return { point: found.p, angle };
 }
@@ -2075,17 +2091,20 @@ function clipRing(ring, [x0, y0, x1, y1]) {
 export function labelPoint(rings) {
   let area = 0, cx = 0, cy = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // Relative to a vertex: in world units ([0, 1]) the cross products of a
+  // small polygon cancel out (its centroid was metres off).
+  const [ox, oy] = (rings.find((ring) => ring.length) || [[0, 0]])[0];
   for (const ring of rings) {
     for (let i = 0, n = ring.length; i < n; i++) {
       const [x1, y1] = ring[i], [x2, y2] = ring[(i + 1) % n];
-      const cross = x1 * y2 - x2 * y1;
-      area += cross; cx += (x1 + x2) * cross; cy += (y1 + y2) * cross;
+      const cross = (x1 - ox) * (y2 - oy) - (x2 - ox) * (y1 - oy);
+      area += cross; cx += (x1 + x2 - 2 * ox) * cross; cy += (y1 + y2 - 2 * oy) * cross;
       if (x1 < minX) minX = x1; if (x1 > maxX) maxX = x1;
       if (y1 < minY) minY = y1; if (y1 > maxY) maxY = y1;
     }
   }
   if (Math.abs(area) < 1e-22) return null;
-  const centroid = [cx / (3 * area), cy / (3 * area)];
+  const centroid = [ox + cx / (3 * area), oy + cy / (3 * area)];
   if (inside(rings, centroid)) return centroid;
   const y = (minY + maxY) / 2, xs = [];
   for (const ring of rings) {

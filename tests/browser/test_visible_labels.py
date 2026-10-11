@@ -1253,3 +1253,67 @@ def test_html_labels_get_a_box():
     script_box = _js(f"m.layoutBoxes({{'text-field': {json.dumps(fmt)}, 'text-size': 10}}, 15, 0.001)"
                      "({h0: 'Long street ', h1: 'name'})")
     assert _lines([(1, [[1000, 1000], [1300, 1000]])], [0, 0, 1, 1], {"box": script_box}) == {}
+
+
+def _zoom_chain(anchor, zooms, polygon):
+    """The label of one small polygon (world ring) zoomed in step by step
+    (tiles up to zoom 16, overzoomed above), in screen px from its centroid,
+    with the position kept between the steps."""
+    script = f"""
+import {{ labelPoints, labelPoint, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const ring = {json.dumps(polygon)};
+const [cx, cy] = labelPoint([ring]);
+const tiles = (z) => {{
+  const n = 2 ** z, xs = ring.map((p) => Math.floor(p[0] * n)), ys = ring.map((p) => Math.floor(p[1] * n));
+  const out = [];
+  for (let tx = Math.min(...xs); tx <= Math.max(...xs); tx++) {{
+    for (let ty = Math.min(...ys); ty <= Math.max(...ys); ty++) {{
+      const geometry = ring.map(([x, y]) => ({{ x: Math.round((x * n - tx) * 4096), y: Math.round((y * n - ty) * 4096) }}));
+      out.push({{ _x: tx, _y: ty, _z: z, properties: {{ q2vt_orig_id: 1 }},
+                 _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [geometry] }} }});
+    }}
+  }}
+  return out;
+}};
+const state = newLabelState();
+const out = {json.dumps(zooms)}.map((zoom) => {{
+  const perPx = 1 / (512 * 2 ** zoom);
+  const view = [cx - 300 * perPx, cy - 300 * perPx, cx + 300 * perPx, cy + 300 * perPx];
+  const box = [20 * perPx, 6 * perPx];
+  const [x, y] = labelPoints(tiles(Math.min(16, Math.floor(zoom))), view, maplibregl, {{
+    state, margin: 8 * perPx, tileZoom: Math.min(16, Math.floor(zoom)), precision: perPx,
+    keepDistance: 24 * perPx, labelBox: () => box, anchor: {json.dumps(anchor[0])},
+    orient: {json.dumps(anchor[1])}, rotationField: {json.dumps(anchor[1] == "free" and "q2vt_rot" or None)},
+  }}).features[0].geometry.coordinates;
+  return [(x - cx) / perPx, (y - cy) / perPx];
+}});
+console.log(JSON.stringify(out));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+@pytest.mark.parametrize("anchor", [("centroid", "horizontal"), ("pole", "horizontal"), ("pole", "free")])
+def test_small_polygon_label_labelled_zoomed_out_stays_centred_zooming_in(anchor):
+    """A polygon smaller than its label is labelled once wholly on the screen
+    (zoom 13 for 30 x 22 m). That point, from coarse z13 tiles, was kept as
+    the user zoomed in (within 24 px / 80 % of the room): its rounding error
+    doubled with each zoom, 16 px off the centroid at zoom 22. Finer tiles
+    now refine it; above the tiles' max zoom (16) it stays put."""
+    metre = 1 / (40075016.686 * math.cos(math.radians(47)))  # world units at latitude 47
+    x0, y0 = 0.5537123456, 0.3561234567
+    rectangle = [[x0, y0], [x0 + 30 * metre, y0], [x0 + 30 * metre, y0 + 22 * metre], [x0, y0 + 22 * metre]]
+    chain = _zoom_chain(anchor, [13, 15, 16.5, 18, 20, 22], rectangle)
+    for zoom, (dx, dy) in zip([13, 15, 16.5, 18, 20, 22], chain):
+        # Zoom 22: the z16 tiles' own rounding (1/8 px at z16) is 8 px there.
+        assert math.hypot(dx, dy) < (1.5 if zoom < 22 else 3), (zoom, dx, dy)
+    # A triangle: the centroid of the label point's polygon (labelPoint kept
+    # world units: the cross products of a small polygon cancelled out).
+    triangle = [[x0, y0], [x0 + 30 * metre, y0], [x0 + 10 * metre, y0 + 22 * metre]]
+    if anchor[0] == "centroid":
+        for zoom, (dx, dy) in zip([13, 15, 16.5, 18], _zoom_chain(anchor, [13, 15, 16.5, 18], triangle)):
+            assert math.hypot(dx, dy) < 1.5, (zoom, dx, dy)
