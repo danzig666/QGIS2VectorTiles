@@ -373,12 +373,59 @@ class SymbolMaterializer:
                 self._fold_constant_ddp(layer, key, self._setter(layer, key),
                                         ZoomLevels.zoom_to_scale(low))
             return None
+        groups = self._screen_constant_overzoom(groups)
         groups = self._scale_groups_in_budget(flat_rule, groups)
         parts = []
         for rule, clone, _ in groups:
             result = self.materialize(rule, clone)
             parts.extend(result if result is not None else [rule])
         return parts
+
+    def _screen_constant_overzoom(self, groups):
+        """The per-zoom groups of _split_scale_dependent, the overzoom ones
+        (attribute "v") whose map-unit interval and offset along the line
+        follow the map scale (``@map_scale / 200``: 5 mm on screen whatever
+        the zoom) merged into one rule with those lengths in millimetres.
+        QGIS keeps them constant on screen, as the native placement past
+        the last tiles does (_screen_interval_rules), with no copy of the
+        markers per zoom (each would double them)."""
+        over = [index for index, group in enumerate(groups) if group[0].get_attr("v") is not None]
+        if len(over) < 2 or over != list(range(over[0], len(groups))):
+            return groups
+
+        def screen(rule, clone, values):
+            """The interval and offset along the line in mm at the rule's
+            zoom; None when not both map lengths (or nothing)."""
+            if any(values[2]):
+                return None  # still data defined
+            lengths = []
+            for value, unit in ((clone.interval(), clone.intervalUnit()),
+                                (clone.offsetAlongLine(), clone.offsetAlongLineUnit())):
+                if abs(value) <= 1e-12:
+                    lengths.append(0.0)
+                elif normalize_unit(unit) != "map":
+                    return None
+                else:
+                    lengths.append(value / self._map_units_per_mm(rule, rule.evaluation_zoom()))
+            return lengths if lengths[0] > 0 else None
+        first = screen(*groups[over[0]])
+        if first is None:
+            return groups
+        for index in over[1:]:
+            lengths = screen(*groups[index])
+            if lengths is None or any(abs(a - b) > 1e-6 * max(abs(a), abs(b), 1e-9)
+                                      for a, b in zip(first, lengths)):
+                return groups
+        rule, clone, _ = groups[over[0]]
+        clone.setInterval(first[0])
+        clone.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+        clone.setOffsetAlongLine(first[1])
+        clone.setOffsetAlongLineUnit(Qgis.RenderUnit.Millimeters)
+        top = groups[over[-1]][0].visibility
+        if rule.visibility is not None:
+            rule.visibility = ZoomInterval(rule.visibility.min_zoom,
+                                           top.max_zoom if top is not None else None)
+        return groups[:over[0] + 1]
 
     def _scale_groups_in_budget(self, flat_rule: FlattenedRule, groups):
         """The per-zoom groups of _split_scale_dependent whose overzoom copies
@@ -393,19 +440,20 @@ class SymbolMaterializer:
         length = self._layer_totals(flat_rule.layer)[1]
         vertices = self._layer_vertices(flat_rule.layer)
 
-        def cost(rule, clone):
+        features = self._layer_totals(flat_rule.layer)[2]
+
+        def cost(clone):
             if "Interval" not in _flag_names(clone.placements()) or clone.interval() <= 0:
                 return float(vertices)
-            interval = clone.interval()
-            mm = _to_mm(interval, clone.intervalUnit()) \
-                if normalize_unit(clone.intervalUnit()) != "map" else None
-            if mm is not None:
-                interval = mm * ZoomLevels.map_units_per_mm(self.rule_zoom(rule) + 0.5)
-            return length / max(interval, 1e-9)
-        kept = self._overzoom_take(flat_rule, [cost(groups[i][0], groups[i][1]) for i in over])
+            if normalize_unit(clone.intervalUnit()) != "map":
+                return float(features)  # native placement on a copy of the lines
+            return length / max(clone.interval(), 1e-9)
+        kept = self._overzoom_take(flat_rule, [cost(groups[i][1]) for i in over])
         if kept == len(over):
             return groups
-        groups = groups[:over[kept]]
+        # No copy fits: the first one still serves its zooms and those above
+        # (a rule drawn past the last tiles only has no other).
+        groups = groups[:max(over[kept], 1)]
         last = groups[-1][0]
         if last.visibility is not None and flat_rule.visibility is not None:
             last.visibility = flat_rule.visibility.intersect(
@@ -2786,7 +2834,12 @@ class SymbolMaterializer:
                            else len(fill_layers) * (1 + heads) + strokes)
                 for index in range(len(over))])
             if fit < len(over):
-                over, kept = over[:fit], min(kept, fit)
+                if not fit and not zoom_rules:
+                    # Drawn past the last tiles only: its first zoom serves
+                    # them all, in the cheapest form (a line and head markers).
+                    over, kept = over[:1], 0
+                else:
+                    over, kept = over[:fit], min(kept, fit)
                 last = over[-1] if over else zoom_rules[-1] if zoom_rules else None
                 if last is not None:
                     last.visibility = flat_rule.visibility.intersect(

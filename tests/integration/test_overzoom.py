@@ -501,28 +501,47 @@ def test_map_unit_markers_past_the_last_tiles_keep_an_image_that_fits(plugin, tm
     assert over[-1]["layout"]["icon-size"][:3] == ["interpolate", ["exponential", 2], ["zoom"]]
 
 
+def _scale_interval_line(kind, expression):
+    """A marker (1 mm dots) or hashed line, interval 10 map units data
+    defined by ``expression``."""
+    from qgis.core import QgsHashedLineSymbolLayer, QgsProperty, QgsSymbolLayer
+    line = QgsMarkerLineSymbolLayer() if kind == "marker" else QgsHashedLineSymbolLayer()
+    if kind == "marker":
+        dot = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1)
+        dot.setSizeUnit(MM)
+        line.setSubSymbol(QgsMarkerSymbol([dot]))
+    line.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    line.setInterval(10)
+    line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
+    line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval,
+                                QgsProperty.fromExpression(expression))
+    return line
+
+
+def _past_last_tiles_only(symbol):
+    """A rule-based renderer drawing ``symbol`` from 1:1500 on (about zoom
+    17.6: past the last tiles of a 0-16 export)."""
+    from qgis.core import QgsRuleBasedRenderer
+    root = QgsRuleBasedRenderer.Rule(None)
+    rule = QgsRuleBasedRenderer.Rule(symbol)
+    rule.setMinimumScale(1500.0)
+    rule.setMaximumScale(1.0)
+    root.appendChild(rule)
+    return QgsRuleBasedRenderer(root)
+
+
 def test_scale_dependent_interval_copies_share_the_last_tiles_budget(plugin, tmp_path):
     """A marker-line interval that keeps shrinking with the map scale
-    (``@map_scale / 200``) doubles the markers of every zoom past the last
-    tiles. Exported 0-10, all of those copies are written into the zoom-10
-    tiles: they stop within the last tiles' budget, the last one kept
-    serves the zooms above (a hashed line too)."""
-    from qgis.core import QgsHashedLineSymbolLayer, QgsProperty, QgsSymbolLayer
+    (``@map_scale / 200 + 0.1``) doubles the markers of every zoom past the
+    last tiles. Exported 0-10, all of those copies are written into the
+    zoom-10 tiles: they stop within the last tiles' budget, the last one
+    kept serves the zooms above (a hashed line too)."""
     from q2vt_plugin.src.core.materializer import SymbolMaterializer
     wkts = [f"LINESTRING({X} {Y + 40 * k}, {X + 1000} {Y + 40 * k})" for k in range(20)]
     budget = SymbolMaterializer.OVERZOOM_TILE_ELEMENTS
 
     def flatten(kind, *zooms):
-        line = QgsMarkerLineSymbolLayer() if kind == "marker" else QgsHashedLineSymbolLayer()
-        if kind == "marker":
-            dot = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1)
-            dot.setSizeUnit(MM)
-            line.setSubSymbol(QgsMarkerSymbol([dot]))
-        line.setPlacements(Qgis.MarkerLinePlacement.Interval)
-        line.setInterval(10)
-        line.setIntervalUnit(Qgis.RenderUnit.MapUnits)
-        line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval,
-                                    QgsProperty.fromExpression("@map_scale / 200"))
+        line = _scale_interval_line(kind, "@map_scale / 200 + 0.1")
         layer = _layer("LineString", wkts, str(tmp_path / f"{kind}{len(zooms)}.gpkg"))
         layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
         return _flatten(tmp_path, layer, *zooms)
@@ -530,7 +549,7 @@ def test_scale_dependent_interval_copies_share_the_last_tiles_budget(plugin, tmp
         rules, diags = flatten(kind, 0, 10)
         placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
         copies = sorted(r.get_attr("v") for r in placed if r.get_attr("v") is not None)
-        # 20 km of lines: about 15 markers at zoom 11, 30 000 at zoom 21.
+        # 20 km of lines: about 15 markers at zoom 11, 14 000 at zoom 21.
         assert copies and copies == list(range(11, copies[-1] + 1)) and copies[-1] < 21
         assert _total_overzoom(placed, lambda r: 20000 / r.recipe.param("interval")) <= budget
         last = _at(placed, 22.0)
@@ -540,6 +559,62 @@ def test_scale_dependent_interval_copies_share_the_last_tiles_budget(plugin, tmp
     # Exported 14-19, the copies go on to the last zoom (within the budget).
     rules, _ = flatten("marker", 14, 19)
     assert sorted(r.get_attr("v") for r in rules if r.get_attr("v") is not None) == [20, 21, 22]
+
+
+def test_interval_following_the_map_scale_is_native_past_the_last_tiles(plugin, tmp_path):
+    """``@map_scale / 200`` map units is 5 mm on screen at every scale: past
+    the last tiles it is the native screen-spaced placement (eighths of a
+    zoom on one dataset of the lines), not a copy of the markers per zoom
+    doubling at every zoom (the Publish defaults, 0-16, wrote 1.2 million
+    markers more into the zoom-16 tiles)."""
+    wkts = [f"LINESTRING({X} {Y + 40 * k}, {X + 1000} {Y + 40 * k})" for k in range(20)]
+    for kind in ("marker", "hash"):
+        layer = _layer("LineString", wkts, str(tmp_path / f"{kind}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([
+            _scale_interval_line(kind, "@map_scale / 200")])))
+        rules, diags = _flatten(tmp_path, layer, 0, 16)
+        placed = [r for r in rules if r.recipe is not None]
+        assert placed and not [r for r in placed if r.get_attr("v") is not None]
+        assert {r.get_attr("o") for r in placed} == set(range(17))
+        native = [r for r in rules if r.recipe is None]
+        assert len({r.output_dataset for r in native}) == 1
+        for zoom in (17.0, 18.5, 21.9, 22.5):
+            drawn = _at(rules, zoom)
+            assert len(drawn) == 1 and drawn[0] in native, zoom
+            line = drawn[0].rule.symbol().symbolLayer(0)
+            assert line.intervalUnit() == MM and line.interval() == pytest.approx(5.0)
+        assert not diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_overzoom_only_rules_out_of_budget_keep_their_first_zoom(plugin, tmp_path, monkeypatch):
+    """A rule drawn only past the last tiles (a detail rule from 1:1500 on)
+    whose first overzoom copy does not fit the last tiles' budget still
+    draws that copy at every zoom above (the scale-dependent split raised
+    an IndexError; arrows vanished)."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    monkeypatch.setattr(SymbolMaterializer, "OVERZOOM_TILE_ELEMENTS", 5)
+    wkts = [f"LINESTRING({X} {Y + 40 * k}, {X + 1000} {Y + 40 * k})" for k in range(20)]
+    layer = _layer("LineString", wkts, str(tmp_path / "scale.gpkg"))
+    layer.setRenderer(_past_last_tiles_only(QgsLineSymbol([
+        _scale_interval_line("marker", "@map_scale / 200 + 0.1")])))
+    rules, diags = _flatten(tmp_path, layer, 0, 10)
+    placed = [r for r in rules if r.recipe is not None]
+    assert len(placed) == 1 and placed[0].get_attr("v") == 17
+    assert placed[0].visibility.max_zoom is None and _at(rules, 22.0) == placed
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+    arrow = QgsArrowSymbolLayer()
+    arrow.setIsCurved(False)
+    arrow.setIsRepeated(False)
+    for setter in ("setArrowWidth", "setArrowStartWidth"):
+        getattr(arrow, setter)(1)
+        getattr(arrow, setter + "Unit")(MM)
+    layer = _layer("LineString", wkts, str(tmp_path / "arrows.gpkg"))
+    layer.setRenderer(_past_last_tiles_only(QgsLineSymbol([arrow])))
+    rules, diags = _flatten(tmp_path, layer, 0, 10)
+    assert rules and {r.get_attr("v") for r in rules} == {17}
+    for zoom in (17.7, 20.0, 23.0):
+        assert _at(rules, zoom), zoom
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
 
 
 def test_arrow_and_shapeburst_copies_stay_within_the_last_tiles_budget(
