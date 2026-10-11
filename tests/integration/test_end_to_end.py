@@ -763,6 +763,56 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
+@pytest.mark.parametrize("dist,unit", [(3, Qgis.RenderUnit.Millimeters), (10, Qgis.RenderUnit.MapUnits)])
+def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, unit):
+    """A line label above its line, drawn once per line: exported at the
+    line's middle, turned to the line, the distance a Y offset. As
+    text-translate (never turned) it went straight up the screen: on a
+    sloped line the label touched the line, on an upright one the distance
+    was lost. It stays text-offset, which MapLibre turns with the label.
+    Exported from zoom 0, as the Publish window does."""
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "roads", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes(["Alpha Lane"])
+    feature.setGeometry(QgsGeometry.fromWkt("LineString (2120500 6020000, 2121000 6020866)"))  # 60 degrees
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "roads.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "black"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.Line
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(Qgis.LabelLinePlacementFlags(2))  # above the line
+    settings.setLineSettings(line_settings)
+    settings.dist, settings.distUnits = dist, unit
+    text_format = QgsTextFormat()
+    text_format.setSize(10)
+    text_format.setSizeUnit(Qgis.RenderUnit.Points)
+    settings.setFormat(text_format)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    label = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+    assert label["metadata"]["q2vt:visible-kind"] == "line"
+    assert "labelrotation" in json.dumps(label["layout"]["text-rotate"])
+    assert label["paint"]["text-translate"] == [0, 0]
+    offset = label["layout"]["text-offset"]
+    size = label["layout"]["text-size"]
+    if unit == Qgis.RenderUnit.Millimeters:
+        assert offset == pytest.approx([0, -3 * 96 / 25.4 / size], abs=1e-3)
+    else:  # map units: per tile zoom, the ratio of the zoom's middle
+        for zoom in (17, 19):
+            stops = dict(zip(offset[3::2], (value[1] for value in offset[4::2])))
+            px = 10 * 512 / 40075016.68557849 * 2 ** (zoom + 0.5)
+            assert stops[zoom] == pytest.approx([0, -px / size], rel=1e-3)
+
+
 def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp_path):
     """Horizontal placement on a line was a point label on the line itself
     (MapLibre: at its first vertex, none once that is off the screen); a

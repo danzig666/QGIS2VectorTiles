@@ -330,7 +330,8 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     logical = size_px or int(max(32, 2 * math.ceil(radius + edge) + 16))
     # A fixed-size frame: (width, height), as QGIS draws it (one number: square).
     width_px, height_px = logical if isinstance(logical, (tuple, list)) else (logical, logical)
-    ss = 4  # supersampling for anti-aliased edges
+    # Supersampling for anti-aliased edges (less for a large dense image).
+    ss = max(1, min(4, int(4096 // max(1.0, max(width_px, height_px) * pixel_ratio))))
     scale = pixel_ratio * ss
     big_w, big_h = max(1, round(width_px * scale)), max(1, round(height_px * scale))
     img = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))

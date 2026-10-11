@@ -64,6 +64,14 @@ a double-size copy after every whole zoom. The patch:
     (laid out at the size of the next zoom) vanished when zoomed in, even
     alone, while QGIS draws it.
 
+11. a label frame fitted to its text (``icon-text-fit``) of a style layer
+    flagged ``metadata: {"q2vt:frame-shape": "ellipse" | "circle" | "square"}``
+    is fitted around the text box as QGIS bounds the text by that shape
+    (qgstextrenderer drawBackground): the box times sqrt(2) (ellipse), its
+    diagonal both ways (circle) or its longer side both ways (square), then
+    the padding (the frame's buffer) around it. Stock MapLibre fitted every
+    frame to the bare text box: ellipses were 20-25 % smaller than QGIS's.
+
 Idempotent; run after updating MapLibre:
 
     python3 tools/patch_maplibre.py [--check]
@@ -451,7 +459,36 @@ def _ring_winding_patch(text: str) -> str:
     return TILE_RINGS.sub(tile, FILL_RINGS.sub(fill, text))
 
 
+FRAME_MARK = "/*q2vt-frame-shape*/"
+# fitIconToText(shapedIcon, shapedText, textFit, padding, iconOffset, fontScale)
+FIT_ICON = re.compile(r"function (\w+)\(e,t,n,r,i,a\)\{let o=e\.image,s;if\(o\.content\)")
+FIT_CALL = "(r,{text},k,m.get(`icon-text-fit-padding`),h,_)"
+
+
+def _frame_shape_patch(text: str) -> str:
+    """Shared bundle: a text-fitted frame of a layer flagged
+    ``q2vt:frame-shape`` is fitted around the text box enlarged as QGIS
+    bounds the text by an ellipse, circle or square."""
+    fits = list(FIT_ICON.finditer(text))
+    if len(fits) != 1:
+        raise SystemExit(f"fitIconToText: {len(fits)} matches (expected 1)")
+    fit = fits[0].group(1)
+    helper = (f"function q2FrameBox(t,l){{{FRAME_MARK}let s=l&&l.metadata&&l.metadata[\"q2vt:frame-shape\"];"
+              "if(!t||!s)return t;let w=t.right-t.left,h=t.bottom-t.top,x=(t.left+t.right)/2,y=(t.top+t.bottom)/2;"
+              "s===`ellipse`?(w*=Math.SQRT2,h*=Math.SQRT2):s===`circle`?(w=h=Math.hypot(w,h)):"
+              "s===`square`&&(w=h=Math.max(w,h));return{left:x-w/2,right:x+w/2,top:y-h/2,bottom:y+h/2}}")
+    text = text[:fits[0].start()] + helper + text[fits[0].start():]
+    for shaped in ("n.vertical", "g"):
+        call = fit + FIT_CALL.format(text=shaped)
+        if text.count(call) != 1:
+            raise SystemExit(f"fitIconToText call with {shaped}: expected exactly one match")
+        text = text.replace(call, fit + FIT_CALL.format(text=f"q2FrameBox({shaped},e.layers[0])"))
+    return text
+
+
 def _shared_patch(text: str) -> str:
+    if FRAME_MARK not in text:
+        text = _frame_shape_patch(text)
     if BUCKET_MARK not in text:
         text = _bucket_patch(text)
     if CLOSED_MARK not in text:
@@ -516,7 +553,7 @@ def main() -> int:
         done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK,
                                              PATTERN_ZOOM_MARK, ATLAS_MARK, GRID_MARK)) \
             and BUCKET_MARK in shared and CLOSED_MARK in shared \
-            and ROTATED_MARK in shared and RINGS_MARK in shared
+            and ROTATED_MARK in shared and RINGS_MARK in shared and FRAME_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
     for path, old, new in ((BUNDLE, text, patch(text)),

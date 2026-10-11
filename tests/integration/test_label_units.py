@@ -4,6 +4,9 @@ style's min zoom (0 in a Publish export), the mix came out ~1e5 em off or 0
 at every zoom; the converter now follows each zoom, also above the tiles'
 max zoom (Publish: tiles to 16, the map to 22)."""
 
+import math
+import os
+
 import pytest
 from qgis.core import Qgis, QgsPalLayerSettings, QgsProperty, QgsTextBackgroundSettings, QgsTextFormat
 from qgis.PyQt.QtCore import QSizeF
@@ -365,3 +368,106 @@ def _step_at(value, zoom):
                 out = output
         return out
     return value
+
+
+def _red_run(image, row):
+    """Opaque red px from the left edge of an image row (its border)."""
+    run = 0
+    for x in range(image.width):
+        red, green, _, alpha = image.getpixel((x, row))
+        if alpha < 128 or red < 128 or green > 128:
+            break
+        run += 1
+    return run
+
+
+@pytest.mark.parametrize("zoom", [14, 17, 18, 19, 20.5, 22])
+def test_a_mm_border_of_a_fixed_map_unit_frame_keeps_its_width(mc, at, zoom):
+    """10 pt text in a fixed 20 x 8 map-unit frame with a 0.5 mm border: the
+    frame image drawn once was scaled with the map, border included (~6x
+    QGIS's width at zoom 20.5, 16x at 22, a hairline below the drawing zoom).
+    Each tile zoom now has its image, the border at its px over the scale."""
+    exporter = _exporter(mc)
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeFixed, (20, 8),
+                   Qgis.RenderUnit.MapUnits, 0.5, Qgis.RenderUnit.Millimeters)
+    frame.setFillColor(QColor(255, 255, 0))
+    frame.setStrokeColor(QColor(255, 0, 0))
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24, "layout": {"text-size": 13.3333}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    layout = layer_def["layout"]
+    middle = math.floor(zoom) + 0.5
+    images = exporter.pattern_images[at(layout["icon-image"], zoom)]
+    scale = mc.ex.evaluate_zoom_curve(layout["icon-size"], middle)
+    image, density = images.img_1x, images.density
+    # QGIS's box, its border centred on the outline (half of it outside).
+    assert image.width / density * scale == pytest.approx(_mu(20, middle) + 0.5 * MM, rel=0.03, abs=1)
+    if _mu(8, middle) > 4 * MM:  # smaller frames are all border
+        # The border on screen at the zoom's middle: QGIS's 0.5 mm.
+        border = _red_run(image, image.height // 2) / density * scale
+        assert border == pytest.approx(0.5 * MM, abs=max(0.6, scale / density))
+    # Denser images above the drawing zoom (18): the border stays sharp.
+    assert density == min(8, 2 ** max(0, math.floor(zoom) + 1 - 18))
+    # Zooms whose images are alike share them; none left from the one drawing.
+    assert len(exporter.pattern_images) <= 24
+    assert set(exporter.pattern_images) == {_step_at(layout["icon-image"], z) for z in range(24)}
+
+
+@pytest.mark.parametrize("shape,name", [(QgsTextBackgroundSettings.ShapeType.ShapeEllipse, "ellipse"),
+                                        (QgsTextBackgroundSettings.ShapeType.ShapeCircle, "circle"),
+                                        (QgsTextBackgroundSettings.ShapeType.ShapeSquare, "square")])
+def test_buffer_frames_are_fitted_around_the_text_bounded_by_their_shape(mc, shape, name):
+    """QGIS bounds the text by the frame's shape (an ellipse: the text box
+    times sqrt(2); a circle: its diagonal; a square: its longer side), adds
+    the buffer around that and centres an ellipse's border on its outline.
+    The frame was fitted to the bare text box and buffer: ellipses 20-25 %
+    smaller than QGIS's. The patched MapLibre enlarges the fitted text box
+    of layers flagged q2vt:frame-shape; half the border joins the buffer."""
+    exporter = _exporter(mc)
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2),
+                   Qgis.RenderUnit.Millimeters, 0.5, Qgis.RenderUnit.Millimeters)
+    frame.setType(shape)
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24,
+                 "layout": {"text-size": 13.3333, "text-line-height": 1.2}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    assert layer_def["metadata"]["q2vt:frame-shape"] == name
+    padding = layer_def["layout"]["icon-text-fit-padding"]
+    padding = padding[1] if padding[0] == "literal" else padding
+    half = 0.25 * MM if name != "square" else 0.0  # a square's image centres its border itself
+    assert padding[1] == padding[3] == pytest.approx(3 * MM + half, abs=0.01)
+    assert exporter._frame_text_box(frame, 30, 10) == pytest.approx(
+        {"ellipse": (30 * 2 ** 0.5, 10 * 2 ** 0.5), "circle": (10 * 10 ** 0.5,) * 2,
+         "square": (30, 30)}[name])
+    # A rectangle keeps the bare text box (no flag).
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeRectangle)
+    plain = {"id": "lbl", "minzoom": 0, "maxzoom": 24,
+             "layout": {"text-size": 13.3333, "text-line-height": 1.2}, "paint": {}}
+    exporter._apply_icon_from_background(plain, frame, "s", settings)
+    assert "q2vt:frame-shape" not in plain.get("metadata", {})
+
+
+def test_a_border_in_another_unit_than_the_buffer_joins_it_per_zoom(mc, at):
+    """An ellipse with a 3 x 2 map-unit buffer and a 0.5 mm border: half the
+    border lies outside the buffer at every zoom (QGIS strokes the outline
+    centred on it)."""
+    exporter = _exporter(mc)
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2),
+                   Qgis.RenderUnit.MapUnits, 0.5, Qgis.RenderUnit.Millimeters)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24,
+                 "layout": {"text-size": 13.3333, "text-line-height": 1.2}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    for zoom in (15, 19, 21):
+        padding = at(layer_def["layout"]["icon-text-fit-padding"], zoom)
+        assert padding[1] == pytest.approx(_mu(3, zoom + 0.5) + 0.25 * MM, rel=1e-3)
+
+
+def test_the_bundled_maplibre_fits_flagged_frames_around_their_shape():
+    """tools/patch_maplibre.py patched the frame fit of the shared bundle."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(root, "resources", "ml_viewer", "maplibre-gl-shared.mjs"), encoding="utf-8") as handle:
+        bundle = handle.read()
+    assert "/*q2vt-frame-shape*/" in bundle
+    assert bundle.count("q2FrameBox(") == 3  # the helper and both fits (horizontal, vertical text)

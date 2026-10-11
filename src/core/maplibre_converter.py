@@ -4527,6 +4527,12 @@ class QgisMapLibreStyleExporter:
         variable_anchor = TextPropertyExtractor.get_text_variable_anchor(label_settings)
         pinned = self._is_pinned(label_settings)
         translate = None
+        visible = tuple(self.visible_polygons.get(style_name) or ())
+        # A line label at its line's middle (rules_exporter
+        # _single_line_label_as_point): turned to the line by a data-defined
+        # rotation, its above/below distance is a Y offset.
+        line_midpoint = visible[2:3] == ("line",)
+        frame_offset = None
         if pinned:
             # Data-defined position: the label's alignment point sits on the
             # exported point; offsets and candidate positions do not apply.
@@ -4549,7 +4555,16 @@ class QgisMapLibreStyleExporter:
         elif placement == "OverPoint":
             offset = TextPropertyExtractor.get_text_offset(label_settings, em_size)
             background = text_format.background()
-            if offset != [0, 0] and (
+            if offset != [0, 0] and line_midpoint:
+                # The distance points out from the line, as pal places the
+                # label: text-offset, which MapLibre turns with the label
+                # (text-translate is never turned, and cannot follow each
+                # line's angle). A frame not fitted to the text follows by
+                # icon-offset, turned with it too.
+                if background.enabled() and not IconPropertyExtractor.get_icon_text_fit(background):
+                    frame_offset = [PropertyExtractor.length(label_settings.xOffset, label_settings.offsetUnits),
+                                    PropertyExtractor.length(label_settings.yOffset, label_settings.offsetUnits)]
+            elif offset != [0, 0] and (
                     ex.is_zoom_curve(offset) or layer_def["layout"]["text-rotate"] != 0
                     or (background.enabled() and not IconPropertyExtractor.get_icon_text_fit(background))):
                 # px drawn at the camera zoom: offset and text scale unlike, a
@@ -4571,8 +4586,7 @@ class QgisMapLibreStyleExporter:
             # anchors along it, half a label + 2 em from its start).
             layer_def["layout"]["symbol-placement"] = "line-center"
             layer_def["layout"].pop("symbol-spacing", None)
-        visible = tuple(self.visible_polygons.get(style_name) or ())
-        if layer_def["layout"]["symbol-placement"] == "point" and visible[2:3] != ("line",) and \
+        if layer_def["layout"]["symbol-placement"] == "point" and not line_midpoint and \
                 TextPropertyExtractor.flips_upside_down(label_settings):
             # Line labels at a line's middle come upright already. Before the
             # background takes the text's angle (icon-rotate).
@@ -4603,6 +4617,12 @@ class QgisMapLibreStyleExporter:
             if translate and "icon-image" in layer_def["layout"]:
                 # The frame goes with its text.
                 layer_def["paint"]["icon-translate"] = translate
+            if frame_offset and "icon-image" in layer_def["layout"] \
+                    and layer_def["layout"].get("icon-offset") in (None, [0, 0], [0.0, 0.0]):
+                # icon-offset is in px of the icon, multiplied by icon-size.
+                layer_def["layout"]["icon-offset"] = self._layer_zoom_step(
+                    layer_def, TextPropertyExtractor.label_ems(
+                        frame_offset, layer_def["layout"].get("icon-size", 1)))
         else:
             self._apply_default_icon_props(layer_def)
 
@@ -4909,8 +4929,11 @@ class QgisMapLibreStyleExporter:
             return None
         stroke = PropertyExtractor.static_pixels(background.strokeWidth(), background.strokeWidthUnit(), mid)
         buffer = background.size()
-        width = text_ems[0] * text + 2 * PropertyExtractor.static_pixels(buffer.width(), background.sizeUnit(), mid)
-        height = text_ems[1] * text + 2 * PropertyExtractor.static_pixels(buffer.height(), background.sizeUnit(), mid)
+        # The text box as QGIS bounds it by the ellipse (or circle).
+        width, height = QgisMapLibreStyleExporter._frame_text_box(
+            background, text_ems[0] * text, text_ems[1] * text)
+        width += 2 * PropertyExtractor.static_pixels(buffer.width(), background.sizeUnit(), mid)
+        height += 2 * PropertyExtractor.static_pixels(buffer.height(), background.sizeUnit(), mid)
         if width <= 0 or height <= 0 or stroke <= 0:
             return None
         # About the frame's own size: MapLibre draws a text-fitted icon
@@ -4956,11 +4979,13 @@ class QgisMapLibreStyleExporter:
         return ["match", key] + cases + ["bottom-left"]
 
     def _background_image(self, background, stroke_px: Optional[float] = None,
-                          zoom: Optional[float] = None) -> Optional[str]:
+                          zoom: Optional[float] = None, radius_px: Optional[float] = None,
+                          density: int = 1) -> Optional[str]:
         """Sprite for a label background shape (rectangle/ellipse/SVG/marker).
-        ``stroke_px`` overrides the frame stroke (per-zoom map-unit frames);
-        ``zoom``: the zoom map-unit sizes are drawn at (a fixed map-unit frame,
-        scaled by icon-size)."""
+        ``stroke_px`` / ``radius_px`` override the frame stroke / corner
+        radius (per-zoom frames); ``zoom``: the zoom map-unit sizes are drawn
+        at (a fixed map-unit frame, scaled by icon-size); ``density``: image
+        px per logical px (a frame scaled up by icon-size)."""
         from .fidelity.patterns import frame_image  # pylint: disable=import-outside-toplevel
         shape = _enum_int(background.type(), 0)
         names = {0: "rectangle", 1: "rectangle", 2: "ellipse", 3: "ellipse", 4: "svg", 5: "marker"}
@@ -4982,35 +5007,37 @@ class QgisMapLibreStyleExporter:
             name = self._next_name("marker")
             self.marker_symbols[name] = SpriteRequest(QgsMarkerSymbol([svg]), bake_rotation=True)
             return name
-        if shape in (1, 3):
-            self.context.report("Q2VT_PATTERN_APPROXIMATE",
-                                "Square/circle label backgrounds are fitted to the text box "
-                                "(width and height may differ).")
         fill = background.fillColor()
         stroke = background.strokeColor()
         if stroke_px is None:
             stroke_px = PropertyExtractor.static_pixels(background.strokeWidth(),
                                                         background.strokeWidthUnit(), zoom)
-        radii = background.radii()
-        radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()), background.radiiUnit(),
-                                                    zoom) if kind == "rectangle" else 0
+        if kind != "rectangle":
+            radius_px = 0
+        elif radius_px is None:
+            radii = background.radii()
+            radius_px = PropertyExtractor.static_pixels(max(radii.width(), radii.height()),
+                                                        background.radiiUnit(), zoom)
         fixed = 0
         if _enum_int(background.sizeType(), 0) == 1:  # SizeFixed: QGIS's width x height
             # QGIS strokes the outline centred on it: half the stroke outside
             # (the image's stroke lies inside its edge).
             size = background.size()
-            fixed = tuple(max(1, round(PropertyExtractor.static_pixels(side, background.sizeUnit(), zoom)
-                                       + max(stroke_px, 0.0)))
+            fixed = tuple(max(1, round((PropertyExtractor.static_pixels(side, background.sizeUnit(), zoom)
+                                        + max(stroke_px, 0.0)) * density)) / density
                           for side in (size.width(), size.height()))
+            if density == 1:
+                fixed = tuple(int(side) for side in fixed)
         rgba = lambda c: (c.red(), c.green(), c.blue(), c.alpha())  # noqa: E731
-        one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 1, fixed)
-        two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2, fixed)
+        one, meta = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, density, fixed)
+        two, _ = frame_image(kind, rgba(fill), rgba(stroke), stroke_px, radius_px, 2 * density, fixed)
         name = self._next_name("frame")
-        self.pattern_images[name] = PatternImages(one, two, meta)
+        self.pattern_images[name] = PatternImages(one, two, meta, density)
         return name
 
     def _frame_variants(self, background, label_settings, base: str, source_layer: str,
-                        zoom: Optional[float] = None, stroke_px: Optional[float] = None):
+                        zoom: Optional[float] = None, stroke_px: Optional[float] = None,
+                        radius_px: Optional[float] = None, density: int = 1):
         """Frame per distinct data-defined frame fill/border colour."""
         from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
         props = label_settings.dataDefinedProperties()
@@ -5042,7 +5069,8 @@ class QgisMapLibreStyleExporter:
                     variant.setStrokeColor(color)
                 else:
                     variant.setFillColor(color)
-            return self._background_image(variant, stroke_px=stroke_px, zoom=zoom)
+            return self._background_image(variant, stroke_px=stroke_px, zoom=zoom,
+                                          radius_px=radius_px, density=density)
         key, cases = self._variant_images(names, combos, make)
         return ["match", key] + cases + [base] if cases else base
 
@@ -5095,6 +5123,12 @@ class QgisMapLibreStyleExporter:
                                     label_settings=None):
         """Configure icon layout/paint from a label background shape."""
         fixed_zoom = self._fixed_frame_zoom(background)
+        shape = _enum_int(background.type(), 0)
+        if _enum_int(background.sizeType(), 0) == 0 and shape in self.FRAME_SHAPES:
+            # QGIS bounds the text by the shape, then adds the buffer: the
+            # patched MapLibre enlarges the fitted text box (tools/patch_maplibre.py).
+            layer_def.setdefault("metadata", {})["q2vt:frame-shape"] = self.FRAME_SHAPES[shape]
+            background = self._stroke_centred_buffer(background)
         image = self._background_image(background, zoom=fixed_zoom)
         if image is None:
             self.context.report("Q2VT_UNSUPPORTED_SYMBOL_LAYER",
@@ -5140,6 +5174,7 @@ class QgisMapLibreStyleExporter:
                 # A fixed map-unit frame: drawn at fixed_zoom, scaled with the
                 # map (drawn at the style's min zoom it was 1 px).
                 self._scale_fixed_frame(layer_def, background, fixed_zoom)
+                self._paper_border_of_fixed_frame(layer_def, background, label_settings, fixed_zoom)
             elif text_fit and not text_curve:
                 # Screen text: the map-unit buffer and stroke grow, not the text.
                 self._grow_screen_text_frame(layer_def, background, label_settings, map_stroke)
@@ -5166,6 +5201,44 @@ class QgisMapLibreStyleExporter:
             "icon-translate": IconPropertyExtractor.get_icon_translate(),
             "icon-translate-anchor": IconPropertyExtractor.get_icon_translate_anchor(),
         })
+
+    # Buffer frames QGIS fits around the text bounded by their shape
+    # (qgstextrenderer drawBackground): square, ellipse, circle.
+    FRAME_SHAPES = {1: "square", 2: "ellipse", 3: "circle"}
+
+    @staticmethod
+    def _frame_text_box(background, width: float, height: float):
+        """The box a buffer frame of QGIS is fitted around for a text box of
+        ``width`` x ``height``: times sqrt(2) for an ellipse, its diagonal
+        both ways for a circle, its longer side both ways for a square."""
+        shape = _enum_int(background.type(), 0)
+        if shape == 2:
+            return width * math.sqrt(2), height * math.sqrt(2)
+        if shape == 3:
+            side = math.hypot(width, height)
+            return side, side
+        if shape == 1:
+            side = max(width, height)
+            return side, side
+        return width, height
+
+    @staticmethod
+    def _stroke_centred_buffer(background):
+        """An ellipse / circle buffer frame whose border is in the buffer's
+        unit, with the buffer grown by half the border: QGIS strokes the
+        outline centred on it, the frame image keeps its border inside its
+        edge (the whole image is fitted to the text plus the buffer).
+        Borders in another unit: _grow_screen_text_frame adds the half per zoom."""
+        if _enum_int(background.type(), 0) not in (2, 3) or background.strokeWidth() <= 0 \
+                or normalize_unit(background.strokeWidthUnit()) != normalize_unit(background.sizeUnit()):
+            return background
+        from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QSizeF  # pylint: disable=import-outside-toplevel
+        grown = QgsTextBackgroundSettings(background)
+        half = background.strokeWidth() / 2.0
+        size = background.size()
+        grown.setSize(QSizeF(size.width() + half, size.height() + half))
+        return grown
 
     # A fixed map-unit frame is drawn at the zoom where its longer side is at
     # most this many px, then scaled by icon-size (MapLibre stores icon
@@ -5200,6 +5273,56 @@ class QgisMapLibreStyleExporter:
                 [PropertyExtractor.length(offset.x(), unit), PropertyExtractor.length(offset.y(), unit)],
                 size)
 
+    # Most image px per logical px of a fixed map-unit frame image (one
+    # drawn 128 px wide: up to 1024 px, 2048 in the @2x sheet).
+    FIXED_FRAME_MAX_DENSITY = 8
+
+    def _paper_border_of_fixed_frame(self, layer_def: dict, background, label_settings, fixed_zoom: int):
+        """A fixed map-unit frame with a border or corner radius in paper
+        units (mm, pt, px): one frame image per tile zoom (a ``step``: MapLibre
+        lays the image out at the tile's zoom). The image drawn at fixed_zoom
+        is scaled by icon-size 2^(zoom - fixed_zoom), so the border is drawn
+        at its px divided by that scale at the zoom's middle (within sqrt(2)
+        of QGIS's at its ends), the image denser above fixed_zoom so a thin
+        border stays sharp. One image scaled the border with the map: 0.5 mm
+        was ~6x QGIS's at zoom 20.5, a hairline below fixed_zoom."""
+        stroke_paper = background.strokeWidth() > 0 and not _is_map_unit(background.strokeWidthUnit())
+        radii = background.radii()
+        radius = max(radii.width(), radii.height())
+        rectangle = _enum_int(background.type(), 0) in (0, 1)
+        radius_paper = rectangle and radius > 0 and not _is_map_unit(background.radiiUnit())
+        if not (stroke_paper or radius_paper):
+            return
+        layout = layer_def["layout"]
+        low = int(math.floor(max(0, layer_def.get("minzoom", 0))))
+        high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
+        zooms = list(range(low, max(low + 1, high)))
+        size = background.size()
+        # Beyond the frame's own size the image is all border.
+        top = PropertyExtractor.static_pixels(max(size.width(), size.height()), background.sizeUnit(), fixed_zoom)
+        image = layout["icon-image"]
+        variants = isinstance(image, list)
+        for name in (image[3::2] + image[-1:] if variants else [image]):
+            self.pattern_images.pop(name, None)
+        images, names = {}, []
+        for zoom in zooms:
+            scale = 2.0 ** (zoom + 0.5 - fixed_zoom)  # icon-size at the zoom's middle
+            stroke = min(top, PropertyExtractor.static_pixels(
+                background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5) / scale)
+            corner = min(top, PropertyExtractor.static_pixels(radius, background.radiiUnit(), zoom + 0.5)
+                         / scale) if rectangle else 0.0
+            density = int(min(self.FIXED_FRAME_MAX_DENSITY, 2 ** max(0, zoom + 1 - fixed_zoom)))
+            key = (round(stroke, 3), round(corner, 3), density)
+            if key not in images:
+                base = self._background_image(background, stroke_px=key[0], zoom=fixed_zoom,
+                                              radius_px=key[1], density=density)
+                images[key] = self._frame_variants(
+                    background, label_settings, base, layer_def.get("source-layer", ""), zoom=fixed_zoom,
+                    stroke_px=key[0], radius_px=key[1], density=density) \
+                    if variants and label_settings is not None else base
+            names.append(images[key])
+        layout["icon-image"] = self._zoom_step(zooms, names)
+
     def _grow_screen_text_frame(self, layer_def: dict, background, label_settings, map_stroke: bool):
         """A text-fitted frame around screen-size text with a map-unit buffer or
         stroke: its padding and frame image per tile zoom (a ``step``: MapLibre
@@ -5210,23 +5333,29 @@ class QgisMapLibreStyleExporter:
         low = int(math.floor(max(0, layer_def.get("minzoom", 0))))
         high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
         zooms = list(range(low, max(low + 1, high)))
-        if _enum_int(background.sizeType(), 0) == 0 and _is_map_unit(background.sizeUnit()):
+        # An ellipse / circle border in another unit than the buffer: half of
+        # it outside the buffer, per zoom (_stroke_centred_buffer).
+        centred = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0 \
+            and normalize_unit(background.strokeWidthUnit()) != normalize_unit(background.sizeUnit())
+        if _enum_int(background.sizeType(), 0) == 0 and (_is_map_unit(background.sizeUnit()) or centred):
             size = background.size()
             steps = []
             for zoom in zooms:
-                x = PropertyExtractor.static_pixels(size.width(), background.sizeUnit(), zoom + 0.5)
-                y = PropertyExtractor.static_pixels(size.height(), background.sizeUnit(), zoom + 0.5)
+                half = PropertyExtractor.static_pixels(background.strokeWidth(), background.strokeWidthUnit(),
+                                                       zoom + 0.5) / 2 if centred else 0.0
+                x = PropertyExtractor.static_pixels(size.width(), background.sizeUnit(), zoom + 0.5) + half
+                y = PropertyExtractor.static_pixels(size.height(), background.sizeUnit(), zoom + 0.5) + half
                 padding = [y, x, y, x]
                 if label_settings is not None:
                     padding = self._frame_fit_padding(padding, label_settings.format(), layout)
                 steps.append([round(v, 4) for v in padding])
             layout["icon-text-fit-padding"] = self._zoom_step(zooms, steps, literal=True)
         ellipse = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0
-        map_buffer = _enum_int(background.sizeType(), 0) == 0 and _is_map_unit(background.sizeUnit())
         text_ems = self._ellipse_text_ems(label_settings, layout) if ellipse else None
-        if map_stroke or (ellipse and map_buffer):
+        if map_stroke or ellipse:
             # The frame shown at icon-size 1: the stroke of the zoom's middle
-            # (an ellipse: its share of the frame, _ellipse_ring); zooms whose
+            # (an ellipse, whatever its units: its share of the frame,
+            # _ellipse_ring; a border in image px grew with the frame); zooms whose
             # strokes round alike share an image (data-defined colours: a
             # match of variants per stroke).
             image = layout["icon-image"]

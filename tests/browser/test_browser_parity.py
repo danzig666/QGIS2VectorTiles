@@ -1811,3 +1811,110 @@ def test_huge_map_unit_text_is_drawn_when_zoomed_in(tmp_path, monkeypatch):
     qgis, browser = _compare(tmp_path, _label_point(tmp_path, settings), metric="ink",
                              zooms=PUBLISH_ZOOMS)
     assert qgis > 10000 and browser > 0.7 * qgis, (qgis, browser)
+
+
+@pytest.mark.parametrize("unit,dist,zoom", [(Qgis.RenderUnit.Millimeters, 3, 17.5),
+                                            (Qgis.RenderUnit.Millimeters, 3, 19.5),
+                                            (Qgis.RenderUnit.MapUnits, 10, 17.5),
+                                            (Qgis.RenderUnit.MapUnits, 10, 19.5)])
+def test_a_line_label_keeps_its_distance_out_from_a_sloped_line(tmp_path, monkeypatch, unit, dist, zoom):
+    """10 pt text above a 60 degree line (drawn once, at the line's middle):
+    the distance points out from the line, as pal places the label. As an
+    unturned text-translate it went straight up the screen: the label
+    touched the line (3 mm) or slid along it (10 map units)."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857&field=t:string", "lines", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes(["N0"])
+    dx, dy = 250 * 0.5, 250 * 3 ** 0.5 / 2
+    feature.setGeometry(QgsGeometry.fromWkt(f"LINESTRING({CENTER[0] - dx} {CENTER[1] - dy}, "
+                                            f"{CENTER[0] + dx} {CENTER[1] + dy})"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "lines.gpkg"))
+    hidden = QgsLineSymbol.createSimple({"color": "0,0,0", "width": "0.3"})
+    hidden.setOpacity(0)
+    layer.setRenderer(QgsSingleSymbolRenderer(hidden))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "t"
+    settings.placement = Qgis.LabelPlacement.Line
+    line_settings = settings.lineSettings()
+    line_settings.setPlacementFlags(Qgis.LabelLinePlacementFlags(2))  # above the line
+    settings.setLineSettings(line_settings)
+    settings.dist, settings.distUnits = dist, unit
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    fmt.setSizeUnit(Qgis.RenderUnit.Points)
+    fmt.setColor(QColor("blue"))
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _compare(tmp_path, layer, metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    middle = SIZE / 2
+    along, normal = (0.5, -(3 ** 0.5) / 2), (-(3 ** 0.5) / 2, -0.5)  # on screen: up the line, its left
+
+    def part(box, axis):
+        x, y = (box[0] + box[2]) / 2 - middle, (box[1] + box[3]) / 2 - middle
+        return x * axis[0] + y * axis[1]
+    gap = dist * 96 / 25.4 if unit == Qgis.RenderUnit.Millimeters else dist * 512 * 2 ** zoom / gallery.EARTH
+    assert abs(part(browser, along)) <= 4, (qgis, browser)  # across the line, not along it
+    assert part(qgis, normal) > gap
+    # Out from the line by the distance (QGIS also adds half the text height).
+    assert gap - 3 <= part(browser, normal) <= part(qgis, normal) + 3, (qgis, browser, gap)
+
+
+def _border_across(path):
+    """Red border px (red over the yellow fill or white ground) along the
+    image's middle row, from its left edge to near the middle."""
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    row = [image.getpixel((x, image.height // 2)) for x in range(image.width // 2 - 12)]
+    return sum((255 - p[1]) / 255 for p in row if p[0] > 200 and p[2] < 100)
+
+
+@pytest.mark.parametrize("zoom", [17.5, 19.5])
+def test_a_mm_border_of_a_fixed_map_unit_frame_stays_mm_wide(tmp_path, monkeypatch, zoom):
+    """10 pt text in a fixed 20 x 8 map-unit frame with a 0.5 mm border,
+    tiles to zoom 16: the frame image (drawn for zoom 18) was scaled with the
+    map, border and all - ~3x QGIS's border at zoom 19.5, ~6x at 20.5,
+    thinner below zoom 18."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeFixed, (20, 8), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setFillColor(QColor(255, 255, 0))
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_border_across(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qgis == pytest.approx(0.5 * 96 / 25.4, abs=0.2)
+    assert browser == pytest.approx(qgis, abs=0.5), (qgis, browser)
+
+
+@pytest.mark.parametrize("unit,zoom", [(Qgis.RenderUnit.Millimeters, 18.5), (Qgis.RenderUnit.MapUnits, 20.5)])
+def test_an_ellipse_buffer_frame_is_as_large_as_qgis(tmp_path, monkeypatch, unit, zoom):
+    """10 pt text in an ellipse with a 3 x 2 buffer and a 0.5 border (same
+    unit): QGIS bounds the text by an ellipse (the text box times sqrt(2))
+    before adding the buffer and centres the border on the outline. The web
+    frame hugged the bare text box: 41 x 31 px against QGIS's 50 x 40."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    frame.setSizeUnit(unit)
+    frame.setStrokeWidthUnit(unit)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, _), (bf, _) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    for a, b in zip(qf, bf):  # the ellipse's edges within 3 px
+        assert abs(a - b) <= 3, (qf, bf)

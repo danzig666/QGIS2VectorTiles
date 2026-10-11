@@ -99,6 +99,9 @@ class PatternImages:
     img_2x: Img
     # Stretch metadata (logical px), e.g. for label background frames.
     metadata: Optional[Dict[str, object]] = None
+    # Image px per logical px of the 1x image (its declared pixelRatio; the
+    # 2x image: twice it). A frame scaled up by icon-size keeps sharp edges.
+    density: float = 1.0
 
 
 def _pixels_to_millimeters(symbol: QgsSymbol) -> None:
@@ -399,8 +402,9 @@ class SpriteGenerator:
             if entry:
                 entries.append(entry)
         for name, images in self.pattern_images.items():
-            entries.append(AtlasEntry(name, {1: (images.img_1x, 1),
-                                             self.lower_factor: (images.img_2x, self.lower_factor)},
+            density = images.density
+            entries.append(AtlasEntry(name, {1: (images.img_1x, density),
+                                             self.lower_factor: (images.img_2x, self.lower_factor * density)},
                                       dict(images.metadata or {})))
         if not entries:
             return None
