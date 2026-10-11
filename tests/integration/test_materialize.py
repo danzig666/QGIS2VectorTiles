@@ -184,15 +184,15 @@ def test_hash_line_converted_to_markers(plugin, tmp_path):
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.08
 
 
-def _polygon_offset_markers(plugin, tmp_path, line):
+def _polygon_offset_markers(plugin, tmp_path, line, offset=1.5, fast_markers=False):
     tmp_path = tmp_path / line.layerType()
     tmp_path.mkdir()
     layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "po.gpkg"))
     line.setInterval(3)
-    line.setOffset(1.5)
+    line.setOffset(offset)
     line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
-    return _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT)
+    return _export_zooms(plugin, layer, tmp_path, 0, 16, EXTENT, fast_markers)
 
 
 def test_screen_offset_hashes_on_polygons_are_placed_per_zoom(plugin, tmp_path):
@@ -248,6 +248,32 @@ def test_screen_offset_polygon_outline_markers_overzoom_inwards_on_the_kept_ring
             hole = max(p.x() for p in ring) < -20 and min(p.y() for p in ring) > -40
             assert (area > 0) == hole  # holes counter-clockwise, exteriors clockwise
             assert hole or ring_filter != 2
+
+
+@pytest.mark.parametrize("kind", ["HashLine", "MarkerLine"])
+@pytest.mark.parametrize("ring_filter,offset", [(2, 0.0), (0, 1.5)])
+def test_fast_polygon_outline_markers_keep_the_ring_filter_and_inward_offset(
+        plugin, tmp_path, kind, ring_filter, offset):
+    """With fast marker lines (or over the output budget) millimetre-interval
+    hashes or markers on polygon outlines are not placed per zoom: the
+    browser draws them along the rings. That native rule took the raw rings,
+    without the ring filter (interior rings only drew the exteriors too) and
+    with the screen offset on the right-hand side of each ring as stored."""
+    line = QgsHashedLineSymbolLayer() if kind == "HashLine" else QgsMarkerLineSymbolLayer()
+    if kind == "MarkerLine":
+        line.setSubSymbol(_marker(Qgis.MarkerShape.Square, 4))
+    line.setRingFilter(QgsLineSymbolLayer.RenderRingFilter(ring_filter))
+    datasets, rules, diags = _polygon_offset_markers(plugin, tmp_path, line, offset,
+                                                     fast_markers=True)
+    assert rules and diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    for dataset, rule in zip(datasets, rules):
+        assert rule.recipe is not None and rule.recipe.kind == "polygon_offset"
+        assert rule.recipe.param("ring_filter") == ring_filter
+        assert bool(rule.recipe.param("rhr")) == bool(offset)
+        rings = [QgsGeometry(f.geometry()) for f in dataset.getFeatures()]
+        rings = [part for ring in rings for part in ring.asMultiPolyline()] \
+            if rings and rings[0].isMultipart() else [ring.asPolyline() for ring in rings]
+        assert len(rings) == (1 if ring_filter == 2 else 3)
 
 
 def _hash_line(placements):
@@ -371,14 +397,15 @@ def test_rotated_map_unit_hatch_keeps_angle_and_spacing(plugin, tmp_path):
     assert gaps == {15.0}
 
 
-def _export_zooms(plugin, layer, tmp_path, low, high, extent):
+def _export_zooms(plugin, layer, tmp_path, low, high, extent, fast_markers=False):
     """Flatten and export ``layer`` for zooms ``low``-``high`` within ``extent``."""
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener
     from q2vt_plugin.src.core.rules_exporter import RulesExporter
     from fidelity.diagnostics import DiagnosticCollector
     reset_project(layer)
     diags = DiagnosticCollector()
-    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags,
+                           fast_markers=fast_markers).flatten_all_rules()
     utils = tmp_path / f"utils{low}_{high}"
     utils.mkdir()
     layers, rules = RulesExporter(rules, extent, low, high, str(utils), 0, QgsProcessingFeedback(),

@@ -1075,7 +1075,7 @@ class SymbolMaterializer:
         the polygon, holes left out (renderPolygonStroke; not for interior
         rings only), so of a stroke of width w at offset o (inwards) only
         what lies inside the polygon shows. A solid stroke is those polygons
-        (fidelity inside_band_expression: each ring's offset ring stroked
+        (fidelity inside_band_geometry: each ring's offset ring stroked
         with the pen's join, then clipped), per eighth of a zoom for screen
         units (the offset and the width converted each in its own unit);
         the browser draws the band as a line of its width at its middle
@@ -2356,17 +2356,7 @@ class SymbolMaterializer:
             last = zoom_rules[-1]
             last.visibility = (last.visibility or ZoomInterval(float(high), None)).intersect(
                 ZoomInterval(float(high), float(high + 1)))
-            if native.get_attr("g") == 2 and (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
-                # Polygon outlines: the ring filter, and a screen offset
-                # towards the interior on right-hand-rule rings (a map offset
-                # buffered), as _polygon_outline_offset draws native markers.
-                params = [("ring_filter", _ring_filter(layer)), ("crs", crs)]
-                if abs(layer.offset()) > 1e-9 and normalize_unit(layer.offsetUnit()) == "map":
-                    params.append(("offset", float(layer.offset())))
-                    over.rule.symbol().symbolLayer(0).setOffset(0.0)
-                elif abs(layer.offset()) > 1e-9:
-                    params.append(("rhr", True))
-                over.recipe = mat.Recipe("polygon_offset", params=tuple(params))
+            self._native_outline_recipe(over, layer, crs)
             if not over.visibility.is_empty:
                 rules.extend(self._native_interval_bands(over, 8))
         # A zoom where no line or ring is an interval long (to its end): one
@@ -2395,6 +2385,25 @@ class SymbolMaterializer:
                 rules.append(self._with_symbol(rule, (early_symbol if early else symbol).clone(),
                                                0, 2, recipe))
         return rules
+
+    @staticmethod
+    def _native_outline_recipe(native: FlattenedRule, layer, crs: str) -> FlattenedRule:
+        """Native interval markers on polygon outlines with an offset or a
+        ring filter (past the last tiles, or not materialized: fast marker
+        lines, over budget, too dense): the ring filter, and a screen offset
+        towards the interior on right-hand-rule rings (a map offset
+        buffered), as _polygon_outline_offset draws native markers."""
+        if native.get_attr("g") != 2 or not (abs(layer.offset()) > 1e-9 or _ring_filter(layer)):
+            return native
+        params = [("ring_filter", _ring_filter(layer)), ("crs", crs)]
+        if abs(layer.offset()) > 1e-9 and normalize_unit(layer.offsetUnit()) == "map":
+            params.append(("offset", float(layer.offset())))
+            native.rule.symbol().symbolLayer(0).setOffset(0.0)
+        elif abs(layer.offset()) > 1e-9:
+            params.append(("rhr", True))
+        native.recipe = mat.Recipe("polygon_offset", params=tuple(params))
+        native.set_attr("m", 1)
+        return native
 
     def _native_interval_bands(self, over: FlattenedRule, steps: int) -> List[FlattenedRule]:
         """Native screen-spaced interval markers past the last tiles, one
@@ -2579,10 +2588,12 @@ class SymbolMaterializer:
                                           max(layer.interval(), 1e-9),
                                           what="Marker line",
                                           min_px=self.INTERVAL_MIN_SPACING_PX, overzoom=True)
-                rules.extend(split if split is not None else [native])
+                rules.extend(split if split is not None else
+                             [self._native_outline_recipe(native, layer, crs)])
             elif zoom_interval:
                 per_zoom = self._screen_interval_rules(native, layer, sub, crs)
-                rules.extend(per_zoom if per_zoom is not None else [native])
+                rules.extend(per_zoom if per_zoom is not None else
+                             [self._native_outline_recipe(native, layer, crs)])
             else:
                 rules.append(native)
         return rules
