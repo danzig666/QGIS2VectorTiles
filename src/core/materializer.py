@@ -50,7 +50,7 @@ from .fidelity import zoom as fidelity_zoom
 from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector
-from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, physical_factor, normalize_unit, MM
+from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, physical_factor, normalize_unit, MM, PERCENT
 from .fidelity.zoom import WEB_MERCATOR_TOP_SCALE
 
 
@@ -1337,14 +1337,40 @@ class SymbolMaterializer:
             pass
         return "feature"
 
-    def _map_units(self, value: float, unit, what: str, flat_rule) -> float:
+    def _map_units(self, value: float, unit, what: str, flat_rule, cell: float,
+                   wrap: float = 0.0) -> float:
+        """Offset or displacement of a map-unit grid in map units; percentages
+        are of the grid ``cell`` (QgsPointPatternFillSymbolLayer). A non-zero
+        ``wrap`` keeps the value within that period (QGIS: std::fmod)."""
         if not value:
             return 0.0
-        if normalize_unit(unit) == "map":
-            return value
-        self._report("Q2VT_PATTERN_APPROXIMATE",
-                     f"Pattern {what} in screen units is ignored for a map-unit grid.", flat_rule)
-        return 0.0
+        unit = normalize_unit(unit)
+        if unit == "map":
+            pass
+        elif unit == PERCENT:
+            value = value * cell / 100.0
+        else:
+            self._report("Q2VT_PATTERN_APPROXIMATE",
+                         f"Pattern {what} in screen units is ignored for a map-unit grid.",
+                         flat_rule)
+            return 0.0
+        return math.fmod(value, wrap) if wrap else value
+
+    def _grid_shift(self, layer, flat_rule, shape: bool):
+        """(displacement x, y, offset x, y) of a map-unit point grid. QGIS
+        wraps the offset within one cell (renderPolygon) or two cells for the
+        clipped "Shape" texture (applyPattern)."""
+        dx, dy = layer.distanceX(), layer.distanceY()
+        period = 2.0 if shape else 1.0
+        return (
+            self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement",
+                            flat_rule, dx),
+            self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement",
+                            flat_rule, dy),
+            self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule, dx,
+                            period * dx),
+            self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule, dy,
+                            period * dy))
 
     def _point_grid(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         marker = layer.subSymbol()
@@ -1373,10 +1399,7 @@ class SymbolMaterializer:
                          "unrotated.", flat_rule)
         recipe = mat.grid_recipe(
             layer.distanceX(), layer.distanceY(),
-            self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
-            self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement", flat_rule),
-            self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
-            self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
+            *self._grid_shift(layer, flat_rule, clip == int(Qgis.MarkerClipMode.Shape)),
             self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
             inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape),
             deviation=self._deviation(layer, flat_rule), seed=layer.seed())
@@ -1421,7 +1444,7 @@ class SymbolMaterializer:
         def mm(value, unit, cell_mm):
             if not value:
                 return 0.0
-            if normalize_unit(unit) in ("percent", "percentage", "%"):
+            if normalize_unit(unit) == PERCENT:
                 return value * cell_mm / 100.0
             converted = _to_mm(value, unit)
             if converted is None:
@@ -1561,10 +1584,7 @@ class SymbolMaterializer:
         def recipe(fill):
             return mat.grid_recipe(
                 layer.distanceX(), layer.distanceY(),
-                self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
-                self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement", flat_rule),
-                self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
-                self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
+                *self._grid_shift(layer, flat_rule, True),
                 crs, self._anchor(layer, flat_rule), 0.0, rows_from_top=False,
                 clip_shape=True, clip_mode="shape", deviation=self._deviation(layer, flat_rule),
                 seed=layer.seed(), paths=paths, fill=fill)
@@ -1639,10 +1659,7 @@ class SymbolMaterializer:
         inherit_opacity(flat_rule.rule.symbol(), symbol)
         recipe = mat.grid_recipe(
             layer.distanceX(), layer.distanceY(),
-            self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
-            self._map_units(layer.displacementY(), layer.displacementYUnit(), "displacement", flat_rule),
-            self._map_units(layer.offsetX(), layer.offsetXUnit(), "offset", flat_rule),
-            self._map_units(layer.offsetY(), layer.offsetYUnit(), "offset", flat_rule),
+            *self._grid_shift(layer, flat_rule, clip == int(Qgis.MarkerClipMode.Shape)),
             self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
             0.0, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape), segments=segments,
             clip_shape=clip == int(Qgis.MarkerClipMode.Shape), clip_mode={
@@ -2166,6 +2183,8 @@ class SymbolMaterializer:
                 if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
                     translate = (offset.x(), offset.y(),
                                  QgsUnitTypes.encodeUnit(fill_layer.offsetUnit()))
+                    if normalize_unit(fill_layer.offsetUnit()) in ("map", "m"):
+                        translate += (fill_layer.offsetMapUnitScale(),)
                     fill_layer.setOffset(QPointF())
                 if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
                     # QGIS strokes the arrow centred on its edge with the

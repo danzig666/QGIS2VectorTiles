@@ -50,8 +50,9 @@ class FlattenedRule:
     # params...) applied to the whole layer before anything else (see
     # RulesExporter._point_groups).
     point_group: Optional[tuple] = None
-    # Shift on screen (x, y, QGIS unit name), y down: drawn with a viewport
-    # translate (an arrow fill layer's offset, e.g. a drop shadow).
+    # Shift on screen (x, y, QGIS unit name[, QgsMapUnitScale]), y down:
+    # drawn with a viewport translate (a fill layer's offset, e.g. a drop
+    # shadow; map units grow with the map).
     translate: Optional[tuple] = None
     # Paint effects drawn for this component: "outer" only its outer effects
     # (glow, drop shadow; the line itself is another component), "none" no
@@ -82,6 +83,10 @@ class FlattenedRule:
     # the rule renders, whichever symbol layers are enabled). None: the
     # rule's own filter.
     label_filter: Optional[str] = None
+    # (dx, dy) in project map units (y up) added to the exported geometry: a
+    # simple fill's offset in map units, exact at every zoom (a translate
+    # would show tile edges where it exceeds the tile buffer).
+    shift: Optional[tuple] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -91,7 +96,7 @@ class FlattenedRule:
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
             self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
-            self.label_filter,
+            self.label_filter, self.shift,
         )
 
     def evaluation_zoom(self) -> float:

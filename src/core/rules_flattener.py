@@ -35,6 +35,7 @@ from qgis.core import (
     QgsProperty,
     QgsFontUtils
     )
+from qgis.PyQt.QtCore import QPointF
 from qgis.PyQt.QtGui import QFont
 
 from ..utils.config import Qt
@@ -1417,7 +1418,7 @@ class RulesFlattener:
             sub_symbol = symbol_layer.subSymbol()
             layer_type = symbol_layer.layerType() if symbol_layer else None
             if layer_type == "GeometryGenerator" and sub_symbol is not None and \
-                    int(getattr(sub_symbol.type(), "value", sub_symbol.type())) == 1:
+                    int(getattr(sub_symbol.type(), "value", sub_symbol.type())) in (1, 2):
                 split_rules.extend(self._generated_line_rules(flat_rule, symbol_layer, layer_idx))
                 continue
             if layer_type == "VectorField" and sub_symbol is not None:
@@ -1455,29 +1456,45 @@ class RulesFlattener:
                 split_rules.extend(materialized)
                 continue
             if rule_clone and layer_type == "SimpleFill":
-                if clone_symbol_layer.strokeStyle() != Qt.PenStyle.NoPen:
-                    outline_rule = rule_clone.derive()
-                    outline_rule.set_attr("c", 1)
-                    # No Python reference to the fill symbol may outlive
-                    # setSymbol() below, which deletes it: SIP would hand
-                    # that stale QgsFillSymbol wrapper back for the next
-                    # object QGIS allocates at the same address (seen on
-                    # Windows: "'QgsFillSymbol' object has no attribute
-                    # 'sizeUnit'" for a point pattern's marker).
-                    outline_symbol = self._convert_fill_outline_to_line_symbol(
-                        outline_rule.rule.symbol())
-                    if outline_symbol:
-                        outline_rule.order = order + (1,)  # stroke above its fill
-                        outline_rule.translate = self._screen_offset(clone_symbol_layer)
-                        outline_rule.rule.setSymbol(outline_symbol)
-                        split_rules.append(outline_rule)
-                        clone_symbol_layer.setStrokeStyle(Qt.PenStyle.NoPen)
-                if clone_symbol_layer.brushStyle() == Qt.BrushStyle.NoBrush:
-                    continue
+                split_rules.extend(self._simple_fill_rules(rule_clone, clone_symbol_layer, order))
+                continue
             if rule_clone:
                 split_rules.append(rule_clone)
 
         return split_rules
+
+    def _simple_fill_rules(self, rule_clone: FlattenedRule, fill_layer, order: tuple):
+        """A simple fill as its fill and its outline: QGIS strokes the polygon
+        with the pen's width, unit, dashes and join, which MapLibre's
+        fill-outline (one device pixel) cannot, so the stroke is a line rule
+        on the polygon's rings, above its fill. A map-unit offset moves the
+        exported polygon (outline too)."""
+        rules = []
+        shift = self._map_offset_shift(fill_layer)
+        if shift is not None:
+            # The exported polygon is moved (outline too); no translate.
+            rule_clone.shift = shift
+            fill_layer.setOffset(QPointF())
+        if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
+            outline_rule = rule_clone.derive()
+            outline_rule.set_attr("c", 1)
+            # No Python reference to the fill symbol may outlive
+            # setSymbol() below, which deletes it: SIP would hand
+            # that stale QgsFillSymbol wrapper back for the next
+            # object QGIS allocates at the same address (seen on
+            # Windows: "'QgsFillSymbol' object has no attribute
+            # 'sizeUnit'" for a point pattern's marker).
+            outline_symbol = self._convert_fill_outline_to_line_symbol(
+                outline_rule.rule.symbol())
+            if outline_symbol:
+                outline_rule.order = order + (1,)  # stroke above its fill
+                outline_rule.translate = self._fill_offset(fill_layer)
+                outline_rule.rule.setSymbol(outline_symbol)
+                rules.append(outline_rule)
+                fill_layer.setStrokeStyle(Qt.PenStyle.NoPen)
+        if fill_layer.brushStyle() != Qt.BrushStyle.NoBrush:
+            rules.append(rule_clone)
+        return rules
 
     def _vector_field_rules(self, flat_rule: FlattenedRule, field_layer, layer_idx: int):
         """A vector field marker: QGIS draws its line sub-symbol from each
@@ -1532,14 +1549,23 @@ class RulesFlattener:
         return rules
 
     def _generated_line_rules(self, flat_rule: FlattenedRule, generator, layer_idx: int):
-        """A geometry generator drawn with a line symbol, as line rules on the
-        generated geometry: one per sub-symbol layer, exported like the
-        layers of a line layer (exact marker positions, hash lines, offsets
-        ...). ``pre_generator`` makes the exporter generate the lines first
-        and evaluate geometry-dependent properties on every generated part,
-        as QGIS does (``length(geometry_n($geometry, @geometry_part_num))``
-        is one segment's length)."""
+        """A geometry generator drawn with a line (or fill) symbol, as line
+        (fill) rules on the generated geometry: one per sub-symbol layer,
+        exported like the layers of a line (polygon) layer (exact marker
+        positions, hash lines, offsets, materialized patterns, a fill's
+        stroke as a line ...). ``pre_generator`` makes the exporter generate
+        the geometry first and evaluate geometry-dependent properties on
+        every generated part, as QGIS does
+        (``length(geometry_n($geometry, @geometry_part_num))`` is one
+        segment's length)."""
         sub_symbol = generator.subSymbol()
+        kind = int(getattr(sub_symbol.type(), "value", sub_symbol.type()))
+        expression = generator.geometryExpression()
+        if kind == 2:
+            # A fill sub-symbol draws only polygons (the rest is not coerced
+            # to a polygon by QgsGeometryGeneratorSymbolLayer::render).
+            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type("
+                          f"@q2vt_generated) = 'Polygon', @q2vt_generated, NULL))")
         rules = []
         clone_layer = None
         for inner_idx in reversed(range(sub_symbol.symbolLayerCount())):
@@ -1554,14 +1580,14 @@ class RulesFlattener:
                     single.deleteSymbolLayer(remove_idx)
             single.setOpacity(single.opacity() * flat_rule.rule.symbol().opacity())
             rule_clone.rule.setSymbol(single)
-            rule_clone.set_attr("g", 1)
-            rule_clone.set_attr("c", 1)
+            rule_clone.set_attr("g", kind)
+            rule_clone.set_attr("c", kind)
             # A distinct dataset per sub-symbol layer (their recipes differ),
             # apart from the ordinary symbol layers' (s = their index): with
             # layer_idx * 100 the generator at layer 0 gave its sub-layer 1
             # the dataset of symbol layer 1, drawn on the source geometry.
             rule_clone.set_attr("s", (layer_idx + 1) * 100 + inner_idx)
-            rule_clone.pre_generator = generator.geometryExpression()
+            rule_clone.pre_generator = expression
             clone_layer = single.symbolLayers()[0]
             self._fold_enabled_property(rule_clone, clone_layer)
             draw_pass = generator.renderingPass() if self._honor_passes else 0
@@ -1572,22 +1598,55 @@ class RulesFlattener:
                 for part, component in enumerate(materialized):
                     component.order = order + (part,)
                 rules.extend(materialized)
+            elif kind == 2 and clone_layer.layerType() == "SimpleFill":
+                rules.extend(self._simple_fill_rules(rule_clone, clone_layer, order))
             else:
                 rules.append(rule_clone)
         return rules
 
+    def _map_offset_shift(self, fill_layer) -> Optional[tuple]:
+        """A simple fill's offset in map units or meters at scale as a shift
+        of the polygon in project map units, y up (QgsSimpleFillSymbolLayer::
+        renderPolygon translates the painter by it: x right, y down). None
+        when there is none, or it is data-defined or limited by a map unit
+        scale (then a zoom-curve translate draws it)."""
+        from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
+        offset = fill_layer.offset()
+        unit = normalize_unit(fill_layer.offsetUnit())
+        if unit not in ("map", "m") or (abs(offset.x()) <= 1e-9 and abs(offset.y()) <= 1e-9):
+            return None
+        if fill_layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyOffset):
+            return None
+        scale = fill_layer.offsetMapUnitScale()
+        if scale.minScale or scale.maxScale or scale.minSizeMMEnabled or scale.maxSizeMMEnabled:
+            return None
+        factor = 1.0
+        if unit == "m":
+            # QgsRenderContext::convertMetersToMapUnits: a plain unit factor
+            # for projected CRSs, measured at the latitude for degrees.
+            from qgis.core import QgsProject, QgsUnitTypes  # pylint: disable=import-outside-toplevel
+            map_units = QgsProject.instance().crs().mapUnits()
+            if map_units == Qgis.DistanceUnit.Degrees:
+                context = self.lengths.map_context
+                factor = context.mercator_per_meter / context.mercator_per_map_unit
+            else:
+                factor = QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, map_units)
+        return offset.x() * factor, -offset.y() * factor
+
     @staticmethod
-    def _screen_offset(fill_layer) -> Optional[tuple]:
-        """A simple fill's screen offset as a rule translate: QGIS shifts the
-        whole polygon, outline too (the fill itself is shifted by its own
-        fill-translate)."""
+    def _fill_offset(fill_layer) -> Optional[tuple]:
+        """A simple fill's offset as a rule translate: QGIS shifts the whole
+        polygon, outline too (the fill itself is shifted by its own
+        fill-translate), in any unit; map units keep their map unit scale."""
         from qgis.core import QgsUnitTypes  # pylint: disable=import-outside-toplevel
         from .fidelity.units import normalize_unit  # pylint: disable=import-outside-toplevel
         offset = fill_layer.offset()
-        if (abs(offset.x()) <= 1e-9 and abs(offset.y()) <= 1e-9) or \
-                normalize_unit(fill_layer.offsetUnit()) in ("map", "m"):
+        if abs(offset.x()) <= 1e-9 and abs(offset.y()) <= 1e-9:
             return None
-        return offset.x(), offset.y(), QgsUnitTypes.encodeUnit(fill_layer.offsetUnit())
+        translate = (offset.x(), offset.y(), QgsUnitTypes.encodeUnit(fill_layer.offsetUnit()))
+        if normalize_unit(fill_layer.offsetUnit()) in ("map", "m"):
+            translate += (fill_layer.offsetMapUnitScale(),)
+        return translate
 
     @staticmethod
     def _convert_fill_outline_to_line_symbol(fill_symbol: QgsFillSymbol) -> QgsFillSymbol | None:

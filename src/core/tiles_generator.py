@@ -353,18 +353,27 @@ class GDALTilesGenerator:
         """Clip buffer for the datasets ``members`` (all without): a line is
         cut that far outside the tile, so a wide line (map units at the last
         tile zoom, square caps) needs about its width there, or both edges of
-        the band step where it crosses a tile edge."""
+        the band step where it crosses a tile edge. A translated fill or line
+        (a QGIS fill offset) needs its shift there too: MapLibre draws a
+        tile's features only inside the tile, so the neighbour's cut edge
+        would show."""
         from .fidelity import expressions as ex  # pylint: disable=import-outside-toplevel
         members = self.layers if members is None else members
         top = {self._layer_name(m): self._layer_zoom_range(m)[1] for m in members}
         widest = 0.0
         for layer in self.style.get("layers", []) if isinstance(self.style, dict) else []:
-            if layer.get("type") != "line" or layer.get("source-layer") not in top:
+            kind = layer.get("type")
+            if kind not in ("line", "fill") or layer.get("source-layer") not in top:
                 continue
             paint, zoom = layer.get("paint") or {}, top[layer["source-layer"]]
             # A style layer shown only beyond the last tile zoom draws its
             # tiles magnified: its width there is that much less of a tile.
             shown = max(zoom, float(layer.get("minzoom") or 0))
+            magnify = 2 ** (shown - zoom)
+            shift = self._translate_px(paint.get(f"{kind}-translate"), shown)
+            if kind == "fill":
+                widest = max(widest, shift / magnify)
+                continue
             try:
                 values = [ex.evaluate_zoom_curve(paint.get(name, default), shown)
                           for name, default in (("line-width", 1), ("line-gap-width", 0),
@@ -372,9 +381,27 @@ class GDALTilesGenerator:
             except (ex.ExpressionError, TypeError, IndexError):
                 continue  # feature-dependent: unknown
             width, gap, offset = (float(v) for v in values)
-            widest = max(widest, (width + 2 * gap + abs(offset)) / 2 ** (shown - zoom))
+            widest = max(widest, (width + 2 * gap + abs(offset) + shift) / magnify)
         units = math.ceil(widest * 8) + 8  # 8 tile units a CSS px (512 px tiles)
         return max(self._MIN_BUFFER, min(self._MAX_BUFFER, units))
+
+    @staticmethod
+    def _translate_px(translate, zoom: float) -> float:
+        """Length of a ``*-translate`` ([x, y], or a zoom curve of literal
+        [x, y] stops) at ``zoom``; 0 when unknown."""
+        from .fidelity import expressions as ex  # pylint: disable=import-outside-toplevel
+        if isinstance(translate, list) and len(translate) == 2 and \
+                all(ex.is_number(v) for v in translate):
+            return math.hypot(*translate)
+        if not ex.is_zoom_curve(translate) or translate[0] != "interpolate":
+            return 0.0
+        try:
+            parts = [list(translate[:3]) + [item if index % 2 == 0 else item[1][axis]
+                                            for index, item in enumerate(translate[3:])]
+                     for axis in (0, 1)]
+            return math.hypot(*(ex.evaluate_zoom_curve(part, zoom) for part in parts))
+        except (ex.ExpressionError, TypeError, IndexError):
+            return 0.0
 
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
                          conf_path: Optional[str] = None,

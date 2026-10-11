@@ -262,3 +262,36 @@ def test_map_unit_marker_limits_apply_once(plugin, sg, kind, reference_zoom):
         drawn = sprite_px * ex.evaluate_zoom_curve(icon_size, zoom)
         assert drawn == pytest.approx(expected, rel=0.15, abs=1.0), (zoom, sprite_px)
     assert math.isfinite(sprite_px)
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_percentage_pattern_offsets_match_the_absolute_texture(plugin, monkeypatch, exact):
+    """Percentage displacement and offset of a point pattern texture are
+    shares of the spacing (applyPattern) and are not reported as units
+    without a reference dimension."""
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter
+    from q2vt_plugin.src.core import maplibre_converter as mc
+    from qgis.core import QgsPointPatternFillSymbolLayer, Qgis
+    from PIL import ImageChops
+    exporter = QgisMapLibreStyleExporter.__new__(QgisMapLibreStyleExporter)
+    exporter.pattern_images, exporter.marker_counter = {}, 0
+    exporter.profile = mc.ExportProfile()
+    exporter.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context = exporter.context
+    monkeypatch.setattr(exporter, "TEXTURE_SCREEN_SCALE", 1.0)
+    # QGIS's own texture brush (screen patterns) or the generic cell builder.
+    monkeypatch.setattr(exporter, "_exact_screen_texture", exact, raising=False)
+    cells = []
+    for value, unit in ((50.0, Qgis.RenderUnit.Percentage), (8.0, Qgis.RenderUnit.Pixels)):
+        layer = QgsPointPatternFillSymbolLayer()
+        layer.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer()]))
+        for name in ("DistanceX", "DistanceY"):
+            getattr(layer, f"set{name}")(16.0)
+            getattr(layer, f"set{name}Unit")(Qgis.RenderUnit.Pixels)
+        for name in ("DisplacementX", "OffsetY"):
+            getattr(layer, f"set{name}")(value)
+            getattr(layer, f"set{name}Unit")(unit)
+        cells.append(exporter.pattern_images[exporter._register_point_pattern(layer)].img_1x)
+    assert cells[0].size == cells[1].size
+    assert ImageChops.difference(cells[0], cells[1]).getbbox() is None
+    assert not exporter.context.diagnostics.by_code("Q2VT_UNIT_PERCENTAGE")

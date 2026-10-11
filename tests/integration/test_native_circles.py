@@ -176,3 +176,57 @@ def test_marker_sized_by_map_unit_extents_grows_with_the_map(exporter):
     assert ex.is_zoom_curve(size)
     assert ex.evaluate_zoom_curve(size, 16.5) == pytest.approx(
         2 ** 0.5 * ex.evaluate_zoom_curve(size, 16), rel=1e-3)
+
+
+def test_data_defined_symbol_opacity_of_a_sprite_is_the_icon_opacity(exporter):
+    """QgsMarkerSymbol::renderPoint replaces the symbol's opacity by its
+    data-defined Opacity per feature: the sprite (drawn without a feature)
+    is opaque and icon-opacity reads the attribute."""
+    from qgis.core import QgsSymbol
+    symbol = _circle()
+    symbol.symbolLayer(0).setShape(Qgis.MarkerShape.Square)
+    symbol.setOpacity(0.5)
+    key = getattr(QgsSymbol.Property, "Opacity", None) or QgsSymbol.PropertyOpacity
+    symbol.setDataDefinedProperty(key, QgsProperty.fromField("q2vt_property_alpha_0_00"))
+    layer = _convert(exporter, symbol)[0]
+    opacity = layer["paint"]["icon-opacity"]
+    assert ex.referenced_fields(opacity) == {"q2vt_property_alpha_0_00"}
+    assert exporter.marker_symbols[layer["layout"]["icon-image"]].symbol.opacity() == 1.0
+    assert symbol.opacity() == 0.5  # the converted symbol itself is left alone
+    # Without one the static opacity stays in the sprite, applied once.
+    symbol.setDataDefinedProperty(key, QgsProperty())
+    exporter.style["layers"] = []
+    layer = _convert(exporter, symbol)[0]
+    assert layer["paint"]["icon-opacity"] == 1.0
+    assert exporter.marker_symbols[layer["layout"]["icon-image"]].symbol.opacity() == 0.5
+
+
+def test_data_defined_raster_marker_opacity_is_the_icon_opacity(exporter, tmp_path, monkeypatch):
+    """QgsRasterMarkerSymbolLayer reads its own data-defined opacity (other
+    markers ignore it): one raster layer gets it as icon-opacity; one among
+    several changes the image, so each value is its own sprite variant."""
+    from qgis.core import QgsRasterMarkerSymbolLayer
+    from PIL import Image
+    path = str(tmp_path / "cell.png")
+    Image.new("RGBA", (8, 8), (0, 0, 200, 255)).save(path)
+    raster = QgsRasterMarkerSymbolLayer(path, 6)
+    raster.setOpacity(0.4)
+    raster.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOpacity,
+                                  QgsProperty.fromField("q2vt_property_alpha_35_00"))
+    second = raster.clone()
+    layer = _convert(exporter, QgsMarkerSymbol([raster]))[0]
+    assert ex.referenced_fields(layer["paint"]["icon-opacity"]) == {"q2vt_property_alpha_35_00"}
+    sprite = exporter.marker_symbols[layer["layout"]["icon-image"]].symbol
+    assert sprite.symbolLayer(0).opacity() == 1.0
+    asked = []
+
+    def distinct(_source, fields):
+        asked.append(fields)
+
+    monkeypatch.setattr(exporter, "_distinct_values", distinct)
+    exporter.style["layers"] = []
+    circle = _circle()
+    two = QgsMarkerSymbol([second, circle.symbolLayer(0).clone()])
+    layer = _convert(exporter, two)[0]
+    assert asked == [["q2vt_property_alpha_35_00"]]  # its values are sprite variants
+    assert layer["paint"]["icon-opacity"] == 1.0

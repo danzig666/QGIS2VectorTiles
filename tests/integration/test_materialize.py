@@ -1669,3 +1669,145 @@ def test_point_pattern_rows_in_map_units_follow_the_map_in_overzoom(plugin):
     for zoom, name in zip(pattern[3::2], pattern[4::2]):
         height = exporter.pattern_images[name].img_1x.size[1]
         assert height == pytest.approx(15 * 512 * 2 ** zoom / 40075016.68557849, rel=0.05), zoom
+
+
+def _percent_pattern(unit, offset, displacement, spacing, clip):
+    from qgis.core import QgsPointPatternFillSymbolLayer
+    pp = QgsPointPatternFillSymbolLayer()
+    marker = _marker(Qgis.MarkerShape.Square, 3)
+    marker.symbolLayer(0).setSizeUnit(unit)
+    marker.symbolLayer(0).setStrokeStyle(0)
+    pp.setSubSymbol(marker)
+    for name in ("DistanceX", "DistanceY"):
+        getattr(pp, f"set{name}")(spacing)
+        getattr(pp, f"set{name}Unit")(unit)
+    for name, (value, value_unit) in (("OffsetX", offset), ("OffsetY", offset),
+                                      ("DisplacementX", displacement)):
+        getattr(pp, f"set{name}")(value)
+        getattr(pp, f"set{name}Unit")(value_unit)
+    pp.setClipMode(clip)
+    return QgsFillSymbol([pp])
+
+
+@pytest.mark.parametrize("unit,spacing,clip", [
+    (Qgis.RenderUnit.MapUnits, 20, "CentroidWithin"), (Qgis.RenderUnit.MapUnits, 20, "Shape"),
+    (Qgis.RenderUnit.Millimeters, 8, "CentroidWithin")])
+def test_percentage_pattern_offsets_are_of_the_spacing(plugin, tmp_path, unit, spacing, clip):
+    """QgsPointPatternFillSymbolLayer: a Percentage offset or displacement is
+    that share of the grid spacing, the same grid as the absolute value
+    (materialized grids; the screen-unit "Shape" texture is checked in
+    test_sprites)."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    pct = Qgis.RenderUnit.Percentage
+    recipes = []
+    for index, (offset, displacement) in enumerate((((50, pct), (50, pct)),
+                                                    ((spacing / 2, unit), (spacing / 2, unit)))):
+        layer = _layer("Polygon", ["POLYGON((-100 -90, 95 -90, 95 80, -100 80, -100 -90))"],
+                       str(tmp_path / f"pp{index}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(_percent_pattern(
+            unit, offset, displacement, spacing, getattr(Qgis.MarkerClipMode, clip))))
+        reset_project(layer)
+        diags = DiagnosticCollector()
+        rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(),
+                               diags).flatten_all_rules()
+        recipes.append([r.recipe for r in rules if r.recipe])
+        assert not diags.by_code("Q2VT_PATTERN_APPROXIMATE") or clip == "Shape"
+    assert recipes[0] and recipes[0] == recipes[1]
+    params = dict(recipes[0][-1].params)
+    assert params["disp_x"] and params["off_x"] and params["off_y"]
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.MetersInMapUnits])
+def test_map_unit_fill_offset_moves_the_polygon(plugin, tmp_path, unit):
+    """QgsSimpleFillSymbolLayer::renderPolygon shifts the polygon and its
+    outline by the offset in any unit (x right, y down); map units (and
+    meters at scale in a metre CRS) move the exported geometry, so the
+    shift is exact at every zoom, overzoom included, with no tile seams."""
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import QPointF
+    layer = _layer("Polygon", ["POLYGON((-90 -80, 60 -80, 60 50, -90 50, -90 -80))"],
+                   str(tmp_path / "fill.gpkg"))
+    fill = QgsSimpleFillSymbolLayer(QColor("red"), strokeColor=QColor("black"),
+                                    strokeWidth=0.8)
+    fill.setOffset(QPointF(30, 20))
+    fill.setOffsetUnit(unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert sorted(r.get_attr("c") for r in rules) == [1, 2]  # fill + its outline
+    for output, rule in zip(outputs, rules):
+        assert rule.shift == pytest.approx((30, -20))
+        assert not rule.translate
+        box = output.extent()
+        assert (box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()) == \
+            pytest.approx((-60, -100, 90, 30), abs=1e-6)
+        symbol_layer = rule.rule.symbol().symbolLayer(0)
+        if rule.get_attr("c") == 2:
+            assert symbol_layer.offset() == QPointF()
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+@pytest.mark.parametrize("width,unit,dashed", [
+    (2.0, Qgis.RenderUnit.Millimeters, False),
+    (6.0, Qgis.RenderUnit.MapUnits, False),
+    (1.2, Qgis.RenderUnit.Millimeters, True),
+])
+def test_generator_fill_stroke_is_a_line_on_the_generated_polygons(plugin, tmp_path, width,
+                                                                   unit, dashed):
+    """A geometry generator drawn with a fill symbol: each sub-symbol layer
+    is a rule on the generated polygons, and a simple fill's stroke is a
+    line with its width, unit and dashes on their rings (MapLibre's
+    fill-outline is a one-pixel hairline)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    pen = Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "gen.gpkg"))
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), pen, width)
+    inner.setStrokeWidthUnit(unit)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    kinds = sorted((r.get_attr("c"), r.rule.symbol().symbolLayer(0).layerType()) for r in rules)
+    assert kinds == [(1, "SimpleLine"), (2, "SimpleFill")]
+    for output, rule in zip(outputs, rules):
+        assert rule.pre_generator
+        box = output.extent()  # the generated (buffered) polygon
+        assert (box.xMinimum(), box.yMaximum()) == pytest.approx((-82, 56), abs=1e-6)
+        if rule.get_attr("c") == 1:
+            line = rule.rule.symbol().symbolLayer(0)
+            assert (line.width(), line.widthUnit(), line.penStyle()) == (width, unit, pen)
+            # Drawn on the rings as the style draws it (a line symbol).
+            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
+        else:
+            assert rule.rule.symbol().symbolLayer(0).strokeStyle() == Qt.PenStyle.NoPen
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
+
+
+def test_generator_fill_patterns_are_materialized(plugin, tmp_path):
+    """A map-unit hatch inside a fill generator is exported as hatch lines
+    on the generated polygons (not one texture frozen at the first zoom)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"],
+                   str(tmp_path / "hatch.gpkg"))
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setLineAngle(45)
+    hatch.setDistance(8)
+    hatch.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    hatch.subSymbol().symbolLayer(0).setWidth(1.5)
+    hatch.subSymbol().symbolLayer(0).setWidthUnit(Qgis.RenderUnit.MapUnits)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -15)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([hatch]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    hatched = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
+    assert hatched and all(r.recipe.kind == "hatch_lines" and r.pre_generator for _, r in hatched)
+    ours = ink_mask(render([o for o, _ in hatched], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.1

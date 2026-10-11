@@ -1806,12 +1806,14 @@ class RulesExporter:
         return out
 
     def _generated_lines(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
-        """Worker: the lines of a line-symbol geometry generator, one feature
-        per part (QGIS draws the sub-symbol on every part), with the
-        geometry-dependent properties evaluated on each part."""
-        # geometrybyexpression: OUTPUT_GEOMETRY 1 = line
+        """Worker: the lines (polygons) of a line-symbol (fill-symbol)
+        geometry generator, one feature per part (QGIS draws the sub-symbol
+        on every part), with the geometry-dependent properties evaluated on
+        each part."""
+        # geometrybyexpression: OUTPUT_GEOMETRY 0 = polygon, 1 = line
         out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
-                                 OUTPUT_GEOMETRY=1, EXPRESSION=grp.pre_generator)
+                                 OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
+                                 EXPRESSION=grp.pre_generator)
         out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
         out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
         for ftype, expr, name in grp.generated_fields:
@@ -3306,8 +3308,19 @@ class RulesExporter:
             return None
         if not transformation:
             return None
+        if rule_type == 0 and getattr(flat_rule, "shift", None):
+            transformation[1] = self._shifted(transformation[1], *flat_rule.shift)
         transformation[1] = self._clip_to_extent(transformation[1])
         return tuple(transformation)
+
+    def _shifted(self, expression: str, dx: float, dy: float) -> str:
+        """``expression`` moved by (dx, dy) project map units (a fill's map
+        unit offset), measured in the project CRS."""
+        export_crs = f"EPSG:{_EPSG_CRS}"
+        if self._map_crs == export_crs:
+            return f"translate({expression}, {dx!r}, {dy!r})"
+        return (f"transform(translate(transform({expression}, '{export_crs}', "
+                f"'{self._map_crs}'), {dx!r}, {dy!r}), '{self._map_crs}', '{export_crs}')")
 
     def _clip_to_extent(self, expression: str) -> str:
         """``expression`` cut to the export extent. Geometries inside it are

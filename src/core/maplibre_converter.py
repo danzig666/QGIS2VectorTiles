@@ -344,6 +344,24 @@ class PropertyExtractor:
         zoom = cls.context.reference_zoom if reference_zoom is None else reference_zoom
         return ex.evaluate_zoom_curve(result, zoom)
 
+    @classmethod
+    def translate(cls, x: float, y: float, unit_obj=None, map_unit_scale=None) -> Union[List, Any]:
+        """``*-translate`` for a QGIS offset (x right, y down): ``[x, y]`` in
+        pixels, or for map units and meters at scale a zoom curve of ``[x, y]``
+        that grows with the map (also when overzoomed), limited by the map
+        unit scale like QgsRenderContext::convertToPainterUnits."""
+        if normalize_unit(unit_obj) not in ("map", "m"):
+            return [cls.static_pixels(x, unit_obj), cls.static_pixels(y, unit_obj)]
+        curves = [cls.length(value, unit_obj, None, map_unit_scale) if value else 0.0
+                  for value in (x, y)]
+        if all(ex.is_number(curve) for curve in curves):
+            return [float(curve) for curve in curves]
+        zooms = sorted({zoom for curve in curves if ex.is_zoom_curve(curve)
+                        for zoom in curve[3::2]})
+        return ex.exponential_zoom_curve(
+            [(zoom, ["literal", [round(ex.evaluate_zoom_curve(curve, zoom), 4)
+                                 for curve in curves]]) for zoom in zooms])
+
     @staticmethod
     def opacity(symbol=None, symbol_layer=None) -> Union[float, List]:
         """Symbol opacity × data-defined opacity (QGIS 0–100 → MapLibre 0–1)."""
@@ -2054,21 +2072,29 @@ class QgisMapLibreStyleExporter:
     def _apply_translate(self, layer_defs, translate) -> None:
         """Shift the style's layers on screen like a QGIS fill offset (painter
         coordinates: x right, y down, not turned with the map)."""
-        x, y, unit_name = translate
+        x, y, unit_name = translate[:3]
         unit, ok = QgsUnitTypes.decodeRenderUnit(unit_name)
         if not ok:
             return
-        shift = [PropertyExtractor.static_pixels(x, unit), PropertyExtractor.static_pixels(y, unit)]
+        # Map units and meters at scale grow with the map (a zoom curve).
+        shift = PropertyExtractor.translate(x, y, unit, translate[3] if len(translate) > 3 else None)
         for layer_def in layer_defs:
             prefix = self._TRANSLATE.get(layer_def.get("type"))
             if prefix is None:
                 continue
             paint = layer_def.setdefault("paint", {})
             current = paint.get(f"{prefix}-translate")
+            moved = shift
             if isinstance(current, list) and len(current) == 2 and \
-                    all(isinstance(v, (int, float)) for v in current):
-                shift = [shift[0] + current[0], shift[1] + current[1]]
-            paint[f"{prefix}-translate"] = shift
+                    all(isinstance(v, (int, float)) for v in current) and any(current):
+                if ex.is_zoom_curve(shift):  # stops: zoom, ["literal", [x, y]]
+                    moved = shift[:3] + [
+                        item if index % 2 == 0 else
+                        ["literal", [item[1][0] + current[0], item[1][1] + current[1]]]
+                        for index, item in enumerate(shift[3:])]
+                else:
+                    moved = [shift[0] + current[0], shift[1] + current[1]]
+            paint[f"{prefix}-translate"] = moved
             paint[f"{prefix}-translate-anchor"] = "viewport"
 
     def _heatmap_layer(self, style, spec: dict, bounds) -> None:
@@ -2750,8 +2776,11 @@ class QgisMapLibreStyleExporter:
         dy = self._pattern_px(layer.distanceY(), layer.distanceYUnit(), "spacing")
         if dx <= 0 or dy <= 0:
             return None
-        disp_x = self._pattern_px(layer.displacementX(), layer.displacementXUnit(), "displacement")
-        disp_y = self._pattern_px(layer.displacementY(), layer.displacementYUnit(), "displacement")
+        # Percentages are of the spacing (applyPattern: of twice the spacing / 200).
+        disp_x = self._pattern_offset_px(layer.displacementX(), layer.displacementXUnit(), 2 * dx,
+                                         "displacement")
+        disp_y = self._pattern_offset_px(layer.displacementY(), layer.displacementYUnit(), 2 * dy,
+                                         "displacement")
         # QgsPointPatternFillSymbolLayer::applyPattern shifts the markers in
         # the cell by the offset (x right, y down; percentages of the cell).
         off_x, off_y = (self._pattern_offset_px(layer.offsetX(), layer.offsetXUnit(), 2 * dx),
@@ -2771,10 +2800,6 @@ class QgisMapLibreStyleExporter:
             # drawing order, so overlapping markers stack as in QGIS. (QGIS
             # draws the markers one by one when that image would be empty or
             # over 2000 px.)
-            disp_x, disp_y = (self._pattern_offset_px(layer.displacementX(),
-                                                      layer.displacementXUnit(), 2 * dx),
-                              self._pattern_offset_px(layer.displacementY(),
-                                                      layer.displacementYUnit(), 2 * dy))
             snap = self._cached_marker_image(marker)
             for ratio, image in ((1, one), (2, two)):
                 width, height, positions = apply_pattern_positions(
@@ -2927,13 +2952,13 @@ class QgisMapLibreStyleExporter:
         return self._textures(Image.new("RGBA", (8, 8), rgba),
                               Image.new("RGBA", (16, 16), rgba), 0.0, "Random marker fill")
 
-    def _pattern_offset_px(self, value, unit, cell_px: float) -> float:
+    def _pattern_offset_px(self, value, unit, cell_px: float, what: str = "offset") -> float:
         if not value:
             return 0.0
-        if normalize_unit(unit) in ("percentage", "percent", "%") or \
+        if normalize_unit(unit) == "pct" or \
                 _enum_int(unit) == _enum_int(Qgis.RenderUnit.Percentage):
             return cell_px * value / 200.0
-        return self._pattern_px(value, unit, "offset")
+        return self._pattern_px(value, unit, what)
 
     def _register_svg_pattern(self, layer) -> Optional[str]:
         """Seamless texture for an SVG fill: one SVG per cell, as QGIS tiles it."""
@@ -3151,11 +3176,15 @@ class QgisMapLibreStyleExporter:
         Size, angle and opacity are applied by the style; every other
         data-defined property (colours, SVG path, shape, stroke width...)
         changes the image, so each distinct value combination in the data is
-        rendered by QGIS with those attribute values.
+        rendered by QGIS with those attribute values. So does the opacity of
+        one raster layer among several (see _marker_opacity).
         """
+        several = symbol.symbolLayerCount() > 1
         fields = sorted({f for i in range(symbol.symbolLayerCount())
-                         for f in self._variant_fields(symbol.symbolLayer(i),
-                                                       self._SPRITE_INDEPENDENT)})
+                         for f in self._variant_fields(
+                             symbol.symbolLayer(i), self._SPRITE_INDEPENDENT - {"opacity"}
+                             if several and symbol.symbolLayer(i).layerType() == "RasterMarker"
+                             else self._SPRITE_INDEPENDENT)})
         if not fields:
             return marker_name
         combos = self._distinct_values(source_layer, fields)
@@ -3369,20 +3398,11 @@ class QgisMapLibreStyleExporter:
         # Rotation is applied once, by icon-rotate; the sprite is unrotated.
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             symbol, symbol_layer)
-        # A data-defined symbol opacity (e.g. a parent's, see
-        # materializer.inherit_opacity) varies per feature: icon-opacity,
-        # over a sprite drawn opaque. The static opacity is in the sprite.
-        icon_opacity = IconPropertyExtractor.get_icon_opacity()
-        opacity = symbol.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY)
-        if opacity is not None and opacity.isActive():
-            icon_opacity = self._symbol_opacity(symbol)
-            symbol = symbol.clone()
-            symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty())
-            symbol.setOpacity(1.0)
+        sprite_symbol, icon_opacity = self._marker_opacity(symbol)
         self.marker_symbols[marker_name] = SpriteRequest(
-            symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
+            sprite_symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
-        icon_image = self._marker_variants(symbol, marker_name, source_layer_name,
+        icon_image = self._marker_variants(sprite_symbol, marker_name, source_layer_name,
                                            map_units_per_pixel, oversampling)
 
         layer_def["layout"].update({
@@ -3416,6 +3436,38 @@ class QgisMapLibreStyleExporter:
         })
 
         self.style["layers"].append(layer_def)
+
+    @staticmethod
+    def _marker_opacity(symbol):
+        """(symbol drawn into the sprite, ``icon-opacity``) of a marker.
+
+        QgsMarkerSymbol::renderPoint replaces the symbol's opacity by its
+        data-defined Opacity per feature, and QgsRasterMarkerSymbolLayer (the
+        only marker layer reading one) its own opacity likewise. A sprite is
+        drawn without a feature, so these opacities are left out of it and
+        applied by ``icon-opacity``; static opacities stay in the sprite.
+        A raster layer's opacity in a symbol of several layers cannot be
+        applied to the whole icon: it changes the image (sprite variants).
+        """
+        props = symbol.dataDefinedProperties()
+        prop = props.property(_SYMBOL_OPACITY_KEY) if props else None
+        sprite_symbol, opacity = symbol, IconPropertyExtractor.get_icon_opacity()
+        if prop is not None and prop.isActive():
+            sprite_symbol = symbol.clone()
+            sprite_symbol.setOpacity(1.0)
+            opacity = PropertyExtractor.opacity(symbol=sprite_symbol)
+        if symbol.symbolLayerCount() == 1:
+            layer = sprite_symbol.symbolLayer(0)
+            layer_prop = layer.dataDefinedProperties().property(
+                QgsSymbolLayer.Property.PropertyOpacity)
+            if layer.layerType() == "RasterMarker" and layer_prop is not None \
+                    and layer_prop.isActive():
+                if sprite_symbol is symbol:
+                    sprite_symbol = symbol.clone()
+                    layer = sprite_symbol.symbolLayer(0)
+                layer.setOpacity(1.0)
+                opacity = ex.mul(opacity, PropertyExtractor.opacity(symbol_layer=layer))
+        return sprite_symbol, opacity
 
     def _convert_line_symbol(
         self,
@@ -3775,12 +3827,12 @@ class QgisMapLibreStyleExporter:
                     "fill-translate-anchor": FillPropertyExtractor.get_fill_translate_anchor(),
                 })
                 offset = symbol_layer.offset()
-                if (abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9) and \
-                        normalize_unit(symbol_layer.offsetUnit()) not in ("map", "m"):
-                    # QGIS shifts the fill on screen (x right, y down).
-                    layer_def["paint"]["fill-translate"] = [
-                        PropertyExtractor.static_pixels(offset.x(), symbol_layer.offsetUnit()),
-                        PropertyExtractor.static_pixels(offset.y(), symbol_layer.offsetUnit())]
+                if abs(offset.x()) > 1e-9 or abs(offset.y()) > 1e-9:
+                    # QGIS shifts the fill on screen (x right, y down), in any
+                    # unit (map units grow with the map).
+                    layer_def["paint"]["fill-translate"] = PropertyExtractor.translate(
+                        offset.x(), offset.y(), symbol_layer.offsetUnit(),
+                        symbol_layer.offsetMapUnitScale())
                     layer_def["paint"]["fill-translate-anchor"] = "viewport"
                 if brush is not None:
                     # The pattern image carries the colour; it starts at the

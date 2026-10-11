@@ -1,5 +1,7 @@
 """PR-02 regressions for property evaluation, units and enums (PyQGIS)."""
 
+import math
+
 import pytest
 from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsLineSymbol, QgsMapRendererSequentialJob,
                        QgsMapSettings, QgsMarkerLineSymbolLayer, QgsProperty, QgsRectangle,
@@ -284,3 +286,17 @@ def test_label_text_replacements_match_qgis(plugin):
         expression = QgsExpression(RulesExporter._substituted(literal, collection))
         assert not expression.hasParserError(), expression.parserErrorString()
         assert expression.evaluate(QgsExpressionContext()) == collection.process(text), text
+
+
+def test_map_unit_translate_grows_with_the_map(mc):
+    """A fill offset in map units drawn with a translate (a map unit scale
+    limits it) is a zoom curve of [x, y] reaching past the last tile zoom,
+    and the tile clip buffer covers it."""
+    from q2vt_plugin.src.core.tiles_generator import GDALTilesGenerator  # pylint: disable=import-error
+    shift = mc.PropertyExtractor.translate(30, 20, Qgis.RenderUnit.MapUnits)
+    assert shift[:3] == ["interpolate", ["exponential", 2], ["zoom"]] and shift[-2] == 24
+    px_per_unit_z16 = 512 * 2 ** 16 / 40075016.68557849
+    z16 = GDALTilesGenerator._translate_px(shift, 16)  # pylint: disable=protected-access
+    assert z16 == pytest.approx(math.hypot(30, 20) * px_per_unit_z16, rel=1e-3)
+    assert mc.PropertyExtractor.translate(1, 2, Qgis.RenderUnit.Pixels) == [1, 2]
+    assert GDALTilesGenerator._translate_px([3, 4], 16) == 5  # pylint: disable=protected-access

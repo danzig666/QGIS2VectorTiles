@@ -215,6 +215,39 @@ def test_zooms_above_16_are_generated(export, tmp_path):
     assert not exporter.diagnostics.by_code("Q2VT_TILES_ZOOM_MISMATCH")
 
 
+def test_generator_fill_stroke_and_map_unit_offset_with_publish_zooms(export, tmp_path):
+    """Publish window zooms (0-16, the map overzooms past 16): a fill
+    generator's dashed 1.2 mm stroke is a line layer with its width and
+    dashes (not a one-pixel fill-outline), and a fill offset in map units
+    moves the exported polygons instead of being dropped."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import QPointF, Qt
+    layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
+    shadow = QgsSimpleFillSymbolLayer(QColor(80, 80, 80), Qt.BrushStyle.SolidPattern,
+                                      QColor("black"), Qt.PenStyle.NoPen)
+    shadow.setOffset(QPointF(20, 20))
+    shadow.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.DashLine, 1.2)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -50)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([shadow, generator])))
+    exporter, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    fills = [l for l in style["layers"] if l["type"] == "fill"]
+    lines = [l for l in style["layers"] if l["type"] == "line"]
+    assert not [l for l in fills if "fill-outline-color" in l["paint"]]
+    assert len(lines) == 1 and lines[0]["paint"]["line-width"] == pytest.approx(1.2 * 96 / 25.4,
+                                                                               abs=1e-3)
+    assert lines[0]["paint"]["line-color"] == "rgba(200, 0, 0, 1.0)"
+    assert lines[0]["paint"].get("line-dasharray") and lines[0]["maxzoom"] > 16
+    assert all(l["paint"].get("fill-translate", [0, 0]) == [0, 0] for l in fills)
+    # The shadow's polygons are moved 20 m right and down in the tiles.
+    assert {r.shift for r in exporter.rules if r.shift} == {(20.0, -20.0)}
+    assert len([r for r in exporter.rules if r.pre_generator]) == 2  # fill + its stroke
+
+
 def test_geometry_generator_uses_layer_crs_for_both_geometry_spellings(plugin):
     from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
 
