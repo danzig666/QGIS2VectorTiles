@@ -1084,7 +1084,7 @@ class RulesFlattener:
                   if props.property(key) and props.property(key).isActive()}
         visibility_key, min_key, max_key = self.SCALE_VISIBILITY_KEYS
         if any(self._is_feature_dependent(expression)
-               or "map_scale" in QgsExpression(expression).referencedVariables()
+               or uses_map_scale(expression)
                for expression in active.values()):
             def value(key, static):
                 return f"coalesce(to_real({active[key]}), {static!r})" if key in active else repr(static)
@@ -1980,7 +1980,9 @@ class RulesFlattener:
             if settings is not None:
                 found.append(settings.getLabelExpression().expression())
                 collect(settings.dataDefinedProperties())
-                collect(settings.format().dataDefinedProperties())
+                # Keep the copied text format alive while its properties are read.
+                text_format = settings.format()
+                collect(text_format.dataDefinedProperties())
         else:
             walk(flat_rule.rule.symbol())
         found = [expression for expression in found if uses_map_scale(expression)]
