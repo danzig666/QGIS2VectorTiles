@@ -460,7 +460,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   // "Outside polygons": the layer's other polygons are obstacles (QGIS
   // default): a label beside one polygon keeps off its neighbours if it can.
   const obstacles = options.around && options.around.outside
-    ? ordered.map(([key, { rings }]) => ({ key, rings, bounds: bounds(rings) })) : [];
+    ? boxIndex(ordered.map(([key, { rings }]) => ({ key, rings, bounds: bounds(rings) })), view) : null;
   for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
@@ -509,23 +509,24 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const fit = (x, y) => (half ? Math.min(x - view[0] - half[0], view[2] - half[0] - x,
                                            y - view[1] - half[1], view[3] - half[1] - y) : Infinity);
     // Only boxes that can matter: within a label's size of the visible part
-    // ("outside polygons" labels go anywhere round the polygon: all).
+    // ("outside polygons": of the polygon's edges, the part on the screen).
     let near = [];
-    const nearBoxes = () => {
-      near = [];
-      if (half && avoid.length && overlap !== "always") {
-        const extent = outside ? view : bounds(rings);
-        const extra = options.around ? options.around.distance : 0;
-        const reachBox = grow(extent, 2 * half[0] + extra, 2 * half[1] + extra);
-        near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
-      }
-    };
-    nearBoxes();
+    const extra = options.around ? options.around.distance : 0;
+    const reachBox = intersect(grow(bounds(outside ? loaded : rings), 2 * (half ? half[0] : 0) + extra,
+                                    2 * (half ? half[1] : 0) + extra), view);
+    if (half && avoid.length && overlap !== "always" && reachBox) {
+      near = avoid.filter((box) => intersect(box, reachBox)).map((box) => grow(box, half[0], half[1]));
+    }
     const clear = (x, y) => {
       let min = Infinity;
       for (const box of near) min = Math.min(min, rectDistance(x, y, box));
       return min;
     };
+    // The boxes keep LABEL_MARGIN_PX round the text, for a better spot
+    // where there is room; QGIS's overlap test is of the bare text: two
+    // labels whose margins alone meet do not overlap.
+    const slack = 2 * LABEL_MARGIN_PX * (options.precision || 0);
+    const bareClear = (x, y) => clear(x, y) >= -slack;
     // "Always label" with the polygon's roomiest point precomputed at export:
     // a label that cannot fit even there goes there at once, smaller and
     // along the polygon - no search (narrow strips, tiny parcels).
@@ -564,6 +565,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         const room = (extra) => roomiestPoint(rings, options.precision, extra);
         let score = (x, y) => Math.min(fit(x, y), clear(x, y));
         let best = room(score);
+        if (!(best.room > 0) && slack && near.length) {  // free but for the margins
+          score = (x, y) => Math.min(fit(x, y), clear(x, y) + slack);
+          best = room(score);
+        }
         if (!(best.room > 0) && mayOverlap) {  // no free spot: the best spot that fits (overlapping)
           score = fit;
           best = room(score);
@@ -644,8 +649,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       // edge, the candidate nearest its centroid first.
       let candidates;
       if (outside) {
+        // Only the neighbours a label beside this polygon can reach.
+        const others = reachBox ? obstacles.query(reachBox).filter((other) => other.key !== key) : [];
         candidates = outsideCandidates(loaded, rings, label.text || half, half, options.around.distance,
-                                       options.precision, obstacles.filter((other) => other.key !== key));
+                                       options.precision, others, view);
       } else {
         const target = labelPoint(rings);
         if (!target) continue;
@@ -653,15 +660,17 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       }
       const fits = (p) => fit(...p) >= 0;
       const free = (p) => fits(p) && clear(...p) >= 0;
+      const bare = (p) => fits(p) && bareClear(...p);
       // A kept label stays near its candidate (at the label distance from
       // the polygon at this zoom; "outside": near any of them).
       const nearby = (p) => Math.hypot(old.point[0] - p[0], old.point[1] - p[1]) <= (options.keepDistance ?? Infinity);
       const kept = old && Number.isInteger(old.slot) && within(inner, old.point) && (outside
-        ? candidates.some(nearby) && free(old.point)
-          && !besidePolygon(loaded, old.point, label.text || half, options.around.distance, options.precision)
+        ? candidates.some(nearby) && bare(old.point)
+          && besidePolygon(loaded, old.point, label.text || half, options.around.distance, options.precision)
         : candidates[old.slot] && nearby(candidates[old.slot])
-          && (unchecked(old.point) || free(old.point)));
+          && (unchecked(old.point) || bare(old.point)));
       slot = kept ? old.slot : candidates.findIndex(free);
+      if (slot < 0) slot = candidates.findIndex(bare);
       if (slot < 0 && mayOverlap) slot = candidates.findIndex(fits);
       if (slot < 0) continue;
       point = kept ? old.point : candidates[slot];
@@ -670,10 +679,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       if (!target || fit(...target) < 0) continue;
       const near = (p) => Math.hypot(p[0] - target[0], p[1] - target[1]) <= (options.keepDistance ?? Infinity);
       const keep = old && within(inner, old.point) && fit(...old.point) >= 0 && (unchecked(old.point)
-        || (inside(rings, old.point) && near(old.point) && (mayOverlap || clear(...old.point) >= 0)));
+        || (inside(rings, old.point) && near(old.point) && (mayOverlap || bareClear(...old.point))));
       // Over point (QGIS): its one candidate, dropped where it would overlap
       // a label placed before it ("Never overlap").
-      if (!keep && !mayOverlap && clear(...target) < 0) continue;
+      if (!keep && !mayOverlap && !bareClear(...target)) continue;
       point = keep ? old.point : target;
     }
     if (half) {
@@ -738,10 +747,12 @@ export function aroundCandidates(point, [hx, hy], { anchors, distance }) {
 // half size, from which the distance is measured (and tested: the margin
 // of ``half`` is for keeping clear of other labels, not of the polygon).
 // A label over one of the ``obstacles`` ({rings, bounds}: other polygons)
-// comes after all those that are not (QGIS obstacle cost).
+// comes after all those that are not (QGIS obstacle cost). With ``view``:
+// only the candidates whose box fits in it.
 const OUTSIDE_CANDIDATES = 64;
 const SIDE_TOLERANCE = Math.sin(5 * Math.PI / 180);  // QGIS: within 5° of an axis
-export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0, obstacles = []) {
+export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0, obstacles = [],
+                                  view = null) {
   const edges = realEdges(loaded);
   const total = edges.reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
   if (!(total > 0)) return [];
@@ -764,8 +775,9 @@ export function outsideCandidates(loaded, rings, [tx, ty], half, distance, preci
       const t = offset / length;
       const [px, py] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
       const p = [px + sx * (d + tx), py + sy * (d + ty)];
-      if (!besidePolygon(loaded, p, [tx, ty], distance, eps)) continue;
       const box = [p[0] - half[0], p[1] - half[1], p[0] + half[0], p[1] + half[1]];
+      if (view && !(box[0] >= view[0] && box[1] >= view[1] && box[2] <= view[2] && box[3] <= view[3])) continue;
+      if (!besidePolygon(loaded, p, [tx, ty], distance, eps)) continue;
       const text = [p[0] - tx, p[1] - ty, p[0] + tx, p[1] + ty];
       const over = obstacles.some((other) => intersect(other.bounds, text) && boxHitsPolygon(other.rings, text));
       out.push({ p, over, cost: centre ? Math.max(0, rectDistance(centre[0], centre[1], box)) : 0 });
@@ -784,17 +796,75 @@ function besidePolygon(rings, point, [tx, ty], distance, slack = 0) {
                                  point[0] + tx + reach, point[1] + ty + reach]);
 }
 
-// Does a box touch the polygon (a corner inside it, an edge across it)?
+// Items ({bounds}) in a grid over ``view`` (those off it are dropped):
+// query(box) gives the items whose bounds meet the box, without testing
+// every item for every query.
+const INDEX_CELLS = 32;
+function boxIndex(items, view) {
+  const cells = new Map();
+  const [vx, vy] = [view[0], view[1]];
+  const [sx, sy] = [(view[2] - view[0]) / INDEX_CELLS || 1, (view[3] - view[1]) / INDEX_CELLS || 1];
+  const span = (box) => {
+    const part = intersect(box, view);
+    if (!part) return null;
+    const cell = (v, origin, size) => Math.max(0, Math.min(INDEX_CELLS - 1, Math.floor((v - origin) / size)));
+    return [cell(part[0], vx, sx), cell(part[1], vy, sy), cell(part[2], vx, sx), cell(part[3], vy, sy)];
+  };
+  for (const item of items) {
+    const range = span(item.bounds);
+    if (!range) continue;
+    for (let i = range[0]; i <= range[2]; i++) {
+      for (let j = range[1]; j <= range[3]; j++) {
+        const id = j * INDEX_CELLS + i;
+        if (!cells.has(id)) cells.set(id, []);
+        cells.get(id).push(item);
+      }
+    }
+  }
+  return {
+    query(box) {
+      const range = span(box);
+      const found = new Set();
+      if (!range) return [];
+      for (let i = range[0]; i <= range[2]; i++) {
+        for (let j = range[1]; j <= range[3]; j++) {
+          for (const item of cells.get(j * INDEX_CELLS + i) || []) if (intersect(item.bounds, box)) found.add(item);
+        }
+      }
+      return [...found];
+    },
+  };
+}
+
+// Does a box touch the polygon (an edge across it, or the box inside it)?
+// No edge meets the box: it is wholly inside or wholly outside, so one
+// corner tells.
 function boxHitsPolygon(rings, box) {
   const [x0, y0, x1, y1] = box;
   if (!(x0 < x1 && y0 < y1)) return false;
-  for (const corner of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) if (inside(rings, corner)) return true;
   for (const ring of rings) {
     for (let i = 0, n = ring.length; i < n; i++) {
-      if (clipLine([ring[i], ring[(i + 1) % n]], box).length) return true;
+      if (segmentMeetsBox(ring[i], ring[(i + 1) % n], box)) return true;
     }
   }
-  return false;
+  return inside(rings, [x0, y0]);
+}
+
+// Does a segment touch a box (clipLine's test, without building the pieces)?
+function segmentMeetsBox([ax, ay], [bx, by], [x0, y0, x1, y1]) {
+  if (Math.max(ax, bx) < x0 || Math.min(ax, bx) > x1 || Math.max(ay, by) < y0 || Math.min(ay, by) > y1) return false;
+  const dx = bx - ax, dy = by - ay;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, ax - x0], [dx, x1 - ax], [-dy, ay - y0], [dy, y1 - ay]]) {
+    if (p === 0) {
+      if (q < 0) return false;
+    } else {
+      const r = q / p;
+      if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+      else { if (r < t0) return false; if (r < t1) t1 = r; }
+    }
+  }
+  return true;
 }
 
 // Centroid of the rings' area (holes subtract), inside or not.

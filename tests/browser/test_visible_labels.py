@@ -927,6 +927,63 @@ def test_outside_polygons_labels_at_a_small_distance(distance):
     assert gap == pytest.approx(distance, abs=1e-6)
 
 
+def test_outside_polygons_label_kept_after_a_zoom_out_stays_off_the_polygon():
+    """An "Outside polygons" label kept from the last update (not moved
+    unless needed) stays only while its text is still beside the polygon:
+    zooming out the text grows and would reach onto the polygon. The test
+    was inverted: the label was kept just when it lay on the polygon."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const square = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 1 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[1800, 1800], [2300, 1800], [2300, 2200], [1800, 2200]]
+    .map(([x, y]) => ({{ x, y }}))] }} }};
+const state = newLabelState();
+const out = [];
+let perPx = 2 / 4096;
+for (const [step, view] of [[1, [0.3, 0.3, 0.7, 0.7]], [Math.SQRT2, [0.25, 0.25, 0.75, 0.75]],
+                            [1.1, [0.25, 0.25, 0.75, 0.75]], [1.05, [0.25, 0.25, 0.75, 0.75]]]) {{
+  perPx *= step;
+  const text = [30 * perPx, 5 * perPx], box = [32 * perPx, 7 * perPx];
+  box.text = text;
+  const placed = labelPoints([square], view, maplibregl, {{ state, precision: perPx, keepDistance: 24 * perPx,
+    labelBox: () => box, around: {{ anchors: [], distance: 0, outside: true }} }});
+  for (const f of placed.features) {{
+    const [x, y] = f.geometry.coordinates.map((v) => v * 4096);
+    const [tx, ty] = text.map((v) => v * 4096);
+    // How far the text reaches onto the polygon (tile units; <= 0: beside it).
+    const depth = Math.min(x + tx - 1800, 2300 - (x - tx), y + ty - 1800, 2200 - (y - ty));
+    out.push([depth, perPx * 4096]);
+  }}
+}}
+console.log(JSON.stringify(out));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    steps = json.loads(run.stdout)
+    assert len(steps) == 4
+    for depth, pixel in steps:
+        assert depth <= pixel  # at most the 1 px rounding slack
+
+
+@pytest.mark.parametrize("mode", [{}, {"anchor": "pole"}, {"around": {**AROUND, "distance": 0}}])
+def test_labels_whose_margins_alone_meet_do_not_overlap(mode):
+    """QGIS's "Never overlap" compares the bare text: labels side by side
+    with a gap smaller than the two margins round their boxes are all
+    drawn. Every other strip parcel lost its label."""
+    pixel = 4 / 4096
+    strips = [(col, [_square(400 + 134 * col, 1000, 534 + 134 * col, 1640)], {}) for col in range(10)]
+    # Bare text 30 x 12 px in strips 33.5 px wide, with the 2 px margin.
+    placed = _place(strips, [0, 0, 1, 1], {**mode, "precision": pixel, "box": [17 * pixel, 8 * pixel],
+                                           "text": [15 * pixel, 6 * pixel]})
+    assert len(placed) == len(strips)
+    bare = [(fid, x, y, rot, [x - 15 * pixel, y - 6 * pixel, x + 15 * pixel, y + 6 * pixel])
+            for fid, x, y, rot, _box in placed]
+    assert _overlapping(bare) == 0
+
+
 def test_outside_polygons_labels_keep_off_neighbouring_polygons():
     """"Outside polygons": the layer's other polygons are obstacles, as in
     QGIS. The label above a wide polygon (its cheapest spot) went over the

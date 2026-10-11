@@ -416,6 +416,53 @@ def test_workers_never_touch_the_live_project(export, tmp_path, monkeypatch):
     assert texts == {"Z-K1", "Z-K2", "Z-Lk"}, texts
 
 
+def test_visible_polygons_tell_the_parts_of_a_feature_apart(export, tmp_path):
+    """The viewer labels each part of a multi-part feature ("Label every
+    part") or only its biggest, so the parts in the ``_vp`` tiles differ in
+    q2vt_part. A single-part feature needs no unique value: the values
+    repeat from feature to feature (a small tile value table)."""
+    from osgeo import gdal  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("MultiPolygon?crs=EPSG:3857", "parts", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    square = "(({0} {1}, {2} {1}, {2} {3}, {0} {3}, {0} {1}))"
+    shapes = {"a": [(2120000, 6020000)], "b": [(2120600, 6020000)],
+              "c": [(2121200, 6020000), (2121200, 6020600)],
+              "d": [(2121800, 6020000)], "e": [(2120000, 6020600)]}
+    features = []
+    for name, corners in shapes.items():
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([name])
+        rings = ", ".join(square.format(x, y, x + 400, y + 400) for x, y in corners)
+        feature.setGeometry(QgsGeometry.fromWkt(f"MULTIPOLYGON({rings})"))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    layer = to_geopackage(layer, str(tmp_path / "parts.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "name"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.centroidWhole = False
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    _, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    polygons = labels[0]["metadata"]["q2vt:visible-polygons"]
+    tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), gdal.OF_VECTOR,
+                        open_options=["ZOOM_LEVEL=14"])
+    parts = {}
+    for feature in tiles.GetLayerByName(polygons):
+        parts.setdefault(feature.GetField("q2vt_label"), set()).add(feature.GetField("q2vt_part"))
+    assert set(parts) == set(shapes), parts
+    assert len(parts["c"]) == 2 and all(len(parts[name]) == 1 for name in "abde"), parts
+    single = {next(iter(parts[name])) for name in "abde"}
+    assert len(single) < 4, parts
+
+
 def test_viewer_starts_on_the_exported_area(export, tmp_path):
     """With minimum zoom 0 the viewer opened on the whole earth."""
     layer = zoning_layer(path=str(tmp_path / "view.gpkg"))

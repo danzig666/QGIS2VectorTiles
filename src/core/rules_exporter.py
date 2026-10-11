@@ -2690,7 +2690,11 @@ class RulesExporter:
             # Each part of a multi-part feature (the base datasets are single
             # parts): the viewer labels every part ("Label every part") or
             # only the biggest, and joins only the tile pieces of one part.
-            mapping.append((4, "$id", PART_FIELD))
+            # Distinct within a feature (its parts' ids differ, its orig id
+            # does not); the parts of one feature follow each other, so the
+            # value mostly repeats from feature to feature (a small tile
+            # value table, unlike the unique id).
+            mapping.append((4, f'$id - "{_FIELD_PREFIX}_orig_id"', PART_FIELD))
         source_fields = self._open(current_input, "fields").fields()
         if source_fields.indexFromName(ORDER_FIELD) >= 0:
             mapping.append((2, f'"{ORDER_FIELD}"', ORDER_FIELD))
