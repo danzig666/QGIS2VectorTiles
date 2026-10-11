@@ -161,3 +161,38 @@ def test_line_angles(plugin, wkt, distance, expected):
     line = Line(*linestring_coords(bytes(QgsGeometry.fromWkt(wkt).asWkb())))
     assert line.angle(distance) == pytest.approx(expected)
     assert QgsGeometry.fromWkt(wkt).interpolateAngle(distance) * 180 / 3.141592653589793 == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("along, expected", [
+    (-5.0, [-5, 15, 35, 55, 75, 95]),
+    (-25.0, [-25, -5, 15, 35, 55, 75, 95]),
+    (-50.0, [-50, -30, -10, 10, 30, 50, 70, 90]),
+    (5.0, [5, 25, 45, 65, 85]),
+])
+@pytest.mark.parametrize("average", [0.0, 3.0])
+def test_negative_offset_along_an_open_line_places_markers_before_it(plugin, along, expected, average):
+    """QGIS starts an open line's interval markers ``along`` from its start
+    even when that is before the start (renderPolylineInterval extends the
+    first segment); a negative offset gave no markers at all."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    from qgis.core import QgsExpression, QgsExpressionContext  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    recipe = mat.interval_points(20.0, along)
+    if average:
+        recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (("average", average),))
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 10, 100 10)"))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    points = QgsExpression(mat.interval_points_expression(recipe)).evaluate(context)
+    found = [(p.x(), p.y(), p.z()) for p in points.constGet().vertices()]
+    assert [round(x, 6) for x, _, _ in found] == expected
+    assert all(y == pytest.approx(10) for _, y, _ in found)
+    # Before the start the markers keep the first segment's direction, except
+    # that QGIS turns a marker around when its whole averaging span
+    # (+-average / 2) lies before the start.
+    for x, _, angle in found:
+        turned = average and x + average / 2 < 0
+        assert angle == pytest.approx(270 if turned else 90)
+    line = marker_points.Line(*marker_points.linestring_coords(bytes(feature.geometry().asWkb())))
+    assert marker_points.interval_positions(line, 20.0, along, average) == found

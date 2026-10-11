@@ -172,7 +172,7 @@ def interval_positions(line: Line, interval: float, along: float,
         offset = math.fmod(along, length)
     else:
         offset = along
-    if offset > length or offset < 0 or not math.isfinite(offset):
+    if offset > length or not math.isfinite(offset):
         return None
     last = math.floor((length - offset) / interval + 1e-9)
     if last > 10_000_000:
@@ -184,30 +184,42 @@ def interval_positions(line: Line, interval: float, along: float,
         if closed and element > 0 and abs(position - length) < 1e-6:
             continue
         distance = min(position, length)
-        point = line.point(distance)
+        # a negative offset on an open line: markers before its start
+        point = line.point(distance) if distance >= 0 else _before(line, distance)
         if point is None:
             return None
         if average > 0:
             angle = _averaged_angle(line, distance, half)
         else:
-            angle = line.angle(distance)
+            angle = line.angle(max(0, distance))
         out.append((point[0], point[1], angle))
     return out
 
 
+def _before(line: Line, distance: float) -> Tuple[float, float]:
+    """The point ``distance`` (negative) before the start of an open line,
+    along its first segment (the expression's make_point with sin / cos of
+    radians(line_interpolate_angle(0)))."""
+    radians = (line.angle(0.0) * math.pi) / 180
+    return line.xs[0] + distance * math.sin(radians), line.ys[0] + distance * math.cos(radians)
+
+
 def _averaged_angle(line: Line, distance: float, half: float) -> float:
-    """coalesce(degrees(azimuth(at(d - half), at(d + half))), line_interpolate_angle(d))."""
+    """coalesce(degrees(azimuth(at(d - half), at(d + half))), line_interpolate_angle(d));
+    on an open line the end of the span is not stopped at the line's start."""
     length = line.length
 
-    def at(value):
+    def at(value, extend=False):
         if line.closed:
             value = math.fmod(value + length, length)
+        elif extend and value < 0:
+            return _before(line, value)
         else:
             value = max(0, min(length, value))
         return line.point(value)
-    start, end = at(distance - half), at(distance + half)
+    start, end = at(distance - half), at(distance + half, True)
     if start is None or end is None:  # a NULL point: azimuth is NULL, coalesce goes on
-        return line.angle(distance)
+        return line.angle(max(0, distance))
     return _azimuth(start[0], start[1], end[0], end[1]) * 180 / math.pi
 
 
