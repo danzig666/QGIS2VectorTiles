@@ -219,6 +219,30 @@ def test_hatch_line_touching_a_corner_keeps_the_hatch(plugin, tmp_path, angle):
     assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
 
 
+@pytest.mark.parametrize("angle", [315, -45])
+def test_hatch_first_chunk_touching_a_corner_keeps_the_hatch(plugin, tmp_path, angle):
+    """At 270-360 degrees the line through the anchor corner is the first one
+    clipped: when its chunk of lines only touched the polygon there, the
+    collected hatch took that point's type and lost every line."""
+    wkts = [f"POLYGON(({x} {y}, {x + w} {y}, {x + w} {y + h}, {x} {y + h}, {x} {y}))"
+            for x, y, w, h in ((2042854, 6077878, 32, 1899), (2044854, 6077878, 19, 1865))]
+    layer = _layer("Polygon", wkts, str(tmp_path / "first.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(angle, 9)))
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16,
+                                          QgsRectangle(2042000, 6077000, 2046000, 6080000))
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = {}
+    for feature in outputs[0].getFeatures():
+        geometry = feature.geometry()
+        assert geometry.type() == Qgis.GeometryType.Line
+        assert not any(part.isEmpty() for part in geometry.constParts())
+        index = round((geometry.boundingBox().xMinimum() - 2042854) / 2000)
+        hatch[index] = hatch.get(index, 0.0) + geometry.length()
+    for index, (w, h) in enumerate(((32, 1899), (19, 1865))):
+        assert hatch.get(index, 0.0) == pytest.approx(w * h / 9, rel=0.03)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+
+
 def test_hatch_of_a_large_polygon_is_kept(plugin, tmp_path):
     """A polygon needing more than 20,000 hatch lines got no hatch at all,
     unreported (the per-feature cap returned NULL)."""
@@ -1161,7 +1185,9 @@ def test_a_map_from_zoom_0_keeps_the_exact_last_zooms(plugin, tmp_path, monkeypa
         layer = _layer("LineString", wkts, str(tmp_path / f"{kind}.gpkg"))
         per_zoom = len(wkts)  # arrows per zoom step
     else:
-        size = 150 if kind == "shapeburst" else 40  # a 2 mm inset fits inside at 13-16
+        # Shapeburst: a 2 mm inset fits inside at 13-16. Offset: 0.5 mm
+        # inwards is wider than the squares below zoom 13 (no outline).
+        size = 150 if kind == "shapeburst" else 30
         wkts = [f"POLYGON(({x} 0, {x + size} 0, {x + size} {size}, {x} {size}, {x} 0))"
                 for x in range(0, 800, 200)]
         layer = _layer("Polygon", wkts, str(tmp_path / f"{kind}.gpkg"))
@@ -1172,21 +1198,62 @@ def test_a_map_from_zoom_0_keeps_the_exact_last_zooms(plugin, tmp_path, monkeypa
     if kind == "shapeburst":
         # Bands per zoom step at 13-16: every band of every feature; below
         # them a feature a few pixels wide has few. The last four zooms fit
-        # with four steps, every zoom with one but not with two.
+        # with four steps and the zooms below with two; every zoom counted
+        # alike (as before) only with one.
         rules, _ = _zoom_rules(tmp_path, 16, 16)
         per_zoom = len(wkts) * len(rules[0].recipe.param("colors"))
-        budget = per_zoom * 20
+        budget = int(per_zoom * 22.1)
     monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
     narrow, narrow_diags = _zoom_rules(tmp_path, 13, 16)
     wide, wide_diags = _zoom_rules(tmp_path, 0, 16)
     top = sorted(repr(_band_key(r)) for r in narrow)
     assert len(top) > 4 and not narrow_diags.by_code("Q2VT_PATTERN_BUDGET")
     assert sorted(repr(_band_key(r)) for r in wide if r.get_attr("o") >= 13) == top
-    if kind == "polygon_offset":  # native (right-hand-rule rings) only below
-        below = [r for r in wide if r.get_attr("o") < 13]
-        assert below and all(dict(r.recipe.params).get("rhr") for r in below)
-        assert below[0].get_attr("i") < 13
-        assert "below zoom" in wide_diags.by_code("Q2VT_PATTERN_BUDGET")[0].message
+    if kind == "polygon_offset":  # no outline (QGIS draws none), no budget spent
+        assert not [r for r in wide if r.get_attr("o") < 13]
+        assert not wide_diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def _offset_squares(tmp_path, sizes):
+    wkts = [f"POLYGON(({x} 0, {x + size} 0, {x + size} {size}, {x} {size}, {x} 0))"
+            for x, size in zip(range(0, 10000 * len(sizes), 10000), sizes)]
+    layer = _layer("Polygon", wkts, str(tmp_path / "squares.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_budget_symbol("polygon_offset")))
+    reset_project(layer)
+
+
+def test_polygon_offset_over_the_budget_is_native_only_where_drawn(plugin, tmp_path, monkeypatch):
+    """Past the budget the browser's line offset draws the lower zooms; it
+    must not draw at the zooms where every ring's inward offset is empty
+    (QGIS draws nothing there, the browser drew loops)."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    # 0.5 mm inwards: the 30 m squares have an outline from zoom 13, the
+    # 2,000 m one from zoom 7.
+    _offset_squares(tmp_path, [30, 30, 30, 30, 2000])
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 100)
+    rules, diags = _zoom_rules(tmp_path, 0, 16)
+    native = [r for r in rules if dict(r.recipe.params).get("rhr") and r.get_attr("o") < 16]
+    assert len(native) == 1
+    assert (native[0].get_attr("o"), native[0].get_attr("i")) == (7, 12)
+    assert (native[0].visibility.min_zoom, native[0].visibility.max_zoom) == (7.0, 13.0)
+    assert sorted({r.get_attr("o") for r in rules if r not in native}) == [13, 14, 15, 16]
+    assert "below zoom 13" in diags.by_code("Q2VT_PATTERN_BUDGET")[0].message
+
+
+def test_polygon_offset_budget_keeps_the_uniform_steps_of_a_narrow_export(plugin, tmp_path,
+                                                                          monkeypatch):
+    """Giving the last zooms finer steps must not leave the zooms below with
+    fewer than one step count for every zoom gives (14-19: two per zoom)."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    _offset_squares(tmp_path, [40] * 10)  # 5 vertices each, drawn at 14-19
+    per_zoom = 50
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS",
+                        int(per_zoom * 18.99))  # 6 zooms x 2 steps, not x 4
+    rules, diags = _zoom_rules(tmp_path, 14, 19)
+    exact = [r for r in rules if not dict(r.recipe.params).get("rhr")]
+    steps = {zoom: sum(r.get_attr("o") == zoom for r in exact) for zoom in range(14, 20)}
+    assert steps == {zoom: 2 for zoom in range(14, 20)}
+    assert not diags.by_code("Q2VT_PATTERN_BUDGET")
 
 
 def test_map_unit_line_offset_is_the_offset_line(plugin, tmp_path):

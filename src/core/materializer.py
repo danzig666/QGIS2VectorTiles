@@ -19,6 +19,7 @@ Each rewrite reports what is approximated. The flattened rule's ``m``
 attribute keeps output datasets of derived components apart.
 """
 
+import bisect
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -524,25 +525,32 @@ class SymbolMaterializer:
         if low > high:
             return None
         zoom_rules = self._per_zoom(flat_rule)
-        vertices = self._layer_vertices(flat_rule.layer)
-        steps = self._zoom_steps({rule.get_attr("o"): vertices for rule in zoom_rules},
-                                 (8, 4, 2, 1))
-        exact = [rule for rule in zoom_rules if steps[rule.get_attr("o")]]
-        if not exact:
-            self._report("Q2VT_PATTERN_BUDGET",
-                         "Polygon outline offsets would exceed the output budget; drawn with "
-                         "the browser's line offset.", flat_rule)
-            return None
+        costs = {rule.get_attr("o"): self._polygon_offset_cost(flat_rule, layer, offset_mm,
+                                                                rule.get_attr("o"))
+                 for rule in zoom_rules}
+        steps = self._zoom_steps(costs, (8, 4, 2, 1))
+        # No outline at all where every ring's offset is empty (an inward
+        # offset wider than the features, as at low zooms): QGIS draws
+        # nothing there, the browser's line offset would.
+        drawn = [rule for rule in zoom_rules if costs[rule.get_attr("o")]]
+        exact = [rule for rule in drawn if steps[rule.get_attr("o")]]
+        native_zooms = [rule.get_attr("o") for rule in drawn if not steps[rule.get_attr("o")]]
         rules = []
-        cut = exact[0].get_attr("o")
-        if cut > low:  # the budget ends below the last zooms: native there
-            self._report("Q2VT_PATTERN_BUDGET",
-                         f"Polygon outline offsets below zoom {cut} would exceed the output "
-                         "budget; drawn there with the browser's line offset.", flat_rule)
+        if native_zooms:  # the budget ends below the last zooms: native there
+            cut = max(native_zooms) + 1
+            if exact:
+                self._report("Q2VT_PATTERN_BUDGET",
+                             f"Polygon outline offsets below zoom {cut} would exceed the output "
+                             "budget; drawn there with the browser's line offset.", flat_rule)
+            else:
+                self._report("Q2VT_PATTERN_BUDGET",
+                             "Polygon outline offsets would exceed the output budget; drawn "
+                             "with the browser's line offset.", flat_rule)
             native = flat_rule.derive()
-            native.set_attr("i", cut - 1)
+            native.set_attr("o", min(native_zooms))
+            native.set_attr("i", max(native_zooms))
             native.visibility = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
-                ZoomInterval(0.0, float(cut)))
+                ZoomInterval(float(min(native_zooms)), float(cut)))
             native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
             native.set_attr("m", 1)
             rules.append(native)
@@ -567,6 +575,75 @@ class SymbolMaterializer:
             native.set_attr("m", 1)
             rules.append(native)
         return rules
+
+    def _polygon_offset_cost(self, flat_rule: FlattenedRule, layer, offset_mm: float,
+                             zoom: int) -> int:
+        """Vertices of the offset rings one sub-zoom step of ``zoom`` outputs:
+        a ring buffered inwards by more than its inradius is empty (an
+        inward offset at the zoom's smallest, i.e. at ``zoom + 1``)."""
+        if flat_rule.pre_generator or flat_rule.merge:
+            return self._layer_vertices(flat_rule.layer)  # not the source polygons' rings
+        inset = offset_mm * self._map_units_per_mm(flat_rule, zoom + 1.0)
+        ring_filter = _ring_filter(layer)  # 1: exteriors only, 2: holes only
+        total = 0
+        for exterior, (radii, vertices_from) in self._layer_rings(flat_rule.layer).items():
+            if ring_filter == (2 if exterior else 1):
+                continue
+            # A positive offset shrinks exteriors and grows holes: the rings
+            # with a larger radius are drawn.
+            total += vertices_from[bisect.bisect_right(radii, inset if exterior else -inset)]
+        return total
+
+    def _layer_rings(self, layer) -> Dict[bool, Tuple[List[float], List[int]]]:
+        """Exterior (True) and interior rings of a source layer (cached):
+        their radii ascending, each at least the inradius of the ring as its
+        own polygon (project map units: no inset deeper than it is drawn),
+        and the vertices of the rings from each index on."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeatureRequest, QgsGeometry, QgsPolygon)
+        cache = self.__dict__.setdefault("_rings", {})
+        if layer.id() in cache:
+            return cache[layer.id()]
+        transform = None
+        if self.project_crs and layer.crs().authid() != self.project_crs:
+            transform = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem(self.project_crs),
+                                               QgsProject.instance())
+        rings = []
+        for feature in layer.getFeatures(QgsFeatureRequest().setNoAttributes()):
+            geometry = feature.geometry()
+            if geometry.isEmpty():
+                continue
+            if transform is not None:
+                geometry.transform(transform)
+            for part in geometry.constParts():
+                if not hasattr(part, "exteriorRing"):
+                    continue
+                part = part.segmentize() if part.hasCurvedSegments() else part
+                for index in range(-1, part.numInteriorRings()):
+                    ring = part.exteriorRing() if index < 0 else part.interiorRing(index)
+                    if ring is None:
+                        continue
+                    bounds = ring.boundingBox()
+                    # A disk inside the ring fits inside its bounding box.
+                    radius = min(bounds.width(), bounds.height()) / 2.0
+                    polygon = QgsPolygon()
+                    polygon.setExteriorRing(ring.clone())
+                    precision = radius / 50.0
+                    if precision > 0:
+                        pole, distance = QgsGeometry(polygon).poleOfInaccessibility(precision)
+                        if not pole.isNull() and math.isfinite(distance):
+                            # Within ``precision`` of the largest inscribed circle.
+                            radius = min(radius, distance + precision)
+                    rings.append((index < 0, radius, ring.numPoints()))
+        result = {}
+        for exterior in (True, False):
+            rows = sorted((radius, count) for kind, radius, count in rings if kind == exterior)
+            vertices_from = [0] * (len(rows) + 1)
+            for i in range(len(rows) - 1, -1, -1):
+                vertices_from[i] = vertices_from[i + 1] + rows[i][1]
+            result[exterior] = ([radius for radius, _ in rows], vertices_from)
+        cache[layer.id()] = result
+        return result
 
     def _layer_vertices(self, layer) -> int:
         """Vertices of a source layer (cached): the size of per-zoom copies."""
@@ -944,14 +1021,14 @@ class SymbolMaterializer:
         each zoom to its output size per step, ``choices`` the step counts
         from fine to coarse. The last BUDGET_TOP_ZOOMS zooms get the finest
         step count that fits them together, then the zooms below, highest
-        first, the finest that still fits (coarser and coarser). When every
-        zoom fits at the coarsest steps, each keeps at least those, so no zoom
-        gets fewer steps than one count for all would give. Zooms past the
-        budget get ``floor`` (0: not materialized)."""
+        first, the finest that still fits (coarser and coarser). No zoom gets
+        fewer steps than one count for all zooms would give (the finest that
+        fits them all). Zooms past the budget get ``floor`` (0: not
+        materialized)."""
         budget = self.MAX_PATTERN_ELEMENTS
         zooms = sorted(costs, reverse=True)
         coarsest = choices[-1]
-        reserve = coarsest if sum(costs.values()) * coarsest <= budget else 0
+        reserve = next((n for n in choices if sum(costs.values()) * n <= budget), 0)
         below, total = {}, 0.0  # cost of the zooms below each zoom
         for zoom in reversed(zooms):
             below[zoom] = total

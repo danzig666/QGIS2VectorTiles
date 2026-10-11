@@ -231,9 +231,12 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         f"if(@q2vt_k[1] - @q2vt_k[0] > {MAX_HATCH_LINES}, NULL, "
         # Only the clipped line work: a line that merely touches the polygon
         # at a vertex (the k = 0 line through the bounding box corner of a
-        # rectangle at 90-180 degrees) adds a point, and a mixed collection
-        # cannot be written to the line dataset (the whole hatch was lost).
-        f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_foreach("
+        # rectangle at 90-180 or 270-360 degrees) adds a point, and a mixed
+        # collection cannot be written to the line dataset (the whole hatch
+        # was lost). collect_geometries takes its type from the first part,
+        # so an empty multi-line leads (a chunk that is only that point
+        # would make a multi-point, dropping every line after it).
+        f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_prepend(array_foreach("
         f"generate_series(@q2vt_k[0], @q2vt_k[1], {chunk}), "
         f"intersection(@q2vt_g, collect_geometries(array_foreach("
         f"generate_series(@element, min(@q2vt_k[1], @element + {chunk - 1})), "
@@ -241,8 +244,9 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {ux!r} * @q2vt_r, "
         f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {uy!r} * @q2vt_r), "
         f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {uy!r} * @q2vt_r)))))))), "
-        f"geometry_type(@element) = 'Line'))))))))"
+        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {uy!r} * @q2vt_r)))))), "
+        f"geom_from_wkt('MULTILINESTRING EMPTY')))), "
+        f"geometry_type(@element) = 'Line' AND NOT is_empty(@element)))))))))"
     )
     if crs == export_crs:
         return body
