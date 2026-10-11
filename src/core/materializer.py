@@ -48,7 +48,8 @@ from .fidelity import zoom as fidelity_zoom
 from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector
-from .fidelity.units import physical_factor, normalize_unit, MM
+from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, physical_factor, normalize_unit, MM
+from .fidelity.zoom import WEB_MERCATOR_TOP_SCALE
 
 
 def replace_symbol_layer(symbol, layer, index: int = 0) -> None:
@@ -1717,9 +1718,12 @@ class SymbolMaterializer:
         from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes  # pylint: disable=import-outside-toplevel
         layer = layer if layer is not None else flat_rule.layer
         crs = QgsCoordinateReferenceSystem(self.project_crs or layer.crs().authid())
-        metres = (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom / 1000.0
         if crs.isGeographic():
-            return metres / 111320.0
+            # QGIS's map units per pixel in degrees: the browser's Mercator
+            # metres per mm over the Mercator x-extent of a degree (the
+            # scale of a geographic CRS counts haversine metres instead).
+            return WEB_MERCATOR_TOP_SCALE / 2.0 ** zoom / 1000.0 / MERCATOR_UNITS_PER_DEGREE
+        metres = (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom / 1000.0
         return metres * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
 
     # Arrow sizes in screen units: polygons per eighth of a zoom (sizes

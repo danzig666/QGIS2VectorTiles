@@ -186,8 +186,10 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Markers are not clipped to the polygon.",)),
     Capability("GeometryGenerator", "other", Strategy.MATERIALIZED,
                "Generated geometry is materialized in the layer CRS and coerced to the "
-               "sub-symbol type; nested generators are composed as QGIS evaluates them.",
-               ("Nested generators in screen units are evaluated in map units.",)),
+               "sub-symbol type; nested generators are composed as QGIS evaluates them. "
+               "Generators in screen units are evaluated per zoom (up to zoom 22) on the "
+               "geometry scaled to those units, y pointing down.",
+               ("Generators nested inside another generator are evaluated in its units.",)),
     Capability("GradientFill", "fill", Strategy.MATERIALIZED,
                "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
                "reflect / repeat) as solid colour bands per feature, from the QGIS reference "

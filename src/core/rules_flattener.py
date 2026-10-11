@@ -45,7 +45,7 @@ from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import OverzoomPolicy, ZoomInterval
 from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
-from .fidelity.units import LengthConverter
+from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, LengthConverter
 from .fidelity.qgis_expr import (SCALE_VARIABLES, and_filters, enabled_condition,
                                  map_scale_reads, scale_thresholds, substitute_geometry,
                                  uses_map_scale, with_map_scale)
@@ -207,6 +207,7 @@ class RulesFlattener:
             if not rule_system:
                 continue
             self._legend_keys = self._legend_key_map(layer, rule_system, rule_type)
+            self._apply_reference_scale(layer, rule_system, rule_type)
             self._rule_systems.append(rule_system)
             self._drop_missing_field_properties(rule_system, layer, rule_type)
             root_rule = self._prepare_root_rule(rule_system, layer, rule_type)
@@ -229,6 +230,27 @@ class RulesFlattener:
                         layer.renderer().type() in self.POINT_GROUP_MODES and \
                         layer.renderer().embeddedRenderer() is not None:
                     self._expand_point_groups(layer, before)
+
+    def _apply_reference_scale(self, layer, rule_system, rule_type: int) -> None:
+        """Screen-unit sizes of a layer with a symbology reference scale
+        (symbols and labels, as QgsVectorLayerRenderer / QgsLabelingEngine
+        apply it) as map units of their size at that scale, on this copy."""
+        from .reference_scale import ReferenceScaleConverter, apply_to_rules  # pylint: disable=import-outside-toplevel
+        renderer = layer.renderer()
+        reference = renderer.referenceScale() if renderer is not None else -1.0
+        if not reference or reference <= 0:
+            return
+        project_crs = QgsProject.instance().crs()
+        converter = ReferenceScaleConverter(
+            reference, self.lengths.map_context.scale_metres_per_map_unit,
+            project_crs.authid() if project_crs.isValid() else "", layer.crs().authid())
+        apply_to_rules(rule_system, rule_type, converter)
+        if converter.unhandled:
+            self.diagnostics.add(
+                "Q2VT_REFERENCE_SCALE",
+                f"Layer '{layer.name()}' (reference scale 1:{reference:g}): "
+                f"{', '.join(sorted(set(converter.unhandled)))} keep their screen size.",
+                layer_id=layer.id())
 
     @staticmethod
     @staticmethod
@@ -419,9 +441,12 @@ class RulesFlattener:
         """Project CRS map units per screen millimetre at ``zoom``."""
         from qgis.core import QgsUnitTypes  # pylint: disable=import-outside-toplevel
         crs = QgsProject.instance().crs() if QgsProject.instance().crs().isValid() else layer.crs()
-        metres = (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom / 1000.0
         if crs.isGeographic():
-            return metres / 111320.0
+            # Degrees per mm as QGIS's map-to-pixel at the browser's ground
+            # resolution (see SymbolMaterializer._map_units_per_mm).
+            return fidelity_zoom.WEB_MERCATOR_TOP_SCALE / 2.0 ** zoom / 1000.0 / \
+                MERCATOR_UNITS_PER_DEGREE
+        metres = (ZoomLevels.zoom_to_scale(0) or 0.0) / 2.0 ** zoom / 1000.0
         return metres * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
 
     def _point_group_params(self, renderer, layer, zoom: float) -> tuple:
@@ -1284,6 +1309,67 @@ class RulesFlattener:
                 result.appendSymbolLayer(layer.clone())
         return result
 
+    @staticmethod
+    def _screen_generator_indices(symbol) -> List[int]:
+        """Indices of the enabled geometry generators in screen units."""
+        from .fidelity.units import normalize_unit, physical_factor  # pylint: disable=import-outside-toplevel
+        return [index for index, layer in enumerate(symbol.symbolLayers())
+                if layer.enabled() and layer.layerType() == "GeometryGenerator"
+                and physical_factor(normalize_unit(layer.units())) is not None]
+
+    def _screen_generator_rules(self, flat_rule: FlattenedRule,
+                                indices: List[int]) -> List[FlattenedRule]:
+        """A symbol with geometry generators in mm / px / pt / in: QGIS
+        evaluates them on the painter geometry in those units (fixed screen
+        sizes, y down), so each zoom gets its own generator in map units; the
+        symbol's other layers are split as usual. Overzoomed zooms (up to
+        zoom MAX_TILE_ZOOM) get bands of the last tile zoom (attribute "b"),
+        each with its own generator, so sizes stay fixed on screen there too."""
+        from .fidelity.qgis_expr import in_screen_units  # pylint: disable=import-outside-toplevel
+        from .fidelity.units import normalize_unit, physical_factor  # pylint: disable=import-outside-toplevel
+        rest = flat_rule.derive()
+        for index in indices:
+            rest.rule.symbol().symbolLayer(index).setEnabled(False)
+        rules = self._split_by_symbol_layers(rest)
+        layer_crs = flat_rule.layer.crs().authid()
+        per_zoom = self.materializer._per_zoom(flat_rule)  # pylint: disable=protected-access
+        slices = []
+        for position, zoom_rule in enumerate(per_zoom):
+            zoom = int(zoom_rule.get_attr("o"))
+            last = position == len(per_zoom) - 1
+            visible = zoom_rule.visibility or ZoomInterval(float(zoom), None if last else zoom + 1.0)
+            if not last:
+                slices.append((zoom_rule, zoom))
+                continue
+            top = fidelity_zoom.MAX_TILE_ZOOM if visible.max_zoom is None else \
+                min(fidelity_zoom.MAX_TILE_ZOOM, int(math.ceil(visible.max_zoom)) - 1)
+            if top <= zoom:
+                slices.append((zoom_rule, zoom))
+                continue
+            for band, at_zoom in enumerate(range(zoom, top + 1)):
+                interval = visible.intersect(ZoomInterval(
+                    float(at_zoom), None if at_zoom == top else at_zoom + 1.0))
+                if interval.is_empty:
+                    continue
+                banded = zoom_rule.derive()
+                banded.visibility = interval
+                banded.set_attr("b", band)
+                slices.append((banded, at_zoom))
+        for zoom_rule, zoom in slices:
+            # Web Mercator units per CSS px at this zoom (512 px tiles).
+            mercator_per_px = 40075016.68557849 / (512.0 * 2.0 ** zoom)
+            symbol = zoom_rule.rule.symbol()
+            for index, layer in enumerate(symbol.symbolLayers()):
+                if index not in indices:
+                    layer.setEnabled(False)
+                    continue
+                per_unit = mercator_per_px * physical_factor(normalize_unit(layer.units()))
+                layer.setGeometryExpression(in_screen_units(
+                    layer.geometryExpression(), per_unit, "EPSG:3857", layer_crs))
+                layer.setUnits(Qgis.RenderUnit.MapUnits)
+            rules.extend(self._split_by_symbol_layers(zoom_rule))
+        return rules
+
     def _split_by_symbol_layers(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
         """Split a renderer rule into one rule per enabled symbol layer."""
         symbol = flat_rule.rule.symbol()
@@ -1294,6 +1380,9 @@ class RulesFlattener:
             del symbol  # deleted by setSymbol: no stale wrapper (see below)
             flat_rule.rule.setSymbol(flattened)
             symbol = flat_rule.rule.symbol()
+        screen_generators = self._screen_generator_indices(symbol)
+        if screen_generators:
+            return self._screen_generator_rules(flat_rule, screen_generators)
 
         layer_count = symbol.symbolLayerCount()
         split_rules = []

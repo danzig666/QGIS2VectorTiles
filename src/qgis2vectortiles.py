@@ -243,9 +243,9 @@ class QGIS2VectorTiles:
         )
         self.lengths = self._length_converter()
         # zoom <-> scale: QGIS's scale for the browser's ground resolution in
-        # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.).
-        ZoomLevels.configure(
-            fidelity_zoom.WEB_MERCATOR_TOP_SCALE / self.lengths.map_context.mercator_per_map_unit)
+        # the project CRS (1 for Web Mercator, ~cos(latitude) for EOV etc.;
+        # the metric ground scale QgsScaleCalculator gives a geographic CRS).
+        ZoomLevels.configure(self.lengths.map_context.top_scale)
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
@@ -604,8 +604,10 @@ class QGIS2VectorTiles:
         context = QgsRenderContext()
         context.setScaleFactor(96.0 / 25.4)
         context.setRendererScale(scale)
-        metres_per_px = scale * 0.0254 / 96.0 / self.lengths.map_context.mercator_per_map_unit
-        context.setMapToPixel(QgsMapToPixel(metres_per_px))
+        # Project map units per CSS px at the minimum zoom (512 px tiles).
+        units_per_px = 40075016.68557849 / (512.0 * 2 ** self.min_zoom) / \
+            self.lengths.map_context.mercator_per_map_unit
+        context.setMapToPixel(QgsMapToPixel(units_per_px))
         reach = 0.0
         for rule in rules:
             symbol = rule.rule.symbol() if rule.get_attr("t") == 0 else None

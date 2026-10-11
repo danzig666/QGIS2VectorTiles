@@ -151,6 +151,30 @@ _MEASURE_RE = re.compile(
     r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\$(area|length|perimeter|x|y)\b", re.IGNORECASE)
 
 
+def in_screen_units(expression: str, units_per_screen_unit: float, frame_crs: str = "",
+                    layer_crs: str = "") -> str:
+    """Evaluate a geometry generator written in screen units (mm, px, pt, in).
+
+    QgsGeometryGeneratorSymbolLayer::render evaluates such a generator on
+    the painter geometry scaled to its units (y pointing down) and maps the
+    result back. The geometry is scaled here by ``1 / units_per_screen_unit``
+    (frame map units per screen unit) and mirrored about its centroid in
+    ``frame_crs``, the expression is evaluated, and the result is scaled
+    back. With a ``layer_crs`` other than ``frame_crs`` the input and the
+    result are in the layer CRS (as the exporter evaluates generators).
+    """
+    k = float(units_per_screen_unit)
+    geometry = "@geometry"
+    if frame_crs and layer_crs and frame_crs != layer_crs:
+        geometry = f"transform(@geometry, '{layer_crs}', '{frame_crs}')"
+    centre = f"centroid({geometry})"
+    scaled = f"scale({geometry}, {1.0 / k!r}, {-1.0 / k!r}, {centre})"
+    result = f"scale({substitute_geometry(expression, scaled)}, {k!r}, {-k!r}, {centre})"
+    if geometry != "@geometry":
+        result = f"transform({result}, '{frame_crs}', '{layer_crs}')"
+    return result
+
+
 def in_layer_crs(expression: str, export_crs: str, layer_crs: str, planar_measures: bool) -> str:
     """Evaluate a scalar expression as QGIS does on the source layer.
 

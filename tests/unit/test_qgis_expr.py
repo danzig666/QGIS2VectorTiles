@@ -69,3 +69,19 @@ def test_scale_thresholds_are_the_scales_where_a_comparison_switches():
     assert scale_thresholds("2 * @map_scale < 1000") is None
     assert scale_thresholds("@map_scale < 1000 * 2") is None
     assert scale_thresholds('"map_scale" > 3') == []
+
+
+def test_in_screen_units_scales_and_mirrors_about_the_centroid():
+    from fidelity.qgis_expr import in_screen_units
+    out = in_screen_units("buffer($geometry, 5)", 2.0)
+    assert out == ("scale(buffer((scale(@geometry, 0.5, -0.5, centroid(@geometry))), 5), "
+                   "2.0, -2.0, centroid(@geometry))")
+
+
+def test_in_screen_units_in_another_layer_crs():
+    from fidelity.qgis_expr import in_screen_units
+    out = in_screen_units("translate(@geometry, 1, 1)", 4.0, "EPSG:3857", "EPSG:4326")
+    frame = "transform(@geometry, 'EPSG:4326', 'EPSG:3857')"
+    assert out == (f"transform(scale(translate((scale({frame}, 0.25, -0.25, centroid({frame}))), "
+                   f"1, 1), 4.0, -4.0, centroid({frame})), 'EPSG:3857', 'EPSG:4326')")
+    assert in_screen_units("$geometry", 1.0, "EPSG:3857", "EPSG:3857").startswith("scale(")
