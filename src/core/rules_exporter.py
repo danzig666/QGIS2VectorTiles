@@ -3659,6 +3659,12 @@ class RulesExporter:
             rule.visible_polygons = name
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
             rule.visible_kind = "line"
+            # "Merge connected lines" (line layers; not with direction
+            # symbols, QgsVectorLayerLabelProvider): the viewer labels lines
+            # of one text that meet end to end as one line.
+            line_settings = flat_rule.rule.settings().lineSettings()
+            rule.merge_lines = flat_rule.get_attr("g") == 1 and line_settings.mergeLines() \
+                and not line_settings.addDirectionSymbol()
         lines = self._EXTERIOR_RINGS if flat_rule.get_attr("g") == 2 else "@geometry"
         return dataclasses.replace(
             label, output_dataset=name, geometry_target=1,

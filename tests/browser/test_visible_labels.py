@@ -452,6 +452,64 @@ def test_horizontal_line_label_is_level_and_centred_on_the_line():
     assert _lines(steep, view, {"box": [0.1, 0.01]}) == {}  # along it: no room
 
 
+def test_level_line_label_wider_than_the_screen_is_kept():
+    """A level (Horizontal) line label wider than the view - map-unit text
+    at a high zoom: QGIS keeps candidates that only overlap the map extent
+    (partial candidates, on by default) and draws it cut by the screen
+    edge, centred on the visible line; it was dropped."""
+    line = [(1, [[0, 2048], [4096, 2048]])]
+    view = [0.4, 0.4, 0.6, 0.6]
+    x, y, rotation = _lines(line, view, {"box": [0.3, 0.01], "level": True})[1]
+    assert (x, y) == pytest.approx((0.5, 0.5)) and rotation == 0
+    assert _lines(line, view, {"box": [0.3, 0.01]}) == {}  # along the line: still no room
+
+
+def _merged(lines, view, options):
+    """labelPoints of line features [(id, name, [[x, y], ...] in z0 tile
+    units)] whose text is their "name": [[x, y, id], ...] sorted by x."""
+    script = f"""
+import {{ labelPoints, newLabelState, textKey }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(lines)}.map(([id, name, points]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, name, rot: 99 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), ...{json.dumps(options)} }};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+if (options.merge) options.mergeText = textKey(["coalesce", ["get", "name"], ""]);
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => [...f.geometry.coordinates, f.properties.q2vt_orig_id])
+  .sort((a, b) => a[0] - b[0])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def test_connected_lines_of_one_text_are_labelled_as_one_line():
+    """QGIS "Merge connected lines": features of one label text meeting end
+    to end are labelled as one line (pal joinConnectedFeatures). A river
+    split into short features got one label per feature - or none where
+    each feature is shorter than the label."""
+    river = [(k + 1, "Echo", [[512 * k, 2048], [512 * (k + 1), 2048]]) for k in range(8)]
+    view, box = [0, 0, 1, 1], [0.2, 0.01]          # a label 0.4 long, features 0.125
+    assert _merged(river, view, {"box": box}) == []
+    labels = _merged(river, view, {"box": box, "merge": True})
+    assert len(labels) == 1 and labels[0][:2] == pytest.approx([0.5, 0.5])
+    # Short labels: one per feature without merging, one in all with it.
+    assert len(_merged(river, view, {"box": [0.02, 0.01]})) == 8
+    assert len(_merged(river, view, {"box": [0.02, 0.01], "merge": True})) == 1
+    # Repeated: the merged line is chopped at the repeat (0.3: three parts),
+    # not labelled once per feature.
+    labels = _merged(river, view, {"box": [0.02, 0.01], "merge": True, "repeat": 0.3})
+    assert [x for x, _, _ in labels] == pytest.approx([1 / 6, 1 / 2, 5 / 6])
+    # Another text, or the same text not touching: separate lines.
+    other = [(20, "Echo", [[0, 3584], [4096, 3584]]), (21, "Fox", [[4096, 2048], [3584, 0]])]
+    labels = _merged(river + other, view, {"box": [0.02, 0.01], "merge": True})
+    assert sorted(label[2] for label in labels) == [1, 20, 21]
+
+
 def test_repeated_line_label_is_chopped_on_the_visible_line():
     """A repeated line label (QGIS repeat distance): the line clipped to the
     screen is cut into equal parts at a whole multiple of the repeat at

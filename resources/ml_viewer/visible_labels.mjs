@@ -130,6 +130,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:line-orient"] === "horizontal") groups.get(polygons).level = true;
     // A repeated line label: one label per repeat part of the visible line.
     if (layer.metadata["q2vt:repeat"]) groups.get(polygons).repeat = layer.metadata["q2vt:repeat"];
+    // "Merge connected lines": lines of one text meeting end to end are one line.
+    if (layer.metadata["q2vt:merge-lines"]) groups.get(polygons).merge = true;
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
     // "Around point" (QGIS): beside the point at the label distance, not on it.
     if (layer.metadata["q2vt:label-around"]) groups.get(polygons).around = layer.metadata["q2vt:label-around"];
@@ -259,6 +261,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         degraded: Boolean(group.degraded), overlap: group.overlap || null, perPart: Boolean(group.perPart),
         level: Boolean(group.level), repeat: repeatOption(group.repeat, zoom, perPx),
+        mergeText: group.merge ? textKey((activeLayer(group, zoom).layout || {})["text-field"]) : null,
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -391,7 +394,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   // neighbouring tiles round a line's cut on their shared edge to it.
   let tileUnit = 0;
   const loaded = new Set(); // deepest tiles with data
-  const byFeature = new Map();
+  let byFeature = new Map();
   const excluded = new Set();
   for (const f of features) {
     if (f._z !== deepest || !f._vectorTileFeature) continue;
@@ -414,7 +417,9 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       const world = ring.map((p) => [ox + p.x * scale, oy + p.y * scale]);
       extent = union(extent, intersect(bounds([world]), tileRect));
       if (options.kind === "line") {  // polylines, cut to the tile
-        rings.push(...clipLine(world, clip));
+        const pieces = clipLine(world, clip);
+        for (const piece of pieces) piece.clip = clip;  // ends on it are cuts, not line ends
+        rings.push(...pieces);
         continue;
       }
       const clipped = clipRing(world, clip);
@@ -433,6 +438,20 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const entry = parts.get(part);
     entry.rings.push(...rings);
     entry.extent = union(entry.extent, extent);
+  }
+  if (options.kind === "line" && options.mergeText) {
+    // "Merge connected lines" joins feature parts (pal's FeatureParts): the
+    // parts of the features are merged, the others keep their feature.
+    const flat = new Map();
+    for (const [key, parts] of byFeature) {
+      for (const [part, entry] of parts) flat.set(key + PART_OF + part, entry);
+    }
+    byFeature = new Map();
+    for (const [key, entry] of mergeConnected(flat, options.mergeText, joinTolerance({ ...options, tileUnit }))) {
+      const [feature, part] = key.startsWith(MERGED_PREFIX) ? [key, ""] : key.split(PART_OF);
+      if (!byFeature.has(feature)) byFeature.set(feature, new Map());
+      byFeature.get(feature).set(part, entry);
+    }
   }
   // A kept point on a tile still loading cannot be checked: keep it.
   const unchecked = (point) => !loaded.has(
@@ -1344,6 +1363,78 @@ function clipLine(points, [x0, y0, x1, y1]) {
   return pieces.filter((piece) => piece.length >= 2);
 }
 
+// How far apart (world units) two line ends may be and still meet: a tile
+// cut's mismatch, a few units of the data's tiles (it grows on the screen
+// with every overzoom level), at least one CSS pixel; never a visible gap
+// in the line.
+function joinTolerance(options) {
+  return Math.max(1e-10, options.precision || 0, 4 * (options.tileUnit || 0));
+}
+
+// properties -> the label's text as a key: the values of the fields the
+// style's text-field reads (one constant text: one key).
+export function textKey(expression) {
+  const fields = [];
+  const find = (value) => {
+    if (!Array.isArray(value)) return;
+    if (value[0] === "get" && typeof value[1] === "string") fields.push(value[1]);
+    else value.forEach(find);
+  };
+  find(expression);
+  return (properties) => JSON.stringify(fields.map((field) => properties[field] ?? null));
+}
+
+// "Merge connected lines" (QGIS): features of one label text whose ends
+// meet are labelled as one line (pal Layer::joinConnectedFeatures), so a
+// river split into short features gets one label along its course - not
+// one per feature, nor none where each is shorter than the label. Ends on
+// a tile or reach cut (piece.clip) are not line ends. byFeature -> the same
+// with each connected set as one entry (keyed by its first feature's key).
+const MERGED_PREFIX = "\u0001";
+// Feature key / part separator of the parts merged by mergeConnected.
+const PART_OF = "\u0002";
+
+function mergeConnected(byFeature, textOf, tolerance) {
+  const onCut = ([x, y], [x0, y0, x1, y1]) => Math.min(Math.abs(x - x0), Math.abs(x - x1),
+                                                       Math.abs(y - y0), Math.abs(y - y1)) <= 1e-12;
+  const byText = new Map();
+  for (const [key, value] of byFeature) {
+    const text = textOf(value.properties);
+    if (!byText.has(text)) byText.set(text, []);
+    const ends = value.rings.flatMap((piece) => [piece[0], piece[piece.length - 1]]
+      .filter((end) => !piece.clip || !onCut(end, piece.clip)));
+    byText.get(text).push({ key, value, ends });
+  }
+  const meet = (a, b) => Math.abs(a[0] - b[0]) <= tolerance && Math.abs(a[1] - b[1]) <= tolerance;
+  const out = new Map();
+  for (const members of byText.values()) {
+    const parent = members.map((_, i) => i);
+    const root = (i) => (parent[i] === i ? i : (parent[i] = root(parent[i])));
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        if (root(i) !== root(j) && members[i].ends.some((a) => members[j].ends.some((b) => meet(a, b)))) {
+          parent[root(j)] = root(i);
+        }
+      }
+    }
+    const sets = new Map();
+    members.forEach((member, i) => {
+      if (!sets.has(root(i))) sets.set(root(i), []);
+      sets.get(root(i)).push(member);
+    });
+    for (const set of sets.values()) {
+      if (set.length === 1) {
+        out.set(set[0].key, set[0].value);
+        continue;
+      }
+      set.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      out.set(MERGED_PREFIX + set[0].key, { properties: set[0].value.properties,
+                                             rings: set.flatMap(({ value }) => value.rings) });
+    }
+  }
+  return out;
+}
+
 // Pieces of one line (cut at tile edges and the screen) joined where their
 // ends meet. Neighbouring tiles cut their own rounded, buffered copies of a
 // line, so the two cuts on a shared tile edge miss each other by up to a
@@ -1351,21 +1442,22 @@ function clipLine(points, [x0, y0, x1, y1]) {
 function stitch(pieces, tolerance = 1e-10) {
   const same = (a, b) => Math.abs(a[0] - b[0]) <= tolerance && Math.abs(a[1] - b[1]) <= tolerance;
   const chains = pieces.map((piece) => piece.slice());
-  for (let joined = true; joined;) {
-    joined = false;
-    for (let i = 0; i < chains.length && !joined; i++) {
-      for (let j = 0; j < chains.length && !joined; j++) {
-        if (i === j) continue;
-        const a = chains[i], b = chains[j];
-        let merged = null;
-        if (same(a[a.length - 1], b[0])) merged = a.concat(b.slice(1));
-        else if (same(a[a.length - 1], b[b.length - 1])) merged = a.concat(b.slice(0, -1).reverse());
-        else if (same(a[0], b[0])) merged = a.slice().reverse().concat(b.slice(1));
-        if (merged) {
-          chains[i] = merged;
-          chains.splice(j, 1);
-          joined = true;
-        }
+  // Each chain grown at both ends until nothing more meets it (merged lines
+  // can bring hundreds of pieces: no restart from the first chain).
+  for (let i = 0; i < chains.length; i++) {
+    for (let j = i + 1; j < chains.length;) {
+      const a = chains[i], b = chains[j];
+      let merged = null;
+      if (same(a[a.length - 1], b[0])) merged = a.concat(b.slice(1));
+      else if (same(a[a.length - 1], b[b.length - 1])) merged = a.concat(b.slice(0, -1).reverse());
+      else if (same(a[0], b[b.length - 1])) merged = b.concat(a.slice(1));
+      else if (same(a[0], b[0])) merged = a.slice().reverse().concat(b.slice(1));
+      if (merged) {
+        chains[i] = merged;
+        chains.splice(j, 1);
+        j = i + 1;
+      } else {
+        j++;
       }
     }
   }
@@ -1420,11 +1512,7 @@ function project(chain, [x, y]) {
 function lineSpots(loaded, properties, view, avoid, options) {
   const withRotation = (rotation) => (options.rotationField
     ? { ...properties, [options.rotationField]: rotation } : properties);
-  // A tile cut's mismatch: a few units of the data's tiles (it grows on
-  // the screen with every overzoom level), at least one CSS pixel; never a
-  // visible gap in the line.
-  const joinTolerance = Math.max(1e-10, options.precision || 0, 4 * (options.tileUnit || 0));
-  const chains = (pieces) => stitch(pieces, joinTolerance).map((chain) => ({ chain, length: chainLength(chain) }))
+  const chains = (pieces) => stitch(pieces, joinTolerance(options)).map((chain) => ({ chain, length: chainLength(chain) }))
     .sort((a, b) => b.length - a.length);
   const visible = chains(loaded.flatMap((piece) => clipLine(piece, view)));
   const half = options.labelBox ? options.labelBox(properties) : null;
@@ -1445,8 +1533,10 @@ function lineSpots(loaded, properties, view, avoid, options) {
   // label only needs its centre on the line).
   const lo = half && !level ? half[0] : 0;
   // The first clear spot from the middle of [a, b] outwards, in steps of a
-  // quarter label (at most 40), and the first that only fits the screen.
-  const search = (chain, a, b) => {
+  // quarter label (at most 40), and the first that only fits the screen
+  // (``partial``: a box that only overlaps the screen, its centre on it).
+  const search = (chain, a, b, partial = false) => {
+    const minFit = partial ? -Infinity : 0;
     const length = b - a;
     let overlapping = null;
     const step = Math.max(length / 40, half ? half[0] / 2 : length / 20);
@@ -1454,8 +1544,8 @@ function lineSpots(loaded, properties, view, avoid, options) {
       const s = a + length / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
       if (s < a + lo - 1e-12 || s > b - lo + 1e-12) continue;
       const c = candidate(chain, s);
-      if (c && c.fit >= 0 && c.clear) return { clear: c, overlapping };
-      if (c && c.fit >= 0 && !overlapping) overlapping = c;
+      if (c && c.fit >= minFit && c.clear) return { clear: c, overlapping };
+      if (c && c.fit >= minFit && !overlapping) overlapping = c;
     }
     return { clear: null, overlapping };
   };
@@ -1496,6 +1586,17 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     if (found.clear) return result(found.clear);
     if (!overlapping) overlapping = found.overlapping;
   }
+  // A level label with no clear spot wholly on the screen (map-unit text
+  // wider than the view): QGIS keeps candidates that only overlap the map extent
+  // (labeling engine "partial candidates", on by default), drawn cut by
+  // the screen edge - centred on the visible line as before.
+  if (options.level && half) {
+    for (const { chain, length } of visible) {
+      const found = search(chain, 0, length, true);
+      if (found.clear) return result(found.clear);
+      if (!overlapping) overlapping = found.overlapping;
+    }
+  }
   // A wholly visible line too short for its label (a dimension line):
   // with "Allow degraded placement" QGIS draws the label level with its
   // bottom-left corner on the line's interior point (PAL
@@ -1528,16 +1629,29 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
 // candidates). An empty list when no part has room.
 function placeRepeatedOnLine(loaded, properties, view, avoid, options) {
   const taken = avoid.slice();
-  const { visible, half, lo, result, search } = lineSpots(loaded, properties, view, taken, options);
-  if (!visible.length) return [];
+  // pal chops the line with the label's own box (no margin around it) and
+  // keeps the labels of its parts clear of each other by that box; it
+  // measures the text with the font at a whole pixel size: 10 pt (13.33 px)
+  // as 13 px, 2.5 % narrower - with the margin, labels about as long as the
+  // repeat lost every other part.
   const precision = options.precision || 0;
-  // pal chops with the label's own width (no margin around it).
-  const width = half ? 2 * Math.max(half[0] - LABEL_MARGIN_PX * precision, half[0] / 2) : 0;
+  const drawn = options.labelBox ? options.labelBox(properties) : null;
+  let own = null;
+  if (drawn) {
+    const whole = drawn.size > 0 ? Math.max(1, Math.round(drawn.size)) / drawn.size : 1;
+    own = [Math.max(drawn[0] - LABEL_MARGIN_PX * precision, drawn[0] / 2) * whole,
+           Math.max(drawn[1] - LABEL_MARGIN_PX * precision, drawn[1] / 2)];
+  }
+  const { visible, lo, result, search } = lineSpots(loaded, properties, view, taken,
+                                                    { ...options, labelBox: own ? () => own : null });
+  if (!visible.length) return [];
+  const width = own ? 2 * own[0] : 0;
   const out = [];
   for (const { chain, length } of options.perPart ? visible : visible.slice(0, 1)) {
     for (const [a, b] of repeatParts(length, width, options.repeat)) {
       if (b - a < 2 * lo) continue;
-      const found = search(chain, a, b);
+      let found = search(chain, a, b);
+      if (!found.clear && !found.overlapping && options.level) found = search(chain, a, b, true);
       const spot = found.clear || (options.overlap ? found.overlapping : null);
       if (!spot) continue;
       out.push(result(spot));
@@ -1756,6 +1870,7 @@ export function layoutBoxes(layout, zoom, perPx, charWidth = 0.6, metrics = null
     height += pad[0] + pad[2];
     const box = [(width / 2 + LABEL_MARGIN_PX) * perPx, (height / 2 + LABEL_MARGIN_PX) * perPx];
     box.text = bare;  // QGIS measures the "around point" distance from the bare text
+    box.size = size;  // CSS px
     return box;
   };
 }

@@ -689,7 +689,7 @@ def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp
     from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
     from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
 
-    def labels_for(name, placement, repeat):
+    def labels_for(name, placement, repeat, unit=Qgis.RenderUnit.Millimeters, merge=False):
         layer = QgsVectorLayer("LineString?crs=EPSG:3857", name, "memory")
         layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
         layer.updateFields()
@@ -704,7 +704,10 @@ def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp
         settings.fieldName = "name"
         settings.placement = placement
         settings.repeatDistance = repeat
-        settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+        settings.repeatDistanceUnit = unit
+        line_settings = settings.lineSettings()
+        line_settings.setMergeLines(merge)
+        settings.setLineSettings(line_settings)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
         _, result = export(layer, min_zoom=0, max_zoom=14)
@@ -722,6 +725,17 @@ def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp
     assert len(sparse) == 1 and sparse[0]["metadata"]["q2vt:visible-kind"] == "line"
     assert "q2vt:line-orient" not in sparse[0]["metadata"]
     assert sparse[0]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(300 * 96 / 25.4, abs=0.01)
+    assert "q2vt:merge-lines" not in sparse[0]["metadata"]
+    # "Merge connected lines": the viewer labels connected lines of one text
+    # as one line (a river split into short features).
+    merged = labels_for("merged", Qgis.LabelPlacement.Line, 300, merge=True)
+    assert len(merged) == 1 and merged[0]["metadata"]["q2vt:merge-lines"] is True
+    # A map-unit repeat: px at zoom 24. At the export's first zoom (0) it was
+    # a fraction of a pixel, rounded to 3 decimals: 30 m became no repeat.
+    meters = labels_for("level_meters", Qgis.LabelPlacement.Horizontal, 30, unit=Qgis.RenderUnit.MapUnits)
+    repeat = meters[0]["metadata"]["q2vt:repeat"]
+    assert repeat["zoom"] == 24
+    assert repeat["px"] == pytest.approx(30 / (2 * 20037508.342789244) * 512 * 2 ** 24, rel=1e-6)
     # A small repeat keeps MapLibre's spacing over the tile zooms, the viewer
     # takes over while the map overzooms.
     dense = sorted(labels_for("dense", Qgis.LabelPlacement.Line, 20), key=lambda l: l["minzoom"])

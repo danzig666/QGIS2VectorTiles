@@ -1897,8 +1897,9 @@ class QgisMapLibreStyleExporter:
             ordered_styles:  Style names whose features carry a QGIS
                              drawing rank (renderer order-by) to sort by.
             visible_polygons: Style name -> (polygon source layer, label per
-                             part) of labels placed on the visible part of
-                             their polygon by the viewer.
+                             part[, kind, merge connected lines]) of labels
+                             placed on the visible part of their polygon or
+                             line by the viewer.
         """
         self.visible_polygons = visible_polygons or {}
         # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
@@ -4222,6 +4223,10 @@ class QgisMapLibreStyleExporter:
                 repeat = self._line_label_repeat(label_settings)
                 if repeat:
                     layer_def["metadata"]["q2vt:repeat"] = repeat
+                if len(polygons) > 3 and polygons[3]:
+                    # "Merge connected lines": one label for the lines of one
+                    # text that meet end to end (pal joinConnectedFeatures).
+                    layer_def["metadata"]["q2vt:merge-lines"] = True
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around
@@ -4292,7 +4297,10 @@ class QgisMapLibreStyleExporter:
                                           map_unit_scale=label_settings.repeatDistanceMapUnitScale)
         if ex.is_number(pixels):
             return {"px": round(max(0.0, float(pixels)), 3)}
-        zoom = float(PropertyExtractor.context.reference_zoom)
+        # Map units: px at zoom 24, as the symbol-spacing curve ends - at the
+        # export's first zoom (0) it is a fraction of a pixel, which the
+        # style's 4 decimals rounded off (30 m: none).
+        zoom = 24.0
         return {"px": round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3), "zoom": zoom}
 
     def _line_label_zoom_split(self, layer_def: dict) -> list:
