@@ -93,6 +93,67 @@ def test_marker_line_positions_match_qgis(plugin, tmp_path, placements):
     assert mask_difference(reference, ours) < 0.05
 
 
+def _marker_azimuth(feature) -> float:
+    """The line azimuth a materialized marker of angle 0 was turned to (its
+    rotation field holds azimuth - 90, see marker_rotation_expression)."""
+    name = next(n for n in feature.fields().names() if n.startswith("q2vt_property_angle"))
+    return (feature[name] + 90.0) % 360.0
+
+
+# Lines starting (and one ending) with a repeated vertex.
+REPEATED_LINES = ["LINESTRING(-100 -80, -100 -80, -100 -20, -40 -20)",
+                  "LINESTRING(-20 10, -20 10, -20 10, 60 50)",
+                  "LINESTRING(20 -30, 20 -30, 50 -90, 90 -60, 90 -60)"]
+
+
+@pytest.mark.parametrize("placements", [
+    Qgis.MarkerLinePlacement.FirstVertex,
+    Qgis.MarkerLinePlacement.LastVertex,
+    Qgis.MarkerLinePlacement.Vertex,
+])
+def test_vertex_markers_skip_repeated_vertices_like_qgis(plugin, tmp_path, placements):
+    """QGIS turns a vertex marker towards the nearest point that differs
+    from the vertex (markerAngle); the angle of native:extractvertices
+    takes a repeated vertex's zero-length segment, so every first-vertex
+    marker of such a line pointed east. A repeat of the start keeps its own
+    marker, at QGIS's fallback angle (east)."""
+    layer = _layer("LineString", REPEATED_LINES, str(tmp_path / "r.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(placements)
+    ml.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["marker_points"]
+    ours = ink_mask(render(outputs, EXTENT))
+    assert mask_difference(reference, ours) < 0.05
+    angles = sorted((round(f.geometry().asPoint().x()), round(f.geometry().asPoint().y()),
+                     round(_marker_azimuth(f), 3)) for f in outputs[0].getFeatures())
+    if placements == Qgis.MarkerLinePlacement.FirstVertex:
+        assert angles == [(-100, -80, 0.0), (-20, 10, 63.435), (20, -30, 153.435)]
+    elif placements == Qgis.MarkerLinePlacement.LastVertex:
+        assert angles == [(-40, -20, 90.0), (60, 50, 63.435), (90, -60, 53.13)]
+    else:  # the repeats of the start at 90 (QGIS's angle 0)
+        assert (-100, -80, 90.0) in angles and angles.count((-20, 10, 90.0)) == 2
+        assert len(angles) == 4 + 4 + 5
+
+
+def test_first_vertex_marker_on_a_ring_follows_its_first_segment(plugin, tmp_path):
+    """On a polygon ring the first-vertex marker follows the ring's first
+    segment (QGIS renders First vertex as an open line); the closed line's
+    vertex angle averaged it with the closing segment."""
+    layer = _layer("Polygon", ["POLYGON((-80 -80, 80 -80, 80 60, -80 60, -80 -80))"],
+                   str(tmp_path / "pf.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(Qgis.MarkerLinePlacement.FirstVertex)
+    ml.setSubSymbol(_marker())
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [_marker_azimuth(f) for f in outputs[0].getFeatures()] == [pytest.approx(90.0)]
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT))) < 0.05
+
+
 def test_marker_line_on_polygon_outline(plugin, tmp_path):
     layer = _layer("Polygon", ["POLYGON((-80 -80, 80 -80, 80 60, -80 60, -80 -80))"],
                    str(tmp_path / "p.gpkg"))

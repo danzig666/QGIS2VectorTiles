@@ -2779,13 +2779,7 @@ class RulesExporter:
         outputs = []
         vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
         if vertex_placements:
-            vertices = self._run_alg_safe("extractvertices", "native", INPUT=lines)
-            expression = " OR ".join(f"({mat.vertex_filter(p)})" for p in vertex_placements)
-            selected = self._run_alg_safe("extractbyexpression", "native",
-                                          INPUT=vertices, EXPRESSION=expression)
-            outputs.append(self._run_alg_safe(
-                "fieldcalculator", "native", INPUT=selected, FIELD_NAME=mat.ANGLE_FIELD,
-                FIELD_TYPE=0, FORMULA='"angle"'))
+            outputs.append(self._vertex_points(lines, vertex_placements))
         if "Interval" in recipe.placements and self._memory_active:
             outputs.append(self._interval_points_direct(lines, recipe))
         elif "Interval" in recipe.placements:
@@ -3265,6 +3259,52 @@ class RulesExporter:
         else:
             self._group_tokens.append(token)
         return token
+
+    def _vertex_points(self, lines: str, placements: List[str]) -> str:
+        """Worker: the vertex markers of ``lines`` (marker_points.
+        vertex_markers) as points with the line's fields and ``ANGLE_FIELD``:
+        QGIS turns them towards the nearest neighbours that differ from the
+        vertex, where native:extractvertices' angle takes a repeated
+        vertex's zero-length segment (east)."""
+        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsPointXY,  # pylint: disable=import-outside-toplevel
+                               QgsProject, QgsVectorFileWriter)
+        self._check_cancel()
+        source = self._open(lines, "vertex_lines")
+        fields = QgsFields()
+        for field in source.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD:
+                fields.append(field)
+        fields.append(QgsField(mat.ANGLE_FIELD, QVariant.Double))
+        out = self._temp_path("vertices")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.Point, source.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        for feature in source.getFeatures():
+            self._check_cancel()
+            geometry = feature.geometry()
+            if geometry.isNull() or geometry.isEmpty():
+                continue
+            attributes = [feature[field.name()] for field in fields if field.name() != mat.ANGLE_FIELD]
+            for part in geometry.constParts():
+                line = part.curveToLine() if part.hasCurvedSegments() else part
+                xs = [line.xAt(i) for i in range(line.numPoints())]
+                ys = [line.yAt(i) for i in range(line.numPoints())]
+                drawn = set()
+                for placement in placements:
+                    for index, angle in marker_points.vertex_markers(xs, ys, placement):
+                        if (index, angle) in drawn:
+                            continue  # the same marker of two placements
+                        drawn.add((index, angle))
+                        point = QgsFeature(fields)
+                        point.setAttributes(attributes + [angle])
+                        point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(xs[index], ys[index])))
+                        writer.addFeature(point)
+        del writer
+        return out
 
     def _interval_points_direct(self, lines: str, recipe: Recipe) -> str:
         """The interval markers of ``lines`` computed in Python

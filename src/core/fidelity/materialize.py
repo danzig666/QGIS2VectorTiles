@@ -190,20 +190,6 @@ def offset_line_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str
     return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
 
 
-def vertex_filter(placement: str) -> Optional[str]:
-    """Filter over ``native:extractvertices`` output for one placement.
-
-    Requires ``LENGTH_FIELD``/``COUNT_FIELD`` computed on the original line.
-    """
-    return {
-        "Vertex": "TRUE",
-        "CurvePoint": "TRUE",
-        "FirstVertex": '"vertex_index" = 0',
-        "LastVertex": f'"vertex_index" = "{COUNT_FIELD}" - 1',
-        "InnerVertices": f'"vertex_index" > 0 AND "vertex_index" < "{COUNT_FIELD}" - 1',
-    }.get(placement)
-
-
 def marker_rotation_expression(base_angle: float) -> str:
     """QGIS marker angle for a line azimuth (clockwise from north).
 

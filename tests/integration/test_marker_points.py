@@ -236,3 +236,26 @@ def test_negative_offset_along_skips_a_repeated_first_vertex(plugin, wkt, plain,
         # the first marker as QGIS renders it: 20 m back along (100, 30)
         assert found[0][:2] == (pytest.approx(-19.157, abs=1e-3), pytest.approx(-5.747, abs=1e-3))
         assert found[0][2] == pytest.approx(73.301, abs=1e-3)
+
+
+@pytest.mark.parametrize("points, placement, expected", [
+    # markerAngle walks to the first / last point that differs
+    ([(0, 0), (0, 0), (0, 30)], "FirstVertex", [(0, 0.0)]),
+    ([(0, 0), (0, 0), (0, 0), (30, 15)], "FirstVertex", [(0, 63.435)]),
+    ([(0, 0), (30, 0), (30, 0)], "LastVertex", [(2, 90.0)]),
+    # a repeat of the start has no distinct neighbour before it: angle 0
+    ([(0, 0), (0, 0), (0, 30), (20, 30)], "Vertex", [(0, 0.0), (1, 90.0), (2, 45.0), (3, 90.0)]),
+    # inner repeats both take the nearest distinct neighbours
+    ([(0, 0), (0, 30), (0, 30), (20, 30)], "InnerVertices", [(1, 45.0), (2, 45.0)]),
+    # a closed line: "Vertex" averages its start with the closing segment
+    # and draws no marker on its last vertex; "FirstVertex" does neither
+    ([(0, 0), (40, 0), (40, 40), (0, 0)], "Vertex", [(0, 157.5), (1, 45.0), (2, 292.5)]),
+    ([(0, 0), (40, 0), (40, 40), (0, 0)], "FirstVertex", [(0, 90.0)]),
+])
+def test_vertex_marker_angles_skip_repeated_points(plugin, points, placement, expected):
+    """Vertex markers turned as QgsTemplatedLineSymbolLayerBase::markerAngle
+    turns them (azimuths, map y up); native:extractvertices took a repeated
+    vertex's zero-length segment (east)."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    found = marker_points.vertex_markers([x for x, _ in points], [y for _, y in points], placement)
+    assert [(index, round(angle, 3)) for index, angle in found] == expected

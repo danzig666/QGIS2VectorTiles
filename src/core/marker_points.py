@@ -362,3 +362,57 @@ def interval_points_layer(source, recipe, export_crs: str, expression_context, e
     for batch in batches:
         out.dataProvider().addFeatures(batch)
     return out
+
+
+def vertex_markers(xs: Sequence[float], ys: Sequence[float],
+                   placement: str) -> List[Tuple[int, float]]:
+    """[(vertex index, azimuth in degrees)] of the vertex markers QGIS draws
+    on one line part (map y up) for one vertex placement ("Vertex",
+    "CurvePoint", "FirstVertex", "LastVertex", "InnerVertices"), the way
+    QgsTemplatedLineSymbolLayerBase::renderPolylineVertex / markerAngle
+    turn them: towards the nearest neighbours that differ from the vertex
+    (repeated points skipped), averaged at inner vertices and, for
+    "Vertex" on a closed line, at its start (whose last vertex then gets no
+    marker of its own). A vertex without such neighbours (a repeat of the
+    start) keeps markerAngle's angle 0: east (azimuth 90)."""
+    count = len(xs)
+    if not count:
+        return []
+    every = placement in ("Vertex", "CurvePoint")
+    ring = every and count > 1 and xs[0] == xs[-1] and ys[0] == ys[-1]
+
+    def same(i: int, j: int) -> bool:
+        return xs[i] == xs[j] and ys[i] == ys[j]
+
+    def screen_angle(i: int, j: int) -> float:
+        # Screen y points down (QGIS's MyLine works on screen points).
+        return math.atan2(ys[i] - ys[j], xs[j] - xs[i])
+
+    def angle(vertex: int) -> float:
+        if ring or 0 < vertex < count - 1:
+            prev, nxt = vertex - 1, vertex + 1
+            if ring and vertex in (0, count - 1):
+                prev, nxt = count - 2, 1
+            while prev >= 0 and same(prev, vertex):
+                prev -= 1
+            while nxt < count and same(nxt, vertex):
+                nxt += 1
+            if prev < 0 or nxt >= count:
+                return 0.0
+            a1, a2 = screen_angle(prev, vertex), screen_angle(vertex, nxt)
+            return math.atan2(math.sin(a1) + math.sin(a2), math.cos(a1) + math.cos(a2))
+        if vertex == 0:
+            other = next((j for j in range(1, count) if not same(j, 0)), None)
+            return 0.0 if other is None else screen_angle(0, other)
+        other = next((j for j in range(vertex - 1, -1, -1) if not same(j, vertex)), None)
+        return 0.0 if other is None else screen_angle(other, vertex)
+
+    if placement == "FirstVertex":
+        indices = [0]
+    elif placement == "LastVertex":
+        indices = [count - 1]
+    elif placement == "InnerVertices":
+        indices = list(range(1, count - 1))
+    else:
+        indices = list(range(count - 1 if ring else count))
+    return [(i, (90.0 + math.degrees(angle(i))) % 360.0) for i in indices]
