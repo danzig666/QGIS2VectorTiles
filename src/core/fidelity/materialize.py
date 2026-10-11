@@ -791,17 +791,20 @@ def inside_band(inner: float, outer: float, ring_filter: int, join: str, crs: st
 
 def inside_band_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     """Polygons of an outline stroke with "Draw line only inside polygon"
-    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``): QGIS clips the
-    stroke to each polygon part, holes left out, so of a stroke of width w
-    at offset o (positive inwards) the points of the part between o - w/2
-    and o + w/2 from a stroked ring remain. Every ring is stroked on its
-    own (all rings, or the exterior only for ``ring_filter`` 1): one piece
-    per ring, so a translucent stroke darkens where the bands of the
-    exterior and a hole overlap, as in QGIS. The stroke's join shapes the
-    band's inner edge at the polygon's reflex corners; its own corners stay
-    sharp, and a part narrower than the band is filled whole."""
+    (``QgsSimpleLineSymbolLayer::renderPolygonStroke``): QGIS offsets every
+    stroked ring by o (positive inwards; ``QgsSymbolLayerUtils::offsetLine``
+    buffers the ring as its own polygon, mitred with limit 2, holes the
+    other way), strokes each ring of that offset polygon with width w and
+    the pen's join, and clips the strokes to the polygon part, holes left
+    out. All rings are stroked, or the exterior only for ``ring_filter`` 1.
+    Every stroked ring is its own piece, so a translucent stroke darkens
+    where the bands of the exterior and a hole overlap, as in QGIS. With
+    o = 0 the band is the part's points within w/2 of a ring, its corners
+    sharp; with o > 0 the pen's join cuts the offset ring's corners and a
+    ring whose offset collapses (parts narrower than 2o) draws nothing."""
     inner = float(recipe.param("inner"))
     outer = float(recipe.param("outer"))
+    offset, half = (inner + outer) / 2.0, (outer - inner) / 2.0
     ring_filter = int(recipe.param("ring_filter", 0) or 0)
     join = recipe.param("join", "bevel")
     crs = recipe.param("crs") or export_crs
@@ -809,18 +812,32 @@ def inside_band_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str
     def grown(polygon, distance):
         return f"buffer({polygon}, {distance!r}, 8, 'flat', '{join}', 2)"
 
+    def strokes(ring_polygon, distance):
+        """The clipped strokes of the rings of one ring's offset polygon."""
+        shifted = (f"buffer({ring_polygon}, {distance!r}, 8, 'flat', 'miter', 2)"
+                   if distance else ring_polygon)
+        # A closed line's buffer is the ring's stroke, joined at its start.
+        # buffer 0: only the polygons of an intersection that also touches
+        # along edges or at points (a collection, dropped from the tiles).
+        ring = "if(is_multipart(@q2vt_b), geometry_n(@q2vt_b, @element), @q2vt_b)"
+        piece = f"buffer(intersection(@q2vt_part, {grown(ring, half)}), 0)"
+        return (f"with_variable('q2vt_b', boundary({shifted}), if(@q2vt_b IS NULL OR "
+                f"is_empty(@q2vt_b), NULL, collect_geometries(array_filter(array_foreach("
+                f"generate_series(1, num_geometries(@q2vt_b)), {piece}), "
+                f"@element IS NOT NULL AND NOT is_empty(@element)))))")
+
     def band(part):
         exterior = f"make_polygon(exterior_ring({part}))"
-        keep = f"intersection({part}, {grown(exterior, -inner)})" if inner > 0 else part
-        pieces = f"array(difference({keep}, {grown(exterior, -outer)}))"
+        if offset:
+            pieces = f"array({strokes(exterior, -offset)})"
+        else:  # the same, cheaper: within w/2 of the ring, inside the part
+            pieces = f"array(difference({part}, {grown(exterior, -half)}))"
         if ring_filter != 1:
-            # A hole's band lies outside it, within the part.
             hole = f"make_polygon(interior_ring_n({part}, @element))"
-            ring = f"intersection({part}, {grown(hole, outer)})"
-            if inner > 0:
-                ring = f"difference({ring}, {grown(hole, inner)})"
+            hole = (strokes(hole, offset) if offset else
+                    f"buffer(intersection({part}, {grown(hole, half)}), 0)")
             pieces = (f"array_cat({pieces}, if(num_interior_rings({part}) > 0, array_foreach("
-                      f"generate_series(1, num_interior_rings({part})), {ring}), array()))")
+                      f"generate_series(1, num_interior_rings({part})), {hole}), array()))")
         return (f"collect_geometries(array_filter({pieces}, "
                 f"@element IS NOT NULL AND NOT is_empty(@element)))")
 
@@ -833,8 +850,6 @@ def inside_band_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str
         return body("@geometry")
     return (f"transform(with_variable('q2vt_poly', transform(@geometry, '{export_crs}', '{crs}'), "
             f"{body('@q2vt_poly')}), '{crs}', '{export_crs}')")
-
-
 
 
 def centroid_fill_expression(point_on_surface: bool, geom: str = "@geometry") -> str:

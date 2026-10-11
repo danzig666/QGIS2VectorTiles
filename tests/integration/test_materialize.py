@@ -148,11 +148,14 @@ def test_hash_line_keeps_a_data_defined_hash_angle_and_length(plugin, tmp_path):
                               QgsProperty.fromExpression('"id" * 6 + 22'))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hl])))
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
-    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
     exact = [(o, r) for o, r in zip(outputs, rules) if r.recipe is not None]
     assert exact and all(r.recipe.kind == "marker_points" for _, r in exact)
     ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.1
+    # The browser scales the hash image with its length, stroke included.
+    assert any("Data-defined hash length" in d.message
+               for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
 
 
 def test_hash_line_keeps_a_data_defined_interval(plugin, tmp_path):
@@ -885,10 +888,59 @@ def test_map_unit_line_drawn_inside_polygon_matches_qgis(plugin, tmp_path, offse
     assert mask_difference(reference, ours) < 0.03
 
 
+# A concave L with a hole, a part with a spike and a notch, and a sliver
+# narrower than twice the offset used below.
+INSIDE_SHAPES = ["POLYGON((-110 -100, -10 -100, -10 -30, -60 -30, -60 100, -110 100, -110 -100),"
+                 "(-95 -85, -75 -85, -75 30, -95 30, -95 -85))",
+                 "POLYGON((10 -100, 100 -100, 100 90, 80 10, 55 90, 10 90, 10 -100))",
+                 "POLYGON((10 100, 100 100, 100 110, 10 110, 10 100))"]
+
+
+@pytest.mark.parametrize("offset,join", [(6.0, Qt.PenJoinStyle.BevelJoin),
+                                         (6.0, Qt.PenJoinStyle.RoundJoin),
+                                         (-3.0, Qt.PenJoinStyle.BevelJoin)])
+def test_line_drawn_inside_polygon_with_an_offset_matches_qgis(plugin, tmp_path, offset, join):
+    """With an offset QGIS strokes each ring's offset ring (mitred buffer)
+    with the pen's join and then clips: the join cuts the corners of an
+    inward offset ring, and a part narrower than twice the offset gets no
+    stroke. A band at a distance from the rings filled corners sharp and
+    narrow parts whole."""
+    layer = _layer("Polygon", INSIDE_SHAPES, str(tmp_path / "io.gpkg"))
+    line = _inside_line(16, Qgis.RenderUnit.MapUnits, offset)
+    line.setPenJoinStyle(join)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    reference = ink_mask(render([layer], EXTENT, (480, 480)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    assert [r.recipe.kind for r in rules] == ["inside_band"]
+    ours = ink_mask(render(outputs, EXTENT, (480, 480)))
+    assert mask_difference(reference, ours) < 0.01
+
+
+def test_line_drawn_inside_polygon_keeps_only_polygons(plugin):
+    """Where a band piece touches the part along an edge, the intersection is
+    a collection with lines, which the tiles dropped: the feature lost its
+    whole band at that zoom."""
+    from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature, QgsGeometry, QgsWkbTypes
+    from fidelity import materialize as mat
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "POLYGON((-160 -100, -20 -100, -20 -20, -90 -20, -90 90, -160 90, -160 -100),"
+        "(-140 -80, -110 -80, -110 40, -140 40, -140 -80))"))
+    context = QgsExpressionContext()
+    context.setFeature(feature)
+    width = 2.420816752525332  # a quarter of it outside the rings
+    expr = QgsExpression(mat.inside_band_expression(mat.inside_band(
+        -0.75 * width, 0.25 * width, 0, "bevel", "EPSG:3857")))
+    result = expr.evaluate(context)
+    assert QgsWkbTypes.geometryType(result.wkbType()) == Qgis.GeometryType.Polygon
+    assert result.area() == pytest.approx(width / 4 * 2 * (140 + 190 + 30 + 120), rel=0.02)
+
+
 def test_screen_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path):
     """A 4 mm stroke drawn only inside the polygon: its 2 mm inner band, as
     polygons per eighth of a zoom (QGIS-rendered here at one band's zoom),
-    and beyond the last tiles a 2 mm line 1 mm inside the rings."""
+    and beyond the last tiles a 2 mm line 1 mm inside the rings. Zooms
+    where the whole layer is under a pixel get no (empty) band dataset."""
     from fidelity.units import EARTH_CIRCUMFERENCE
     layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "is.gpkg"))
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
@@ -900,7 +952,9 @@ def test_screen_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path)
     outputs, rules, _ = _export(plugin, layer, tmp_path)
     bands = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"]
     top = max(r.get_attr("o") for _, r in bands)
-    assert top > 17 and {r.get_attr("o") for _, r in bands} == set(range(0, top + 1))
+    first = min(r.get_attr("o") for _, r in bands)
+    # 190 map units: over a pixel (153 m at zoom 9) from the end of zoom 8 on.
+    assert top > 17 and first == 8 and {r.get_attr("o") for _, r in bands} == set(range(first, top + 1))
     shown = [(o, r) for o, r in bands
              if r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
     assert len(shown) == 1
@@ -911,6 +965,45 @@ def test_screen_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path)
     assert len(over) == 1 and over[0].visibility.min_zoom == top + 1 and over[0].recipe.param("rhr")
     line = over[0].rule.symbol().symbolLayer(0)
     assert (line.width(), line.offset(), line.drawInsidePolygon()) == (2.0, 1.0, False)
+
+
+def test_mixed_unit_line_drawn_inside_polygon_is_its_band_per_zoom(plugin, tmp_path):
+    """A 4 mm stroke 5 map units inside the rings: the offset and the width
+    converted each in its own unit per band. The whole stroke was drawn."""
+    from fidelity.units import EARTH_CIRCUMFERENCE
+    layer = _layer("Polygon", INSIDE_SHAPES, str(tmp_path / "im.gpkg"))
+    line = _inside_line(4, Qgis.RenderUnit.Millimeters, 5.0)
+    line.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([line])))
+    zoom, size = 17.0625, 360  # the middle of a band
+    half = EARTH_CIRCUMFERENCE / (512 * 2 ** zoom) * size / 2
+    extent = QgsRectangle(-half, -half, half, half)
+    reference = ink_mask(render([layer], extent, (size, size)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    shown = [(o, r) for o, r in zip(outputs, rules) if r.recipe.kind == "inside_band"
+             and r.visibility.min_zoom <= zoom < r.visibility.max_zoom]
+    assert len(shown) == 1
+    output, rule = shown[0]
+    output.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+    assert mask_difference(reference, ink_mask(render([output], extent, (size, size)))) < 0.02
+    # Beyond the last tiles the stroke cannot be narrowed in one unit.
+    assert any("different units" in d.message for d in diags.by_code("Q2VT_SYMBOL_APPROXIMATE"))
+
+
+def test_screen_line_drawn_inside_polygon_with_an_offset_is_reported_beyond_the_tiles(plugin, tmp_path):
+    """Beyond the last tiles a stroke inside the rings is a mitred line: QGIS
+    cuts the offset ring's corners with the pen join and draws nothing on
+    parts narrower than twice the offset, which is reported."""
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "ij.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol(
+        [_inside_line(4, Qgis.RenderUnit.Millimeters, 1.5)])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    over = [r for r in rules if r.recipe.kind == "polygon_offset"]
+    assert len(over) == 1
+    line = over[0].rule.symbol().symbolLayer(0)
+    assert (line.width(), line.offset()) == (3.5, 1.75)
+    assert line.penJoinStyle() == Qt.PenJoinStyle.MiterJoin
+    assert any("beyond zoom" in d.message for d in diags.by_code("Q2VT_SYMBOL_APPROXIMATE"))
 
 
 def test_dashed_line_drawn_inside_polygon_keeps_its_dash_lengths(plugin, tmp_path):
