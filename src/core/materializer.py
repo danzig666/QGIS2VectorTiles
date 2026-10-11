@@ -2824,16 +2824,23 @@ class SymbolMaterializer:
             # Every overzoom copy goes into the last tiles, within their budget
             # (_overzoom_take): the band sets of a polygon zoom (a fill and
             # its outline per fill layer), a line, its outline and head
-            # markers per fill layer a native one. The last zoom written
-            # serves the zooms above it.
+            # markers per fill layer a native one. A zoom whose polygons do
+            # not fit is drawn natively, as are the zooms above it. The last
+            # zoom written serves the zooms above it. A feature is one arrow,
+            # a repeated arrow one a segment.
             strokes = sum(l.layerType() == "SimpleFill" and l.strokeStyle() != Qt.PenStyle.NoPen
                           for l in fill_layers)
             heads = 2 if _enum_value(layer.arrowType()) != 0 else 1
-            fit = self._overzoom_take(flat_rule, [
-                per_set * (over_steps * (len(fill_layers) + strokes) if index < kept
-                           else len(fill_layers) * (1 + heads) + strokes)
-                for index in range(len(over))])
+            features = self._layer_totals(flat_rule.layer)[2]
+            arrows = max(features, self._layer_vertices(flat_rule.layer) - features) \
+                if layer.isRepeated() else features
+            kept = self._overzoom_take(flat_rule, [arrows * over_steps * (len(fill_layers) + strokes)
+                                                   for _ in over[:kept]], report=False)
+            fit = kept + self._overzoom_take(
+                flat_rule, [arrows * (len(fill_layers) * (1 + heads) + strokes)
+                            for _ in over[kept:]], report=False)
             if fit < len(over):
+                self._report_overzoom_budget(flat_rule, fit)
                 if not fit and not zoom_rules:
                     # Drawn past the last tiles only: its first zoom serves
                     # them all, in the cheapest form (a line and head markers).
@@ -2899,8 +2906,9 @@ class SymbolMaterializer:
                     rules.append(derived)
         if native:
             self._report("Q2VT_SYMBOL_APPROXIMATE",
-                         "Arrows narrower than the last tiles' geometry grid (far past the last "
-                         "tile zoom) are drawn as a line of their mean width with head markers.",
+                         "Arrows past the last tile zoom narrower than the last tiles' geometry "
+                         "grid, or past their output budget as polygons, are drawn as a line of "
+                         "their mean width with head markers.",
                          flat_rule)
         return rules
 
@@ -3264,9 +3272,12 @@ class SymbolMaterializer:
         # Every band set is written into the last tiles: within their budget.
         kept = self._overzoom_take(flat_rule, [cost(self.rule_zoom(rule)) * over_steps
                                                for rule in over[:kept]], report=False)
-        if kept < grid and (kept or zoom_rules):
+        if kept < grid:
             # Out of budget: the last band set written serves the zooms above
-            # (its bands widen with the map there).
+            # (its bands widen with the map there). Drawn past the last tiles
+            # only: its first zoom's band set, the cheapest (one a zoom).
+            if not kept and not zoom_rules:
+                kept, over_steps = 1, 1
             last = over[kept - 1] if kept else zoom_rules[-1]
             last.visibility = flat_rule.visibility.intersect(
                 ZoomInterval(last.visibility.min_zoom, None))

@@ -615,6 +615,54 @@ def test_overzoom_only_rules_out_of_budget_keep_their_first_zoom(plugin, tmp_pat
     for zoom in (17.7, 20.0, 23.0):
         assert _at(rules, zoom), zoom
     assert diags.by_code("Q2VT_PATTERN_BUDGET")
+    # A shapeburst fading to transparent drew its (transparent) inner colour.
+    burst = QgsShapeburstFillSymbolLayer()
+    burst.setUseWholeShape(False)
+    burst.setMaxDistance(3)
+    burst.setDistanceUnit(MM)
+    burst.setColor(QColor("blue"))
+    burst.setColor2(QColor(255, 255, 255, 0))
+    squares = [f"POLYGON(({X + 60 * k} {Y}, {X + 60 * k + 50} {Y}, {X + 60 * k + 50} {Y + 50}, "
+               f"{X + 60 * k} {Y + 50}, {X + 60 * k} {Y}))" for k in range(20)]
+    layer = _layer("Polygon", squares, str(tmp_path / "bursts.gpkg"))
+    layer.setRenderer(_past_last_tiles_only(QgsFillSymbol([burst])))
+    rules, diags = _flatten(tmp_path, layer, 0, 16)
+    assert rules and {r.get_attr("v") for r in rules} == {17}
+    for zoom in (17.7, 20.0, 23.0):
+        drawn = _at(rules, zoom)
+        assert drawn and all(r.recipe is not None and r.recipe.kind == "color_bands"
+                             for r in drawn), zoom
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_arrows_past_the_polygon_budget_go_on_natively(plugin, tmp_path, monkeypatch):
+    """An overzoom whose arrow polygons do not fit the last tiles' budget is
+    drawn natively (a line and head markers, fewer features) if that fits,
+    and so are the zooms above it: their widths stay QGIS's instead of the
+    last exported band growing with the map."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    monkeypatch.setattr(SymbolMaterializer, "OVERZOOM_TILE_ELEMENTS", 150)
+    arrow = QgsArrowSymbolLayer()
+    arrow.setIsCurved(False)
+    arrow.setIsRepeated(False)
+    for setter in ("setArrowWidth", "setArrowStartWidth"):
+        getattr(arrow, setter)(1)
+        getattr(arrow, setter + "Unit")(MM)
+    # 20 arrows in one zoom-10 tile: a band set of polygons does not fit 150
+    # features, a line, its outline and a head marker each (60) do.
+    layer = _layer("LineString", [f"LINESTRING({X} {Y + 40 * k}, {X + 300} {Y + 40 * k})"
+                                  for k in range(20)], str(tmp_path / "arrows.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    rules, diags = _flatten(tmp_path, layer, 0, 10)
+    over = [r for r in rules if r.get_attr("v") is not None]
+    assert over and all(r.recipe.param("part") in ("body", "heads") for r in over)
+    assert len(over) * 20 <= 150
+    zooms = sorted({r.get_attr("v") for r in over})
+    assert zooms == list(range(11, zooms[-1] + 1))
+    last = _at(rules, 22.0)
+    assert last and {r.get_attr("v") for r in last} == {zooms[-1]}
+    assert all(r.visibility.max_zoom is None for r in last)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
 
 
 def test_arrow_and_shapeburst_copies_stay_within_the_last_tiles_budget(
