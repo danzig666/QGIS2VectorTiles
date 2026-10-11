@@ -1053,3 +1053,33 @@ def test_geometry_generator_sub_layers_have_their_own_datasets(flattener):
         ("#0000ff", "translate($geometry, 0, 100)"), ("#00ff00", None),
         ("#ff0000", "translate($geometry, 0, 100)")]
     assert all(len(group) == 1 for group in datasets.values()), datasets
+
+
+def test_split_fill_outline_keeps_its_map_unit_limits(flattener):
+    """A map-unit fill outline capped at 0.5 mm (thin borders when zoomed
+    in): the outline split off as a line lost the cap and grew without
+    bound with the zoom."""
+    from qgis.core import Qgis, QgsFillSymbol, QgsMapUnitScale, QgsSingleSymbolRenderer
+    from fidelity import expressions as ex
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    layer = zoning_layer()
+    symbol = QgsFillSymbol.createSimple({"color": "red", "outline_color": "black"})
+    fill = symbol.symbolLayer(0)
+    fill.setStrokeWidth(10)
+    fill.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    limit = QgsMapUnitScale()
+    limit.maxSizeMMEnabled = True
+    limit.maxSizeMM = 0.5
+    fill.setStrokeWidthMapUnitScale(limit)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    reset_project(layer)
+    rules, _ = flattener(min_zoom=0, max_zoom=16)
+    outlines = [r for r in rules if r.get_attr("c") == 1]
+    assert len(outlines) == 1, [r.output_dataset for r in rules]
+    line = outlines[0].rule.symbol().symbolLayer(0)
+    assert line.widthMapUnitScale().maxSizeMMEnabled and line.widthMapUnitScale().maxSizeMM == 0.5
+    mc.PropertyExtractor.context = mc.ConversionContext(DiagnosticCollector())
+    width = mc.LinePropertyExtractor.get_line_width(line)
+    for zoom in (16, 17, 19, 22):
+        assert ex.evaluate_zoom_curve(width, zoom) == pytest.approx(0.5 * 96 / 25.4, rel=1e-3)

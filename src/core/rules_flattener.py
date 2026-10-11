@@ -1612,6 +1612,9 @@ class RulesFlattener:
         line_layer.setColor(fill_layer.strokeColor())
         line_layer.setWidth(fill_layer.strokeWidth())
         line_layer.setWidthUnit(fill_layer.strokeWidthUnit())
+        # Min/max size and scale limits of a map-unit outline (e.g. "max
+        # 0.5 mm" to keep a border thin when zoomed in).
+        line_layer.setWidthMapUnitScale(fill_layer.strokeWidthMapUnitScale())
         line_layer.setPenStyle(fill_layer.strokeStyle())
         line_layer.setPenJoinStyle(fill_layer.penJoinStyle())
 
