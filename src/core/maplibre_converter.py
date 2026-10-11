@@ -4721,6 +4721,17 @@ class QgisMapLibreStyleExporter:
         else:
             # Kept within a map unit scale's limits: the curve itself.
             around["px"] = pixels
+        # QGIS (QgsPalLayerSettings::registerFeature) forces a distance of
+        # at least 2 painter px on "Outside polygons", and on "Around point"
+        # when placement outside the polygon is allowed: then no label is
+        # centred on the point (pal tries that only at distance 0).
+        try:
+            outside_allowed = bool(int(label_settings.polygonPlacementFlags())
+                                   & int(Qgis.LabelPolygonPlacementFlag.AllowPlacementOutsideOfPolygon))
+        except (AttributeError, TypeError, ValueError):
+            outside_allowed = False
+        if outside or (placement == "AroundPoint" and outside_allowed):
+            around["min_px"] = 2.0
         return around
 
     @staticmethod

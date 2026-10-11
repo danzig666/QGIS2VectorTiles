@@ -130,6 +130,24 @@ def test_around_point_polygon_distance_in_map_units_is_not_rounded_away(mc, zoom
     assert around["px"] * 2 ** (zoom - around["zoom"]) == pytest.approx(_mu(10, zoom), rel=1e-3)
 
 
+def test_around_point_polygon_distance_floor_when_outside_is_allowed(mc):
+    """QGIS forces at least 2 px on "Around point" when the label may leave
+    the polygon (and on "Outside polygons"): then it is never centred on
+    the point, even at distance 0."""
+    settings = _settings(Qgis.LabelPlacement.AroundPoint, 10, Qgis.RenderUnit.Points)
+    settings.dist = 0
+    settings.setPolygonPlacementFlags(Qgis.LabelPolygonPlacementFlags(
+        Qgis.LabelPolygonPlacementFlag.AllowPlacementInsideOfPolygon
+        | Qgis.LabelPolygonPlacementFlag.AllowPlacementOutsideOfPolygon))
+    around = mc.QgisMapLibreStyleExporter._label_around(settings, "AroundPoint")
+    assert around["px"] == 0 and around["min_px"] == 2
+    assert mc.QgisMapLibreStyleExporter._label_around(settings, "OutsidePolygons")["min_px"] == 2
+    # Inside only (the default): no floor, centred first at distance 0.
+    settings.setPolygonPlacementFlags(Qgis.LabelPolygonPlacementFlags(
+        Qgis.LabelPolygonPlacementFlag.AllowPlacementInsideOfPolygon))
+    assert "min_px" not in mc.QgisMapLibreStyleExporter._label_around(settings, "AroundPoint")
+
+
 def _exporter(mc, maxzoom=16):
     exporter = mc.QgisMapLibreStyleExporter.__new__(mc.QgisMapLibreStyleExporter)
     exporter.pattern_images, exporter.marker_counter, exporter.maxzoom = {}, 0, maxzoom

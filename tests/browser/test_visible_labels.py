@@ -812,6 +812,10 @@ def test_around_point_distance_in_map_units_follows_the_zoom():
     assert _js("m.aroundOption(undefined, 16, 0.001)") is None
     # No distance: centred on the point first (QGIS), then around it.
     assert _js("m.aroundOption({px: 0, anchors: ['top']}, 16, 0.001)")["anchors"] == ["center", "top"]
+    # Outside the polygon allowed: QGIS's 2 px floor, never centred.
+    floored = _js("m.aroundOption({px: 0, min_px: 2, anchors: ['top']}, 16, 0.001)")
+    assert floored == {"anchors": ["top"], "distance": pytest.approx(0.002)}
+    assert _js("m.aroundOption({px: 5, min_px: 2}, 16, 0.001)")["distance"] == pytest.approx(0.005)
     candidates = _js("m.aroundCandidates([0.5, 0.5], [0.1, 0.02], "
                      "{anchors: ['bottom', 'right', 'top-left'], distance: 0.04})")
     diagonal = 0.04 * math.sqrt(0.5)
