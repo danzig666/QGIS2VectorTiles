@@ -446,6 +446,9 @@ class RulesExporter:
         # (QgsProcessingFeedback keeps a log that is not thread-safe).
         self._messages: "queue.SimpleQueue[Tuple[str, str]]" = queue.SimpleQueue()
         self._layer_names: Dict[str, str] = {}
+        # Layers whose base layer numbers the parts of each feature (those
+        # exported for viewer-placed labels, PART_FIELD).
+        self._part_layers: set = set()
         # QgsRectangle is a value type — safe to share across threads.
         self.extent = extent
         self.include_required_fields_only = include_required_fields_only
@@ -543,6 +546,7 @@ class RulesExporter:
             cached_outputs = self._reuse_cached(sources, rule_groups)
             pending = [grp for grp in rule_groups if grp.output_dataset not in cached_outputs]
             needed = {grp.layer_id for grp in pending}
+            self._part_layers = {grp.layer_id for grp in pending if grp.visible_polygons}
 
             # Phase 1 — serial source materialisation (caller thread).
             if self._is_cancelled():
@@ -956,7 +960,7 @@ class RulesExporter:
             futures: Dict[Future, str] = {
                 pool.submit(
                     self._build_one_base_layer, src_path, target_paths[lid], lid in keep,
-                    lid in anchored
+                    lid in anchored, lid in self._part_layers
                 ): lid
                 for lid, src_path in todo.items()
             }
@@ -1029,16 +1033,17 @@ class RulesExporter:
                 f"'{crs}', '{export}'))")
 
     def _build_one_base_layer(self, src_path: str, dst_path: str,
-                              keep_vertices: bool = False, feature_anchor: bool = False) -> None:
+                              keep_vertices: bool = False, feature_anchor: bool = False,
+                              number_parts: bool = False) -> None:
         """Worker: run the cleanup chain on a local Parquet file."""
         began = time.perf_counter()
         try:
-            self._build_base_layer(src_path, dst_path, keep_vertices, feature_anchor)
+            self._build_base_layer(src_path, dst_path, keep_vertices, feature_anchor, number_parts)
         finally:
             self._spent(os.path.basename(dst_path)[len("map_layer_"):].rsplit(".", 1)[0], began)
 
     def _build_base_layer(self, src_path: str, dst_path: str, keep_vertices: bool,
-                          feature_anchor: bool) -> None:
+                          feature_anchor: bool, number_parts: bool = False) -> None:
         self._check_cancel()
         crash_log.note(f"Base layer {dst_path}")
         transform_extent = self.transform_extent(src_path)
@@ -1095,7 +1100,7 @@ class RulesExporter:
         singleparted = self._run_alg_safe(
             "multiparttosingleparts", "native", INPUT=orig_id
         )
-        if geometry_type in (1, 2):  # lines and polygons (visible-label datasets)
+        if number_parts and geometry_type in (1, 2):  # lines and polygons (visible-label datasets)
             # The part of its feature each single part is, numbered here,
             # where the order is that of the split: later steps (a filter
             # writing a memory layer) renumber the feature ids.
@@ -1307,7 +1312,7 @@ class RulesExporter:
             if exists(targets[lid]) or (src.read_in_main and lid not in materialized):
                 continue
             tasks.append((("source", lid, None if src.read_in_main else src, materialized.get(lid),
-                           targets[lid], lid in keep, lid in anchored), [lid]))
+                           targets[lid], lid in keep, lid in anchored, lid in self._part_layers), [lid]))
         done, left = [0], {}
 
         def handle(message, task):

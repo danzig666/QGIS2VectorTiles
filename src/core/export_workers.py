@@ -374,13 +374,13 @@ def serve(stdin, stdout) -> None:
                 break
             continue
         if kind == "source":  # read a source (unless read already), build its base layer
-            _, layer_id, source, materialized, target, keep, anchored = message
+            _, layer_id, source, materialized, target, keep, anchored, parts = message
             began = time.perf_counter()
             try:
                 path = materialized if source is None else exporter._materialize_one(source)
                 if not path:
                     raise RuntimeError(f"source {layer_id} not read")
-                exporter._build_base_layer(path, target, keep, anchored)
+                exporter._build_base_layer(path, target, keep, anchored, parts)
                 send(stdout, ("base-done", layer_id, None, time.perf_counter() - began,
                               _messages(exporter)))
             except Exception:  # noqa: BLE001
