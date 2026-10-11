@@ -466,14 +466,14 @@ def test_level_line_label_wider_than_the_screen_is_kept():
 
 def _merged(lines, view, options):
     """labelPoints of line features [(id, name, [[x, y], ...] in z0 tile
-    units)] whose text is their "name": [[x, y, id], ...] sorted by x."""
+    units[, part])] whose text is their "name": [[x, y, id], ...] sorted by x."""
     script = f"""
 import {{ labelPoints, newLabelState, textKey }} from {json.dumps('file://' + MODULE)};
 const maplibregl = {{ MercatorCoordinate: class {{
   constructor(x, y) {{ this.x = x; this.y = y; }}
   toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
-const features = {json.dumps(lines)}.map(([id, name, points]) => ({{
-  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, name, rot: 99 }},
+const features = {json.dumps(lines)}.map(([id, name, points, part]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id, name, rot: 99, q2vt_part: part ?? 0 }},
   _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
 const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), ...{json.dumps(options)} }};
 if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
@@ -508,6 +508,17 @@ def test_connected_lines_of_one_text_are_labelled_as_one_line():
     other = [(20, "Echo", [[0, 3584], [4096, 3584]]), (21, "Fox", [[4096, 2048], [3584, 0]])]
     labels = _merged(river + other, view, {"box": [0.02, 0.01], "merge": True})
     assert sorted(label[2] for label in labels) == [1, 20, 21]
+
+
+def test_connected_parts_of_multi_part_lines_are_merged():
+    """Merge connected lines joins feature parts (pal FeatureParts): the
+    part of a two-part feature touching the river joins it; its other,
+    distant part keeps its own label."""
+    river = [(k + 1, "Echo", [[512 * k, 2048], [512 * (k + 1), 2048]]) for k in range(4)]
+    parts = [(9, "Echo", [[2048, 2048], [4096, 2048]], 0), (9, "Echo", [[0, 3584], [4096, 3584]], 1)]
+    options = {"box": [0.2, 0.01], "merge": True, "perPart": True}
+    labels = _merged(river + parts, [0, 0, 1, 1], options)
+    assert sorted((round(x, 3), round(y, 3)) for x, y, _ in labels) == [(0.5, 0.5), (0.5, 0.875)]
 
 
 def test_repeated_line_label_is_chopped_on_the_visible_line():
