@@ -4663,12 +4663,16 @@ class QgisMapLibreStyleExporter:
             if translate and "icon-image" in layer_def["layout"]:
                 # The frame goes with its text.
                 layer_def["paint"]["icon-translate"] = translate
-            if frame_offset and "icon-image" in layer_def["layout"] \
-                    and layer_def["layout"].get("icon-offset") in (None, [0, 0], [0.0, 0.0]):
-                # icon-offset is in px of the icon, multiplied by icon-size.
+            if frame_offset and "icon-image" in layer_def["layout"]:
+                # icon-offset is in px of the icon, multiplied by icon-size:
+                # the frame's own offset (turned with it too) plus the
+                # distance, or the text left its frame.
+                own, unit = background.offset(), background.offsetUnit()
+                total = [ex.add(frame_offset[0], PropertyExtractor.length(own.x(), unit)),
+                         ex.add(frame_offset[1], PropertyExtractor.length(own.y(), unit))]
                 layer_def["layout"]["icon-offset"] = self._layer_zoom_step(
                     layer_def, TextPropertyExtractor.label_ems(
-                        frame_offset, layer_def["layout"].get("icon-size", 1)))
+                        total, layer_def["layout"].get("icon-size", 1)))
         else:
             self._apply_default_icon_props(layer_def)
 
@@ -5320,8 +5324,12 @@ class QgisMapLibreStyleExporter:
                 size)
 
     # Most image px per logical px of a fixed map-unit frame image (one
-    # drawn 128 px wide: up to 1024 px, 2048 in the @2x sheet).
-    FIXED_FRAME_MAX_DENSITY = 8
+    # drawn 128 px wide: up to 512 px, 1024 in the @2x sheet).
+    FIXED_FRAME_MAX_DENSITY = 4
+    # Image px (1x sheet; the @2x sheet holds 4x) the per-zoom images of one
+    # such frame may take, all its data-defined colours together: past it the
+    # images get less dense, then the frame keeps its one image.
+    FIXED_FRAME_SPRITE_PIXELS = 1_000_000
 
     def _paper_border_of_fixed_frame(self, layer_def: dict, background, label_settings, fixed_zoom: int):
         """A fixed map-unit frame with a border or corner radius in paper
@@ -5344,27 +5352,56 @@ class QgisMapLibreStyleExporter:
         high = int(min(24, math.ceil(layer_def.get("maxzoom", 24))))
         zooms = list(range(low, max(low + 1, high)))
         size = background.size()
-        # Beyond the frame's own size the image is all border.
-        top = PropertyExtractor.static_pixels(max(size.width(), size.height()), background.sizeUnit(), fixed_zoom)
+        sides = [PropertyExtractor.static_pixels(side, background.sizeUnit(), fixed_zoom)
+                 for side in (size.width(), size.height())]
         image = layout["icon-image"]
         variants = isinstance(image, list)
+        count = len(image[3::2]) + 1 if variants else 1
+
+        def plan(top_density):
+            # (stroke, corner, density) per zoom: a border of at least the
+            # shorter side fills the frame (alike from there down), one under
+            # half an image px is drawn at that (alike from there up).
+            keys = []
+            for zoom in zooms:
+                scale = 2.0 ** (zoom + 0.5 - fixed_zoom)  # icon-size at the zoom's middle
+                density = int(min(top_density, 2 ** max(0, zoom + 1 - fixed_zoom)))
+                stroke = min(min(sides), PropertyExtractor.static_pixels(
+                    background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5) / scale)
+                if stroke_paper:
+                    stroke = max(stroke, 0.5 / density)
+                corner = min(max(sides), PropertyExtractor.static_pixels(
+                    radius, background.radiiUnit(), zoom + 0.5) / scale) if rectangle else 0.0
+                if corner * density < 0.5:
+                    corner = 0.0
+                keys.append((round(stroke, 3), round(corner, 3), density))
+            return keys
+
+        def pixels(keys):
+            return count * sum((sides[0] + stroke) * (sides[1] + stroke) * density ** 2
+                               for stroke, _, density in set(keys))
+
+        top_density = self.FIXED_FRAME_MAX_DENSITY
+        keys = plan(top_density)
+        while pixels(keys) > self.FIXED_FRAME_SPRITE_PIXELS and top_density > 1:
+            top_density //= 2
+            keys = plan(top_density)
+        if pixels(keys) > self.FIXED_FRAME_SPRITE_PIXELS:
+            self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                "A fixed map-unit label frame with a paper-unit border and many "
+                                "frame colours: one image per colour, its border scaled with the map.")
+            return
         for name in (image[3::2] + image[-1:] if variants else [image]):
             self.pattern_images.pop(name, None)
         images, names = {}, []
-        for zoom in zooms:
-            scale = 2.0 ** (zoom + 0.5 - fixed_zoom)  # icon-size at the zoom's middle
-            stroke = min(top, PropertyExtractor.static_pixels(
-                background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5) / scale)
-            corner = min(top, PropertyExtractor.static_pixels(radius, background.radiiUnit(), zoom + 0.5)
-                         / scale) if rectangle else 0.0
-            density = int(min(self.FIXED_FRAME_MAX_DENSITY, 2 ** max(0, zoom + 1 - fixed_zoom)))
-            key = (round(stroke, 3), round(corner, 3), density)
+        for key in keys:
             if key not in images:
-                base = self._background_image(background, stroke_px=key[0], zoom=fixed_zoom,
-                                              radius_px=key[1], density=density)
+                stroke, corner, density = key
+                base = self._background_image(background, stroke_px=stroke, zoom=fixed_zoom,
+                                              radius_px=corner, density=density)
                 images[key] = self._frame_variants(
                     background, label_settings, base, layer_def.get("source-layer", ""), zoom=fixed_zoom,
-                    stroke_px=key[0], radius_px=key[1], density=density) \
+                    stroke_px=stroke, radius_px=corner, density=density) \
                     if variants and label_settings is not None else base
             names.append(images[key])
         layout["icon-image"] = self._zoom_step(zooms, names)

@@ -763,14 +763,9 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
-@pytest.mark.parametrize("dist,unit", [(3, Qgis.RenderUnit.Millimeters), (10, Qgis.RenderUnit.MapUnits)])
-def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, unit):
-    """A line label above its line, drawn once per line: exported at the
-    line's middle, turned to the line, the distance a Y offset. As
-    text-translate (never turned) it went straight up the screen: on a
-    sloped line the label touched the line, on an upright one the distance
-    was lost. It stays text-offset, which MapLibre turns with the label.
-    Exported from zoom 0, as the Publish window does."""
+def _line_label_above(export, tmp_path, dist, unit, frame=None):
+    """The style layer of a 10 pt label above a 60 degree line, drawn once
+    per line, exported from zoom 0 as the Publish window does."""
     from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
     from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
     from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
@@ -793,12 +788,24 @@ def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, 
     text_format = QgsTextFormat()
     text_format.setSize(10)
     text_format.setSizeUnit(Qgis.RenderUnit.Points)
+    if frame is not None:
+        text_format.setBackground(frame)
     settings.setFormat(text_format)
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
     _, result = export(layer, min_zoom=0, max_zoom=16)
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
-    label = [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+    return [l for l in style["layers"] if "text-field" in l.get("layout", {})][0]
+
+
+@pytest.mark.parametrize("dist,unit", [(3, Qgis.RenderUnit.Millimeters), (10, Qgis.RenderUnit.MapUnits)])
+def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, unit):
+    """A line label above its line, drawn once per line: exported at the
+    line's middle, turned to the line, the distance a Y offset. As
+    text-translate (never turned) it went straight up the screen: on a
+    sloped line the label touched the line, on an upright one the distance
+    was lost. It stays text-offset, which MapLibre turns with the label."""
+    label = _line_label_above(export, tmp_path, dist, unit)
     assert label["metadata"]["q2vt:visible-kind"] == "line"
     assert "labelrotation" in json.dumps(label["layout"]["text-rotate"])
     assert label["paint"]["text-translate"] == [0, 0]
@@ -811,6 +818,29 @@ def test_a_line_label_distance_points_out_from_its_line(export, tmp_path, dist, 
             stops = dict(zip(offset[3::2], (value[1] for value in offset[4::2])))
             px = 10 * 512 / 40075016.68557849 * 2 ** (zoom + 0.5)
             assert stops[zoom] == pytest.approx([0, -px / size], rel=1e-3)
+
+
+def test_a_line_label_frame_with_its_own_offset_keeps_the_distance_too(export, tmp_path):
+    """A fixed 10 x 5 mm frame offset 2 mm right, around a label 3 mm above
+    its line: the frame's own offset left out the distance, so the text was
+    drawn outside its frame. icon-offset (turned with the label, multiplied
+    by icon-size) is now the frame's offset plus the distance."""
+    from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QPointF, QSizeF  # pylint: disable=import-outside-toplevel
+    frame = QgsTextBackgroundSettings()
+    frame.setEnabled(True)
+    frame.setSizeType(QgsTextBackgroundSettings.SizeType.SizeFixed)
+    frame.setSize(QSizeF(10, 5))
+    frame.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    frame.setStrokeWidth(0.4)
+    frame.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    frame.setOffset(QPointF(2, 0))
+    frame.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    label = _line_label_above(export, tmp_path, 3, Qgis.RenderUnit.Millimeters, frame)
+    mm = 96 / 25.4
+    size = label["layout"].get("icon-size", 1)
+    assert label["layout"]["icon-offset"] == pytest.approx([2 * mm / size, -3 * mm / size], abs=1e-3)
+    assert label["layout"]["text-offset"] == pytest.approx([0, -3 * mm / label["layout"]["text-size"]], abs=1e-3)
 
 
 def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp_path):

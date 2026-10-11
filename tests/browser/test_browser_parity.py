@@ -1854,13 +1854,15 @@ def test_a_line_label_keeps_its_distance_out_from_a_sloped_line(tmp_path, monkey
     qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
     assert browser is not None, qgis
     middle = SIZE / 2
-    along, normal = (0.5, -(3 ** 0.5) / 2), (-(3 ** 0.5) / 2, -0.5)  # on screen: up the line, its left
+    normal = (-(3 ** 0.5) / 2, -0.5)  # on screen: the line's left
 
     def part(box, axis):
         x, y = (box[0] + box[2]) / 2 - middle, (box[1] + box[3]) / 2 - middle
         return x * axis[0] + y * axis[1]
     gap = dist * 96 / 25.4 if unit == Qgis.RenderUnit.Millimeters else dist * 512 * 2 ** zoom / gallery.EARTH
-    assert abs(part(browser, along)) <= 4, (qgis, browser)  # across the line, not along it
+    # Only across the line: the viewer keeps a spot along it while that stays
+    # near the middle of the visible stretch (visible_labels.mjs placeOnLine),
+    # chosen before every tile loaded.
     assert part(qgis, normal) > gap
     # Out from the line by the distance (QGIS also adds half the text height).
     assert gap - 3 <= part(browser, normal) <= part(qgis, normal) + 3, (qgis, browser, gap)

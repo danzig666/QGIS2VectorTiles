@@ -407,10 +407,47 @@ def test_a_mm_border_of_a_fixed_map_unit_frame_keeps_its_width(mc, at, zoom):
         border = _red_run(image, image.height // 2) / density * scale
         assert border == pytest.approx(0.5 * MM, abs=max(0.6, scale / density))
     # Denser images above the drawing zoom (18): the border stays sharp.
-    assert density == min(8, 2 ** max(0, math.floor(zoom) + 1 - 18))
+    assert density == min(4, 2 ** max(0, math.floor(zoom) + 1 - 18))
     # Zooms whose images are alike share them; none left from the one drawing.
-    assert len(exporter.pattern_images) <= 24
+    assert len(exporter.pattern_images) <= 14
     assert set(exporter.pattern_images) == {_step_at(layout["icon-image"], z) for z in range(24)}
+    assert _sprite_pixels(exporter) <= mc.QgisMapLibreStyleExporter.FIXED_FRAME_SPRITE_PIXELS
+
+
+def _sprite_pixels(exporter):
+    """Image px of the 1x sprite sheet's frames."""
+    return sum(images.img_1x.width * images.img_1x.height for images in exporter.pattern_images.values())
+
+
+@pytest.mark.parametrize("colours", [16, 64])
+def test_the_per_zoom_border_images_of_a_fixed_frame_keep_to_a_sprite_budget(mc, colours):
+    """Per-zoom images of a fixed map-unit frame with a mm border, times its
+    data-defined colours: up to 8x denser images for each colour made a 35
+    megapixel @2x sprite for 16 colours (phones decode the whole sheet).
+    Past the budget the images get less dense, then the frame keeps its
+    one image per colour (reported)."""
+    from qgis.core import QgsProperty
+    exporter = _exporter(mc)
+    exporter._distinct_values = lambda source_layer, fields: [
+        (f"#{i:02x}ff00ff",) for i in range(colours)]
+    settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.ShapeFillColor, QgsProperty.fromField(f"{mc._FIELD_PREFIX}_fill"))
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeFixed, (20, 8),
+                   Qgis.RenderUnit.MapUnits, 0.5, Qgis.RenderUnit.Millimeters)
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24, "source-layer": "p",
+                 "layout": {"text-size": 13.3333}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    image = layer_def["layout"]["icon-image"]
+    assert _sprite_pixels(exporter) <= mc.QgisMapLibreStyleExporter.FIXED_FRAME_SPRITE_PIXELS
+    reported = [d.code for d in exporter.context.diagnostics.items]
+    if colours == 16:  # per zoom, less dense
+        assert image[0] == "step"
+        assert max(images.density for images in exporter.pattern_images.values()) < 4
+        assert "Q2VT_PATTERN_APPROXIMATE" not in reported
+    else:  # one image per colour, drawn at the frame's zoom
+        assert image[0] == "match" and len(exporter.pattern_images) == colours + 1
+        assert "Q2VT_PATTERN_APPROXIMATE" in reported
 
 
 @pytest.mark.parametrize("shape,name", [(QgsTextBackgroundSettings.ShapeType.ShapeEllipse, "ellipse"),
