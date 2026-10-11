@@ -246,7 +246,9 @@ class QGIS2VectorTiles:
             mode=FidelityMode.from_index(fidelity_mode),
             overzoom=[OverzoomPolicy.PERSIST, OverzoomPolicy.STOP][int(overzoom)],
             reference_latitude=self._reference_latitude(),
-            view_max_zoom=float(max(view_max_zoom - viewer, self.max_zoom)),
+            # Nothing is drawn past the last tile zoom when overzoom stops.
+            view_max_zoom=float(self.max_zoom if int(overzoom) else
+                                max(view_max_zoom - viewer, self.max_zoom)),
         )
         # Overzoom stopped: nothing is drawn past the last tile zoom.
         self.view_max_zoom = self.max_zoom if self.profile.overzoom == OverzoomPolicy.STOP \
@@ -763,6 +765,7 @@ class QGIS2VectorTiles:
             layer_opacities={rule.rule.description(): rule.layer.opacity() for rule in rules or []
                              if rule.layer is not None and rule.get_attr("t") == 0
                              and rule.layer.opacity() < 1.0},
+            view_max_zoom=self.view_max_zoom,
         )
         exporter.export()
         return exporter

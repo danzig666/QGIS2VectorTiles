@@ -264,29 +264,138 @@ def curved_arrow(po: Point, pm: Point, pd: Point, start_width: float, width: flo
     return [(p.x(), p.y()) for p in polygons[0]]
 
 
+def _arrow_vertices(points: Sequence[Point], curved: bool, repeated: bool):
+    """The (origin, middle or None, destination) of every arrow QGIS draws
+    for one line part (the vertex pairing of ``renderPolyline``)."""
+    points = list(points)
+    if curved and not repeated:
+        if len(points) >= 3:
+            yield points[0], points[len(points) // 2], points[-1]
+        elif len(points) == 2:
+            yield points[0], None, points[1]
+    elif curved:
+        for i in range(0, len(points) - 1, 2):
+            if len(points) - i >= 3:
+                yield points[i], points[i + 1], points[i + 2]
+            elif len(points) - i == 2:
+                yield points[i], None, points[i + 1]
+    elif not repeated:
+        if points:
+            yield points[0], None, points[-1]
+    else:
+        for i in range(len(points) - 1):
+            yield points[i], None, points[i + 1]
+
+
 def arrow_polygons(points: Sequence[Point], curved: bool, repeated: bool, start_width: float,
                    width: float, head_length: float, head_thickness: float, head_type: int,
                    arrow_type: int, offset: float) -> List[List[Point]]:
     """Every arrow polygon QGIS draws for one line part (``renderPolyline``),
     all sizes in the units of ``points`` (painter pixels, y down)."""
     args = (start_width, width, head_length, head_thickness, head_type, arrow_type, offset)
-    points = list(points)
-    out: List[List[Point]] = []
-    if curved and not repeated:
-        if len(points) >= 3:
-            out.append(curved_arrow(points[0], points[len(points) // 2], points[-1], *args))
-        elif len(points) == 2:
-            out.append(straight_arrow(points[0], points[1], *args))
-    elif curved:
-        for i in range(0, len(points) - 1, 2):
-            if len(points) - i >= 3:
-                out.append(curved_arrow(points[i], points[i + 1], points[i + 2], *args))
-            elif len(points) - i == 2:
-                out.append(straight_arrow(points[i], points[i + 1], *args))
-    elif not repeated:
-        if points:
-            out.append(straight_arrow(points[0], points[-1], *args))
-    else:
-        for i in range(len(points) - 1):
-            out.append(straight_arrow(points[i], points[i + 1], *args))
+    out = [straight_arrow(po, pd, *args) if pm is None else curved_arrow(po, pm, pd, *args)
+           for po, pm, pd in _arrow_vertices(points, curved, repeated)]
     return [p for p in out if len(p) >= 4]
+
+
+def _straight_skeleton(po: Point, pd: Point, head_width: float, head_type: int,
+                       shift: float, offset: float):
+    length = _dist(po, pd)
+    if length <= 0:
+        return [], []
+    unit = ((pd[0] - po[0]) / length, (pd[1] - po[1]) / length)
+    # straightArrow lengthens an arrow shorter than its head(s).
+    heads = 2 if head_type == HEAD_DOUBLE else 1
+    if length < heads * head_width:
+        if head_type == HEAD_SINGLE:
+            po = _add(pd, unit, -head_width)
+        elif head_type == HEAD_REVERSED:
+            pd = _add(po, unit, head_width)
+        else:
+            mid = ((po[0] + pd[0]) / 2.0, (po[1] + pd[1]) / 2.0)
+            po, pd = _add(mid, unit, -head_width), _add(mid, unit, head_width)
+        length = heads * head_width
+    perp = (-unit[1], unit[0])
+    po, pd = _add(po, perp, offset), _add(pd, perp, offset)
+    tips = []
+    if head_type in (HEAD_SINGLE, HEAD_DOUBLE):
+        tips.append((pd, unit, False))
+    if head_type in (HEAD_REVERSED, HEAD_DOUBLE):
+        tips.append((po, (-unit[0], -unit[1]), True))
+    start = head_width if head_type in (HEAD_REVERSED, HEAD_DOUBLE) else 0.0
+    end = length - (head_width if head_type in (HEAD_SINGLE, HEAD_DOUBLE) else 0.0)
+    if end - start <= 1e-9:
+        return [], tips
+    base = _add(po, perp, shift)
+    return [_add(base, unit, start), _add(base, unit, end)], tips
+
+
+def _curved_skeleton(po: Point, pm: Point, pd: Point, head_width: float, head_type: int,
+                     side: int, half: float, offset: float):
+    circle = points_to_circle(po, pm, pd)
+    if circle is None:
+        return None
+    center, radius = circle
+    angle_o = _clamp_angle(math.atan2(center[1] - po[1], po[0] - center[0]))
+    angle_m = _clamp_angle(math.atan2(center[1] - pm[1], pm[0] - center[0]))
+    angle_d = _clamp_angle(math.atan2(center[1] - pd[1], pd[0] - center[0]))
+    direction = 1 if _clamp_angle(angle_m - angle_o) < _clamp_angle(angle_m - angle_d) else -1
+    delta = angle_d - angle_o
+    if direction * delta < 0.0:
+        delta += direction * 2 * math.pi
+    length = _dist(po, pd)
+    if abs(delta) < math.pi and length < (2 if head_type == HEAD_DOUBLE else 1) * head_width:
+        return None  # drawn straight (curvedArrow)
+    radius += offset
+    head_angle = direction * math.atan(head_width / radius)
+
+    def head(angle, base_angle):
+        """(tip, unit direction from the middle of the head's base)."""
+        tip, base = _circle_point(center, radius, angle), _circle_point(center, radius, base_angle)
+        length = max(_dist(tip, base), 1e-12)
+        return tip, ((tip[0] - base[0]) / length, (tip[1] - base[1]) / length)
+    tips = []
+    if head_type in (HEAD_SINGLE, HEAD_DOUBLE):
+        tips.append(head(angle_d, angle_d - head_angle) + (False,))
+    if head_type in (HEAD_REVERSED, HEAD_DOUBLE):
+        tips.append(head(angle_o, angle_o + head_angle) + (True,))
+    start = angle_o + (head_angle if head_type in (HEAD_REVERSED, HEAD_DOUBLE) else 0.0)
+    sweep = delta - head_angle * (2 if head_type == HEAD_DOUBLE else 1)
+    if direction * sweep <= 1e-9:
+        return [], tips
+    # A half arrow fills one side of the arc (curvedArrow's a_type is
+    # side * direction; -1 fills radius + direction * width / 2).
+    body_radius = radius - side * half
+    # Chords within 0.05 px of the arc.
+    step = 2 * math.acos(max(-1.0, 1.0 - 0.05 / max(body_radius, 0.05)))
+    count = min(4096, max(1, int(math.ceil(abs(sweep) / max(step, 1e-6)))))
+    return [_circle_point(center, body_radius, start + sweep * i / count)
+            for i in range(count + 1)], tips
+
+
+def arrow_skeletons(points: Sequence[Point], curved: bool, repeated: bool, start_width: float,
+                    width: float, head_length: float, head_type: int, arrow_type: int,
+                    offset: float):
+    """(bodies, heads) of the arrows ``arrow_polygons`` builds, for drawing
+    them as a line and markers: every body's centre line between its heads
+    (a polyline along the arc of a curved arrow; the middle of the filled
+    side of a half arrow), and every head's (tip, unit direction it points
+    to, pointing back: the filled side of a half arrow's head is then on
+    the other side of that direction).
+    Sizes in the units of ``points`` (painter pixels, y down)."""
+    # A half arrow's body: half the mean width, beside the line.
+    half = (start_width + width) / 8.0 if arrow_type != ARROW_PLAIN else 0.0
+    side = {ARROW_RIGHT_HALF: 1, ARROW_LEFT_HALF: -1}.get(arrow_type, 0)
+    bodies: List[List[Point]] = []
+    heads: List[Tuple[Point, Point, bool]] = []
+    for po, pm, pd in _arrow_vertices(points, curved, repeated):
+        found = None
+        if pm is not None:
+            found = _curved_skeleton(po, pm, pd, head_length, head_type, side, half, offset)
+        if found is None:
+            found = _straight_skeleton(po, pd, head_length, head_type, side * half, offset)
+        body, tips = found
+        if len(body) >= 2:
+            bodies.append(body)
+        heads.extend(tips)
+    return bodies, heads

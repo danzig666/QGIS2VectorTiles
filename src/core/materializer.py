@@ -2463,58 +2463,48 @@ class SymbolMaterializer:
             return mat.Recipe("arrow_polygons", params=params)
 
         low, high = self._zoom_range(flat_rule)
+        native = []  # overzoom rules drawn as a line and head markers
         if screen and low <= high:
-            # Every zoom the map is viewed at, overzoom included: one set of
-            # arrows sized for each.
             zoom_rules = self._per_zoom(flat_rule, overzoom=True)
-            features = self._layer_totals(flat_rule.layer)[2]
-            per_set = features * (10 if layer.isRepeated() else 1)
-            # The exported zooms get the budget first (the last ones finest);
-            # the zooms past the last tiles share what is left.
             over = [rule for rule in zoom_rules if rule.get_attr("v") is not None]
             zoom_rules = zoom_rules[:len(zoom_rules) - len(over)]
+            per_set = self._layer_totals(flat_rule.layer)[2] * (10 if layer.isRepeated() else 1)
+            # The exported zooms get the budget first, the last ones finest
+            # (_zoom_steps); the zooms past the last tiles share what is left.
             steps = self._zoom_steps({rule.get_attr("o"): per_set for rule in zoom_rules},
                                      self.ARROW_BAND_STEPS, 1)
-            left = self.MAX_PATTERN_ELEMENTS - sum(per_set * n for n in steps.values())
+            used = sum(per_set * n for n in steps.values())
             top = steps[zoom_rules[-1].get_attr("o")] if zoom_rules else self.ARROW_BAND_STEPS[0]
-            over_steps = next((n for n in self.ARROW_BAND_STEPS
-                               if n <= top and per_set * len(over) * n <= left), 1)
+            # Past the last tiles (on their data): polygons per zoom while the
+            # body is at least two units of their geometry grid wide (4096
+            # units a tile: 8 px at 6 zooms over; narrower polygons
+            # collapse), within what is left of the output budget, at most
+            # OVERZOOM_ARROW_STEPS bands a zoom. Then a line and head markers.
+            quantum = self._map_units_per_mm(flat_rule, high) * 25.4 / 96.0 / 8.0
+            kept = 0
+            for rule in over:
+                per_mm = self._map_units_per_mm(flat_rule, self.rule_zoom(rule) + 1.0)
+                if max(to_map(v, u, per_mm) for v, u in values[:2]) < 2 * quantum:
+                    break
+                kept += 1
+            over_steps = 0
+            while kept and not over_steps:
+                over_steps = next((n for n in self.ARROW_BAND_STEPS
+                                   if n <= min(top, self.OVERZOOM_ARROW_STEPS) and
+                                   used + per_set * kept * n <= self.MAX_PATTERN_ELEMENTS), 0)
+                kept -= 0 if over_steps else 1
+            native = over[kept:]  # _per_zoom closed the zooms before at their end
             bands = [band for index, rule in enumerate(zoom_rules)
                      for band in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
                                                       not over and index == len(zoom_rules) - 1)]
-            bands += [band for index, rule in enumerate(over)
-                      for band in self._sub_zoom_bands(rule, over_steps, index == len(over) - 1)]
+            bands += [band for rule in over[:kept]
+                      for band in self._sub_zoom_bands(rule, over_steps, False)]
         else:
             # Map units: one dataset; arcs flattened at the finest zoom it is
             # viewed at (overzoom included).
             bands = [(flat_rule, max([low, high] + self._overzoom_zooms(flat_rule)) + 0.5)]
 
         rules = []
-        # Far past the last tiles an arrow is narrower than their geometry
-        # grid (4096 units a tile: 8 px at 6 zooms over) and its polygons
-        # collapse: from there on its body is a native line.
-        quantum = self._map_units_per_mm(flat_rule, high) * 25.4 / 96.0 / 8.0
-        for index, (band_rule, zoom) in enumerate(bands):
-            per_mm = self._map_units_per_mm(flat_rule, zoom)
-            widths = [to_map(v, u, per_mm) for v, u in values[:2] if abs(v or 0.0) > 1e-12]
-            if band_rule.get_attr("v") is not None and widths and min(widths) < 2 * quantum:
-                body = QgsSimpleLineSymbolLayer(fill.color(), layer.arrowWidth(),
-                                                Qt.PenStyle.SolidLine)
-                body.setWidthUnit(layer.arrowWidthUnit())
-                body.setPenCapStyle(Qt.PenCapStyle.FlatCap)
-                body.setOffset(layer.offset())
-                body.setOffsetUnit(layer.offsetUnit())
-                symbol = QgsLineSymbol([body])
-                symbol.setOpacity(fill.opacity())
-                native = self._with_symbol(band_rule, symbol, 1, 1 + len(fill_layers))
-                native.visibility = flat_rule.visibility.intersect(
-                    ZoomInterval(band_rule.visibility.min_zoom, None))
-                rules.append(native)
-                self._report("Q2VT_SYMBOL_APPROXIMATE",
-                             "Arrows narrower than the last tiles' geometry grid (far past the "
-                             "last tile zoom) are drawn as a line without the head.", flat_rule)
-                bands = bands[:index]
-                break
         for copy, fill_layer in enumerate(fill_layers):
             fill_layer = fill_layer.clone()
             translate = outline = None
@@ -2550,7 +2540,102 @@ class SymbolMaterializer:
                                                recipe(zoom, copy))
                     stroke.translate = translate  # shifted with its fill
                     rules.append(stroke)
+            for rule in native:
+                for index, derived in enumerate(self._native_arrow(
+                        rule, layer, fill_layers[copy], fill.opacity(), base, values, to_map)):
+                    derived.set_attr("m", 1 + len(fill_layers) + 4 * copy + index)
+                    derived.translate = translate
+                    rules.append(derived)
+        if native:
+            self._report("Q2VT_SYMBOL_APPROXIMATE",
+                         "Arrows narrower than the last tiles' geometry grid (far past the last "
+                         "tile zoom) are drawn as a line of their mean width with head markers.",
+                         flat_rule)
         return rules
+
+    # Arrow bands per zoom past the last tile zoom (+-9 % of the width).
+    OVERZOOM_ARROW_STEPS = 4
+
+    def _native_arrow(self, rule: FlattenedRule, layer, fill_layer, opacity: float, base,
+                      values, to_map) -> List[FlattenedRule]:
+        """An arrow at an overzoom (``rule``, one zoom on the last tiles) as
+        native screen-size parts: its body's centre line (fidelity/arrows.py
+        arrow_skeletons) drawn as a line of the body's mean width, and a
+        triangle marker turned along the line at every head's tip. The body
+        ends at the head's base at the end of the zoom (the head covers it
+        before)."""
+        from qgis.core import QgsEllipseSymbolLayer  # pylint: disable=import-outside-toplevel
+        zoom = self.rule_zoom(rule)
+        per_mm = self._map_units_per_mm(rule, zoom + 0.5)
+        start, width, head_length, thickness, offset = (to_map(v, u, per_mm) for v, u in values)
+        head_end = to_map(*values[2], self._map_units_per_mm(rule, zoom + 1.0))
+        params = base + (("pixel", per_mm * 25.4 / 96.0),)
+        grid = self._map_units_per_mm(rule, self._zoom_range(rule)[1]) * 25.4 / 96.0 / 8.0
+        body_recipe = mat.Recipe("arrow_polygons", params=params + (
+            ("sizes", (start, width, head_end, thickness, offset)), ("part", "body"),
+            ("grid", grid)))
+        head_recipe = mat.Recipe("arrow_polygons", params=params + (
+            ("sizes", (start, width, head_length, thickness, offset)), ("part", "heads")))
+        half = _enum_value(layer.arrowType()) != 0
+        mm = lambda value: value / per_mm  # pylint: disable=unnecessary-lambda-assignment
+        body_mm = mm(start + width) / (4.0 if half else 2.0)
+        color = fill_layer.color()
+        stroke = None
+        if fill_layer.layerType() == "SimpleFill":
+            if fill_layer.brushStyle() == Qt.BrushStyle.NoBrush:
+                color = QColor(0, 0, 0, 0)
+            if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
+                stroke_mm = _to_mm(fill_layer.strokeWidth(), fill_layer.strokeWidthUnit())
+                if stroke_mm is None:
+                    stroke_mm = mm(fill_layer.strokeWidth())
+                stroke = (fill_layer.strokeColor(), stroke_mm or 25.4 / 96.0)
+        out = []
+        # QGIS strokes the polygon's edge: the stroke's width centred on it.
+        for line_color, line_mm in ([(stroke[0], body_mm + stroke[1])] if stroke else []) + [
+                (color, body_mm - (stroke[1] if stroke else 0.0))]:
+            if line_mm <= 0 or line_color.alpha() == 0:
+                continue
+            line = QgsSimpleLineSymbolLayer(line_color, line_mm, Qt.PenStyle.SolidLine)
+            line.setWidthUnit(Qgis.RenderUnit.Millimeters)
+            line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+            line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            symbol = QgsLineSymbol([line])
+            symbol.setOpacity(opacity)
+            out.append(self._with_symbol(rule, symbol, 1, 1, body_recipe))
+        shapes = {0: QgsEllipseSymbolLayer.Shape.Triangle,
+                  1: QgsEllipseSymbolLayer.Shape.RightHalfTriangle,
+                  2: QgsEllipseSymbolLayer.Shape.LeftHalfTriangle}
+        arrow_type = _enum_value(layer.arrowType())
+        # QgsArrowSymbolLayer's right half (y down: the right of the travel)
+        # is the ellipse marker's left half triangle (x >= 0); a head
+        # pointing back has its filled half on the other side.
+        for backward, kind in ([(None, arrow_type)] if not half else
+                               [(False, arrow_type), (True, 3 - arrow_type)]):
+            head = QgsEllipseSymbolLayer()
+            head.setShape(shapes[kind])
+            head.setSymbolWidth(2 * mm(thickness))
+            head.setSymbolHeight(mm(head_length))
+            head.setSymbolWidthUnit(Qgis.RenderUnit.Millimeters)
+            head.setSymbolHeightUnit(Qgis.RenderUnit.Millimeters)
+            head.setColor(color)
+            if stroke:
+                head.setStrokeColor(stroke[0])
+                head.setStrokeWidth(stroke[1])
+                head.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+                head.setStrokeStyle(Qt.PenStyle.SolidLine)
+            else:
+                head.setStrokeStyle(Qt.PenStyle.NoPen)
+            # Apex up (north) at angle 0, its centre half a head behind the tip.
+            head.setOffset(QPointF(0.0, mm(head_length) / 2.0))
+            head.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+            head.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyAngle, QgsProperty.fromExpression(
+                mat.marker_rotation_expression(90.0)))
+            symbol = QgsMarkerSymbol([head])
+            symbol.setOpacity(opacity)
+            recipe = head_recipe if backward is None else mat.Recipe(
+                head_recipe.kind, params=head_recipe.params + (("backward", backward),))
+            out.append(self._with_symbol(rule, symbol, 0, 1, recipe))
+        return out
 
     @staticmethod
     def _fill_stroke_as_line(fill_layer) -> QgsSimpleLineSymbolLayer:
@@ -2783,18 +2868,15 @@ class SymbolMaterializer:
             width = mm * self._map_units_per_mm(flat_rule, zoom + 1.0) / count
             return sum(min(count, int(radius / width) + 1) for radius in radii)
         # Every zoom the map is viewed at, overzoom included: the exported
-        # zooms get the budget first (the last ones finest), the zooms past
-        # the last tiles share what is left.
+        # zooms get the budget first, the last ones finest (_zoom_steps); the
+        # zooms past the last tiles share what is left.
         zoom_rules = self._per_zoom(flat_rule, overzoom=True)
         over = [rule for rule in zoom_rules if rule.get_attr("v") is not None]
         zoom_rules = zoom_rules[:len(zoom_rules) - len(over)]
         steps = self._zoom_steps({rule.get_attr("o"): cost(rule.get_attr("o")) for rule in zoom_rules},
                                  self.SHAPEBURST_ZOOM_STEPS, 1)
-        left = self.MAX_PATTERN_ELEMENTS - sum(cost(zoom) * n for zoom, n in steps.items())
+        used = sum(cost(zoom) * n for zoom, n in steps.items())
         top = steps[zoom_rules[-1].get_attr("o")] if zoom_rules else self.SHAPEBURST_ZOOM_STEPS[0]
-        over_cost = sum(cost(self.rule_zoom(rule)) for rule in over)
-        over_steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
-                           if n <= min(top, 2) and over_cost * n <= left), 1)
         coarse = sorted((zoom for zoom, n in steps.items() if n < self.SHAPEBURST_ZOOM_STEPS[0]),
                         reverse=True)
         if coarse:
@@ -2807,14 +2889,46 @@ class SymbolMaterializer:
             self._report("Q2VT_GRADIENT_APPROXIMATE",
                          "Shapeburst distance in screen units is set {} to stay within the "
                          "output size.".format(", ".join(parts)), flat_rule)
+        # Past the last tiles (on their data): band sets per half zoom while
+        # the distance is at least a unit of their geometry grid (4096 units
+        # a tile), within what is left of the output budget. Narrower, the
+        # bands would collapse onto the outline: the inner colour from there.
+        quantum = self._map_units_per_mm(flat_rule, self._zoom_range(flat_rule)[1]) * 25.4 / 96.0 / 8.0
+        kept = 0
+        for rule in over:
+            if mm * self._map_units_per_mm(flat_rule, self.rule_zoom(rule) + 0.5) < quantum:
+                break
+            kept += 1
+        over_steps = 0
+        while kept and not over_steps:
+            over_cost = sum(cost(self.rule_zoom(rule)) for rule in over[:kept])
+            over_steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
+                               if n <= min(top, 2) and
+                               used + over_cost * n <= self.MAX_PATTERN_ELEMENTS), 0)
+            kept -= 0 if over_steps else 1
         rules = []
         for index, rule in enumerate(zoom_rules):
-            for band_rule, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
-                                                        not over and index == len(zoom_rules) - 1):
+            for band_rule, zoom in self._sub_zoom_bands(
+                    rule, steps[rule.get_attr("o")], not over and index == len(zoom_rules) - 1):
                 rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
-        for index, rule in enumerate(over):
-            for band_rule, zoom in self._sub_zoom_bands(rule, over_steps, index == len(over) - 1):
+        for rule in over[:kept]:
+            for band_rule, zoom in self._sub_zoom_bands(rule, over_steps, False):
                 rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
+        if kept < len(over):
+            from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+            inner = over[kept].derive()
+            inner.visibility = flat_rule.visibility.intersect(
+                ZoomInterval(over[kept].visibility.min_zoom, None))
+            fill = QgsSimpleFillSymbolLayer(ramp.color(1.0), Qt.BrushStyle.SolidPattern,
+                                            ramp.color(1.0), Qt.PenStyle.NoPen)
+            fill.setOffset(layer.offset())
+            fill.setOffsetUnit(layer.offsetUnit())
+            symbol = QgsFillSymbol([fill])
+            symbol.setOpacity(flat_rule.rule.symbol().opacity())
+            rules.append(self._with_symbol(inner, symbol, 2, 1))
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst bands narrower than the last tiles' geometry grid (far past "
+                         "the last tile zoom) are drawn in the inner colour.", flat_rule)
         return rules
 
     def _hatch(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:

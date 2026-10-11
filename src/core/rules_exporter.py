@@ -2277,11 +2277,15 @@ class RulesExporter:
     def _arrow_polygons(self, source: str, recipe: Recipe) -> Optional[str]:
         """Worker: the polygons QGIS fills for an arrow symbol layer
         (``fidelity/arrows.py``), built in painter pixels (y down) of the
-        recipe's zoom in the recipe CRS (the project CRS, like QGIS)."""
+        recipe's zoom in the recipe CRS (the project CRS, like QGIS).
+        Recipe part "body": the bodies' centre lines instead; "heads": a
+        point at every head's tip with its azimuth (mat.ANGLE_FIELD), only
+        those pointing back or forward with param "backward"."""
         from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
-                               QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProject,
-                               QgsVectorFileWriter, QgsWkbTypes)
-        from .fidelity.arrows import arrow_polygons  # pylint: disable=import-outside-toplevel
+                               QgsFeature, QgsField, QgsFields, QgsGeometry, QgsPointXY,
+                               QgsProject, QgsVectorFileWriter, QgsWkbTypes)
+        from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+        from .fidelity.arrows import arrow_polygons, arrow_skeletons  # pylint: disable=import-outside-toplevel
         layer = self._open(source, "arrows")
         if layer is None or not layer.isValid():
             return None
@@ -2295,17 +2299,22 @@ class RulesExporter:
             context = QgsProject.instance().transformContext()
             to_crs = QgsCoordinateTransform(layer.crs(), crs, context)
             from_crs = QgsCoordinateTransform(crs, layer.crs(), context)
+        drawn = recipe.param("part")
         fields = QgsFields()
         for field in layer.fields():
-            if field.name().lower() not in ("fid", "ogc_fid"):
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD:
                 fields.append(field)
+        if drawn == "heads":
+            fields.append(QgsField(mat.ANGLE_FIELD, QVariant.Double))
         out = self._temp_path("arrows")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
         with self._temp_files_lock:
             self._temp_files.add(out)
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "FlatGeobuf"
         options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
-        writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.MultiPolygon, layer.crs(),
+        kind = {"body": QgsWkbTypes.MultiLineString, "heads": QgsWkbTypes.Point}.get(
+            drawn, QgsWkbTypes.MultiPolygon)
+        writer = QgsVectorFileWriter.create(out, fields, kind, layer.crs(),
                                             QgsProject.instance().transformContext(), options)
         # Opaque multi-layer fills: QGIS fills every arrow with all layers
         # before the next arrow, so a later arrow's shadow covers an earlier
@@ -2330,6 +2339,27 @@ class RulesExporter:
                     continue
                 x0, y0 = points[0]
                 pixels = [((x - x0) / pixel, (y0 - y) / pixel) for x, y in points]
+
+                def to_map(x, y, x0=x0, y0=y0):
+                    return QgsPointXY(x0 + x * pixel, y0 - y * pixel)
+                if drawn is not None:
+                    bodies, heads = arrow_skeletons(pixels, curved, repeated, start, width,
+                                                    head_length, head_type, arrow_type, offset)
+                    if drawn == "body":
+                        # Vertices one grid unit of the tiles apart at least:
+                        # an arc's dense vertices snapped to a coarse grid (far
+                        # past the last tiles) step like stairs.
+                        grid = float(recipe.param("grid", 0.0) or 0.0)
+                        shapes.extend(QgsGeometry.fromPolylineXY([to_map(*p) for p in body]).simplify(grid)
+                                      if grid > 0 else QgsGeometry.fromPolylineXY([to_map(*p) for p in body])
+                                      for body in bodies)
+                    else:
+                        # Azimuth: clockwise from north (painter y is down).
+                        shapes.extend((QgsGeometry.fromPointXY(to_map(*tip)),
+                                       math.degrees(math.atan2(dx, -dy)) % 360.0)
+                                      for tip, (dx, dy), back in heads
+                                      if recipe.param("backward") in (None, back))
+                    continue
                 for polygon in arrow_polygons(pixels, curved, repeated, start, width, head_length,
                                               thickness, head_type, arrow_type, offset):
                     shape = QgsGeometry.fromPolygonXY([[
@@ -2338,15 +2368,22 @@ class RulesExporter:
                     shape.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
                     if not shape.isEmpty():
                         shapes.append(shape)
-            if shifts:
+            if shifts and drawn is None:
                 shapes = self._painter_visible(shapes, shifts, target)
             for shape in shapes:
+                angle = None
+                if drawn == "heads":
+                    shape, angle = shape
                 if from_crs is not None:
                     shape.transform(from_crs)
-                shape.convertToMultiType()
+                if drawn != "heads":
+                    shape.convertToMultiType()
                 out_feature = QgsFeature(fields)
                 for field in fields:
-                    out_feature[field.name()] = feature[field.name()]
+                    if field.name() != mat.ANGLE_FIELD:
+                        out_feature[field.name()] = feature[field.name()]
+                if angle is not None:
+                    out_feature[mat.ANGLE_FIELD] = angle
                 out_feature.setGeometry(shape)
                 writer.addFeature(out_feature)
                 written += 1
@@ -3557,6 +3594,10 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "arrow_polygons":
             # Polygons built by _arrow_polygons; the arrow's outline
             # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
+            if recipe.param("part") == "body":
+                return [1, "@geometry"]
+            if recipe.param("part") == "heads":
+                return [0, "@geometry"]
             if flat_rule.get_attr("c") == 1:
                 return [1, "boundary(@geometry)"]
             return [2, "@geometry"]

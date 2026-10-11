@@ -104,6 +104,88 @@ def test_arrow_polygons_are_qgis_arrows(plugin):
             (curved, repeated, head_type, arrow_type)
 
 
+def test_arrow_skeletons_drawn_as_line_and_head_markers_are_qgis_arrows(plugin):
+    """fidelity.arrows.arrow_skeletons (arrows past the last tiles' geometry
+    grid, SymbolMaterializer._native_arrow): the body's centre line drawn
+    with the body's width and a triangle marker turned along the line at
+    every tip cover what QGIS fills, curved arrows and half arrows too."""
+    from qgis.core import QgsArrowSymbolLayer, QgsEllipseSymbolLayer, QgsField, QgsMarkerSymbol, \
+        QgsProperty, QgsSymbolLayer
+    from qgis.PyQt.QtCore import QPointF, QVariant
+    from fidelity.arrows import arrow_skeletons
+    rng = random.Random(11)
+    size, mm = 300, 96 / 25.4
+    shapes = {1: QgsEllipseSymbolLayer.Shape.RightHalfTriangle,
+              2: QgsEllipseSymbolLayer.Shape.LeftHalfTriangle}
+    for _ in range(25):
+        curved, repeated = rng.random() < 0.6, rng.random() < 0.6
+        head_type, arrow_type = rng.choice([0, 0, 1, 2]), rng.choice([0, 0, 1, 2])
+        points = [(rng.uniform(30, 270), rng.uniform(30, 270)) for _ in range(rng.randint(2, 6))]
+        width, length = rng.uniform(1, 3), rng.uniform(2, 5)
+        thickness = rng.uniform(width / 2 + 0.5, 4)
+        source = QgsVectorLayer("LineString?crs=EPSG:3857", "a", "memory")
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(*p) for p in points]))
+        source.dataProvider().addFeatures([feature])
+        arrow = QgsArrowSymbolLayer()
+        arrow.setIsCurved(curved)
+        arrow.setIsRepeated(repeated)
+        arrow.setArrowStartWidth(width)
+        arrow.setArrowWidth(width)
+        arrow.setHeadLength(length)
+        arrow.setHeadThickness(thickness)
+        arrow.setHeadType(QgsArrowSymbolLayer.HeadType(head_type))
+        arrow.setArrowType(QgsArrowSymbolLayer.ArrowType(arrow_type))
+        arrow.setSubSymbol(_fill())
+        source.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+        bodies, heads = arrow_skeletons([(x, size - y) for x, y in points], curved, repeated,
+                                        width * mm, width * mm, length * mm, head_type,
+                                        arrow_type, 0.0)
+        lines = QgsVectorLayer("LineString?crs=EPSG:3857", "l", "memory")
+        for body in bodies:
+            shape = QgsFeature()
+            shape.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(x, size - y) for x, y in body]))
+            lines.dataProvider().addFeatures([shape])
+        line = QgsSimpleLineSymbolLayer(QColor("black"), width * mm / (2 if arrow_type else 1))
+        line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+        line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+        lines.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+        tips = QgsVectorLayer("Point?crs=EPSG:3857", "h", "memory")
+        tips.dataProvider().addAttributes([QgsField("angle", QVariant.Double),
+                                           QgsField("back", QVariant.Int)])
+        tips.updateFields()
+        for (x, y), (dx, dy), back in heads:
+            shape = QgsFeature(tips.fields())
+            shape.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, size - y)))
+            shape["angle"] = math.degrees(math.atan2(dx, -dy))
+            shape["back"] = int(back)
+            tips.dataProvider().addFeatures([shape])
+        head = QgsEllipseSymbolLayer()
+        head.setShape(shapes.get(arrow_type, QgsEllipseSymbolLayer.Shape.Triangle))
+        if arrow_type:
+            # A head pointing back: the other half (one rule each in the export).
+            names = {1: "right_half_triangle", 2: "left_half_triangle"}
+            head.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyName, QgsProperty.fromExpression(
+                f"if(\"back\", '{names[3 - arrow_type]}', '{names[arrow_type]}')"))
+        head.setSymbolWidth(2 * thickness * mm)
+        head.setSymbolHeight(length * mm)
+        head.setSymbolWidthUnit(Qgis.RenderUnit.MapUnits)
+        head.setSymbolHeightUnit(Qgis.RenderUnit.MapUnits)
+        head.setColor(QColor("black"))
+        head.setStrokeStyle(Qt.PenStyle.NoPen)
+        head.setOffset(QPointF(0, length * mm / 2))
+        head.setOffsetUnit(Qgis.RenderUnit.MapUnits)
+        head.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyAngle,
+                                    QgsProperty.fromField("angle"))
+        tips.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([head])))
+        extent = QgsRectangle(0, 0, size, size)
+        reference = ink_mask(render([source], extent, (size, size)))
+        drawn = ink_mask(render([tips, lines], extent, (size, size)))
+        # Straight-sided heads (QGIS bends a curved arrow's head sides).
+        assert reference and mask_difference(reference, drawn) < 0.06, \
+            (curved, repeated, head_type, arrow_type)
+
+
 def test_arrow_shadow_is_covered_by_later_arrows(plugin):
     """QGIS fills each arrow with all fill layers before the next one: the
     shadow of a later arrow hides an earlier arrow (painter order)."""

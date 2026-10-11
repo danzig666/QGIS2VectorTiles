@@ -1956,6 +1956,7 @@ class QgisMapLibreStyleExporter:
         label_windows: Optional[set] = None,
         layer_opacities: Optional[Dict[str, float]] = None,
         disjoint_bands: Optional[set] = None,
+        view_max_zoom: Optional[int] = None,
     ):
         """Initialise the exporter.
 
@@ -1981,6 +1982,9 @@ class QgisMapLibreStyleExporter:
                              part[, kind, merge connected lines]) of labels
                              placed on the visible part of their polygon or
                              line by the viewer.
+            view_max_zoom:   The browser's zoom limit (None: the profile's,
+                             MapLibre's 22 by default): map-unit textures
+                             with screen-unit lengths get one per zoom up to it.
         """
         self.visible_polygons = visible_polygons or {}
         # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
@@ -2013,6 +2017,7 @@ class QgisMapLibreStyleExporter:
         self.viewer = viewer
         self.minzoom = minzoom
         self.maxzoom = maxzoom
+        self._view_max_zoom_override = view_max_zoom
         self.diagnostics = diagnostics or DiagnosticCollector()
         self.profile = profile or ExportProfile()
         self.visibility = visibility or {}
@@ -2891,7 +2896,7 @@ class QgisMapLibreStyleExporter:
         top = float(max_zoom) if max_zoom is not None and max_zoom >= 0 else 24.0
         tiles_top = min(top, float(self.maxzoom) + 3.0)
         if screen_spacing or screen_lengths:
-            top = min(top, max(tiles_top, float(getattr(self.profile, "view_max_zoom", 22.0)) + 1.0))
+            top = min(top, max(tiles_top, self._view_max_zoom() + 1.0))
         else:
             top = tiles_top
         # Over the cap, the highest zooms get their own texture (zoomed out,
@@ -2948,6 +2953,14 @@ class QgisMapLibreStyleExporter:
 
     _pattern_zoom_bands = False
     _last_pattern_zoom = None
+    _view_max_zoom_override = None
+
+    def _view_max_zoom(self) -> float:
+        """The browser's zoom limit: the one given to the converter, else the
+        profile's (MapLibre's 22)."""
+        if self._view_max_zoom_override is not None:
+            return float(self._view_max_zoom_override)
+        return float(getattr(self.profile, "view_max_zoom", 22.0))
 
     # MapLibre draws fill-pattern in the pixels of the tile's integer zoom: a
     # texture grows 2x with the map until the next zoom, while QGIS keeps
@@ -3798,7 +3811,7 @@ class QgisMapLibreStyleExporter:
             return
         if not IconPropertyExtractor.uses_map_units(sub_symbol):
             self._marker_line_layer(symbol_layer, sub_symbol, style_name, source_layer_name,
-                                    source_name, min_zoom, max_zoom)
+                                    source_name, min_zoom, max_zoom, symbol)
             return
         # Map-unit details (size, stroke): one sprite per zoom band, drawn at
         # the band's scale, as for point markers (_convert_marker_symbol); a
@@ -3817,7 +3830,7 @@ class QgisMapLibreStyleExporter:
                 context.reference_zoom, context.reference_zoom_span = low, high - low
                 context.sprite_oversampling = quality
                 self._marker_line_layer(symbol_layer, sub_symbol, f"{style_name}_z{int(low)}",
-                                        source_layer_name, source_name, low, high)
+                                        source_layer_name, source_name, low, high, symbol)
                 if index == len(bands) - 1:
                     break
         finally:
@@ -3826,8 +3839,10 @@ class QgisMapLibreStyleExporter:
 
     def _marker_line_layer(self, symbol_layer, sub_symbol, style_name: str,
                            source_layer_name: str, source_name: str,
-                           min_zoom: float = -1, max_zoom: float = -1):
-        """One MapLibre ``symbol`` layer (and its sprite) of a marker line."""
+                           min_zoom: float = -1, max_zoom: float = -1,
+                           symbol: Optional[QgsSymbol] = None):
+        """One MapLibre ``symbol`` layer (and its sprite) of a marker line
+        (``symbol``: the line symbol, whose opacity the markers take)."""
         layer_def = self._base_layer_def(
             "symbol", style_name, source_layer_name, source_name, min_zoom, max_zoom
         )

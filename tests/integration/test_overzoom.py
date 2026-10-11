@@ -77,25 +77,98 @@ def test_screen_unit_arrows_keep_their_width_past_the_last_tiles(plugin, tmp_pat
         layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow.clone()])))
         return _flatten(tmp_path, layer, *zooms)[0]
     rules = flatten()
-    for zoom in (16.5, 17.5, 19.06, 19.94):
+    # An eighth of a zoom in the tiles' range (within +-4.5 % of QGIS's
+    # 1.5 mm), a quarter past it (+-9 %).
+    for zoom, rel in ((16.5, 0.045), (17.5, 0.095), (19.06, 0.095), (19.94, 0.095)):
         drawn = _at(rules, zoom)
         assert len(drawn) == 1 and drawn[0].recipe.kind == "arrow_polygons"
         width = drawn[0].recipe.param("sizes")[1]
-        # an eighth of a zoom: within +-4.5 % of QGIS's 1.5 mm
-        assert width == pytest.approx(1.5 * _per_mm(zoom), rel=0.045)
+        assert width == pytest.approx(1.5 * _per_mm(zoom), rel=rel)
         assert drawn[0].get_attr("o") == drawn[0].get_attr("i") == min(int(zoom), 16)
-    # Narrower than two units of the zoom-16 tiles' geometry grid (4 px at
-    # zoom 20): the body as a line.
-    for zoom in (21.0, 22.0):
+    # From zoom 20 the body gets narrower than two units of the zoom-16
+    # tiles' geometry grid (4 px at zoom 21): per zoom, its centre line drawn
+    # with its width and a head marker at the tip.
+    for zoom in (20.5, 21.0, 22.0):
         drawn = _at(rules, zoom)
-        assert len(drawn) == 1 and drawn[0].recipe is None
-        body = drawn[0].rule.symbol().symbolLayer(0)
-        assert body.layerType() == "SimpleLine" and body.width() == 1.5 and body.widthUnit() == MM
-        assert drawn[0].visibility.max_zoom is None
+        assert sorted(r.recipe.param("part") for r in drawn) == ["body", "heads"]
+        assert {r.get_attr("v") for r in drawn} == {int(zoom)}
+        body = next(r for r in drawn if r.recipe.param("part") == "body")
+        line = body.rule.symbol().symbolLayer(0)
+        assert line.layerType() == "SimpleLine" and line.widthUnit() == MM
+        assert line.width() == pytest.approx(1.5)
+        # The body ends at the head's base at the end of the zoom.
+        assert body.recipe.param("sizes")[2] == pytest.approx(4 * _per_mm(int(zoom) + 1))
+        head = next(r for r in drawn if r.recipe.param("part") == "heads")
+        marker = head.rule.symbol().symbolLayer(0)
+        assert marker.layerType() == "EllipseMarker"
+        assert (marker.symbolWidth(), marker.symbolHeight()) == pytest.approx((4, 4))
+        assert (marker.offset().x(), marker.offset().y()) == pytest.approx((0, 2))
+    assert all(r.visibility.max_zoom is None for r in _at(rules, 22.0))
     # Exported to zoom 19: the overzoom starts at 20 (nothing changes below).
     narrow = flatten(14, 19)
     assert [r.get_attr("v") for r in _at(narrow, 19.5)] == [None]
     assert _at(narrow, 20.5)[0].get_attr("v") == 20
+
+
+def test_arrow_output_budget_goes_to_the_tiles_zooms_first(plugin, tmp_path, monkeypatch):
+    """The band steps of the exported zooms are chosen from those zooms
+    alone; the overzoom gets what is left of the output budget."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    arrow = QgsArrowSymbolLayer()
+    arrow.setIsCurved(False)
+    arrow.setIsRepeated(False)
+
+    def bands(budget):
+        monkeypatch.setattr(SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
+        layer = _layer("LineString", LINE, str(tmp_path / f"b{budget}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow.clone()])))
+        rules = _flatten(tmp_path, layer)[0]
+        count = {}
+        for rule in rules:
+            if rule.recipe is not None and rule.get_attr("c") == 2:
+                zoom = SymbolMaterializer.rule_zoom(rule)
+                count[zoom] = count.get(zoom, 0) + 1
+        return count, rules
+    # One arrow, zooms 0-16 in eight bands each (136): room for two bands at
+    # the two overzooms before the 1 mm body reaches the grid (zoom 19).
+    count, rules = bands(17 * 8 + 2 * 2)
+    assert [count[z] for z in range(17)] == [8] * 17
+    assert [count.get(z) for z in (17, 18, 19)] == [2, 2, None]
+    assert {r.recipe.param("part") for r in _at(rules, 19.5)} == {"body", "heads"}
+    # No room left: the overzoom is drawn natively from zoom 17.
+    count, rules = bands(17 * 8)
+    assert [count[z] for z in range(17)] == [8] * 17 and 17 not in count
+    assert {r.recipe.param("part") for r in _at(rules, 17.5)} == {"body", "heads"}
+
+
+def test_curved_arrow_past_the_grid_follows_its_arc(plugin, tmp_path):
+    """QGIS's default arrow (curved, 1 mm) far past the last tiles: the
+    body's centre line along the arc (fidelity/arrows.py arrow_skeletons,
+    checked against QGIS in test_line_shapes.py), not the source line."""
+    from qgis.core import QgsRectangle
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity.diagnostics import DiagnosticCollector
+    layer = _layer("LineString", LINE, str(tmp_path / "c.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([QgsArrowSymbolLayer()])))
+    rules, diags = _flatten(tmp_path, layer)
+    assert diags.by_code("Q2VT_SYMBOL_APPROXIMATE")
+    # The default fill's outline under the fill's colour: two lines.
+    drawn = [r for r in _at(rules, 21.5) if r.recipe.param("part") == "body"]
+    assert len(drawn) == 2 and drawn[0].recipe == drawn[1].recipe
+    assert drawn[0].recipe.param("curved")
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    extent = QgsRectangle(X - 100, Y - 100, X + 700, Y + 100)
+    layers, _ = RulesExporter(drawn[:1], extent, 0, 16, str(utils), 0, QgsProcessingFeedback(),
+                              diagnostics=DiagnosticCollector()).export()
+    lines = [f.geometry() for f in layers[0].getFeatures()]
+    assert len(lines) == 1
+    # The arc through the line's three vertices bulges 20 m: its middle is
+    # on the circle, far from the source's straight chords.
+    centre = lines[0].interpolate(lines[0].length() / 2).asPoint()
+    assert centre.y() - Y == pytest.approx(20, abs=0.5)
+    # Chords within a unit of the zoom-16 tiles' geometry grid (0.3 m).
+    assert 10 < len(list(lines[0].vertices())) < 40
 
 
 def test_screen_point_pattern_past_the_last_tiles_is_the_native_pattern(plugin, tmp_path):
@@ -129,14 +202,29 @@ def test_screen_unit_shapeburst_keeps_its_width_past_the_last_tiles(plugin, tmp_
     burst.setDistanceUnit(MM)
     burst.setColor(QColor("blue"))
     burst.setColor2(QColor("yellow"))
-    layer = _layer("Polygon", SQUARE, str(tmp_path / "s.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst])))
-    rules, _ = _flatten(tmp_path, layer)
-    for zoom in (16.6, 19.1, 21.9):
+
+    def flatten(distance):
+        burst.setMaxDistance(distance)
+        layer = _layer("Polygon", SQUARE, str(tmp_path / f"s{distance}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst.clone()])))
+        return _flatten(tmp_path, layer)
+    rules, _ = flatten(3)
+    # A quarter of a zoom in the tiles' range (+-9 %), half a zoom past it.
+    for zoom, rel in ((16.6, 0.1), (19.1, 0.2), (21.9, 0.2)):
         drawn = _at(rules, zoom)
         assert len(drawn) == 1
         distance = drawn[0].recipe.param("bands")[0].param("distance")
-        assert distance == pytest.approx(3 * _per_mm(zoom), rel=0.1)  # a quarter of a zoom
+        assert distance == pytest.approx(3 * _per_mm(zoom), rel=rel)
+    # 1 mm is narrower than a unit of the zoom-16 tiles' geometry grid from
+    # zoom 21 (8 px at zoom 22): the inner colour, without bands.
+    rules, diags = flatten(1)
+    assert _at(rules, 20.9)[0].recipe.kind == "color_bands"
+    for zoom in (21.0, 22.0):
+        drawn = _at(rules, zoom)
+        assert len(drawn) == 1 and drawn[0].recipe is None
+        fill = drawn[0].rule.symbol().symbolLayer(0)
+        assert fill.layerType() == "SimpleFill" and fill.color() == QColor("yellow")
+    assert diags.by_code("Q2VT_GRADIENT_APPROXIMATE")
 
 
 def test_screen_offset_vertex_markers_keep_their_offset_past_the_last_tiles(plugin, tmp_path):
