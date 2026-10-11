@@ -67,6 +67,16 @@ class FlattenedRule:
     # only the features lifted into it, or (stratum 0) all the others; None
     # draws every feature.
     feature_filter: Optional[list] = None
+    # Zoom whose map scale the scale-dependent expressions of the rule
+    # (@map_scale, @zoom_level) are evaluated at; None: its first tile zoom
+    # ("o"). Set where they differ: a piece of a rule split at a scale
+    # threshold, or a zoom beyond the archive's last one, drawn from the
+    # last zoom's tiles.
+    scale_zoom: Optional[float] = None
+    # The rule filter before @map_scale was bound for this piece (labels
+    # are matched to the features of the renderer rule, then bound at their
+    # own zoom); None: the filter itself.
+    unbound_filter: Optional[str] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -75,8 +85,18 @@ class FlattenedRule:
             self.layer, self.output_dataset, self.visibility, self.recipe, self.order,
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
-            self.z_order, self.feature_filter,
+            self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
         )
+
+    def evaluation_zoom(self) -> float:
+        """The zoom whose map scale this rule's scale-dependent values use."""
+        return float(self.scale_zoom if self.scale_zoom is not None else self.get_attr("o"))
+
+    def renderer_filter(self) -> str:
+        """The rule's filter, @map_scale unbound (see ``unbound_filter``)."""
+        if self.unbound_filter is not None:
+            return self.unbound_filter
+        return self.rule.filterExpression()
 
     @property
     def rule_id(self) -> str:

@@ -120,7 +120,6 @@ from qgis.core import (
 from ..utils import crash_log, main_thread
 from ..utils.config import _DATA_SIMPLIFICATION_TOLERANCE, _EPSG_CRS, _FIELD_PREFIX
 from ..utils.flattened_rule import FlattenedRule
-from ..utils.zoom_levels import ZoomLevels
 from .ddp_fetcher import DataDefinedPropertiesFetcher
 from . import export_cache
 from .datasets import DatasetInfo, ExportedDataset, gpkg_info
@@ -128,7 +127,9 @@ from . import label_lines
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity import feature_order as fo
-from .fidelity.qgis_expr import bind_geometry, in_layer_crs, substitute_geometry, with_map_scale
+from .fidelity.qgis_expr import (bind_geometry, in_layer_crs, substitute_geometry, uses_map_scale,
+                                 with_map_scale)
+from .fidelity import zoom as fidelity_zoom
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .materializer import pattern_anchor_kind
@@ -3163,11 +3164,11 @@ class RulesExporter:
         """
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
-            zoom_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            zoom_scale = fidelity_zoom.zoom_to_scale(flat_rule.evaluation_zoom())
             if rule_type == 1 and flat_rule.rule.settings():
                 settings = flat_rule.rule.settings()
                 label_exp = settings.getLabelExpression().expression()
-                if label_exp and "map_scale" in label_exp:
+                if label_exp and uses_map_scale(label_exp):
                     settings.fieldName = with_map_scale(label_exp, zoom_scale)
                     settings.isExpression = True
                 if settings.geometryGeneratorEnabled:
@@ -3192,7 +3193,7 @@ class RulesExporter:
         for flat_rule in flat_rules:
             rule_type = flat_rule.get_attr("t")
             suffix = flat_rule.get_attr("s") if rule_type == 0 else flat_rule.get_attr("f")
-            min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            min_scale = fidelity_zoom.zoom_to_scale(flat_rule.evaluation_zoom())
             rule_fields = DataDefinedPropertiesFetcher(
                 flat_rule.rule, min_scale, suffix, diagnostics=self.diagnostics
             ).fetch()

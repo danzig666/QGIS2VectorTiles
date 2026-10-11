@@ -563,7 +563,7 @@ class QGIS2VectorTiles:
         return RulesFlattener(
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
-            fast_markers=self.fast_markers, lengths=self.lengths,
+            fast_markers=self.fast_markers, lengths=self.lengths, overzoom=self.profile.overzoom,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).

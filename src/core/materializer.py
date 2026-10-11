@@ -44,6 +44,8 @@ from ..utils.config import Qt
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import ZoomInterval
+from .fidelity import zoom as fidelity_zoom
+from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.units import physical_factor, normalize_unit, MM
@@ -135,9 +137,16 @@ class SymbolMaterializer:
     """Rewrite flattened rules into materialized or simplified components."""
 
     def __init__(self, diagnostics: DiagnosticCollector, max_zoom: int = 24,
-                 fast_markers: bool = False, min_zoom: int = 0):
+                 fast_markers: bool = False, min_zoom: int = 0,
+                 overzoom_top: Optional[int] = None):
         self.diagnostics = diagnostics
         self.max_zoom = max_zoom
+        # Last zoom evaluated on its own beyond the archive's last zoom (the
+        # browser draws that zoom's tiles there); max_zoom: none.
+        self.overzoom_top = max_zoom if overzoom_top is None else max(max_zoom, overzoom_top)
+        # Pieces of a rule that share their tile zooms (beyond the last
+        # zoom) get distinct names: attribute "z", unique in the export.
+        self._pieces = 0
         # The export's first zoom: rules are materialized before the flattener
         # clamps their zoom range, so a rule without a scale limit still
         # starts at zoom 0 here (see _zoom_range).
@@ -153,6 +162,16 @@ class SymbolMaterializer:
         """(first, last) zoom of a rule within the export's zooms (first >
         last: none of them)."""
         return max(rule.get_attr("o"), self.min_zoom), min(rule.get_attr("i"), self.max_zoom)
+
+    def distinguish(self, rules: List[FlattenedRule]) -> None:
+        """Rules split from one rule that share a name (pieces with the same
+        tile zooms) get distinct ones (attribute "z")."""
+        seen = set()
+        for rule in rules:
+            if rule.rule.description() in seen:
+                self._pieces += 1
+                rule.set_attr("z", self._pieces)
+            seen.add(rule.rule.description())
 
     def _report(self, code: str, message: str, flat_rule: FlattenedRule, **extra):
         self.diagnostics.add(code, message, layer_id=flat_rule.layer.id(),
@@ -249,7 +268,8 @@ class SymbolMaterializer:
         """Marker-line interval / offset along the line that depend on the
         map scale only (``CASE WHEN @map_scale > 3000 THEN 10 ELSE 3 END``):
         one rule per zoom, with the value at that zoom's scale, so the
-        markers can still be placed exactly. None when not applicable."""
+        markers can still be placed exactly (and per zoom beyond the last
+        tile zoom while the value changes). None when not applicable."""
         from qgis.core import QgsExpression  # pylint: disable=import-outside-toplevel
         props = layer.dataDefinedProperties()
         scale_only = []
@@ -259,44 +279,94 @@ class SymbolMaterializer:
                 continue
             expression = QgsExpression(prop.asExpression())
             if expression.referencedColumns() - {""} or \
-                    set(expression.referencedVariables()) - {"map_scale"}:
+                    set(expression.referencedVariables()) - set(SCALE_VARIABLES):
                 return None  # feature-dependent: not placed exactly
-            if "map_scale" in expression.referencedVariables():
+            if set(expression.referencedVariables()) & set(SCALE_VARIABLES):
                 scale_only.append(key)
         low, high = self._zoom_range(flat_rule)
-        if not scale_only or low >= high:
-            if scale_only:
-                for key in scale_only:
-                    self._fold_constant_ddp(layer, key, self._setter(layer, key),
-                                            ZoomLevels.zoom_to_scale(low))
+        if not scale_only:
             return None
-        parts = []
-        for rule in self._per_zoom(flat_rule):
-            zoom = rule.get_attr("o")
+        # Every zoom, beyond the last tile zoom too (its value was kept
+        # there: a spacing switched at 1:3000 never switched in overzoom);
+        # zooms beyond it valued alike are drawn by the same rule.
+        groups = []  # [(rule, folded symbol layer, values)]
+        for rule in self._per_zoom(flat_rule, overzoom=True):
             clone = rule.rule.symbol().symbolLayer(0)
             for key in scale_only:
                 self._fold_constant_ddp(clone, key, self._setter(clone, key),
-                                        ZoomLevels.zoom_to_scale(zoom))
+                                        fidelity_zoom.zoom_to_scale(rule.evaluation_zoom()))
+            values = (clone.interval(), clone.offsetAlongLine(),
+                      tuple(clone.dataDefinedProperties().isActive(key) for key in scale_only))
+            if groups and rule.scale_zoom is not None and groups[-1][2] == values:
+                groups[-1][0].visibility = self._visibility_hull(groups[-1][0].visibility,
+                                                                 rule.visibility)
+                continue
+            groups.append((rule, clone, values))
+        if len(groups) == 1 and low >= high:
+            for key in scale_only:
+                self._fold_constant_ddp(layer, key, self._setter(layer, key),
+                                        ZoomLevels.zoom_to_scale(low))
+            return None
+        parts = []
+        for rule, clone, _ in groups:
             result = self.materialize(rule, clone)
             parts.extend(result if result is not None else [rule])
         return parts
 
-    def _per_zoom(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
-        """One rule per zoom of ``flat_rule``; the last keeps its overzoom."""
+    @staticmethod
+    def _visibility_hull(first: Optional[ZoomInterval], second: Optional[ZoomInterval]):
+        """The interval covering two touching intervals."""
+        if first is None or second is None:
+            return None
+        high = None if first.max_zoom is None or second.max_zoom is None \
+            else max(first.max_zoom, second.max_zoom)
+        return ZoomInterval(min(first.min_zoom, second.min_zoom), high)
+
+    def _per_zoom(self, flat_rule: FlattenedRule, overzoom: bool = False) -> List[FlattenedRule]:
+        """One rule per zoom of ``flat_rule``; the last keeps its overzoom.
+
+        ``overzoom``: also one per zoom beyond the archive's last zoom, up to
+        ``overzoom_top`` (then open), drawn from that zoom's tiles; their
+        ``scale_zoom`` is the zoom they are shown at."""
         low, high = self._zoom_range(flat_rule)
         if low > high:
             return [flat_rule]
         if low == high and (flat_rule.get_attr("o"), flat_rule.get_attr("i")) == (low, high):
-            return [flat_rule]
-        rules = []
-        for zoom in range(low, high + 1):
+            rules = [flat_rule]
+        else:
+            rules = []
+            for zoom in range(low, high + 1):
+                rule = flat_rule.derive()
+                rule.set_attr("o", zoom)
+                rule.set_attr("i", zoom)
+                if flat_rule.visibility is not None:
+                    rule.visibility = flat_rule.visibility.intersect(
+                        ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+                rules.append(rule)
+        if not overzoom or high < self.max_zoom or self.overzoom_top <= self.max_zoom:
+            return rules
+        visible = rules[-1].visibility or ZoomInterval(float(high), None)
+        beyond = []
+        for zoom in range(high + 1, self.overzoom_top + 1):
+            interval = visible.intersect(ZoomInterval(
+                float(zoom), None if zoom == self.overzoom_top else float(zoom + 1)))
+            if interval.is_empty:
+                continue
             rule = flat_rule.derive()
-            rule.set_attr("o", zoom)
-            rule.set_attr("i", zoom)
-            if flat_rule.visibility is not None:
-                rule.visibility = flat_rule.visibility.intersect(
-                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
-            rules.append(rule)
+            rule.set_attr("o", high)
+            rule.set_attr("i", high)
+            rule.visibility = interval
+            rule.scale_zoom = float(zoom)
+            beyond.append(rule)
+        if not beyond:
+            return rules
+        if rules[-1] is flat_rule:
+            rules[-1] = flat_rule.derive()
+        rules[-1].visibility = visible.intersect(ZoomInterval(visible.min_zoom, float(high + 1)))
+        if rules[-1].visibility.is_empty:
+            rules.pop()
+        rules.extend(beyond)
+        self.distinguish(rules)
         return rules
 
     @staticmethod
@@ -317,11 +387,11 @@ class SymbolMaterializer:
             return
         text = prop.asExpression()
         original = QgsExpression(text)
-        allowed = {"map_scale"} if scale is not None else set()
+        allowed = set(SCALE_VARIABLES) if scale is not None else set()
         if original.hasParserError() or original.referencedColumns() - {""} or \
                 set(original.referencedVariables()) - allowed:
             return
-        if scale is not None and "@map_scale" in text:
+        if scale is not None and uses_map_scale(text):
             text = with_map_scale(text, scale)
         expression = QgsExpression(text)
         value = expression.evaluate(QgsExpressionContext([QgsExpressionContextUtils.globalScope()]))

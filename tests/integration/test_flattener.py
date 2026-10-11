@@ -12,10 +12,10 @@ def flattener(plugin):
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
     from fidelity.diagnostics import DiagnosticCollector
 
-    def run(min_zoom=0, max_zoom=14):
+    def run(min_zoom=0, max_zoom=14, **options):
         diags = DiagnosticCollector()
         rules = RulesFlattener(min_zoom, max_zoom, "/tmp", QgsProcessingFeedback(),
-                               diags).flatten_all_rules()
+                               diags, **options).flatten_all_rules()
         return rules, diags
     return run
 
@@ -250,7 +250,10 @@ def test_switched_off_map_scale_property_does_not_split_per_zoom(flattener, acti
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     reset_project(layer)
     rules, _ = flattener(min_zoom=12, max_zoom=15)
-    assert len(rules) == (4 if active else 1), [r.output_dataset for r in rules]
+    # Active: split where the width changes (1:1000), not per zoom.
+    assert len(rules) == (2 if active else 1), [r.output_dataset for r in rules]
+    if active:
+        assert rules[1].visibility.min_zoom == pytest.approx(zm.scale_to_zoom(1000))
     # The project's own symbol keeps its switched-off property.
     kept = layer.renderer().symbol().symbolLayer(0).dataDefinedProperties().property(
         QgsSymbolLayer.Property.PropertyStrokeWidth)
@@ -450,3 +453,277 @@ def test_map_unit_curved_labels_fit_maplibre_line_check(flattener, tmp_path):
     assert labels[17].param("size") == pytest.approx(2 * labels[16].param("size"))
     assert labels[16].param("fit") == 1.0 and labels[17].param("fit") == pytest.approx(2.0)
     assert labels[16].param("chop") == pytest.approx(1.0)               # grows with the map
+
+
+# --- zooms beyond the export's last tile zoom (Publish: tiles 0-16, the
+# browser zooms in to 22 on the zoom-16 tiles) ---------------------------------
+
+def _shown_at(rules, zoom, rule_type=0):
+    return [r for r in rules if r.get_attr("t") == rule_type and r.visibility.contains(zoom)]
+
+
+def _matches(rule, layer):
+    """Ids of the features a flat rule's (bound) filter selects."""
+    request = QgsFeatureRequest()
+    if rule.rule.filterExpression():
+        request = QgsFeatureRequest(QgsExpression(rule.rule.filterExpression()))
+    return sorted(f["id"] for f in layer.getFeatures(request))
+
+
+def _fills(rules):
+    """The fill components (not the outlines drawn as lines)."""
+    return [r for r in rules if r.get_attr("c") == 2]
+
+
+def test_rules_shown_only_beyond_the_last_tile_zoom_are_drawn_from_its_tiles(flattener):
+    """A rule from 1:1000 (zoom 18.2), a layer shown from 1:1500, a label
+    limited to 1:1500 and an ELSE rule beside a rule up to 1:1000 were
+    dropped from a 0-16 export (their first tile zoom is beyond 16): the
+    web map never drew them, even at zoom 22."""
+    from qgis.core import (QgsFillSymbol, QgsPalLayerSettings, QgsRuleBasedRenderer,
+                           QgsVectorLayerSimpleLabeling)
+    detail = rule_based(zoning_layer("detail"), [("d", "", 1000, 0, True, "0,160,0")])
+    near = rule_based(zoning_layer("near"), [("n", "", 0, 0, True, "0,0,255")])
+    near.setScaleBasedVisibility(True)
+    near.setMinimumScale(1500)
+    near.setMaximumScale(0)
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.scaleVisibility = True
+    settings.minimumScale = 1500
+    settings.maximumScale = 0
+    labelled = rule_based(zoning_layer("labelled"), [("l", "", 0, 0, True, "128,128,128")])
+    labelled.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    labelled.setLabelsEnabled(True)
+    other = zoning_layer("other")
+    root = QgsRuleBasedRenderer.Rule(None)
+    near_rule = QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": "blue"}), 0, 0,
+                                          "\"zone\" = 'K1'", "A")
+    near_rule.setMinimumScale(5000)
+    near_rule.setMaximumScale(1000)
+    root.appendChild(near_rule)
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": "red"}),
+                                               0, 0, "ELSE", "else"))
+    other.setRenderer(QgsRuleBasedRenderer(root))
+    reset_project(detail, near, labelled, other)
+    rules, _ = flattener(0, 16)
+    for name, scale, rule_type in (("detail", 1000, 0), ("near", 1500, 0), ("labelled", 1500, 1)):
+        shown = [r for r in _shown_at(rules, 20.0, rule_type) if r.layer.name() == name]
+        assert shown, name
+        for rule in shown:
+            assert (rule.get_attr("o"), rule.get_attr("i")) == (16, 16)  # the zoom-16 tiles
+            assert rule.visibility.min_zoom == pytest.approx(zm.scale_to_zoom(scale))
+            assert rule.visibility.max_zoom is None
+        assert not [r for r in _shown_at(rules, 16.5, rule_type) if r.layer.name() == name]
+    # ELSE: the features A does not draw while A is shown, then all of them.
+    everything = sorted(f["id"] for f in other.getFeatures())
+    for zoom in (17.0, 20.0, 23.0):
+        drawn = sorted(i for r in _fills(_shown_at(rules, zoom)) if r.layer.name() == "other"
+                       for i in _matches(r, other))
+        assert drawn == everything, zoom
+
+
+def test_rules_beyond_max_zoom_plus_one_are_reported_when_the_map_stops(flattener):
+    """Hide layers beyond the maximum zoom: such a rule is never shown; it
+    is left out with a diagnostic, not silently."""
+    from fidelity.model import OverzoomPolicy
+    reset_project(rule_based(zoning_layer("detail"), [("d", "", 1000, 0, True, "0,160,0")]))
+    rules, diags = flattener(0, 16, overzoom=OverzoomPolicy.STOP)
+    assert not rules
+    assert diags.by_code("Q2VT_ZOOM_EMPTY_INTERVAL")
+
+
+def test_labels_are_not_shown_where_no_renderer_rule_draws(flattener):
+    """QGIS labels only the features its renderer draws: a label from zoom
+    14 of a layer drawn at zooms 10-13 shows nothing (it was exported for
+    every feature, floating without symbols). The "No symbols" renderer
+    still labels every feature."""
+    from qgis.core import (QgsNullSymbolRenderer, QgsPalLayerSettings,
+                           QgsVectorLayerSimpleLabeling)
+
+    def labelled(layer):
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "zone"
+        settings.scaleVisibility = True
+        settings.minimumScale = zm.zoom_to_scale(14)
+        settings.maximumScale = 0
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        return layer
+    drawn = labelled(rule_based(zoning_layer("drawn"), [
+        ("r", "", zm.zoom_to_scale(10), zm.zoom_to_scale(13.5), True, "0,0,255")]))
+    plain = labelled(zoning_layer("plain"))
+    plain.setRenderer(QgsNullSymbolRenderer())
+    reset_project(drawn, plain)
+    rules, _ = flattener(0, 16)
+    labels = {r.layer.name() for r in rules if r.get_attr("t") == 1}
+    assert labels == {"plain"}
+
+
+def test_map_scale_rules_switch_where_qgis_switches_them(flattener):
+    """A filter, a symbol layer enabled and a width switched by @map_scale
+    below the scale of the export's last zoom (1:2000 < 1:4514 at zoom 16)
+    never switched on the web map: the zoom-16 value was kept up to zoom
+    22. Inside the export a 1:5000 switch came up to a zoom late (at zoom
+    16, not 15.85)."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    from fidelity.qgis_expr import with_map_scale
+    layer = rule_based(zoning_layer(), [("f", "@map_scale < 2000", 0, 0, True, "0,0,255"),
+                                        ("e", "", 0, 0, True, "255,0,0"),
+                                        ("w", "", 0, 0, True, "0,160,0"),
+                                        ("lag", "@map_scale < 5000", 0, 0, True, "0,0,0")])
+    width = "CASE WHEN @map_scale < 2000 THEN 3 ELSE 0.5 END"
+    children = layer.renderer().rootRule().children()
+    children[1].symbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyLayerEnabled, QgsProperty.fromExpression("@map_scale < 2000"))
+    children[2].symbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyStrokeWidth, QgsProperty.fromExpression(width))
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    everything = sorted(f["id"] for f in layer.getFeatures())
+
+    def shown(color, zoom):
+        return [r for r in _fills(_shown_at(rules, zoom))
+                if r.rule.symbol().color().name() == color]
+    switch = zm.scale_to_zoom(2000)
+    for color in ("#0000ff", "#ff0000"):
+        assert not [r for r in shown(color, switch - 0.05) if _matches(r, layer)], color
+        for zoom in (switch + 0.05, 20.0, 22.5):
+            [rule] = shown(color, zoom)
+            assert (rule.get_attr("o"), rule.get_attr("i")) == (16, 16)
+            assert _matches(rule, layer) == everything, (color, zoom)
+    # The width in each piece: the exporter binds @map_scale at its scale zoom.
+    for zoom, expected in ((switch - 0.05, 0.5), (switch + 0.05, 3), (21.0, 3)):
+        [rule] = shown("#00a000", zoom)
+        value = QgsExpression(with_map_scale(width, zm.zoom_to_scale(rule.evaluation_zoom())))
+        assert value.evaluate() == expected, zoom
+    lag = zm.scale_to_zoom(5000)
+    assert [_matches(r, layer) for r in shown("#000000", lag + 0.02)] == [everything]
+    assert not [r for r in shown("#000000", lag - 0.02) if _matches(r, layer)]
+
+
+def test_labels_of_a_map_scale_rule_follow_its_features_at_every_zoom(flattener):
+    """Labels of a rule '@map_scale < 50000 OR zone = K1' used the filter
+    bound at the first zoom (where only K1 is drawn) at every zoom: the
+    other features drawn closer in were never labelled."""
+    from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+    layer = rule_based(zoning_layer(), [("r", "@map_scale < 50000 OR \"zone\" = 'K1'", 0, 0,
+                                         True, "0,0,255")])
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    everything = sorted(f["id"] for f in layer.getFeatures())
+    k1 = sorted(f["id"] for f in layer.getFeatures() if f["zone"] == "K1")
+    assert k1 != everything
+    for zoom, expected in ((8.0, k1), (15.0, everything), (20.0, everything)):
+        drawn = [_matches(r, layer) for r in _fills(_shown_at(rules, zoom))]
+        labelled = [_matches(r, layer) for r in _shown_at(rules, zoom, 1)]
+        assert drawn == [expected] and labelled == [expected], zoom
+
+
+def test_zoom_level_variables_are_the_zoom_of_the_map_scale(flattener):
+    """@zoom_level / @vector_tile_zoom (QGIS's map scope, from the map
+    scale) were NULL: rules filtered with them exported no feature."""
+    layer = rule_based(zoning_layer(), [("hi", "@zoom_level >= 15", 0, 0, True, "255,0,0"),
+                                        ("lo", "@zoom_level < 15", 0, 0, True, "0,0,255"),
+                                        ("v", "@vector_tile_zoom > 17.5", 0, 0, True, "0,160,0")])
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    everything = sorted(f["id"] for f in layer.getFeatures())
+    # QGIS: zoom_level = round(log2(559082264.03 / scale) - 1).
+    switch = zm.scale_to_zoom(559082264.0287178 / 2 ** 15.5)
+    for zoom, colors in ((switch - 0.05, {"#0000ff"}), (switch + 0.05, {"#ff0000"}),
+                         (20.0, {"#ff0000", "#00a000"})):
+        drawn = {r.rule.symbol().color().name() for r in _fills(_shown_at(rules, zoom))
+                 if _matches(r, layer) == everything}
+        assert drawn == colors, zoom
+
+
+def test_heatmap_intensity_goes_on_beyond_the_last_tile_zoom(flattener):
+    """An automatic-maximum heatmap is rescaled per zoom up to zoom 22 (its
+    stops ended at the last tile zoom: washed out when zoomed in)."""
+    from qgis.core import Qgis, QgsFeature, QgsGeometry, QgsHeatmapRenderer, QgsVectorLayer
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "pts", "memory")
+    for x in range(5):
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({x * 6} 0)"))
+        layer.dataProvider().addFeature(feature)
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setRadius(5)
+    heatmap.setRadiusUnit(Qgis.RenderUnit.Millimeters)
+    layer.setRenderer(heatmap)
+    reset_project(layer)
+    rules, _ = flattener(10, 16)
+    stops = dict(rules[0].heatmap["intensity_stops"])
+    assert min(stops) == 10 and max(stops) == 22
+
+
+def test_scale_switched_marker_interval_switches_beyond_the_last_tile_zoom(flattener):
+    """A marker-line interval CASE WHEN @map_scale > 3000 THEN 10 ELSE 3
+    END kept its zoom-16 value (10 mm) up to zoom 22."""
+    from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsLineSymbol, QgsMarkerLineSymbolLayer,
+                           QgsMarkerSymbol, QgsProperty, QgsSingleSymbolRenderer, QgsSymbolLayer,
+                           QgsVectorLayer)
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857&field=id:integer", "line", "memory")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([1])
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 0, 400 0)"))
+    layer.dataProvider().addFeatures([feature])
+    markers = QgsMarkerLineSymbolLayer()
+    markers.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    markers.setInterval(3)
+    markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "circle", "size": "1.5"}))
+    markers.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyInterval, QgsProperty.fromExpression(
+        "CASE WHEN @map_scale > 3000 THEN 10 ELSE 3 END"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([markers])))
+    reset_project(layer)
+    rules, _ = flattener(14, 16)
+
+    def intervals(zoom):
+        return {r.rule.symbol().symbolLayer(0).interval() for r in _shown_at(rules, zoom)
+                if r.rule.symbol().symbolLayer(0).layerType() == "MarkerLine"}
+    # Beyond the last tile zoom MapLibre spaces the markers (on screen):
+    # 3 mm from zoom 17 (1:2257), as QGIS from 1:3000.
+    assert intervals(17.5) == {3.0} and intervals(21.0) == {3.0}
+
+
+def test_point_clusters_break_apart_beyond_the_last_tile_zoom(flattener):
+    """QGIS's cluster distance is on screen: zooming in splits the clusters.
+    The last tile zoom's grouping was kept up to zoom 24."""
+    from qgis.core import (Qgis, QgsFeature, QgsGeometry, QgsMarkerSymbol, QgsPointClusterRenderer,
+                           QgsSingleSymbolRenderer, QgsVectorLayer)
+    layer = QgsVectorLayer("Point?crs=EPSG:3857&field=id:integer", "pts", "memory")
+    features = []
+    for i, (x, y) in enumerate(((0, 0), (15, 0), (200, 0), (215, 0))):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([i])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({x} {y})"))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    renderer = QgsPointClusterRenderer()
+    renderer.setTolerance(10)
+    renderer.setToleranceUnit(Qgis.RenderUnit.Millimeters)
+    renderer.setEmbeddedRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    layer.setRenderer(renderer)
+    reset_project(layer)
+    rules, _ = flattener(10, 16)
+
+    from fidelity import point_groups as pg
+    points = [(f.geometry().asPoint().x(), f.geometry().asPoint().y())
+              for f in layer.getFeatures()]
+
+    def groups(zoom):
+        shown = _shown_at(rules, zoom)
+        assert shown, zoom
+        return {len(group) for rule in shown
+                for group in pg.group_points(points, dict(rule.point_group[3])["tolerance"])}
+    # 15 m apart: a cluster per pair at zoom 16 (10 mm is about 45 m), the
+    # single points once 10 mm is under 15 m (about zoom 17.6).
+    assert groups(16.5) == {2}
+    assert groups(18.5) == {1} and groups(22.5) == {1}
+    assert all((r.get_attr("o"), r.get_attr("i")) == (16, 16) for r in _shown_at(rules, 18.5))
+    names = [r.output_dataset for r in rules]
+    assert len(names) == len(set(names))

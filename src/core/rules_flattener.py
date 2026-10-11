@@ -9,6 +9,7 @@ recursively flattens the rule hierarchy with full property inheritance
 Depends on: config, zoom_levels, flattened_rule
 """
 
+import html
 import math
 from typing import Dict, List, Optional, Union
 
@@ -39,12 +40,12 @@ from ..utils.config import QDomDocument
 from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .fidelity.diagnostics import DiagnosticCollector
-from .fidelity.model import ZoomInterval
+from .fidelity.model import OverzoomPolicy, ZoomInterval
 from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.units import LengthConverter
-from .fidelity.qgis_expr import (and_filters, enabled_condition, substitute_geometry,
-                                 with_map_scale)
+from .fidelity.qgis_expr import (and_filters, enabled_condition, scale_thresholds,
+                                 substitute_geometry, uses_map_scale, with_map_scale)
 from .fidelity.materialize import coerce_to_symbol_type
 from .materializer import SymbolMaterializer
 
@@ -87,8 +88,16 @@ class RulesFlattener:
     def __init__(self, min_zoom: int, max_zoom: int, utils_dir, feedback,
                  diagnostics: Optional[DiagnosticCollector] = None, layer_ids=None,
                  scale_limits=None, extent=None, fast_markers: bool = False,
-                 lengths: Optional[LengthConverter] = None):
+                 lengths: Optional[LengthConverter] = None,
+                 overzoom: OverzoomPolicy = OverzoomPolicy.PERSIST):
         self.min_zoom = min_zoom
+        # Beyond the archive's last zoom the browser keeps drawing its tiles
+        # (PERSIST, the viewer zooms in to 22 by default): rules that start
+        # there are drawn from them, and values that depend on the scale are
+        # evaluated per zoom up to this zoom (the last one stays open).
+        self.overzoom = OverzoomPolicy(overzoom)
+        self.overzoom_top = max_zoom if self.overzoom == OverzoomPolicy.STOP else \
+            max(max_zoom, fidelity_zoom.MAX_TILE_ZOOM)
         # Unit converter of the style (map-unit context of the project): the
         # pixel sizes of labels laid out at export time.
         self.lengths = lengths or LengthConverter()
@@ -111,7 +120,8 @@ class RulesFlattener:
         # user's project (renderer, labeling, ELSE rules, scale visibility).
         self._rule_systems: list = []
         self.materializer = SymbolMaterializer(self.diagnostics, max_zoom=max_zoom,
-                                               fast_markers=fast_markers, min_zoom=min_zoom)
+                                               fast_markers=fast_markers, min_zoom=min_zoom,
+                                               overzoom_top=self.overzoom_top)
         # Depth -> first rule number of the next parent's children: rule
         # numbers ("r") are unique per depth within a (layer, rule type) pass.
         self._child_base = {}
@@ -120,6 +130,9 @@ class RulesFlattener:
         # renderer honours symbol-layer rendering passes.
         self._draw_seq = 0
         self._honor_passes = False
+        # Layers whose renderer draws features (not "No symbols"): QGIS
+        # labels only the features drawn.
+        self._drawn_layers = set()
 
     def flatten_all_rules(self) -> List[FlattenedRule]:
         """Extract and flatten all rules from visible vector layers."""
@@ -197,6 +210,8 @@ class RulesFlattener:
             if rule_type == 0:
                 self._draw_seq = 0
                 self._honor_passes = self._renderer_honors_passes(layer.renderer())
+                if layer.renderer() is not None and layer.renderer().type() != "nullSymbol":
+                    self._drawn_layers.add(layer.id())
             if root_rule:
                 self._child_base = {}  # reset per (layer, rule_type) pass
                 before = len(self.flattened_rules)
@@ -490,8 +505,8 @@ class RulesFlattener:
     POINT_GROUP_STEPS = 8
 
     def _point_group_bands(self, renderer, layer, zoom: int, points):
-        """[(start zoom, end zoom, params)] of one zoom: where the grouping (or
-        a displacement's sizes) changes."""
+        """[(start zoom, end zoom, params, groups, moves)] of one zoom: where
+        the grouping (or a displacement's sizes) changes."""
         from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
         cluster = renderer.type() == "pointCluster"
         bands = []
@@ -507,7 +522,7 @@ class RulesFlattener:
                 bands[-1] = (first, end, params, groups, False)
             else:
                 bands.append((start, end, params, groups, moves))
-        return [(start, end, params) for start, end, params, _, _ in bands]
+        return bands
 
     def _expand_point_groups(self, layer, before: int) -> None:
         """Every component of a point cluster / displacement layer, one rule
@@ -526,23 +541,34 @@ class RulesFlattener:
                 flat_rule.set_attr("g", 1)  # drawn on generated lines
             if role in ("cluster", "center"):
                 self._cluster_variables(flat_rule.rule.symbol())
-            per_zoom = self.materializer._per_zoom(flat_rule)  # pylint: disable=protected-access
+            # Grouped per zoom beyond the last tile zoom too (from its tiles):
+            # QGIS's tolerance is on screen, so clusters break apart as the
+            # map zooms in; the last zoom's groups were kept up to zoom 24.
+            per_zoom = self.materializer._per_zoom(flat_rule, overzoom=True)  # pylint: disable=protected-access
+            previous = None  # (band rule, its groups, displaced)
             for index, rule in enumerate(per_zoom):
-                zoom = int(rule.get_attr("o"))
+                zoom = int(rule.evaluation_zoom())
                 if zoom not in bands:
                     bands[zoom] = self._point_group_bands(renderer, layer, zoom, points)
                 visible = rule.visibility or ZoomInterval(
                     float(zoom), None if index == len(per_zoom) - 1 else zoom + 1.0)
-                for band, (start, end, params) in enumerate(bands[zoom]):
+                for band, (start, end, params, groups, moves) in enumerate(bands[zoom]):
                     last = band == len(bands[zoom]) - 1 and visible.max_zoom is None
                     interval = visible.intersect(ZoomInterval(start, None if last else end))
                     if interval.is_empty:
+                        continue
+                    if rule.scale_zoom is not None and previous is not None and \
+                            previous[1] == groups and not moves and not previous[2]:
+                        # Beyond the last tile zoom, grouped as the band before.
+                        previous[0].visibility = self._visibility_hull(previous[0].visibility,
+                                                                       interval)
                         continue
                     banded = rule.derive()
                     banded.visibility = interval
                     banded.set_attr("b", band)
                     banded.point_group = (mode, role, round((start + end) / 2, 4), params)
                     self.flattened_rules.append(banded)
+                    previous = (banded, groups, moves)
         self.diagnostics.add(
             "Q2VT_SYMBOL_APPROXIMATE",
             f"{'Point cluster' if mode == 'cluster' else 'Point displacement'} renderer: points "
@@ -628,7 +654,9 @@ class RulesFlattener:
                 break
         unit = renderer.radiusUnit()
         screen = normalize_unit(unit) != "map" and _to_mm(1.0, unit) is not None
-        zooms = list(range(int(self.min_zoom), int(self.max_zoom) + 1))
+        # Intensity per zoom up to the last zoom the browser shows on its own
+        # (the tiles of the last zoom): MapLibre keeps the last stop beyond.
+        zooms = list(range(int(self.min_zoom), int(self.overzoom_top) + 1))
         if crs.isGeographic():
             self.diagnostics.add("Q2VT_HEATMAP_APPROXIMATE",
                                  "Heatmap in a geographic project CRS: map-unit radius and density "
@@ -983,7 +1011,19 @@ class RulesFlattener:
             return inheritance_source
 
         if not self._is_within_zoom_range(flat_rule):
+            self.diagnostics.add(
+                "Q2VT_ZOOM_EMPTY_INTERVAL",
+                f"Rule '{rule.description() or rule.filterExpression() or rule_idx}' of layer "
+                f"'{layer.name()}' is shown only beyond the export's maximum zoom + 1, where the "
+                "web map hides every layer (scale range "
+                f"{rule.minimumScale():g} – {rule.maximumScale():g}).",
+                layer_id=layer.id(), rule_id=self._rule_key(rule),
+            )
             return inheritance_source
+        # Shown only beyond the last tile zoom: drawn from its tiles.
+        for edge in ("o", "i"):
+            if flat_rule.get_attr(edge) > self.max_zoom:
+                flat_rule.set_attr(edge, self.max_zoom)
 
         if rule_type == 0:
             self._draw_seq += 1
@@ -1084,11 +1124,14 @@ class RulesFlattener:
         return self._split_by_matching_renderers(flat_rule)
 
     def _is_within_zoom_range(self, flat_rule: FlattenedRule) -> bool:
-        """Return True if the rule's zoom range overlaps with the requested range."""
-        return self._ranges_overlap(
-            flat_rule.get_attr("o"), flat_rule.get_attr("i"),
-            self.min_zoom, self.max_zoom,
-        )
+        """Return True if the rule is shown within the export: its browser
+        interval overlaps the exported zooms, or the zooms beyond them while
+        the browser keeps drawing the last tiles (a rule from 1:1000, zoom
+        18.2, is drawn from the zoom-16 tiles of a 0-16 export; comparing
+        the tile zooms dropped it)."""
+        top = None if self.overzoom == OverzoomPolicy.PERSIST else float(self.max_zoom + 1)
+        return not flat_rule.visibility.intersect(
+            ZoomInterval(float(self.min_zoom), top)).is_empty
 
     def _clip_rules_to_zoom_range(self, flat_rules: List[FlattenedRule]):
         """Clamp each rule's zoom range to the global min/max zoom."""
@@ -1621,8 +1664,9 @@ class RulesFlattener:
         feature drawn by two rules twice: a category and a filterless
         catch-all rule (fill and outline) gave every zone code two labels."""
         label_min, label_max = label_rule.get_attr("o"), label_rule.get_attr("i")
+        all_runs = self._renderer_runs(label_rule.layer)
         runs = [(index, rule, span, visibility) for index, (rule, span, visibility)
-                in enumerate(self._renderer_runs(label_rule.layer))
+                in enumerate(all_runs)
                 if self._ranges_overlap(label_min, label_max, span[0], span[1])]
         cuts = {label_min, label_max + 1}
         for _, _, (low, high), _ in runs:
@@ -1649,7 +1693,11 @@ class RulesFlattener:
                 matched = self._match_label_to_renderers(label_rule, tuple(group), low, high)
                 if matched:
                     split_rules.append(matched)
-        return split_rules if split_rules else [label_rule]
+        if split_rules or all_runs or label_rule.layer.id() in self._drawn_layers:
+            # QGIS labels only the features its renderer draws: none where
+            # no renderer rule is shown (they floated without symbols).
+            return split_rules
+        return [label_rule]  # no renderer rules (e.g. the "No symbols" renderer)
 
     def _match_label_to_renderers(self, label_rule: FlattenedRule, active, low: int,
                                   high: int) -> Optional[FlattenedRule]:
@@ -1658,7 +1706,7 @@ class RulesFlattener:
         has no filter)."""
         filters: Optional[List[str]] = []
         for _, renderer_rule, _, _ in active:
-            expression = renderer_rule.rule.filterExpression()
+            expression = renderer_rule.renderer_filter()
             if not expression:
                 filters = None
                 break
@@ -1686,14 +1734,19 @@ class RulesFlattener:
         same rule (the same rule index and depth): its contiguous zooms count
         as one renderer rule. Matching a label to the first slice alone showed
         the labels at that slice's zoom only (a river's labels with flow arrows
-        only at the last zoom)."""
-        groups: Dict[str, list] = {}
+        only at the last zoom). Slices of a rule drawing other features (ELSE
+        pieces, symbol layers with an enabled condition) are runs of their
+        own; @map_scale slices compare their unbound filter (the first
+        slice's bound filter labelled the features of the first zoom at
+        every zoom)."""
+        groups: Dict[tuple, list] = {}
         for renderer_rule in self.flattened_rules:
             if renderer_rule.layer.id() != layer.id() or renderer_rule.get_attr("t") == 1:
                 continue
             if renderer_rule.recipe is not None and renderer_rule.recipe.kind == "callout":
                 continue
-            filter_id = f'{renderer_rule.get_attr("r")}{renderer_rule.get_attr("d")}'
+            filter_id = (renderer_rule.get_attr("r"), renderer_rule.get_attr("d"),
+                         renderer_rule.renderer_filter())
             groups.setdefault(filter_id, []).append(renderer_rule)
         runs = []
         for rules in groups.values():
@@ -1765,22 +1818,57 @@ class RulesFlattener:
         return a_min <= b_max and b_min <= a_max
 
     def _split_by_scale_expressions(self, flat_rule: FlattenedRule) -> List[FlattenedRule]:
-        """Split a rule per zoom level when it contains @map_scale-dependent expressions."""
-        if not self._has_scale_dependencies(flat_rule):
-            return [flat_rule]
+        """Split a rule whose expressions read the map scale (@map_scale,
+        @zoom_level, @vector_tile_zoom) into pieces with the scale bound.
 
-        # One clone per tile zoom the rule occupies (the legacy loop also
-        # produced a clone one zoom beyond the rule's own range).
-        min_zoom = flat_rule.get_attr("o")
-        max_zoom = min(self.max_zoom, flat_rule.get_attr("i"))
+        Expressions that only compare the scale with numbers change value at
+        those scales: the rule is cut exactly there (a zoom's slice valued at
+        its start switched up to a zoom late). Others change at every scale:
+        one piece per zoom, valued at its start. Both go on beyond the
+        archive's last zoom, up to ``overzoom_top`` (then open), drawn from
+        its tiles: the last zoom's value was kept, so "@map_scale < 2000"
+        never showed in a 0-16 export, even at zoom 22.
+        """
+        text = self._scale_dependency_text(flat_rule)
+        if text is None:
+            return [flat_rule]
+        interval = self._split_interval(flat_rule)
+        if interval.is_empty:
+            return []
+        thresholds = scale_thresholds(text)
+        if thresholds is None:
+            cuts = [float(zoom) for zoom in range(int(math.floor(interval.min_zoom + 1e-9)) + 1,
+                                                  self.overzoom_top + 1)]
+        else:
+            cuts = [fidelity_zoom.scale_to_zoom(scale) for scale in thresholds]
+        edges = [interval.min_zoom] + sorted(
+            {zoom for zoom in cuts if zoom > interval.min_zoom + 1e-9 and interval.contains(zoom)}
+        ) + [interval.max_zoom]
         split_rules = []
-        for zoom in range(min_zoom, max_zoom + 1):
-            clone = self._create_zoom_specific_rule(flat_rule, zoom, last=zoom == max_zoom)
-            if flat_rule.get_attr("t") == 1 or self._symbol_layer_visible_at_zoom(clone):
+        for low, high in zip(edges[:-1], edges[1:]):
+            piece = ZoomInterval(low, high)
+            if piece.is_empty:
+                continue
+            if thresholds is None:
+                at = math.floor(low + 1e-9)  # the zoom's start, as within a tile zoom
+            else:
+                at = low + 0.5 if high is None else (low + high) / 2.0  # same value throughout
+            clone = self._create_zoom_specific_rule(flat_rule, piece, at)
+            if clone is not None and (flat_rule.get_attr("t") == 1 or
+                                      self._symbol_layer_visible_at_zoom(clone, at)):
                 split_rules.append(clone)
+        self.materializer.distinguish(split_rules)
         return split_rules
 
-    def _symbol_layer_visible_at_zoom(self, flat_rule: FlattenedRule) -> bool:
+    def _split_interval(self, flat_rule: FlattenedRule) -> ZoomInterval:
+        """The browser interval a rule is drawn in: its visibility within its
+        tile zooms, and beyond the last tile zoom while overzooming."""
+        low, high = flat_rule.get_attr("o"), flat_rule.get_attr("i")
+        top = None if self.overzoom == OverzoomPolicy.PERSIST else float(self.max_zoom + 1)
+        window = ZoomInterval(float(low), float(high + 1) if high < self.max_zoom else top)
+        return (flat_rule.visibility or window).intersect(window)
+
+    def _symbol_layer_visible_at_zoom(self, flat_rule: FlattenedRule, zoom: float) -> bool:
         """Return False if the symbol layer's visibility DDP evaluates to falsy at the zoom."""
         symbol = flat_rule.rule.symbol()
         if not symbol:
@@ -1790,17 +1878,18 @@ class RulesFlattener:
             QgsSymbolLayer.Property.PropertyLayerEnabled
         )
         if vis_prop and vis_prop.isActive():
-            min_scale = ZoomLevels.zoom_to_scale(flat_rule.get_attr("o"))
+            scale = fidelity_zoom.zoom_to_scale(zoom)
             if self._is_feature_dependent(vis_prop.expressionString()):
                 return True  # feature dependent: folded into the rule filter
-            expression = QgsExpression(with_map_scale(vis_prop.expressionString(), min_scale))
+            expression = QgsExpression(with_map_scale(vis_prop.expressionString(), scale))
             evaluation = expression.evaluate()
             if not expression.hasEvalError() and evaluation is not None and not evaluation:
                 return False
         return True
 
-    def _has_scale_dependencies(self, flat_rule: FlattenedRule) -> bool:
-        """Return True if the rule's serialized XML contains @map_scale."""
+    def _scale_dependency_text(self, flat_rule: FlattenedRule) -> Optional[str]:
+        """The rule's serialized XML (its expressions) if it reads the map
+        scale (@map_scale, @zoom_level, @vector_tile_zoom), else None."""
         doc = QDomDocument("style")
         context = QgsReadWriteContext()
         rule_clone = flat_rule.rule.clone()
@@ -1816,33 +1905,52 @@ class RulesFlattener:
 
         doc.appendChild(elem)
         _drop_inactive_properties(elem)
-        return "@map_scale" in doc.toString()
+        text = html.unescape(doc.toString())
+        return text if uses_map_scale(text) else None
 
-    def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, zoom: int,
-                                   last: bool = False) -> FlattenedRule:
-        """Clone a rule with @map_scale replaced by the exact scale for the given zoom."""
+    def _create_zoom_specific_rule(self, flat_rule: FlattenedRule, piece: ZoomInterval,
+                                   zoom: float) -> Optional[FlattenedRule]:
+        """Clone a rule for the browser interval ``piece`` with the map scale
+        bound to that of ``zoom``; None if its filter is then always false.
+
+        Its data comes from the tile zooms of ``piece``; beyond the last
+        tile zoom, from that zoom's tiles."""
         rule_clone = flat_rule.derive()
-        scale = ZoomLevels.zoom_to_scale(zoom)
+        scale = fidelity_zoom.zoom_to_scale(zoom)
 
         filter_exp = flat_rule.rule.filterExpression()
-        if "@map_scale" in filter_exp:
-            rule_clone.rule.setFilterExpression(with_map_scale(filter_exp, scale))
+        if uses_map_scale(filter_exp):
+            bound = with_map_scale(filter_exp, scale)
+            if self._always_false(bound, filter_exp, flat_rule.layer):
+                return None
+            rule_clone.rule.setFilterExpression(bound)
+            rule_clone.unbound_filter = flat_rule.renderer_filter()
 
         if flat_rule.get_attr("t") == 1 and flat_rule.rule.settings():
             settings = flat_rule.rule.settings()
             label_exp = settings.getLabelExpression().expression()
-            if label_exp and "@map_scale" in label_exp:
+            if label_exp and uses_map_scale(label_exp):
                 clone_settings = rule_clone.rule.settings()
                 clone_settings.fieldName = with_map_scale(label_exp, scale)
                 clone_settings.isExpression = True
 
-        rule_clone.set_attr("o", zoom)
-        rule_clone.set_attr("i", zoom)
-        # The last zoom keeps the rule's own upper limit: closed at zoom + 1,
-        # Övezethatár disappeared beyond the export's maximum zoom + 1
-        # instead of following the overzoom setting.
-        upper = None if last else float(zoom + 1)
-        base = flat_rule.visibility if flat_rule.visibility is not None else \
-            ZoomInterval(float(zoom), None if last else float(zoom + 1))
-        rule_clone.visibility = base.intersect(ZoomInterval(float(zoom), upper))
+        first, last = flat_rule.get_attr("o"), min(flat_rule.get_attr("i"), self.max_zoom)
+        low = min(max(first, int(math.floor(piece.min_zoom + 1e-9))), last)
+        high = last if piece.max_zoom is None else \
+            max(low, min(last, int(math.ceil(piece.max_zoom - 1e-9)) - 1))
+        rule_clone.set_attr("o", low)
+        rule_clone.set_attr("i", high)
+        rule_clone.visibility = piece
+        rule_clone.scale_zoom = float(zoom)
         return rule_clone
+
+    def _always_false(self, bound: str, original: str, layer) -> bool:
+        """True if a filter that reads no feature is false (at its bound
+        scale): the piece draws nothing."""
+        if self._is_feature_dependent(original):
+            return False
+        from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+        expression = QgsExpression(bound)
+        value = expression.evaluate(
+            QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)))
+        return not expression.hasEvalError() and isinstance(value, (bool, int, float)) and not value
