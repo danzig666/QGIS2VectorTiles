@@ -1635,6 +1635,77 @@ def test_a_map_unit_frame_moves_with_its_offset_text(tmp_path, monkeypatch):
         assert abs(a - b) <= 3, (qf, qt, bf, bt)
 
 
+@pytest.mark.parametrize("case", ["pt_text_mu_offset", "mm_text_mm_offset"])
+def test_an_over_point_offset_is_not_turned_with_its_label(tmp_path, monkeypatch, case):
+    """A label turned 30 degrees with an X/Y offset: QGIS adds the offset
+    after turning the label (pal createCandidatesOverPoint), MapLibre turns
+    text-offset with the text (~60 px off at zoom 19). Drawn as text-translate."""
+    from qgis.core import QgsPalLayerSettings, QgsTextFormat
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 19.0)
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.angleOffset = 30
+    fmt = QgsTextFormat()
+    fmt.setColor(QColor("blue"))
+    if case == "pt_text_mu_offset":
+        fmt.setSize(10)
+        fmt.setSizeUnit(Qgis.RenderUnit.Points)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
+    else:
+        fmt.setSize(4)
+        fmt.setSizeUnit(Qgis.RenderUnit.Millimeters)
+        settings.xOffset, settings.yOffset, settings.offsetUnits = 8, -5, Qgis.RenderUnit.Millimeters
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_blue_box(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert browser is not None, qgis
+    for a, b in zip(qgis, browser):  # the turned text where QGIS draws it
+        assert abs(a - b) <= 4, (qgis, browser)
+
+
+def test_a_fixed_frame_moves_with_its_offset_text(tmp_path, monkeypatch):
+    """10 pt text 6, -4 mm off its point in a fixed 16 x 6 map-unit frame:
+    text-offset moved only the text (the frame stayed on the point)."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", 18.5)
+    settings = _framed_settings(10, Qgis.RenderUnit.Points,
+                                QgsTextBackgroundSettings.SizeType.SizeFixed, (16, 6), 0.6)
+    settings.xOffset, settings.yOffset, settings.offsetUnits = 6, -4, Qgis.RenderUnit.Millimeters
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    (qf, qt), (bf, bt) = (_red_and_blue_boxes(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qf[0] > SIZE / 2 - 30  # QGIS: the frame around the offset text
+    for a, b in zip(qf + qt, bf + bt):  # frame and text edges within 3 px
+        assert abs(a - b) <= 3, (qf, qt, bf, bt)
+
+
+def _red_pixels(path):
+    from PIL import Image
+    return sum(1 for p in Image.open(path).convert("RGB").getdata()
+               if p[0] > 150 and p[1] < 150 and p[2] < 150)
+
+
+@pytest.mark.parametrize("text_unit,text_size", [(Qgis.RenderUnit.Points, 10),
+                                                 (Qgis.RenderUnit.MapUnits, 1.5)])
+@pytest.mark.parametrize("zoom", [19.5, 20.5])
+def test_a_map_unit_ellipse_frame_keeps_a_thin_ring(tmp_path, monkeypatch, text_unit, text_size, zoom):
+    """An ellipse frame (3 x 2 map-unit buffer, 0.5 map-unit border): MapLibre
+    scales the whole ellipse image to the text plus the buffer, so a border
+    drawn in image px grew with it, a red disc from zoom 20 where QGIS
+    draws a thin ring."""
+    from qgis.core import QgsTextBackgroundSettings
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    settings = _framed_settings(text_size, text_unit,
+                                QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2), 0.5)
+    fmt = settings.format()
+    frame = QgsTextBackgroundSettings(fmt.background())
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    fmt.setBackground(frame)
+    settings.setFormat(fmt)
+    _compare(tmp_path, _label_point(tmp_path, settings), metric="shape", zooms=PUBLISH_ZOOMS)
+    qgis, browser = (_red_pixels(str(tmp_path / f"v_{n}.png")) for n in ("qgis", "browser"))
+    assert qgis > 500 and 0.6 * qgis <= browser <= 1.6 * qgis, (qgis, browser)
+
+
 def test_huge_map_unit_text_is_drawn_when_zoomed_in(tmp_path, monkeypatch):
     """25 map-unit text at zoom 20.5: MapLibre lays it out at the next zoom's
     size, its collision box then covered the whole view, which stock MapLibre

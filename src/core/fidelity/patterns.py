@@ -313,10 +313,18 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     ``shape``: "rectangle" (stretchable: corners and border keep their size
     when MapLibre fits the frame around the text) or "ellipse" (the whole
     image is scaled). ``size_px``: a fixed-size frame, ``(width, height)``
-    or one side of a square. Returns ``(image, metadata)``.
+    or one side of a square. An ellipse's ``stroke_px`` may be ``(x, y,
+    side)``: the ring of a ``side`` px image that MapLibre stretches unevenly
+    to the text.
+    Returns ``(image, metadata)``.
     """
     from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel
 
+    ring = None
+    if isinstance(stroke_px, (tuple, list)):
+        side = stroke_px[2]
+        ring = tuple(min(max(v, 0.0), 0.47 * side) for v in stroke_px[:2])
+        stroke_px, size_px = 0.0, size_px or int(side)
     edge = max(stroke_px, 0.0)
     radius = max(radius_px, 0.0)
     logical = size_px or int(max(32, 2 * math.ceil(radius + edge) + 16))
@@ -335,7 +343,12 @@ def frame_image(shape: str, fill_rgba, stroke_rgba, stroke_px: float, radius_px:
     width = max(0, round(edge * scale))
     fill = tuple(fill_rgba)
     outline = tuple(stroke_rgba) if width else None
-    if shape == "ellipse":
+    if shape == "ellipse" and ring is not None:
+        inner = [ring[0] * scale, ring[1] * scale, big_w - 1 - ring[0] * scale, big_h - 1 - ring[1] * scale]
+        draw.ellipse(box, fill=tuple(stroke_rgba) if any(ring) else fill)
+        if any(ring):
+            draw.ellipse(inner, fill=fill)
+    elif shape == "ellipse":
         draw.ellipse(box, fill=fill, outline=outline, width=width)
     else:
         # QGIS strokes the rounded rectangle centred on its outline: the

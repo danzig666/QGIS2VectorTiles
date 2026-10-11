@@ -1599,19 +1599,18 @@ class TextPropertyExtractor:
             text_size_px, limit=True)
 
     @staticmethod
-    def get_text_offset_translate(label_settings: QgsPalLayerSettings, rotation) -> Optional[List]:
-        """The over-point X/Y offset as ``text-translate`` px (turned with a
-        fixed ``text-rotate`` as text-offset is), or None (a data-defined
-        rotation, an offset that is no plain zoom curve).
+    def get_text_offset_translate(label_settings: QgsPalLayerSettings) -> Optional[List]:
+        """The over-point X/Y offset as ``text-translate`` px, or None (an
+        offset that is no plain zoom curve).
 
         For an offset whose unit scales unlike the text (map-unit offset, mm
         text or the other way round): text-translate is drawn at the camera
         zoom, exact at every zoom, and has no limit. In ems (text-offset) it
         was a per-zoom step, and MapLibre bakes text-offset into each glyph's
         16-bit position: beyond ~42 em with the glyph's own position, a long
-        label wrapped round to the far side of its point."""
-        if not ex.is_number(rotation):
-            return None
+        label wrapped round to the far side of its point. Not turned with the
+        label: QGIS adds the offset after turning the label (pal
+        createCandidatesOverPoint), MapLibre turns text-offset with it."""
         unit = label_settings.offsetUnits
         lengths = [PropertyExtractor.length(label_settings.xOffset, unit),
                    PropertyExtractor.length(label_settings.yOffset, unit)]
@@ -1623,18 +1622,15 @@ class TextPropertyExtractor:
                     or length[1] != ["exponential", 2]:
                 return None
             zooms.update(length[3::2])
-        angle = math.radians(float(rotation))
-        cos, sin = math.cos(angle), math.sin(angle)
 
-        def turned(zoom):
+        def at(zoom):
             try:
-                x, y = (float(ex.evaluate_zoom_curve(v, zoom)) for v in lengths)
+                return [float(f"{float(ex.evaluate_zoom_curve(v, zoom)):.6g}") + 0.0 for v in lengths]
             except ex.ExpressionError:
                 return None
-            return [float(f"{x * cos - y * sin:.6g}") + 0.0, float(f"{x * sin + y * cos:.6g}") + 0.0]
         if not zooms:
-            return turned(0)
-        stops = [(zoom, turned(zoom)) for zoom in sorted(zooms)]
+            return at(0)
+        stops = [(zoom, at(zoom)) for zoom in sorted(zooms)]
         if any(value is None for _, value in stops):
             return None
         out = ["interpolate", ["exponential", 2], ["zoom"]]
@@ -4457,10 +4453,15 @@ class QgisMapLibreStyleExporter:
                 layer_def, TextPropertyExtractor.get_text_radial_offset(label_settings, em_size))
         elif placement == "OverPoint":
             offset = TextPropertyExtractor.get_text_offset(label_settings, em_size)
-            if ex.is_zoom_curve(offset):
-                # Offset and text scale unlike: px drawn at the camera zoom.
-                translate = TextPropertyExtractor.get_text_offset_translate(
-                    label_settings, layer_def["layout"]["text-rotate"])
+            background = text_format.background()
+            if offset != [0, 0] and (
+                    ex.is_zoom_curve(offset) or layer_def["layout"]["text-rotate"] != 0
+                    or (background.enabled() and not IconPropertyExtractor.get_icon_text_fit(background))):
+                # px drawn at the camera zoom: offset and text scale unlike, a
+                # turned label (MapLibre turned text-offset with it, QGIS does
+                # not) or a frame not fitted to the text (text-offset did not
+                # move it).
+                translate = TextPropertyExtractor.get_text_offset_translate(label_settings)
                 if translate is not None:
                     offset = [0, 0]
             if offset != [0, 0]:
@@ -4505,7 +4506,7 @@ class QgisMapLibreStyleExporter:
         if background.enabled():
             self._apply_icon_from_background(layer_def, background, style_name, label_settings)
             if translate and "icon-image" in layer_def["layout"]:
-                # The frame goes with its text (text-offset moved both).
+                # The frame goes with its text.
                 layer_def["paint"]["icon-translate"] = translate
         else:
             self._apply_default_icon_props(layer_def)
@@ -4708,31 +4709,74 @@ class QgisMapLibreStyleExporter:
                 part["layout"]["icon-size"] = ["interpolate", ["exponential", 2], ["zoom"],
                                                zoom, 0.5, zoom + 1, 1.0]
                 if frame is not None:
-                    part["layout"]["icon-image"] = self._map_unit_frame(frame, zoom)
+                    part["layout"]["icon-image"] = self._map_unit_frame(frame, zoom, size)
             out.append(part)
         if high > top:
             rest = copy.deepcopy(layer_def)
             rest["minzoom"] = max(low, top)
             if frame is not None:
-                rest["layout"]["icon-image"] = self._map_unit_frame(frame, top)
+                rest["layout"]["icon-image"] = self._map_unit_frame(frame, top, size)
             out.append(rest)
         return out
 
-    def _map_unit_frame(self, background, zoom: int) -> Optional[str]:
+    def _map_unit_frame(self, frame, zoom: int, size=None) -> Optional[str]:
         """Frame image with the map-unit stroke for [zoom, zoom + 1).
 
-        A text-fitted rectangle's border lies in the image's fixed (not
-        stretched) margin, which MapLibre draws in image pixels whatever the
-        icon-size: the border cannot grow within the zoom, so it is drawn at
-        the stroke of zoom + 0.5, within sqrt(2) of QGIS's at either end (a
-        doubled stroke was twice QGIS's at the whole zoom). An ellipse is
-        scaled whole with the icon (icon-size 0.5 -> 1): its stroke stays
-        doubled."""
-        ellipse = _enum_int(background.type(), 0) in (2, 3)
+        ``frame``: (background, text box in ems or None), ``size``: the
+        text-size curve. A text-fitted rectangle's border lies in the image's
+        fixed (not stretched) margin, which MapLibre draws in image pixels
+        whatever the icon-size: the border cannot grow within the zoom, so it
+        is drawn at the stroke of zoom + 0.5, within sqrt(2) of QGIS's at
+        either end (a doubled stroke was twice QGIS's at the whole zoom). An
+        ellipse is scaled whole with the icon: its ring is drawn at the
+        stroke's share of the frame (_ellipse_ring)."""
+        background, text_ems = frame
+        if _enum_int(background.type(), 0) in (2, 3):
+            ring = self._ellipse_ring(background, text_ems, size, zoom) if text_ems else None
+            if ring is not None:
+                return self._background_image(background, stroke_px=ring)
+            stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
+                                                     background.strokeWidthUnit(), reference_zoom=zoom)
+            return self._background_image(background, stroke_px=2.0 * stroke)
         stroke = PropertyExtractor.static_pixels(background.strokeWidth(),
-                                                 background.strokeWidthUnit(),
-                                                 reference_zoom=zoom if ellipse else zoom + 0.5)
-        return self._background_image(background, stroke_px=2.0 * stroke if ellipse else stroke)
+                                                 background.strokeWidthUnit(), reference_zoom=zoom + 0.5)
+        return self._background_image(background, stroke_px=stroke)
+
+    # Characters an ellipse frame's ring is drawn for (the label text is not
+    # known when the image is drawn): a house or parcel number.
+    ELLIPSE_TEXT_CHARS = 4
+
+    def _ellipse_text_ems(self, label_settings, layout: dict):
+        """The text box an ellipse frame is fitted around, (width, height) in
+        ems: ELLIPSE_TEXT_CHARS of the font's mean width, one line high."""
+        line_height = layout.get("text-line-height", 1.2)
+        char_width = self._char_width(label_settings) if label_settings is not None else None
+        return ((char_width or 0.6) * self.ELLIPSE_TEXT_CHARS,
+                line_height if ex.is_number(line_height) else 1.2)
+
+    @staticmethod
+    def _ellipse_ring(background, text_ems, size, zoom: int):
+        """``(x, y, side)``: the stroke of a ``side`` px ellipse frame image
+        (frame_image) for [zoom, zoom + 1). MapLibre scales the whole image to the text box
+        plus the buffer, so the ring is drawn at the stroke's share of that
+        box at the zoom's middle (``text_ems``: the text box in ems of the
+        text size ``size`` px). A stroke in image px grew with the frame: from
+        zoom 20 a map-unit buffer drew a red disc around the text."""
+        mid = zoom + 0.5
+        try:
+            text = float(ex.evaluate_zoom_curve(size, mid))
+        except ex.ExpressionError:
+            return None
+        stroke = PropertyExtractor.static_pixels(background.strokeWidth(), background.strokeWidthUnit(), mid)
+        buffer = background.size()
+        width = text_ems[0] * text + 2 * PropertyExtractor.static_pixels(buffer.width(), background.sizeUnit(), mid)
+        height = text_ems[1] * text + 2 * PropertyExtractor.static_pixels(buffer.height(), background.sizeUnit(), mid)
+        if width <= 0 or height <= 0 or stroke <= 0:
+            return None
+        # About the frame's own size: MapLibre draws a text-fitted icon
+        # unfiltered, so a much smaller image showed its pixels as steps.
+        side = float(min(256, max(32, 16 * math.ceil(max(width, height) / 16))))
+        return (round(side * stroke / width, 2), round(side * stroke / height, 2), side)
 
     @staticmethod
     def _is_pinned(label_settings) -> bool:
@@ -4949,6 +4993,8 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-allow-overlap"] = True
             layer_def["layout"]["icon-ignore-placement"] = True
             map_stroke = _is_map_unit(background.strokeWidthUnit()) and background.strokeWidth() > 0
+            # An ellipse is scaled whole to the text: its ring is drawn per zoom.
+            ring = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0
             text_curve = ex.is_zoom_curve(layer_def["layout"].get("text-size"))
             if fixed_zoom is not None:
                 # A fixed map-unit frame: drawn at fixed_zoom, scaled with the
@@ -4957,11 +5003,13 @@ class QgisMapLibreStyleExporter:
             elif text_fit and not text_curve:
                 # Screen text: the map-unit buffer and stroke grow, not the text.
                 self._grow_screen_text_frame(layer_def, background, label_settings, map_stroke)
-            elif text_fit and map_stroke and isinstance(image, str):
+            elif text_fit and (map_stroke or ring) and isinstance(image, str):
                 # Map-unit frame stroke: one frame image per zoom
                 # (_line_label_zoom_split); one image drew a hairline.
                 from qgis.core import QgsTextBackgroundSettings  # pylint: disable=import-outside-toplevel
-                layer_def["_q2vt_frame"] = QgsTextBackgroundSettings(background)
+                layer_def["_q2vt_frame"] = (QgsTextBackgroundSettings(background),
+                                            self._ellipse_text_ems(label_settings, layer_def["layout"])
+                                            if ring else None)
             if text_fit and text_curve:
                 layer_def["layout"]["icon-size"] = self._text_fit_icon_size()
                 padding = self._text_fit_padding_curve(background)
@@ -5033,18 +5081,25 @@ class QgisMapLibreStyleExporter:
                     padding = self._frame_fit_padding(padding, label_settings.format(), layout)
                 steps.append([round(v, 4) for v in padding])
             layout["icon-text-fit-padding"] = self._zoom_step(zooms, steps, literal=True)
-        if map_stroke:
-            # The frame shown at icon-size 1: the stroke of the zoom's middle,
-            # whatever its shape; zooms whose strokes round alike share an image
-            # (data-defined colours: a match of variants per stroke).
+        ellipse = _enum_int(background.type(), 0) in (2, 3) and background.strokeWidth() > 0
+        map_buffer = _enum_int(background.sizeType(), 0) == 0 and _is_map_unit(background.sizeUnit())
+        text_ems = self._ellipse_text_ems(label_settings, layout) if ellipse else None
+        if map_stroke or (ellipse and map_buffer):
+            # The frame shown at icon-size 1: the stroke of the zoom's middle
+            # (an ellipse: its share of the frame, _ellipse_ring); zooms whose
+            # strokes round alike share an image (data-defined colours: a
+            # match of variants per stroke).
             image = layout["icon-image"]
             variants = isinstance(image, list)
             for name in (image[3::2] + image[-1:] if variants else [image]):
                 self.pattern_images.pop(name, None)
             images, names = {}, []
             for zoom in zooms:
-                stroke = round(PropertyExtractor.static_pixels(
-                    background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5), 2)
+                stroke = self._ellipse_ring(background, text_ems, layout.get("text-size"), zoom) \
+                    if ellipse else None
+                if stroke is None:
+                    stroke = round(PropertyExtractor.static_pixels(
+                        background.strokeWidth(), background.strokeWidthUnit(), zoom + 0.5), 2)
                 if stroke not in images:
                     base = self._background_image(background, stroke_px=stroke)
                     images[stroke] = self._frame_variants(

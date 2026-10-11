@@ -7,6 +7,7 @@ max zoom (Publish: tiles to 16, the map to 22)."""
 import pytest
 from qgis.core import Qgis, QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat
 from qgis.PyQt.QtCore import QSizeF
+from qgis.PyQt.QtGui import QColor
 
 from fidelity.diagnostics import DiagnosticCollector
 
@@ -75,7 +76,7 @@ def test_a_mm_offset_of_map_unit_text_keeps_its_size_at_every_zoom(mc, at, zoom)
     # Low zooms (text too small to see) stay within MapLibre's 16-bit offsets.
     assert abs(at(offset, 0)[0]) <= mc.TextPropertyExtractor.MAX_TEXT_OFFSET_EM
     # Over point: drawn as text-translate instead, the mm offset at every zoom.
-    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings, 0)
+    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings)
     assert translate == pytest.approx([3 * MM, 0], abs=1e-4)
 
 
@@ -226,22 +227,16 @@ def test_a_map_unit_over_point_offset_of_screen_text_is_a_px_translate(mc, at, z
     zoom, whole ones too, with no limit."""
     settings = _settings(Qgis.LabelPlacement.OverPoint, 10, Qgis.RenderUnit.Points)
     settings.xOffset, settings.yOffset, settings.offsetUnits = 15, -10, Qgis.RenderUnit.MapUnits
-    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings, 0)
+    translate = mc.TextPropertyExtractor.get_text_offset_translate(settings)
     assert translate[:3] == ["interpolate", ["exponential", 2], ["zoom"]]
     stops = list(zip(translate[3::2], (value[1] for value in translate[4::2])))
     x = mc.ex.exponential_zoom_curve([(z, v[0]) for z, v in stops])
     y = mc.ex.exponential_zoom_curve([(z, v[1]) for z, v in stops])
     assert mc.ex.evaluate_zoom_curve(x, zoom) == pytest.approx(_mu(15, zoom), rel=1e-4)
     assert mc.ex.evaluate_zoom_curve(y, zoom) == pytest.approx(_mu(-10, zoom), rel=1e-4)
-    # Turned with a fixed label rotation, as MapLibre turns text-offset.
-    turned = mc.TextPropertyExtractor.get_text_offset_translate(settings, 90)
-    stops = list(zip(turned[3::2], (value[1] for value in turned[4::2])))
-    x = mc.ex.exponential_zoom_curve([(z, v[0]) for z, v in stops])
-    y = mc.ex.exponential_zoom_curve([(z, v[1]) for z, v in stops])
-    assert mc.ex.evaluate_zoom_curve(x, zoom) == pytest.approx(_mu(10, zoom), rel=1e-4)
-    assert mc.ex.evaluate_zoom_curve(y, zoom) == pytest.approx(_mu(15, zoom), rel=1e-4)
-    # A data-defined rotation: kept as text-offset ems.
-    assert mc.TextPropertyExtractor.get_text_offset_translate(settings, ["get", "r"]) is None
+    # Not turned with the label: QGIS adds the offset after turning it.
+    settings.angleOffset = 90
+    assert mc.TextPropertyExtractor.get_text_offset_translate(settings) == translate
 
 
 def test_per_zoom_label_offsets_are_cut_to_the_layer_zooms(mc):
@@ -281,3 +276,46 @@ def test_a_map_unit_border_with_data_defined_colours_grows_around_screen_text(mc
     # The zoom-0 images of the variants are not left in the sprite.
     used = {n for v in [image[2]] + image[4::2] for n in v[3::2] + v[-1:]}
     assert set(exporter.pattern_images) == used
+
+
+@pytest.mark.parametrize("text_unit,text_size", [(Qgis.RenderUnit.Points, 10),
+                                                 (Qgis.RenderUnit.MapUnits, 1.5)])
+def test_an_ellipse_frame_ring_is_its_border_share_of_the_frame(mc, text_unit, text_size):
+    """A map-unit ellipse frame: MapLibre scales the whole image to the text
+    plus the buffer, so a border drawn in image px (per zoom, or doubled for
+    map-unit text) grew with the frame, a red disc from zoom 20. The ring is
+    now the border's share of the estimated frame, the image about its size."""
+    exporter = _exporter(mc)
+    settings = _settings(Qgis.LabelPlacement.OverPoint, text_size, text_unit)
+    frame = _frame(QgsTextBackgroundSettings.SizeType.SizeBuffer, (3, 2),
+                   Qgis.RenderUnit.MapUnits, 0.5, Qgis.RenderUnit.MapUnits)
+    frame.setType(QgsTextBackgroundSettings.ShapeType.ShapeEllipse)
+    frame.setFillColor(QColor(255, 255, 0))
+    frame.setStrokeColor(QColor(255, 0, 0))
+    size = _text_size(mc, settings)
+    layer_def = {"id": "lbl", "minzoom": 0, "maxzoom": 24,
+                 "layout": {"text-size": size, "text-line-height": 1.2}, "paint": {}}
+    exporter._apply_icon_from_background(layer_def, frame, "s", settings)
+    parts = exporter._line_label_zoom_split(layer_def)
+    for zoom in (17, 20, 22):
+        part = next(p for p in parts if p.get("minzoom", 0) <= zoom < p.get("maxzoom", 24))
+        image = exporter.pattern_images[_step_at(part["layout"]["icon-image"], zoom)].img_1x
+        text = mc.ex.evaluate_zoom_curve(size, zoom + 0.5)
+        width = text * 4 * 0.6 + 2 * _mu(3, zoom + 0.5)  # the estimated frame, roughly
+        side = image.width
+        assert 32 <= side <= 256
+        # The ring across the middle row: the border's share of the frame.
+        row = [image.getpixel((x, image.height // 2)) for x in range(side)]
+        ring = next(x for x, p in enumerate(row) if p[1] > 150)  # first yellow px
+        assert ring / side == pytest.approx(_mu(0.5, zoom + 0.5) / width, rel=0.6, abs=1 / side)
+        assert ring < side / 4
+
+
+def _step_at(value, zoom):
+    if isinstance(value, list) and value and value[0] == "step":
+        out = value[2]
+        for stop, output in zip(value[3::2], value[4::2]):
+            if zoom >= stop:
+                out = output
+        return out
+    return value
