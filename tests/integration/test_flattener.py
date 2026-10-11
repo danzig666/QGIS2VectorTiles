@@ -1066,6 +1066,66 @@ def test_data_defined_label_scale_visibility_per_feature(flattener):
     assert labelled[15] == labelled[16] == {"P0", "P1", "P2", "P3"}
 
 
+def _labels_per_feature(layer, rules, zoom, max_zoom):
+    """{feature id: number of label rules labelling it} at browser ``zoom``
+    (drawn from the tiles of min(floor(zoom), max_zoom))."""
+    import math
+    tile_zoom = min(math.floor(zoom), max_zoom)
+    counts = {f["id"]: 0 for f in layer.getFeatures()}
+    for rule in rules:
+        if rule.get_attr("t") == 1 and rule.get_attr("o") <= tile_zoom <= rule.get_attr("i") \
+                and rule.visibility.contains(zoom):
+            for fid in _matching_ids(layer, rule.rule.filterExpression()):
+                counts[fid] += 1
+    return counts
+
+
+@pytest.mark.parametrize("renderer", ["symbol_layers", "rules"])
+def test_runs_shown_over_overlapping_intervals_label_each_feature_once(flattener, renderer):
+    """Renderer runs of one zoom stretch shown over different browser
+    intervals each got a label rule over their own interval: where the
+    intervals overlapped, features drawn by both were labelled twice (a
+    symbol layer enabled by a field beside one enabled by @map_scale; a
+    "v" = 1 rule beside a filterless rule up to 1:2000)."""
+    from qgis.core import (QgsMarkerSymbol, QgsProperty, QgsRuleBasedRenderer,
+                           QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer, QgsSymbolLayer)
+    layer = _points()
+    everything, ones = ["P0", "P1", "P2", "P3"], ["P1", "P3"]
+    if renderer == "symbol_layers":
+        first = QgsSimpleMarkerSymbolLayer()
+        first.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLayerEnabled,
+                                     QgsProperty.fromExpression('"v" = 1'))
+        second = QgsSimpleMarkerSymbolLayer()
+        second.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyLayerEnabled,
+                                      QgsProperty.fromExpression("@map_scale < 2000"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([first, second])))
+        # QGIS labels every feature the renderer draws, whichever symbol
+        # layers their conditions switch off.
+        expected = {zoom: everything for zoom in (0.0, 14.0, 16.0, 17.0, 17.5, 22.0)}
+    else:
+        root = QgsRuleBasedRenderer.Rule(None)
+        root.appendChild(QgsRuleBasedRenderer.Rule(QgsMarkerSymbol.createSimple({}),
+                                                   filterExp='"v" = 1'))
+        near = QgsRuleBasedRenderer.Rule(QgsMarkerSymbol.createSimple({}))
+        near.setMaximumScale(2000)  # shown up to zoom 17.17, within the overzoom
+        root.appendChild(near)
+        layer.setRenderer(QgsRuleBasedRenderer(root))
+        expected = {0.0: everything, 14.0: everything, 16.0: everything, 17.0: everything,
+                    17.5: ones, 22.0: ones}
+    _simple_labels(layer)
+    reset_project(layer)
+    for low, high in ((0, 16), (14, 19)):
+        rules, _ = flattener(low, high)
+        labels = [r for r in rules if r.get_attr("t") == 1]
+        assert len({r.output_dataset for r in labels}) == len(labels)
+        for zoom, ids in expected.items():
+            if zoom < low:
+                continue
+            counts = _labels_per_feature(layer, rules, zoom, high)
+            assert sorted(fid for fid, n in counts.items() if n) == ids, (low, high, zoom, counts)
+            assert all(n <= 1 for n in counts.values()), (low, high, zoom, counts)
+
+
 def test_geometry_generator_sub_layers_have_their_own_datasets(flattener):
     """A line geometry generator at symbol layer 0 with two sub-symbol
     layers, under a plain line: its second sub-layer got the dataset name of

@@ -2141,27 +2141,67 @@ class RulesFlattener:
                 stretches.append([start, stop - 1, active])
         split_rules = []
         for low, high, active in stretches:
-            # Rules shown in other browser intervals (scale limits within a
-            # zoom) keep their own label rule, shown where they are drawn.
-            groups: Dict[object, list] = {}
-            for run in active:
-                key = None if run[3] is None else (run[3].min_zoom, run[3].max_zoom)
-                groups.setdefault(key, []).append(run)
-            for group in groups.values():
-                matched = self._match_label_to_renderers(label_rule, tuple(group), low, high)
-                if matched:
-                    split_rules.append(matched)
+            split_rules.extend(self._stretch_label_rules(label_rule, active, low, high,
+                                                         len(all_runs)))
         if split_rules or all_runs or label_rule.layer.id() in self._drawn_layers:
             # QGIS labels only the features its renderer draws: none where
             # no renderer rule is shown (they floated without symbols).
             return split_rules
         return [label_rule]  # no renderer rules (e.g. the "No symbols" renderer)
 
-    def _match_label_to_renderers(self, label_rule: FlattenedRule, active, low: int,
-                                  high: int) -> Optional[FlattenedRule]:
-        """The label rule for zooms ``low``..``high``, where the renderer rule
-        runs ``active`` draw: its filter is theirs OR-ed (none if one of them
-        has no filter)."""
+    def _stretch_label_rules(self, label_rule: FlattenedRule, active, low: int, high: int,
+                             spare: int) -> List[FlattenedRule]:
+        """The label rules of zooms ``low``..``high``, where the renderer rule
+        runs ``active`` draw. Runs shown in other browser intervals (scale
+        limits within a zoom) label where they are drawn: the browser range
+        is cut at their intervals, and each piece labels the features of the
+        runs shown there, once. A label rule per run interval labelled a
+        feature twice where two intervals overlapped ([0, open) and
+        [17.17, open): two symbol layers, one enabled by @map_scale).
+        ``spare``: the first index no run has (a distinct "f" per piece)."""
+        visibilities = [run[3] for run in active]
+        if len(set(visibilities)) == 1:
+            matched = self._match_label_to_renderers(label_rule, active, low, high)
+            return [matched] if matched else []
+        # A run without an interval is drawn over its tile zooms.
+        stretch = ZoomInterval(float(low), None if high >= self.max_zoom else float(high + 1))
+        shown = [stretch if visibility is None else visibility for visibility in visibilities]
+        edges = sorted({edge for visibility in shown
+                        for edge in (visibility.min_zoom, visibility.max_zoom) if edge is not None})
+        pieces = []  # [interval, runs, label filter]
+        for start, end in zip(edges, edges[1:] + [None]):
+            piece = ZoomInterval(start, end)
+            if piece.is_empty or piece.intersect(stretch).is_empty:
+                continue
+            runs = tuple(run for run, visibility in zip(active, shown)
+                         if visibility.min_zoom <= start + 1e-9 and (
+                             visibility.max_zoom is None
+                             or (end is not None and visibility.max_zoom >= end - 1e-9)))
+            if not runs:
+                continue
+            label_filter = self._renderers_label_filter(runs)
+            previous = pieces[-1] if pieces else None
+            if previous is not None and previous[2] == label_filter and \
+                    previous[0].max_zoom is not None and abs(previous[0].max_zoom - start) < 1e-9:
+                previous[0] = ZoomInterval(previous[0].min_zoom, end)
+                continue
+            pieces.append([piece, runs, label_filter])
+        rules, used = [], set()
+        for piece, runs, _ in pieces:
+            # A distinct dataset per piece (two pieces may share a first run).
+            index = next((run[0] for run in runs if run[0] not in used), None)
+            if index is None:
+                index, spare = spare, spare + 1
+            used.add(index)
+            matched = self._match_label_to_renderers(label_rule, runs, low, high, piece, index)
+            if matched:
+                rules.append(matched)
+        return rules
+
+    @staticmethod
+    def _renderers_label_filter(active) -> str:
+        """The features renderer rule runs ``active`` draw: their filters
+        OR-ed (none if one of them has no filter)."""
         filters: Optional[List[str]] = []
         for _, renderer_rule, _, _ in active:
             # The features the rule renders: its filter before a symbol
@@ -2174,18 +2214,26 @@ class RulesFlattener:
             if expression not in filters:
                 filters.append(expression)
         if filters is None:
-            renderer_filter = ""
-        elif len(filters) == 1:
-            renderer_filter = filters[0]
-        else:
-            renderer_filter = " OR ".join(f"({expression})" for expression in filters)
-        visibility = None
+            return ""
+        if len(filters) == 1:
+            return filters[0]
+        return " OR ".join(f"({expression})" for expression in filters)
+
+    def _match_label_to_renderers(self, label_rule: FlattenedRule, active, low: int,
+                                  high: int, visibility=None,
+                                  index: Optional[int] = None) -> Optional[FlattenedRule]:
+        """The label rule for zooms ``low``..``high``, where the renderer rule
+        runs ``active`` draw: its filter is theirs OR-ed (none if one of them
+        has no filter); shown over ``visibility`` (default: their intervals'
+        hull)."""
+        renderer_filter = self._renderers_label_filter(active)
         visibilities = [run[3] for run in active]
-        if all(v is not None for v in visibilities):
+        if visibility is None and all(v is not None for v in visibilities):
             visibility = visibilities[0]
             for other in visibilities[1:]:
                 visibility = self._visibility_hull(visibility, other)
-        return self._match_label_to_renderer(label_rule, renderer_filter, active[0][0],
+        return self._match_label_to_renderer(label_rule, renderer_filter,
+                                             active[0][0] if index is None else index,
                                              (low, high), visibility)
 
     def _renderer_runs(self, layer):
