@@ -27,7 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
+from qgis.core import NULL, Qgis, QgsExpressionContext, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
@@ -4730,9 +4730,43 @@ class QgisMapLibreStyleExporter:
                                    & int(Qgis.LabelPolygonPlacementFlag.AllowPlacementOutsideOfPolygon))
         except (AttributeError, TypeError, ValueError):
             outside_allowed = False
+        overridden = QgisMapLibreStyleExporter._outside_override(label_settings)
+        if overridden is not None:
+            outside_allowed = overridden
         if outside or (placement == "AroundPoint" and outside_allowed):
             around["min_px"] = 2.0
         return around
+
+    @staticmethod
+    def _outside_override(label_settings) -> Optional[bool]:
+        """The data-defined "Allow outside" (PolygonLabelOutside) of a
+        polygon label, as QGIS's registerFeature reads it: "yes" / "force"
+        (or true) allow placement outside the polygon, "no" (or false)
+        blocks it. None: not set, or varying per feature (from a field or an
+        expression of one: the layer's static flags stand for it)."""
+        try:
+            prop = label_settings.dataDefinedProperties().property(QgsPalLayerSettings.Property.PolygonLabelOutside)
+            if not prop or not prop.isActive():
+                return None
+            if prop.propertyType() == QgsProperty.Type.StaticProperty:
+                value = prop.staticValue()
+            elif prop.propertyType() == QgsProperty.Type.ExpressionBasedProperty:
+                expression = QgsExpression(prop.expressionString())
+                if expression.hasParserError() or expression.referencedColumns() or expression.needsGeometry():
+                    return None
+                value = expression.evaluate(QgsExpressionContext())
+                if expression.hasEvalError():
+                    return None
+            else:
+                return None
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        if value is None or (hasattr(value, "isNull") and value.isNull()):
+            return None
+        if isinstance(value, str):
+            word = value.strip().lower()
+            return True if word in ("yes", "force") else False if word == "no" else None
+        return bool(value)
 
     @staticmethod
     def _line_label_repeat(label_settings) -> Optional[dict]:

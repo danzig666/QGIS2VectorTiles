@@ -5,7 +5,7 @@ at every zoom; the converter now follows each zoom, also above the tiles'
 max zoom (Publish: tiles to 16, the map to 22)."""
 
 import pytest
-from qgis.core import Qgis, QgsPalLayerSettings, QgsTextBackgroundSettings, QgsTextFormat
+from qgis.core import Qgis, QgsPalLayerSettings, QgsProperty, QgsTextBackgroundSettings, QgsTextFormat
 from qgis.PyQt.QtCore import QSizeF
 from qgis.PyQt.QtGui import QColor
 
@@ -146,6 +146,34 @@ def test_around_point_polygon_distance_floor_when_outside_is_allowed(mc):
     settings.setPolygonPlacementFlags(Qgis.LabelPolygonPlacementFlags(
         Qgis.LabelPolygonPlacementFlag.AllowPlacementInsideOfPolygon))
     assert "min_px" not in mc.QgisMapLibreStyleExporter._label_around(settings, "AroundPoint")
+
+
+@pytest.mark.parametrize("override, inside_only, floored", [
+    (QgsProperty.fromValue("yes"), True, True),
+    (QgsProperty.fromValue("Force"), True, True),
+    (QgsProperty.fromExpression("'yes'"), True, True),
+    (QgsProperty.fromValue(True), True, True),
+    (QgsProperty.fromValue("no"), False, False),
+    (QgsProperty.fromValue(False), False, False),
+    # Per feature: the layer's static flags stand for it.
+    (QgsProperty.fromField("outside_ok"), True, False),
+    (QgsProperty.fromExpression("if(\"kind\" = 1, 'yes', 'no')"), False, True),
+])
+def test_around_point_distance_floor_follows_data_defined_allow_outside(mc, override, inside_only, floored):
+    """QGIS applies the data-defined "Allow outside" before it forces the
+    2 px floor: a constant "yes" / "force" sets it on a layer allowing only
+    inside placement, a constant "no" removes it."""
+    settings = _settings(Qgis.LabelPlacement.AroundPoint, 10, Qgis.RenderUnit.Points)
+    settings.dist = 0
+    flags = Qgis.LabelPolygonPlacementFlag.AllowPlacementInsideOfPolygon
+    if not inside_only:
+        flags |= Qgis.LabelPolygonPlacementFlag.AllowPlacementOutsideOfPolygon
+    settings.setPolygonPlacementFlags(Qgis.LabelPolygonPlacementFlags(flags))
+    properties = settings.dataDefinedProperties()
+    properties.setProperty(QgsPalLayerSettings.Property.PolygonLabelOutside, override)
+    settings.setDataDefinedProperties(properties)
+    around = mc.QgisMapLibreStyleExporter._label_around(settings, "AroundPoint")
+    assert ("min_px" in around) == floored
 
 
 def _exporter(mc, maxzoom=16):
