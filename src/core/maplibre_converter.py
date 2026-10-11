@@ -3935,10 +3935,18 @@ class QgisMapLibreStyleExporter:
         strokes the offset curve GEOS builds mitred with that limit
         (QgsSymbolLayerUtils::offsetLine). MapLibre's bevel and round joins
         move the offset vertex at a 35-120 degree turn only part of the way,
-        so an offset several times the width tapers to a sliver there."""
-        if "line-offset" in layer_def["paint"]:
+        so an offset several times the width tapers to a sliver there. A
+        data-defined offset keeps the pen join on features it leaves at 0
+        (QGIS strokes those lines unchanged)."""
+        offset = layer_def["paint"].get("line-offset")
+        if offset is None:
+            return
+        pen = layer_def["layout"].get("line-join", "miter")
+        if isinstance(offset, list) and pen != "miter" and not ex.contains_zoom(offset):
+            layer_def["layout"]["line-join"] = ["case", ["==", offset, 0], pen, "miter"]
+        else:
             layer_def["layout"]["line-join"] = "miter"
-            layer_def["layout"]["line-miter-limit"] = 2.0
+        layer_def["layout"]["line-miter-limit"] = 2.0
 
     def _convert_simple_or_pattern_line_symbol_layer(
         self,

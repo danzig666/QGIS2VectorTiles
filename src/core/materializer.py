@@ -1194,20 +1194,23 @@ class SymbolMaterializer:
         cache[key] = zooms
         return zooms
 
-    def _offset_in_extent_zoom(self, offset_px: float) -> int:
+    def _offset_in_extent_zoom(self, offset_px: float, half_side: bool = False) -> int:
         """First zoom at which a screen offset of ``offset_px`` CSS pixels is
         at most the export extent's diagonal. Below it the offset geometry
         of a feature inside the extent lies wholly outside it (the
         exporter's clip leaves nothing: hundreds of km at zoom 0), while the
         whole extent is a few pixels wide on screen: the browser's
-        line-offset draws it."""
+        line-offset draws it. ``half_side``: at most half the extent's
+        shorter side (markers offset on screen are drawn whole, also beyond
+        the extent, while positions on the offset line there are clipped)."""
         if self.extent is None or not offset_px:
             return -1
-        diagonal = math.hypot(self.extent.width(), self.extent.height())
-        if diagonal <= 0:
+        reach = min(self.extent.width(), self.extent.height()) / 2.0 if half_side else \
+            math.hypot(self.extent.width(), self.extent.height())
+        if reach <= 0:
             return -1
         metres_at_zero = abs(offset_px) * 40075016.68557849 / 512.0
-        return int(math.ceil(math.log2(max(metres_at_zero / diagonal, 1.0))))
+        return int(math.ceil(math.log2(max(metres_at_zero / reach, 1.0))))
 
     @staticmethod
     def _offset_beyond_extent(flat_rule: FlattenedRule, visible: ZoomInterval, low: int,
@@ -1223,6 +1226,40 @@ class SymbolMaterializer:
         early.set_attr("i", first - 1)
         early.visibility = part
         return early
+
+    @staticmethod
+    def _offset_kept_rings(layer, offset_mm: float, polygon: bool) -> Optional[int]:
+        """The ring filter of a polygon outline whose screen offset reaches
+        beyond the export extent: the rings moved inwards (exteriors for a
+        positive offset, holes for a negative one) collapse, so only the
+        others are drawn; None when the layer's filter keeps only collapsed
+        rings. Lines keep their filter."""
+        rings = _ring_filter(layer)
+        if not polygon:
+            return rings
+        kept = 2 if offset_mm > 0 else 1
+        return kept if rings in (0, kept) else None
+
+    def _offset_zoom_split(self, flat_rule: FlattenedRule, offset_px: float, **per_zoom
+                           ) -> Tuple[Optional[FlattenedRule], List[FlattenedRule]]:
+        """(The rule for the zooms where a screen distance of ``offset_px``
+        is wider than half the export extent's shorter side, or None; the
+        per-zoom rules of the other zooms). Marker positions there are placed
+        on the line itself, their markers offset on screen (see
+        _offset_in_extent_zoom). ``per_zoom``: _per_zoom's options (the
+        zooms past the last tiles)."""
+        low, high = self._zoom_range(flat_rule)
+        first = max(low, self._offset_in_extent_zoom(offset_px, half_side=True))
+        if low > high or first <= low:
+            return None, self._per_zoom(flat_rule, **per_zoom)
+        if first > high:  # every exported zoom: one rule, overzoom included
+            early = flat_rule.derive()
+            early.set_attr("o", low)
+            early.set_attr("i", high)
+            return early, []
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        return self._offset_beyond_extent(flat_rule, visible, low, first), \
+            [rule for rule in self._per_zoom(flat_rule, **per_zoom) if rule.get_attr("o") >= first]
 
     def _screen_offset_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
         """A screen-unit line offset as QGIS draws it, a mitred offset curve
@@ -2158,6 +2195,16 @@ class SymbolMaterializer:
             return None
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, 0.0,
                                             layer.offsetUnit(), native)
+        # Where a screen offset reaches beyond the export extent, the markers
+        # are placed on the line and offset on screen (see _offset_zoom_split).
+        first, rings = low, _ring_filter(layer)
+        offset_mm = _to_mm(layer.offset(), layer.offsetUnit()) \
+            if abs(layer.offset()) > 1e-9 and normalize_unit(layer.offsetUnit()) != "map" else None
+        if offset_mm is not None:
+            first = self._offset_in_extent_zoom(offset_mm * 96.0 / 25.4, half_side=True)
+            rings = self._offset_kept_rings(layer, offset_mm, native.get_attr("g") == 2)
+        early_symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, layer.offset(),
+                                                  layer.offsetUnit(), native) if first > low else None
         zoom_rules = self._per_zoom(native)
         rules = []
         visibility = native.visibility
@@ -2173,18 +2220,23 @@ class SymbolMaterializer:
             if not over.visibility.is_empty:
                 rules.extend(self._native_interval_bands(over, 8))
         for index, zoom_rule in enumerate(zoom_rules):
+            early = zoom_rule.get_attr("o") < first
+            if early and rings is None:
+                continue  # only collapsed rings: QGIS draws no markers
             for rule, zoom in self._sub_zoom_bands(zoom_rule, steps, index == len(zoom_rules) - 1):
                 recipe = mat.interval_points(to_map(layer.interval(), layer.intervalUnit(), zoom),
                                              to_map(along, along_unit, zoom),
+                                             0.0 if early else
                                              to_map(layer.offset(), layer.offsetUnit(), zoom), crs)
                 extra = []
-                if _ring_filter(layer):
-                    extra.append(("ring_filter", _ring_filter(layer)))
+                if (rings if early else _ring_filter(layer)):
+                    extra.append(("ring_filter", rings if early else _ring_filter(layer)))
                 average = self._average_angle_length(layer, rule)
                 if average:
                     extra.append(("average", average))
                 recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + tuple(extra))
-                rules.append(self._with_symbol(rule, symbol.clone(), 0, 2, recipe))
+                rules.append(self._with_symbol(rule, (early_symbol if early else symbol).clone(),
+                                               0, 2, recipe))
         return rules
 
     def _native_interval_bands(self, over: FlattenedRule, steps: int) -> List[FlattenedRule]:
@@ -2292,6 +2344,22 @@ class SymbolMaterializer:
 
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, offset,
                                             offset_unit, flat_rule)
+        early_symbol = None
+        if zoom_offset_mm is not None:  # markers offset on screen (see _offset_zoom_split)
+            early_symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0,
+                                                      layer.offset(), offset_unit, flat_rule)
+
+        def offset_zooms(rule, make, elements):
+            """``make(rule, offset[, marker, ring filter])`` per zoom of
+            ``rule`` with a screen offset, the zooms past the last tiles too
+            (``elements`` features a copy, within their budget)."""
+            early, zoom_rules = self._offset_zoom_split(rule, zoom_offset_mm * 96.0 / 25.4,
+                                                        overzoom=True, elements=elements)
+            out = [make(zoom_rule, zoom_offset(zoom_rule)) for zoom_rule in zoom_rules]
+            rings = self._offset_kept_rings(layer, zoom_offset_mm, flat_rule.get_attr("g") == 2)
+            if early is not None and rings is not None:
+                out.insert(0, make(early, 0.0, early_symbol, rings))
+            return out
         rules = []
         if points:
             try:
@@ -2302,17 +2370,17 @@ class SymbolMaterializer:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                              "Offset along the line is not applied to vertex/centre markers.",
                              flat_rule)
-            def placed(rule, line_offset):
+            def placed(rule, line_offset, marker=None, rings=None):
+                rings = _ring_filter(layer) if rings is None else rings
                 recipe = mat.marker_points(points, offset=line_offset, crs=crs)
-                if _ring_filter(layer):
+                if rings:
                     recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
-                        ("ring_filter", _ring_filter(layer)), ("crs", crs)))
-                return self._with_symbol(rule, symbol.clone(), 0, 1, recipe)
+                        ("ring_filter", rings), ("crs", crs)))
+                return self._with_symbol(rule, (marker or symbol).clone(), 0, 1, recipe)
             if zoom_offset_mm is None:
                 rules.append(placed(flat_rule, line_offset))
             else:
-                rules.extend(placed(rule, zoom_offset(rule)) for rule in self._per_zoom(
-                    flat_rule, overzoom=True, elements=self._layer_vertices(flat_rule.layer)))
+                rules.extend(offset_zooms(flat_rule, placed, self._layer_vertices(flat_rule.layer)))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
@@ -2325,19 +2393,24 @@ class SymbolMaterializer:
                     recipe = mat.Recipe(recipe.kind, recipe.placements,
                                         recipe.params + (("ring_filter", _ring_filter(layer)),))
                 def exact(rule, recipe=recipe):
-                    def one(rule):
+                    def one(rule, offset=None, marker=None, rings=None):
                         params = recipe.params
-                        if zoom_offset_mm is not None:
+                        if offset is not None:
                             params = tuple(p for p in params if p[0] != "offset") + (
-                                ("offset", zoom_offset(rule)),)
+                                (("offset", offset),) if offset else ())
+                        if rings is not None:
+                            params = tuple(p for p in params if p[0] != "ring_filter") + (
+                                (("ring_filter", rings),) if rings else ())
                         average = self._average_angle_length(layer, rule)
                         if average:
                             params += (("average", average),)
-                        return self._with_symbol(rule, symbol.clone(), 0, 2, mat.Recipe(
+                        return self._with_symbol(rule, (marker or symbol).clone(), 0, 2, mat.Recipe(
                             recipe.kind, recipe.placements, params))
-                    if zoom_offset_mm is None and (
-                            not self._average_angle_length(layer, rule)
-                            or normalize_unit(layer.averageAngleUnit()) == "map"):
+                    if zoom_offset_mm is not None:
+                        return offset_zooms(rule, one, self._layer_totals(flat_rule.layer)[1] /
+                                            max(layer.interval(), 1e-9))
+                    if not self._average_angle_length(layer, rule) \
+                            or normalize_unit(layer.averageAngleUnit()) == "map":
                         return [one(rule)]
                     # A screen averaging length covers less of the line as the
                     # map zooms in: the same positions, one angle per zoom.
@@ -2983,8 +3056,12 @@ class SymbolMaterializer:
             return sum(min(count, int(radius / width) + 1) for radius in radii)
         # Every zoom the map is viewed at, overzoom included: the exported
         # zooms get the budget first, the last ones finest (_zoom_steps); the
-        # zooms past the last tiles share what is left.
-        zoom_rules = self._per_zoom(flat_rule, overzoom=True)
+        # zooms past the last tiles share what is left. Where the distance is
+        # wider than half the extent's shorter side, the whole extent is a
+        # few distances wide on screen: one band set (early), converted at
+        # the middle of the last of those zooms (per-step sets there only
+        # hold polygons too small for a tile unit).
+        early, zoom_rules = self._offset_zoom_split(flat_rule, mm * 96.0 / 25.4, overzoom=True)
         over = [rule for rule in zoom_rules if rule.get_attr("v") is not None]
         zoom_rules = zoom_rules[:len(zoom_rules) - len(over)]
         steps = self._zoom_steps({rule.get_attr("o"): cost(rule.get_attr("o")) for rule in zoom_rules},
@@ -3029,6 +3106,9 @@ class SymbolMaterializer:
             over = over[:kept]
             self._report_overzoom_budget(flat_rule, kept)
         rules = []
+        if early is not None:
+            rules.extend(bands(early, mm * self._map_units_per_mm(
+                flat_rule, early.get_attr("i") + 0.5)))
         for index, rule in enumerate(zoom_rules):
             for band_rule, zoom in self._sub_zoom_bands(
                     rule, steps[rule.get_attr("o")], not over and index == len(zoom_rules) - 1):

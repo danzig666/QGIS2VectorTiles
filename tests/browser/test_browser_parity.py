@@ -451,6 +451,39 @@ def test_screen_offset_lines_keep_their_width_at_turns(tmp_path, width, offset, 
     assert browser == pytest.approx(qgis, rel=0.06)
 
 
+def test_a_data_defined_offset_of_zero_keeps_the_pen_join(tmp_path):
+    """A data-defined offset that leaves a feature on its line: QGIS
+    strokes it with the pen's round join. Mitring every feature of a layer
+    with an offset expression squared that feature's sharp corner."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    memory = QgsVectorLayer("LineString?crs=EPSG:3857", "corner", "memory")
+    memory.dataProvider().addAttributes([QgsField("v", QVariant.Double)])
+    memory.updateFields()
+    feature = QgsFeature(memory.fields())
+    feature.setGeometry(QgsGeometry.fromWkt(
+        f"LINESTRING({CENTER[0] - 100} {CENTER[1] - 60}, {CENTER[0]} {CENTER[1] + 40}, "
+        f"{CENTER[0] + 100} {CENTER[1] - 60})"))
+    feature.setAttributes([0.0])
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "corner.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 4.0)
+    line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    line.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOffset,
+                                QgsProperty.fromExpression('"v" * 1.5'))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    assert _compare(tmp_path, layer, metric="shape") < 0.03
+    from PIL import Image
+    # Ink just outside the corner (above the vertex): a mitred corner of
+    # the 15 px line reaches about 3 px further there than the round one.
+    scale = gallery.EARTH / (512 * 2 ** ZOOM)
+    x, y = round(SIZE / 2), round(SIZE / 2 - 40 / scale)
+    qgis, browser = (sum(255 - v for v in Image.open(str(tmp_path / f"v_{n}.png")).convert("L")
+                         .crop((x - 8, y - 14, x + 8, y - 4)).getdata())
+                     for n in ("qgis", "browser"))
+    assert browser == pytest.approx(qgis, rel=0.15)
+
+
 def _black_box(tmp_path, name):
     """Bounding box of the black (text) ink of a capture, red left out."""
     from PIL import Image

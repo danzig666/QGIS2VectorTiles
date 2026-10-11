@@ -402,3 +402,72 @@ def test_screen_offsets_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
     early = [l for l in native if l.get("minzoom", 0) == 0]  # lines, holes
     assert [l["maxzoom"] for l in early] == [first]
     assert min(l["minzoom"] for l in bands) >= first
+
+
+@pytest.mark.parametrize("kind", ["Interval", "Vertex", "Hashes", "PolygonVertex",
+                                  "PolygonInterval", "Shapeburst"])
+def test_screen_offset_markers_from_zoom_zero_pass_strict_mode(plugin, tmp_path, kind):
+    """Marker and hash lines with a 1.5 mm offset, and a 2 mm shapeburst,
+    exported from zoom 0: their positions (bands) per zoom lie on an offset
+    line hundreds of km away at the first zooms, wholly outside the 4 km
+    extent (one rule missing from the map per zoom or band, Strict mode
+    failed), and the shapeburst's per-step polygons were too small for a
+    tile unit (source layers without tiles). Until the distance is at most
+    half the extent's side the markers sit on the line, offset on screen
+    (rings an inward offset collapses keep none), and the shapeburst is one
+    band set."""
+    from qgis.core import (QgsHashedLineSymbolLayer, QgsMarkerLineSymbolLayer,  # pylint: disable=import-outside-toplevel
+                           QgsMarkerSymbol, QgsShapeburstFillSymbolLayer,
+                           QgsSimpleMarkerSymbolLayer)
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    cx, cy = 2121000.0, 6021000.0
+
+    def ring(points):
+        return "(" + ", ".join(f"{cx + x} {cy + y}" for x, y in points) + ")"
+    zigzag = [(-300, -100), (-150, 50), (0, -100), (150, 50), (300, -100)]
+    polygon = kind.startswith("Polygon") or kind == "Shapeburst"
+    if polygon:
+        wkt = "POLYGON(" + ring(zigzag + [(300, 200), (-300, 200), (-300, -100)]) + ", " + \
+            ring([(-50, 100), (50, 100), (50, 150), (-50, 150), (-50, 100)]) + ")"
+    else:
+        wkt = "LINESTRING" + ring(zigzag)
+    layer = _layer("Polygon" if polygon else "LineString", [wkt], str(tmp_path / "markers.gpkg"))
+    if kind == "Shapeburst":
+        symbol_layer = QgsShapeburstFillSymbolLayer(QColor("red"), QColor("white"))
+        symbol_layer.setUseWholeShape(False)
+        symbol_layer.setMaxDistance(2.0)
+        symbol_layer.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    else:
+        if kind == "Hashes":
+            symbol_layer = QgsHashedLineSymbolLayer()
+        else:
+            symbol_layer = QgsMarkerLineSymbolLayer()
+            symbol_layer.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(
+                Qgis.MarkerShape.Circle, 1.2)]))
+        symbol_layer.setInterval(3.0)
+        if kind.endswith("Vertex"):
+            symbol_layer.setPlacements(Qgis.MarkerLinePlacement.Vertex)
+        symbol_layer.setOffset(1.5)
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol([symbol_layer]) if polygon else QgsLineSymbol([symbol_layer])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    extent = QgsRectangle(cx - 2000, cy - 2000, cx + 2000, cy + 2000)
+    exporter = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=extent, output_dir=str(out),
+                                feedback=QgsProcessingFeedback(), serve=False, fidelity_mode=1)
+    export_dir = exporter.convert_project_to_vector_tiles()  # Strict: raises on a loss
+    assert not [d for d in exporter.diagnostics.items
+                if d.code in ("Q2VT_RULE_OUTPUT_EMPTY", "Q2VT_SOURCE_LAYER_MISSING")]
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        drawn = [l for l in json.load(handle)["layers"] if l.get("source-layer")]
+    # 1.5 mm = 5.67 px (the shapeburst's 2 mm = 7.56 px) is at most half
+    # the 4 km extent's side from zoom 8 (9) on.
+    distance = 2.0 if kind == "Shapeburst" else 1.5
+    first = math.ceil(math.log2(distance * 96 / 25.4 * WORLD / 512 / 2000))
+    assert first == (9 if kind == "Shapeburst" else 8)
+    early = [l for l in drawn if l.get("minzoom", 0) < first]
+    assert early and max(l["maxzoom"] for l in early) == first
+    if kind.endswith("Vertex") or kind == "Shapeburst":  # one rule (band set) below them
+        assert {(l.get("minzoom", 0), l["maxzoom"]) for l in early} == {(0, first)}
