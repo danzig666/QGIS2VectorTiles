@@ -1407,3 +1407,45 @@ console.log(JSON.stringify({{ steps, jumps }}));
     assert min(result["steps"][1:]) < 2.5, result
     # Zoomed in 2 or 3 levels at once: placed anew beside the polygon.
     assert all(abs(gap - 2) < 0.5 for gap in result["jumps"]), result
+
+
+@pytest.mark.parametrize("winding", ["clockwise", "anticlockwise"])
+@pytest.mark.parametrize("hole", [False, True])
+def test_outside_polygons_candidates_beside_a_polygon_with_a_slit_narrower_than_a_pixel(winding, hole):
+    """"Outside polygons" on a parcel (sides of many short edges) with a
+    slit narrower than a pixel, whose two sides are the ring's longest
+    edges: the outer side of the ring was found by one even-odd test
+    beside its longest edge, which crossed the slit, so every candidate fell
+    on the parcel and the label was lost. Either winding, also with a hole
+    (whose outer side is towards its own inside)."""
+    script = f"""
+import {{ outsideCandidates }} from {json.dumps('file://' + MODULE)};
+const perPx = 1 / 1024, c = 0.5, s = 80 * perPx, w = 0.5 * perPx, depth = 150 * perPx;
+const corners = [[c - s, c - s], [c - w / 2, c - s], [c - w / 2, c - s + depth], [c + w / 2, c - s + depth],
+                 [c + w / 2, c - s], [c + s, c - s], [c + s, c + s], [c - s, c + s]];
+let ring = [];
+corners.forEach((a, i) => {{
+  const b = corners[(i + 1) % corners.length], pieces = i === 1 || i === 3 ? 1 : 8;
+  for (let k = 0; k < pieces; k++) ring.push([a[0] + (b[0] - a[0]) * k / pieces, a[1] + (b[1] - a[1]) * k / pieces]);
+}});
+if ({json.dumps(winding)} === "anticlockwise") ring = ring.reverse();
+const rings = [ring];
+// A hole wound the other way, wide enough for a label in it.
+const h = 70 * perPx, hx = c + 400 * perPx;
+if ({json.dumps(hole)}) {{
+  const outer = [[hx - 2 * h, c - 2 * h], [hx + 2 * h, c - 2 * h], [hx + 2 * h, c + 2 * h], [hx - 2 * h, c + 2 * h]];
+  const inner = [[hx - h, c - h], [hx - h, c + h], [hx + h, c + h], [hx + h, c - h]];
+  rings.push(...({json.dumps(winding)} === "anticlockwise" ? [outer.reverse(), inner.reverse()] : [outer, inner]));
+}}
+const text = [30 * perPx, 6 * perPx], half = [32 * perPx, 8 * perPx];
+const candidates = outsideCandidates(rings, rings, text, half, 2 * perPx, perPx, [], [0, 0, 1, 1]);
+const onParcel = candidates.filter(([x, y]) => Math.abs(x - c) < s && Math.abs(y - c) < s).length;
+const inHole = candidates.filter(([x, y]) => Math.abs(x - hx) < h && Math.abs(y - c) < h).length;
+console.log(JSON.stringify({{ count: candidates.length, onParcel, inHole }}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    result = json.loads(run.stdout)
+    assert result["count"] >= 40 and result["onParcel"] == 0, result
+    if hole:
+        assert result["inHole"] > 0, result

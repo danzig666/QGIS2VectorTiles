@@ -857,26 +857,41 @@ const OUTSIDE_CANDIDATES = 64;
 const SIDE_TOLERANCE = Math.sin(5 * Math.PI / 180);  // QGIS: within 5° of an axis
 export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0, obstacles = [],
                                   view = null) {
-  const byRing = loaded.map((ring) => realEdges([ring])).filter((edges) => edges.length);
-  const total = byRing.flat().reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
+  const byRing = loaded.map((ring) => [ring, realEdges([ring])]).filter(([, edges]) => edges.length);
+  const total = byRing.flatMap(([, edges]) => edges).reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
   if (!(total > 0)) return [];
   const step = Math.max(total / OUTSIDE_CANDIDATES, precision);
   const eps = Math.max(precision, total * 1e-6);
   const centre = centroidOf(rings) || labelPoint(rings);
   const out = [];
-  // A ring keeps the polygon on one side all along: one even-odd test (at
-  // its longest edge) for the whole ring, not one per edge.
+  // A ring keeps the polygon on one side all along, found once per ring
+  // (not by an even-odd test beside each edge, nor beside one edge: a part
+  // of the polygon narrower than the test's offset, such as a slit, put
+  // that test on the wrong side). The winding gives the side of the ring's
+  // own inside; it is the polygon's unless the ring lies in an odd number
+  // of the others (a hole: even-odd), a majority of a few of its edges'
+  // midpoints deciding (a ring may touch another).
   const edges = [];
-  for (const ringEdges of byRing) {
-    let longest = ringEdges[0], most = -1;
-    for (const [a, b] of ringEdges) {
-      const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      if (length > most) [longest, most] = [[a, b], length];
+  for (const [ring, ringEdges] of byRing) {
+    let twice = 0;
+    for (let i = 0, n = ring.length; i < n; i++) {
+      const a = ring[i], b = ring[(i + 1) % n];
+      twice += a[0] * b[1] - b[0] * a[1];
     }
-    const [a, b] = longest;
-    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-    const flip = most > 0 && inside(loaded, [mid[0] + (b[1] - a[1]) / most * eps, mid[1] - (b[0] - a[0]) / most * eps]);
-    for (const [a2, b2] of ringEdges) edges.push([a2, b2, flip]);
+    const others = loaded.filter((other) => other !== ring);
+    let hole = false;
+    if (others.length) {
+      const samples = Math.min(3, ringEdges.length);
+      let votes = 0;
+      for (let k = 0; k < samples; k++) {
+        const [a, b] = ringEdges[Math.floor((k + 0.5) * ringEdges.length / samples)];
+        if (inside(others, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2])) votes++;
+      }
+      hole = 2 * votes > samples;
+    }
+    // (b1 - a1, a0 - b0) points out of a ring of positive (shoelace) area.
+    const flip = (twice < 0) !== hole;
+    for (const [a, b] of ringEdges) edges.push([a, b, flip]);
   }
   let offset = step / 2;  // distance along the edges to the next sample
   for (const [a, b, flip] of edges) {
