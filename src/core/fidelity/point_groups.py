@@ -16,7 +16,7 @@ here are map coordinates (y up): a painter shift (dx, dy) is (dx, -dy).
 """
 
 import math
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Set, Tuple
 
 Point = Tuple[float, float]
 
@@ -53,6 +53,26 @@ def group_points(points: Sequence[Point], tolerance: float) -> List[List[int]]:
         location[best] = ((lx * n + x) / (n + 1), (ly * n + y) / (n + 1))
         groups[best].append(index)
     return groups
+
+
+def isolated(points: Sequence[Point], tolerance: float) -> Set[int]:
+    """Indexes of ``points`` with no other point within ``tolerance`` (on
+    either axis, as group_points compares): alone at that tolerance and at
+    every smaller one."""
+    cells: Dict[Tuple[int, int], List[int]] = {}
+    cell = tolerance if tolerance > 0 else 1.0
+    for index, (x, y) in enumerate(points):
+        cells.setdefault((int(math.floor(x / cell)), int(math.floor(y / cell))), []).append(index)
+    alone = set()
+    for (cx, cy), indexes in cells.items():
+        near = [i for gx in (cx - 1, cx, cx + 1) for gy in (cy - 1, cy, cy + 1)
+                for i in cells.get((gx, gy), ())]
+        for index in indexes:
+            x, y = points[index]
+            if not any(other != index and abs(points[other][0] - x) <= tolerance
+                       and abs(points[other][1] - y) <= tolerance for other in near):
+                alone.add(index)
+    return alone
 
 
 def centroid(points: Sequence[Point], members: Sequence[int]) -> Point:

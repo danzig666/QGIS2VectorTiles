@@ -61,14 +61,17 @@ def _export(layer, tmp_path, low, high):
     return rendered, rules, diags
 
 
-def _compare(plugin, tmp_path, renderer):
+def _compare(plugin, tmp_path, renderer, below=-1):
+    """QGIS vs the exported groups at the test scale; exported up to
+    ``below`` zooms under it (from 1: drawn from overzoomed tiles)."""
     layer = _layer("Point", POINTS, str(tmp_path / "pts.gpkg"))
     renderer.setEmbeddedRenderer(QgsSingleSymbolRenderer(
         QgsMarkerSymbol.createSimple({"name": "circle", "size": "2", "color": "#2b83ba"})))
     layer.setRenderer(renderer)
     expected = render([layer], EXTENT)
     zoom = _zoom(EXTENT)
-    rendered, rules, diags = _export(layer, tmp_path, int(zoom) - 1, int(zoom) + 1)
+    rendered, rules, diags = _export(layer, tmp_path, int(zoom) - 1 - max(below, 0),
+                                     int(zoom) - below)
     visible = [(out, rule) for out, rule in zip(rendered, rules)
                if rule.point_group and rule.visibility is not None and rule.visibility.contains(zoom)]
     assert visible, [r.visibility for r in rules]
@@ -81,6 +84,21 @@ def test_point_cluster_groups_like_qgis(plugin, tmp_path):
     roles = {rule.point_group[1] for rule in rules}
     assert roles == {"cluster", "members"}, roles
     # Two clusters (6 and 2 points) and the lone point, like QGIS.
+    assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
+
+
+def test_point_cluster_past_the_last_tiles_groups_like_qgis(plugin, tmp_path):
+    """Exported three zooms below the test scale: the browser overzooms the
+    last tiles, where the grouping goes on per zoom (a 1 mm distance splits
+    the pair within the overzoom); the lone point (no other within the
+    grouping distance of the first overzoom written) is written once for
+    all of them, the others per zoom."""
+    renderer = QgsPointClusterRenderer()
+    renderer.setTolerance(1)
+    expected, got, rules, _ = _compare(plugin, tmp_path, renderer, below=3)
+    stable = [rule for rule in rules if dict(rule.point_group[3]).get("part") == "stable"]
+    assert len(stable) == 1 and stable[0].visibility.max_zoom is None
+    assert {rule.get_attr("v") is not None for rule in rules} == {True}
     assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
 
 
@@ -99,6 +117,16 @@ def test_point_displacement_grid(plugin, tmp_path):
     expected, got, rules, _ = _compare(plugin, tmp_path, renderer)
     assert "grid" in {rule.point_group[1] for rule in rules}
     assert mask_difference(ink_mask(expected), ink_mask(got)) < 0.08
+
+
+def test_isolated_points_stay_alone_at_smaller_tolerances():
+    from fidelity import point_groups as pg
+    points = [(0, 0), (4, 0), (20, 0), (20, 30), (50, 5)]
+    assert pg.isolated(points, 5) == {2, 3, 4}
+    assert pg.isolated(points, 30) == set()  # (20, 30) is 30 from (20, 0)
+    for tolerance in (5, 3, 1):
+        alone = {g[0] for g in pg.group_points(points, tolerance) if len(g) == 1}
+        assert pg.isolated(points, 5) <= alone
 
 
 def test_grouping_follows_qgis_order_and_tolerance():

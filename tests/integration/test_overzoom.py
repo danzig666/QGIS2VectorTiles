@@ -31,11 +31,14 @@ def _layer(kind, wkt, path, fields=None, values=None):
     layer = QgsVectorLayer(f"{kind}?crs=EPSG:3857", "src", "memory")
     layer.dataProvider().addAttributes([QgsField(f, QVariant.Double) for f in fields or []])
     layer.updateFields()
-    feature = QgsFeature(layer.fields())
-    feature.setGeometry(QgsGeometry.fromWkt(wkt))
-    if values:
-        feature.setAttributes(values)
-    layer.dataProvider().addFeatures([feature])
+    features = []
+    for one in [wkt] if isinstance(wkt, str) else wkt:
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(QgsGeometry.fromWkt(one))
+        if values:
+            feature.setAttributes(values)
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
     return to_geopackage(layer, path)
 
 
@@ -227,6 +230,32 @@ def test_screen_unit_shapeburst_keeps_its_width_past_the_last_tiles(plugin, tmp_
     assert diags.by_code("Q2VT_GRADIENT_APPROXIMATE")
 
 
+def test_shapeburst_out_of_budget_keeps_its_last_bands_past_the_last_tiles(
+        plugin, tmp_path, monkeypatch):
+    """When the exported zooms use up the output budget, the last band set
+    goes on past the last tiles (as before the overzoom bands), not the
+    inner colour that stands for bands narrower than the tiles' grid."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    monkeypatch.setattr(SymbolMaterializer, "_band_count", classmethod(lambda cls, colors: 1))
+    monkeypatch.setattr(SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 17 * 4)  # zooms 0-16 only
+    burst = QgsShapeburstFillSymbolLayer()
+    burst.setUseWholeShape(False)
+    burst.setMaxDistance(3)
+    burst.setDistanceUnit(MM)
+    burst.setColor(QColor("blue"))
+    burst.setColor2(QColor("yellow"))
+    layer = _layer("Polygon", SQUARE, str(tmp_path / "sb.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst])))
+    rules, diags = _flatten(tmp_path, layer)
+    last = _at(rules, 16.9)
+    assert len(last) == 1 and last[0].recipe.kind == "color_bands"
+    for zoom in (17.5, 19.5, 22.0):
+        assert _at(rules, zoom) == last
+    assert last[0].visibility.max_zoom is None
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+    assert not diags.by_code("Q2VT_GRADIENT_APPROXIMATE")
+
+
 def test_screen_offset_vertex_markers_keep_their_offset_past_the_last_tiles(plugin, tmp_path):
     marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2.5)
     marker.setSizeUnit(MM)
@@ -351,3 +380,63 @@ def test_view_max_zoom_limits_the_overzoom_rules(plugin, tmp_path):
     assert _at(rules, 23.0)[0].get_attr("v") == 18  # the last stays open
     rules = flatten(16)
     assert not [r for r in rules if r.get_attr("v") is not None]
+
+
+def test_overzoom_copies_stay_within_the_last_tiles_budget(plugin, tmp_path, monkeypatch):
+    """Every overzoom copy is written into the last tiles: a map whose last
+    tile zoom is low holds many features in one tile, so the copies stop at
+    the budget and the last one serves the zooms above it."""
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    field = QgsVectorFieldSymbolLayer()
+    field.setXAttribute("dx")
+    field.setYAttribute("dy")
+    field.setScale(6)
+    field.setDistanceUnit(MM)
+    # Three points in one zoom-16 tile: three lines a copy.
+    points = [f"POINT({X + 10 * k} {Y})" for k in range(3)]
+    layer = _layer("Point", points, str(tmp_path / "fb.gpkg"), ["dx", "dy"], [3.0, 2.0])
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([field])))
+    monkeypatch.setattr(SymbolMaterializer, "OVERZOOM_TILE_ELEMENTS", 3 * 2)
+    rules, diags = _flatten(tmp_path, layer)
+    assert sorted(r.get_attr("v") for r in rules if r.get_attr("v") is not None) == [17, 18]
+    drawn = _at(rules, 21.5)
+    assert len(drawn) == 1 and drawn[0].get_attr("v") == 18
+    assert drawn[0].visibility.max_zoom is None
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_point_clusters_past_the_last_tiles_merge_zooms_that_group_alike(plugin, tmp_path):
+    """A cluster renderer's grouping is a screen distance (5 mm), so it goes
+    on per zoom past the last tiles; zooms that group the points as the
+    zoom before extend its rule instead of writing the points again."""
+    from qgis.core import QgsPointClusterRenderer
+    from fidelity.model import ZoomInterval
+    # 5 m apart: one cluster up to early zoom 18.
+    layer = _layer("Point", [f"POINT({X} {Y})", f"POINT({X + 5} {Y})"],
+                   str(tmp_path / "pc.gpkg"))
+    renderer = QgsPointClusterRenderer()
+    renderer.setTolerance(5)
+    renderer.setToleranceUnit(MM)
+    renderer.setEmbeddedRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    layer.setRenderer(renderer)
+    rules, _ = _flatten(tmp_path, layer)
+    members = [r for r in rules if r.point_group[1] == "members"
+               and dict(r.point_group[3]).get("part") is None]
+    # The points alone from the first overzoom written on (none here): once.
+    stable = [r for r in rules if dict(r.point_group[3]).get("part") == "stable"]
+    assert len(stable) == 1 and stable[0].visibility == ZoomInterval(18.0, None)
+    tolerance = dict(stable[0].point_group[3])["stable"]
+    assert {dict(r.point_group[3]).get("stable") for r in members if r.get_attr("v")} == {tolerance}
+
+    def drawn(zoom):
+        found = _at(members, zoom)
+        assert len(found) == 1
+        return found[0]
+    # Zoom 17 groups like zoom 16: its rule goes on.
+    assert drawn(17.5) is drawn(16.5) and drawn(16.5).get_attr("v") is None
+    # The pair splits within zoom 18; the zooms above group like its end.
+    split = drawn(22.0)
+    assert split.get_attr("v") == 18 and split.visibility.max_zoom is None
+    assert drawn(19.5) is drawn(21.0) is split and 18.0 < split.visibility.min_zoom < 19.0
+    assert drawn(18.0) is not split
+    assert not [r for r in members if (r.get_attr("v") or 0) > 18]

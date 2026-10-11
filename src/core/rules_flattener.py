@@ -544,7 +544,8 @@ class RulesFlattener:
 
     def _point_group_bands(self, renderer, layer, zoom: int, points):
         """[(start zoom, end zoom, params, groups, moves)] of one zoom: where
-        the grouping (or a displacement's sizes) changes."""
+        the grouping (or a displacement's sizes) changes; ``moves``: a
+        displacement moves points apart."""
         from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
         cluster = renderer.type() == "pointCluster"
         bands = []
@@ -565,6 +566,7 @@ class RulesFlattener:
     def _expand_point_groups(self, layer, before: int) -> None:
         """Every component of a point cluster / displacement layer, one rule
         per zoom band (grouping depends on the scale), with its role."""
+        from .fidelity import point_groups as pg  # pylint: disable=import-outside-toplevel
         renderer = layer.renderer()
         mode = self.POINT_GROUP_MODES[renderer.type()]
         components = self.flattened_rules[before:]
@@ -579,17 +581,48 @@ class RulesFlattener:
                 flat_rule.set_attr("g", 1)  # drawn on generated lines
             if role in ("cluster", "center"):
                 self._cluster_variables(flat_rule.rule.symbol())
-            # Grouped per zoom beyond the last tile zoom too (from its tiles):
-            # QGIS's tolerance is on screen, so clusters break apart as the
-            # map zooms in; the last zoom's groups were kept up to zoom 24.
+            # Overzoom included: the grouping distance is a screen size. Those
+            # zooms are drawn from the last tiles: one that groups like the
+            # zoom before (and moves nothing) extends its rule, the points
+            # that stay alone from the first of them on are written once
+            # (stable_members), and the rest is within the last tiles' budget.
             per_zoom = self.materializer._per_zoom(flat_rule, overzoom=True)  # pylint: disable=protected-access
-            previous = None  # (band rule, its groups, displaced)
+            over = [r for r in per_zoom if r.get_attr("v") is not None]
+            stable = None  # grouping distance of stable_members, once written
+            if over:
+                tolerance = dict(self._point_group_params(
+                    renderer, layer, float(over[0].get_attr("v"))))["tolerance"]
+                grouped = len(points) - len(pg.isolated(points, tolerance))
+                capacity = self.materializer._overzoom_capacity(flat_rule, grouped)  # pylint: disable=protected-access
+            previous = None  # (rule, groups, moves) of the last band written
             for index, rule in enumerate(per_zoom):
                 zoom = int(rule.evaluation_zoom())
                 if zoom not in bands:
                     bands[zoom] = self._point_group_bands(renderer, layer, zoom, points)
                 visible = rule.visibility or ZoomInterval(
                     float(zoom), None if index == len(per_zoom) - 1 else zoom + 1.0)
+                overzoom = rule.get_attr("v") is not None
+                if overzoom and previous is not None and len(bands[zoom]) == 1 and \
+                        bands[zoom][0][3] == previous[1] and not bands[zoom][0][4] and \
+                        not previous[2] and previous[0].visibility.max_zoom is not None and \
+                        abs(previous[0].visibility.max_zoom - visible.min_zoom) < 1e-9:
+                    previous[0].visibility = ZoomInterval(previous[0].visibility.min_zoom,
+                                                          visible.max_zoom)
+                    continue
+                if overzoom:
+                    capacity -= len(bands[zoom])  # a copy of the grouped points per band
+                    if capacity < 0:
+                        self.materializer._report_overzoom_budget(  # pylint: disable=protected-access
+                            flat_rule, zoom - self.materializer.max_zoom - 1)
+                        if previous is not None:
+                            previous[0].visibility = ZoomInterval(
+                                previous[0].visibility.min_zoom, None)
+                        break
+                    if stable is None and role == "members":
+                        stable = dict(self._point_group_params(
+                            renderer, layer, visible.min_zoom))["tolerance"]
+                        self.flattened_rules.append(self._stable_members(
+                            flat_rule, rule, mode, visible.min_zoom, bands[zoom][0][2], stable))
                 for band, (start, end, params, groups, moves) in enumerate(bands[zoom]):
                     last = band == len(bands[zoom]) - 1 and visible.max_zoom is None
                     interval = visible.intersect(ZoomInterval(start, None if last else end))
@@ -604,6 +637,8 @@ class RulesFlattener:
                     banded = rule.derive()
                     banded.visibility = interval
                     banded.set_attr("b", band)
+                    if stable is not None:
+                        params = params + (("stable", stable),)
                     banded.point_group = (mode, role, round((start + end) / 2, 4), params)
                     self.flattened_rules.append(banded)
                     previous = (banded, groups, moves)
@@ -612,6 +647,20 @@ class RulesFlattener:
             f"{'Point cluster' if mode == 'cluster' else 'Point displacement'} renderer: points "
             "grouped per zoom level (QGIS groups at every scale, within the visible area).",
             layer_id=layer.id())
+
+    def _stable_members(self, flat_rule, rule, mode: str, zoom: float, params: tuple,
+                        tolerance: float):
+        """The members role's points with no other point within ``tolerance``
+        (the grouping distance at ``zoom``, the first overzoom written, see
+        point_groups.isolated): alone at every zoom above, so written once,
+        visible from ``zoom`` on; the per-zoom rules leave them out
+        (point_group param "stable")."""
+        stable = rule.derive()
+        stable.visibility = flat_rule.visibility.intersect(ZoomInterval(float(zoom), None))
+        stable.set_attr("b", self.POINT_GROUP_STEPS)
+        stable.point_group = (mode, "members", float(zoom), params + (
+            ("stable", tolerance), ("part", "stable")))
+        return stable
 
     @staticmethod
     def _heatmap_weight(heatmap, fields) -> str:
@@ -1548,8 +1597,11 @@ class RulesFlattener:
         if normalize_unit(unit) == "map" or _to_mm(1.0, unit) is None:
             return self._generated_line_rules(flat_rule, generator(scale), layer_idx)
         rules = []
-        # Every zoom the map is viewed at, overzoom included (on the last tiles).
-        for rule in self.materializer._per_zoom(flat_rule, overzoom=True):  # pylint: disable=protected-access
+        # Every zoom the map is viewed at, overzoom included (on the last
+        # tiles, within their budget: a line per feature and sub-symbol layer).
+        features = self.materializer._layer_totals(flat_rule.layer)[2]  # pylint: disable=protected-access
+        lines = features * max(field_layer.subSymbol().symbolLayerCount(), 1)
+        for rule in self.materializer._per_zoom(flat_rule, overzoom=True, elements=lines):  # pylint: disable=protected-access
             zoom = self.materializer.rule_zoom(rule)
             factor = scale * _to_mm(1.0, unit) * ZoomLevels.map_units_per_mm(zoom) / math.sqrt(2)
             rules.extend(self._generated_line_rules(rule, generator(factor), layer_idx))

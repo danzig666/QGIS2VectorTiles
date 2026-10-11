@@ -520,18 +520,22 @@ class SymbolMaterializer:
         """The last zoom the map is viewed at (see ``overzoom_top``)."""
         return self.overzoom_top
 
-    def _per_zoom(self, flat_rule: FlattenedRule, overzoom: bool = False) -> List[FlattenedRule]:
+    def _per_zoom(self, flat_rule: FlattenedRule, overzoom: bool = False,
+                  elements: Optional[float] = None) -> List[FlattenedRule]:
         """One rule per zoom of ``flat_rule``; the last keeps its overzoom.
 
         ``overzoom``: also one per zoom beyond the archive's last zoom, up to
         ``overzoom_top`` (then open), drawn from that zoom's tiles: attribute
         "v" (a dataset of its own) and ``scale_zoom`` are the zoom they are
         shown at (see rule_zoom), for scale-dependent values and screen
-        sizes held in map units."""
+        sizes held in map units. ``elements``: the features one such copy
+        writes (whole layer), for the overzoom budget (_overzoom_kept)."""
         low, high = self._zoom_range(flat_rule)
         if low > high:
             return [flat_rule]
         over = self._overzoom_zooms(flat_rule) if overzoom else []
+        if over and elements is not None:
+            over = over[:self._overzoom_kept(flat_rule, len(over), elements)]
         if low == high and (flat_rule.get_attr("o"), flat_rule.get_attr("i")) == (low, high):
             rules = [flat_rule]
         else:
@@ -581,6 +585,60 @@ class SymbolMaterializer:
             return []  # no exact visibility: drawn up to its last tile zoom
         return [zoom for zoom in range(high + 1, self.overzoom_to + 1)
                 if not visible.intersect(ZoomInterval(float(zoom), float(zoom + 1))).is_empty]
+
+    # Budget of the overzoom copies (_per_zoom with ``elements``): all of
+    # them are written into the last tiles, so the densest of those tiles
+    # gets at most this many features more (a map whose last tile zoom is
+    # low holds a whole layer in one tile).
+    OVERZOOM_TILE_ELEMENTS = 25_000
+
+    def _overzoom_kept(self, flat_rule: FlattenedRule, count: int, elements: float) -> int:
+        """How many of ``count`` overzoom copies of ``elements`` features fit
+        the output budget; the last one kept serves the zooms above it."""
+        kept = min(count, self._overzoom_capacity(flat_rule, elements))
+        if kept < count:
+            self._report_overzoom_budget(flat_rule, kept)
+        return kept
+
+    def _overzoom_capacity(self, flat_rule: FlattenedRule, elements: float) -> float:
+        """Overzoom copies of ``elements`` features the budget allows."""
+        features = self._layer_totals(flat_rule.layer)[2]
+        if not features or elements <= 0:
+            return math.inf
+        per_tile = elements / features * self._tile_peak(flat_rule.layer)
+        return max(0, min(int(self.OVERZOOM_TILE_ELEMENTS // max(per_tile, 1.0)),
+                          int(self.MAX_PATTERN_ELEMENTS // elements)))
+
+    def _report_overzoom_budget(self, flat_rule: FlattenedRule, kept: int) -> None:
+        self._report("Q2VT_PATTERN_BUDGET",
+                     f"Screen sizes are kept past the last tile zoom for {kept} zoom(s) only "
+                     "(output budget of the last tiles); above that they grow with the map.",
+                     flat_rule)
+
+    def _tile_peak(self, layer) -> int:
+        """Most features of a source layer in one tile of the last tile zoom
+        (by bounding-box centre; cached)."""
+        from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
+                               QgsFeatureRequest, QgsPointXY)
+        cache = self.__dict__.setdefault("_tile_peaks", {})
+        if layer.id() in cache:
+            return cache[layer.id()]
+        transform = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:3857"),
+                                           QgsProject.instance())
+        world = 2 * math.pi * 6378137.0
+        size = world / 2.0 ** self.max_zoom
+        counts: Dict[Tuple[int, int], int] = {}
+        for feature in layer.getFeatures(QgsFeatureRequest().setNoAttributes()):
+            if not feature.hasGeometry():
+                continue
+            try:
+                center = transform.transform(QgsPointXY(feature.geometry().boundingBox().center()))
+            except Exception:  # pylint: disable=broad-except
+                continue  # outside the projection: not in any tile
+            key = (int(math.floor(center.x() / size)), int(math.floor(center.y() / size)))
+            counts[key] = counts.get(key, 0) + 1
+        cache[layer.id()] = max(counts.values(), default=0)
+        return cache[layer.id()]
 
     @staticmethod
     def rule_zoom(rule: FlattenedRule) -> int:
@@ -2200,8 +2258,8 @@ class SymbolMaterializer:
             if zoom_offset_mm is None:
                 rules.append(placed(flat_rule, line_offset))
             else:
-                rules.extend(placed(rule, zoom_offset(rule))
-                             for rule in self._per_zoom(flat_rule, overzoom=True))
+                rules.extend(placed(rule, zoom_offset(rule)) for rule in self._per_zoom(
+                    flat_rule, overzoom=True, elements=self._layer_vertices(flat_rule.layer)))
         if "Interval" in placements:
             native = flat_rule.derive()
             interval_layer = layer.clone()
@@ -2230,7 +2288,9 @@ class SymbolMaterializer:
                         return [one(rule)]
                     # A screen averaging length covers less of the line as the
                     # map zooms in: the same positions, one angle per zoom.
-                    return [one(zoom_rule) for zoom_rule in self._per_zoom(rule, overzoom=True)]
+                    return [one(zoom_rule) for zoom_rule in self._per_zoom(
+                        rule, overzoom=True, elements=self._layer_totals(flat_rule.layer)[1] /
+                        max(layer.interval(), 1e-9))]
                 split = self._dense_split(native, layer.interval(), exact,
                                           elements=self._layer_totals(flat_rule.layer)[1] /
                                           max(layer.interval(), 1e-9),
@@ -2349,7 +2409,8 @@ class SymbolMaterializer:
             past the last tiles one rule per zoom while the size is coarser
             than their geometry grid, then one rule from there on."""
             out = []
-            for rule in self._per_zoom(flat_rule, overzoom=True):
+            for rule in self._per_zoom(flat_rule, overzoom=True,
+                                       elements=self._layer_vertices(flat_rule.layer)):
                 size = size_px * world / (512.0 * 2.0 ** (self.rule_zoom(rule) + 0.5))
                 out.append((rule, size))
                 if rule.get_attr("v") is not None and size < quantum:
@@ -2894,18 +2955,26 @@ class SymbolMaterializer:
         # a tile), within what is left of the output budget. Narrower, the
         # bands would collapse onto the outline: the inner colour from there.
         quantum = self._map_units_per_mm(flat_rule, self._zoom_range(flat_rule)[1]) * 25.4 / 96.0 / 8.0
-        kept = 0
+        grid = 0
         for rule in over:
             if mm * self._map_units_per_mm(flat_rule, self.rule_zoom(rule) + 0.5) < quantum:
                 break
-            kept += 1
-        over_steps = 0
+            grid += 1
+        kept, over_steps = grid, 0
         while kept and not over_steps:
             over_cost = sum(cost(self.rule_zoom(rule)) for rule in over[:kept])
             over_steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
                                if n <= min(top, 2) and
                                used + over_cost * n <= self.MAX_PATTERN_ELEMENTS), 0)
             kept -= 0 if over_steps else 1
+        if kept < grid and (kept or zoom_rules):
+            # Out of budget: the last band set written serves the zooms above
+            # (its bands widen with the map there).
+            last = over[kept - 1] if kept else zoom_rules[-1]
+            last.visibility = flat_rule.visibility.intersect(
+                ZoomInterval(last.visibility.min_zoom, None))
+            over = over[:kept]
+            self._report_overzoom_budget(flat_rule, kept)
         rules = []
         for index, rule in enumerate(zoom_rules):
             for band_rule, zoom in self._sub_zoom_bands(

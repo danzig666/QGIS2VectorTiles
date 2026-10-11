@@ -2023,7 +2023,9 @@ class RulesExporter:
         zoom (FlattenedRule.point_group = (mode, role, zoom, params)):
 
         * members: cluster - the points left alone; displacement - every
-          point, the grouped ones moved around their group's centre;
+          point, the grouped ones moved around their group's centre (param
+          "stable": without the points alone within that distance, which
+          the rule with "part" "stable" writes alone);
         * cluster / center: one point per group of two or more at its
           centroid, with CLUSTER_SIZE_FIELD (the first member's attributes);
         * circle / grid: the displacement circle or grid lines."""
@@ -2068,12 +2070,21 @@ class RulesExporter:
 
         written = 0
         placement = params.get("placement", pg.RING)
+        stable, only_stable = set(), params.get("part") == "stable"
+        if params.get("stable") is not None:
+            key = ("stable", source, params["stable"], params.get("crs"))
+            with self._point_group_lock:
+                if key not in self._point_group_cache:
+                    self._point_group_cache[key] = pg.isolated(points, float(params["stable"]))
+                stable = self._point_group_cache[key]
         for members in groups:
             self._check_cancel()
             if len(members) < 2:
-                if role == "members":
+                if role == "members" and (members[0] in stable) == only_stable:
                     write(features[members[0]], features[members[0]].geometry())
                     written += 1
+                continue
+            if only_stable:
                 continue
             center = pg.centroid(points, members)
             if role in ("cluster", "center"):
