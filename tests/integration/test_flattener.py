@@ -1099,6 +1099,71 @@ def test_geometry_generator_sub_layers_have_their_own_datasets(flattener):
     assert all(len(group) == 1 for group in datasets.values()), datasets
 
 
+@pytest.mark.parametrize("max_scale", [0, 5000])
+def test_a_marker_generator_on_points_has_its_own_dataset(flattener, max_scale):
+    """A marker geometry generator beside a simple marker on a point layer
+    (both draw points): the generator's points were named after symbol
+    layer 0's dataset, so both rules wrote the generated (moved) points
+    into one dataset and the simple marker was drawn at the moved position.
+    Also with a rule shown only up to a zoom below the last tile zoom."""
+    from qgis.core import (QgsGeometryGeneratorSymbolLayer, QgsMarkerSymbol,
+                           QgsRuleBasedRenderer, QgsSimpleMarkerSymbolLayer)
+    layer = _points()
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 30, 0)", "SymbolType": "Marker"})
+    generator.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"}))
+    root = QgsRuleBasedRenderer.Rule(None)
+    rule = QgsRuleBasedRenderer.Rule(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(), generator]))
+    rule.setMaximumScale(max_scale)
+    root.appendChild(rule)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    reset_project(layer)
+    for low, high in ((0, 16), (14, 19)):
+        rules, _ = flattener(low, high)
+        kinds = {r.output_dataset: r.rule.symbol().symbolLayer(0).layerType() for r in rules}
+        assert len(rules) == 2 and sorted(kinds.values()) == ["GeometryGenerator",
+                                                              "SimpleMarker"], \
+            [(r.output_dataset, r.rule.symbol().symbolLayer(0).layerType()) for r in rules]
+
+
+@pytest.mark.parametrize("kind", ["Fill", "Line"])
+def test_geometry_generator_sub_symbols_keep_their_own_opacity(flattener, kind):
+    """QgsGeometryGeneratorSymbolLayer draws its sub-symbol with the
+    sub-symbol's own opacity, never the parent symbol's (unlike marker
+    lines or point patterns): a 0.4 parent made the generated fill and
+    stroke translucent too. The parent's own layers keep its opacity."""
+    from qgis.core import (QgsFillSymbol, QgsGeometryGeneratorSymbolLayer, QgsLineSymbol,
+                           QgsSimpleFillSymbolLayer, QgsSimpleLineSymbolLayer,
+                           QgsSingleSymbolRenderer)
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtGui import QColor
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "buffer($geometry, -15)", "SymbolType": kind})
+    for own in (1.0, 0.5):
+        layer = zoning_layer()
+        if kind == "Fill":
+            sub = QgsFillSymbol([QgsSimpleFillSymbolLayer(
+                QColor(255, 230, 200), Qt.BrushStyle.SolidPattern, QColor(200, 0, 0),
+                Qt.PenStyle.SolidLine, 2.0)])
+        else:
+            sub = QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor(200, 0, 0), 2.0)])
+        sub.setOpacity(own)
+        generator.setSubSymbol(sub)
+        base = QgsSimpleFillSymbolLayer(QColor(200, 200, 200), Qt.BrushStyle.SolidPattern,
+                                        QColor("black"), Qt.PenStyle.NoPen)
+        symbol = QgsFillSymbol([base, generator.clone()])
+        symbol.setOpacity(0.4)
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        reset_project(layer)
+        rules, _ = flattener(0, 16)
+        generated = [r for r in rules if r.pre_generator]
+        plain = [r for r in rules if not r.pre_generator]
+        # Fill: the fill and its stroke (a line); Line: the line.
+        assert len(generated) == (2 if kind == "Fill" else 1), [r.output_dataset for r in rules]
+        assert all(r.rule.symbol().opacity() == pytest.approx(own) for r in generated)
+        assert [r.rule.symbol().opacity() for r in plain] == [pytest.approx(0.4)]
+
+
 def test_split_fill_outline_keeps_its_map_unit_limits(flattener):
     """A map-unit fill outline capped at 0.5 mm (thin borders when zoomed
     in): the outline split off as a line lost the cap and grew without

@@ -1469,7 +1469,6 @@ class RulesFlattener:
             symbol_layer = symbol.symbolLayer(layer_idx)
             if not symbol_layer.enabled():
                 continue
-            geom_generator = None
             sub_symbol = symbol_layer.subSymbol()
             layer_type = symbol_layer.layerType() if symbol_layer else None
             if layer_type == "GeometryGenerator" and sub_symbol is not None and \
@@ -1481,7 +1480,6 @@ class RulesFlattener:
                 continue
             if layer_type == "GeometryGenerator":
                 symbol_type = sub_symbol.type()
-                geom_generator = True
             elif layer_type == "CentroidFill":
                 symbol_type = 0
             else:
@@ -1489,7 +1487,10 @@ class RulesFlattener:
 
             rule_clone = flat_rule.derive()
             rule_clone.set_attr("c", symbol_type)
-            rule_clone.set_attr("s", layer_idx, geom_generator)
+            # Its own dataset, also for a marker generator: on a point layer
+            # (same c) the generated points renamed to s00 were the dataset
+            # of symbol layer 0, which was then drawn at the generated position.
+            rule_clone.set_attr("s", layer_idx)
 
             clone_symbol = rule_clone.rule.symbol()
             for remove_idx in reversed(range(layer_count)):
@@ -1647,7 +1648,9 @@ class RulesFlattener:
             for remove_idx in reversed(range(single.symbolLayerCount())):
                 if remove_idx != inner_idx:
                     single.deleteSymbolLayer(remove_idx)
-            single.setOpacity(single.opacity() * flat_rule.rule.symbol().opacity())
+            # The sub-symbol keeps its own opacity: QgsGeometryGeneratorSymbolLayer
+            # renders it with its own render context (QgsSymbol::startRender
+            # reads its mOpacity), never the parent symbol's opacity.
             rule_clone.rule.setSymbol(single)
             rule_clone.set_attr("g", kind)
             # Each fill sub-layer is drawn like a fill layer's: centroid

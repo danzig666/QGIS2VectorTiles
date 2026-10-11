@@ -129,7 +129,7 @@ class FlattenedRule:
         match = re.search(f"{char}(\\d+)", self.rule.description())
         return int(match.group(1)) if match else None
 
-    def set_attr(self, char: str, value: int, geom_generator=None):
+    def set_attr(self, char: str, value: int):
         """Set rule attribute in description (two digits, more when needed)."""
         new_attr = f"{char}{int(value):02d}"
         desc = self.rule.description()
@@ -139,8 +139,6 @@ class FlattenedRule:
 
         self.rule.setDescription(desc)
         self.output_dataset = desc
-        if geom_generator:
-            self.output_dataset = re.sub(r"s\d+", "s00", desc, count=1)
 
     def get_description(self):
         """Construct rule description for labeling or renderer rule."""

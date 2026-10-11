@@ -248,6 +248,64 @@ def test_generator_fill_stroke_and_map_unit_offset_with_publish_zooms(export, tm
     assert len([r for r in exporter.rules if r.pre_generator]) == 2  # fill + its stroke
 
 
+def test_generator_sub_symbols_ignore_the_parent_opacity_with_publish_zooms(export, tmp_path):
+    """A 0.4 symbol with a fill generator: QGIS draws the generated fill and
+    its stroke opaque (the sub-symbol's own opacity) and only the plain
+    fill at 0.4. The style drew both generated layers at 0.4."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
+    base = QgsSimpleFillSymbolLayer(QColor(200, 200, 200), Qt.BrushStyle.SolidPattern,
+                                    QColor("black"), Qt.PenStyle.NoPen)
+    inner = QgsSimpleFillSymbolLayer(QColor(255, 230, 200), Qt.BrushStyle.SolidPattern,
+                                     QColor(200, 0, 0), Qt.PenStyle.SolidLine, 2.0)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer($geometry, -50)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([inner]))
+    symbol = QgsFillSymbol([base, generator])
+    symbol.setOpacity(0.4)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    exporter, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    generated = {r.output_dataset for r in exporter.rules if r.pre_generator}
+    opacities = sorted((l["type"], l["source-layer"] in generated,
+                        l["paint"].get(f"{l['type']}-opacity", 1))
+                       for l in style["layers"] if l.get("source-layer"))
+    assert opacities == [("fill", False, pytest.approx(0.4)), ("fill", True, 1),
+                         ("line", True, 1)], opacities
+
+
+def test_marker_generator_on_points_keeps_the_source_points_with_publish_zooms(export, tmp_path):
+    """A simple marker and a marker geometry generator moving the point on a
+    point layer, exported 0-16: both style layers read the generated points
+    of one dataset, so the simple marker was drawn at the moved position
+    (hidden under the generator's marker). Each has its own data now."""
+    import sqlite3
+    from qgis.core import (QgsGeometryGeneratorSymbolLayer, QgsMarkerSymbol,
+                           QgsSimpleMarkerSymbolLayer, QgsVectorLayer)
+    from fidelity.validation import tile_layers
+    from q2vt_fixtures import to_geopackage
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(f"POINT({EXTENT.center().x()} "
+                                            f"{EXTENT.center().y()})"))
+    layer.dataProvider().addFeature(feature)
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 30, 0)", "SymbolType": "Marker"})
+    generator.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([
+        QgsSimpleMarkerSymbolLayer.create({"name": "circle", "color": "255,0,0"}), generator])))
+    _, result = export(layer, min_zoom=0, max_zoom=16)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    sources = [l["source-layer"] for l in style["layers"] if l.get("source-layer")]
+    assert len(sources) == 2 and len(set(sources)) == 2, sources
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        found = {name for zoom, data in conn.execute("SELECT zoom_level, tile_data FROM tiles")
+                 if zoom == 16 for name in tile_layers(bytes(data))}
+    assert set(sources) <= found
+
+
 def test_geometry_generator_uses_layer_crs_for_both_geometry_spellings(plugin):
     from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
 
