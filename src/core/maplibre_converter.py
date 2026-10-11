@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import decimal
 import json
 import math
 import re
@@ -2825,9 +2826,19 @@ class QgisMapLibreStyleExporter:
         Numbers are matched as the viewer writes them (``to-string``): a
         tile carries 4.0 as the integer 4, never the text "4.0"."""
         def text(value):
-            if isinstance(value, float) and value.is_integer():
+            if not isinstance(value, float) or not math.isfinite(value):
+                return str(value)
+            if value.is_integer() and abs(value) < 1e16:
                 return str(int(value))
-            return str(value)
+            # JavaScript's shortest form: plain digits from 1e-6 to 1e21,
+            # an exponent with its sign and no padding outside.
+            shortest = repr(value)
+            if "e" not in shortest:
+                return shortest
+            if 1e-6 <= abs(value) < 1e21:
+                return format(decimal.Decimal(shortest), "f")
+            mantissa, exponent = shortest.split("e")
+            return f"{mantissa}e{'+' if int(exponent) > 0 else '-'}{abs(int(exponent))}"
         numeric = any(isinstance(v, (int, float)) and not isinstance(v, bool)
                       for combo in combos for v in combo)
         key = (["to-string", ex.get(fields[0])] if numeric else ex.get(fields[0])) \
@@ -3673,12 +3684,14 @@ class QgisMapLibreStyleExporter:
             return symbol, symbol_layer, self._SPRITE_INDEPENDENT
         independent = self._SPRITE_INDEPENDENT - {"size"}
         fields = self._variant_fields(layer, independent)
-        if not fields or self._distinct_values(source_layer, fields) is None:
+        why = "it reads no attribute" if not fields else \
+            f"more than {self.MAX_VARIANTS} distinct sizes" \
+            if self._distinct_values(source_layer, fields) is None else ""
+        if why:
             self.context.report(
                 "Q2VT_MARKER_PLACEMENT_APPROX",
-                f"Data-defined hash length: more than {self.MAX_VARIANTS} distinct lengths, so "
-                "the browser scales the hash's image and its stroke width changes with the "
-                "length.")
+                f"Data-defined size of a line marker (or hash length): {why}, so the browser "
+                "scales the marker's image and its stroke width changes with the size.")
             return symbol, symbol_layer, self._SPRITE_INDEPENDENT
         static = symbol.clone()
         static.symbolLayer(0).setDataDefinedProperty(size_key, QgsProperty())

@@ -282,5 +282,15 @@ def test_data_defined_hash_length_over_the_variant_budget_is_reported(exporter, 
     monkeypatch.setattr(exporter, "_distinct_values", lambda _source, _fields: None)
     layer = _convert(exporter, _hash_marker())[0]
     assert ex.referenced_fields(layer["layout"]["icon-size"]) == {"q2vt_property_size_0_00"}
-    assert any("Data-defined hash length" in d.message
+    assert any("Data-defined size of a line marker" in d.message
                for d in exporter.context.diagnostics.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
+
+
+def test_numeric_sprite_variants_match_the_viewers_number_text(exporter):
+    """Variant values are matched against ``to-string`` of the tile's
+    number, which writes JavaScript's shortest form: 0.00001 is "0.00001"
+    there, not Python's "1e-05", so such a variant never matched."""
+    _key, cases = exporter._variant_images(
+        ["q2vt_size"], [(0.00001,), (1e-7,), (4.0,), (2.5,), (1e16,), (1.5e22,)],
+        lambda combo: f"v{combo[0]}")
+    assert cases[::2] == ["0.00001", "1e-7", "4", "2.5", "10000000000000000", "1.5e+22"]

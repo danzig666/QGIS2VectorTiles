@@ -281,7 +281,7 @@ def test_hash_line_keeps_a_data_defined_hash_angle_and_length(plugin, tmp_path):
     ours = ink_mask(render([o for o, _ in exact], EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.1
     # Each length is its own sprite (MapLibreConverter._stroke_sized).
-    assert not any("Data-defined hash length" in d.message
+    assert not any("Data-defined size of a line marker" in d.message
                    for d in diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX"))
 
 
