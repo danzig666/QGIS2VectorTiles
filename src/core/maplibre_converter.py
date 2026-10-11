@@ -1751,6 +1751,7 @@ class QgisMapLibreStyleExporter:
         feature_filters: Optional[Dict[str, list]] = None,
         label_windows: Optional[set] = None,
         layer_opacities: Optional[Dict[str, float]] = None,
+        disjoint_bands: Optional[set] = None,
     ):
         """Initialise the exporter.
 
@@ -1794,6 +1795,10 @@ class QgisMapLibreStyleExporter:
         self.label_windows = label_windows or set()
         # Style name -> the QGIS layer's opacity (Layer Rendering), below 1.
         self.layer_opacities = layer_opacities or {}
+        # Style names of gradient / shapeburst bands that do not overlap
+        # (materialize.color_bands_disjoint): filled without anti-aliased
+        # outlines, which would cover the neighbouring bands.
+        self.disjoint_bands = disjoint_bands or set()
         self.output_dir = output_dir
         self.utils_dir = utils_dir
         self.marker_symbols: dict = {}
@@ -1952,6 +1957,10 @@ class QgisMapLibreStyleExporter:
         first = len(self.style["layers"])
         try:
             self._convert_style_layers(style, bounds, first)
+            if style.styleName() in getattr(self, "disjoint_bands", ()):
+                for layer_def in self.style["layers"][first:]:
+                    if layer_def.get("type") == "fill":
+                        layer_def.setdefault("paint", {})["fill-antialias"] = False
         finally:
             opacity = self.layer_opacities.get(style.styleName())
             if opacity is not None:
@@ -3407,7 +3416,7 @@ class QgisMapLibreStyleExporter:
             if LinePropertyExtractor.is_marker_line(symbol_layer):
                 self._convert_marker_line_symbol_layer(
                     symbol_layer, layer_id, source_layer_name, source_name,
-                    min_zoom, max_zoom,
+                    min_zoom, max_zoom, symbol,
                 )
             else:
                 self._convert_simple_or_pattern_line_symbol_layer(
@@ -3423,13 +3432,15 @@ class QgisMapLibreStyleExporter:
         source_name: str,
         min_zoom: float = -1,
         max_zoom: float = -1,
+        symbol: Optional[QgsSymbol] = None,
     ):
         """Convert a QGIS ``QgsMarkerLineSymbolLayer`` into a MapLibre ``symbol`` layer.
 
         The marker sub-symbol is rendered to a sprite (with its own angle
         baked in, since MapLibre rotates it by the line bearing only);
         placements are mapped by named flags, and the perpendicular offset
-        is reproduced through ``icon-offset``.
+        is reproduced through ``icon-offset``. QGIS draws the markers with
+        the line ``symbol``'s opacity multiplied in (``icon-opacity``).
         """
         sub_symbol = None
         try:
@@ -3483,7 +3494,8 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["icon-offset"] = self._icon_offset(offset_px, icon_size)
 
         layer_def["paint"].update({
-            "icon-opacity": IconPropertyExtractor.get_icon_opacity(),
+            "icon-opacity": PropertyExtractor.opacity(symbol) if symbol is not None
+            else IconPropertyExtractor.get_icon_opacity(),
             "icon-halo-color": IconPropertyExtractor.get_icon_halo_color(),
             "icon-halo-width": IconPropertyExtractor.get_icon_halo_width(),
             "icon-halo-blur": IconPropertyExtractor.get_icon_halo_blur(),

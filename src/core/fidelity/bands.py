@@ -14,7 +14,7 @@ import math
 from typing import Iterable, List, Optional, Tuple
 
 from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsGeometry,
-                       QgsPointXY, QgsProject)
+                       QgsPointXY, QgsProject, QgsRectangle, QgsWkbTypes)
 from qgis.PyQt.QtGui import QTransform
 
 from .materialize import Recipe, _band_interval
@@ -27,6 +27,31 @@ def _union(parts: Iterable[QgsGeometry]) -> Optional[QgsGeometry]:
     if not parts:
         return None
     return QgsGeometry.unaryUnion(parts) if len(parts) > 1 else parts[0]
+
+
+def _without_holes(shape: QgsGeometry) -> List[QgsGeometry]:
+    """``shape`` as polygons without holes, cut at each hole. Bands that do
+    not overlap are rings narrower than a tile unit at low zooms: there a
+    ring's hole collapses onto its outline and the tiles drop it, so the
+    ring would cover the whole inside; a part without holes vanishes."""
+    parts, todo = [], [QgsGeometry.fromPolygonXY(p) for p in
+                       (shape.asMultiPolygon() if shape.isMultipart() else [shape.asPolygon()]) if p]
+    while todo:
+        part = todo.pop()
+        rings = part.asPolygon()
+        if len(rings) < 2:
+            parts.append(part)
+            continue
+        # Cut across the first hole, through a point inside it.
+        x = QgsGeometry.fromPolygonXY([rings[1]]).pointOnSurface().asPoint().x()
+        box = part.boundingBox()
+        for x0, x1 in ((box.xMinimum() - 1, x), (x, box.xMaximum() + 1)):
+            half = part.intersection(QgsGeometry.fromRect(
+                QgsRectangle(x0, box.yMinimum() - 1, x1, box.yMaximum() + 1)))
+            for piece in half.asGeometryCollection():
+                if piece.type() == QgsWkbTypes.PolygonGeometry and not piece.isEmpty():
+                    todo.append(piece)
+    return parts
 
 
 class BandBuilder:
@@ -79,7 +104,11 @@ class BandBuilder:
                 continue
             if self._from_crs is not None:
                 shape.transform(self._from_crs)
-            if not shape.isEmpty():
+            if shape.isEmpty():
+                continue
+            if band.param("overlap") is False:
+                shapes.extend((index, part) for part in _without_holes(shape))
+            else:
                 shapes.append((index, shape))
         return shapes
 
@@ -252,7 +281,10 @@ def _gradient(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[
 
 def _shapeburst(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optional[QgsGeometry]:
     band, bands = recipe.param("band"), recipe.param("bands")
-    if band == 0:
+    # Nested (overlap): every inset reaches to the middle, under the bands
+    # drawn after it. Translucent bands are rings that do not overlap.
+    overlap = recipe.param("overlap") is not False
+    if band == 0 and overlap:
         return QgsGeometry(geometry)
     ignore_rings = recipe.param("ignore_rings")
     key = ("shape", ignore_rings)
@@ -271,5 +303,14 @@ def _shapeburst(geometry: QgsGeometry, recipe: Recipe, ctx: _Context) -> Optiona
         ctx.reach[key] = (shape, reach)
     shape, reach = ctx.reach[key]
     if not reach or reach <= 0:
-        return None
-    return geometry.intersection(shape.buffer(-band / bands * reach, 8))
+        return QgsGeometry(geometry) if band == 0 else None
+
+    def inset(index):
+        if (key, index, bands) not in ctx.reach:
+            ctx.reach[(key, index, bands)] = shape.buffer(-index / bands * reach, 8)
+        return ctx.reach[(key, index, bands)]
+    outer = geometry if band == 0 else geometry.intersection(inset(band))
+    if not overlap and (band + 1) / bands < 1 - 1e-9:
+        # The last band keeps the whole inside (QGIS: colour 2 beyond the distance).
+        outer = outer.difference(inset(band + 1))
+    return outer

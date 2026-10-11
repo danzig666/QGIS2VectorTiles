@@ -53,6 +53,7 @@ from .utils.config import _EPSG_CRS
 from .utils import crash_log, main_thread
 from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
+from .core.fidelity import materialize
 from .core.fidelity import zoom as fidelity_zoom
 from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
@@ -666,6 +667,8 @@ class QGIS2VectorTiles:
             layer_zooms=layer_zooms, cache=self.cache, dataset_keys=self.dataset_keys,
             layer_groups=export_cache.source_layer_groups(rules or []),
             progress_range=(33.0, 97.0),
+            exact_datasets={rule.output_dataset for rule in rules or []
+                            if materialize.color_bands_disjoint(rule.recipe)},
         )
         self.min_zoom = generator._get_global_min_zoom()  # pylint: disable=protected-access
         return generator
@@ -743,6 +746,8 @@ class QGIS2VectorTiles:
                              for rule in rules or [] if getattr(rule, "feature_filter", None)},
             label_windows={rule.rule.description() for rule in rules or []
                            if rule.recipe is not None and rule.recipe.kind == "label_windows"},
+            disjoint_bands={rule.rule.description() for rule in rules or []
+                            if materialize.color_bands_disjoint(rule.recipe)},
             # QGIS layer opacity applies to the features, not to the labels.
             layer_opacities={rule.rule.description(): rule.layer.opacity() for rule in rules or []
                              if rule.layer is not None and rule.get_attr("t") == 0

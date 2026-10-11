@@ -141,6 +141,109 @@ def test_shapeburst_fill_bands_match_qgis(plugin, tmp_path, whole):
     assert mean < 8 and p99 < 40, (mean, p99)
 
 
+def _inside_house():
+    """The house's pixels in the test view, away from its edge."""
+    from scipy import ndimage
+    from qgis.core import QgsSimpleFillSymbolLayer
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        layer = _layer("Polygon", [HOUSE], os.path.join(folder, "mask.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([QgsSimpleFillSymbolLayer(QColor("black"))])))
+        mask = (_pixels(render([layer], EXTENT)) != 255).any(axis=2)
+    return ndimage.binary_erosion(mask, iterations=2)
+
+
+def _render_aliased(layers):
+    """The bands as the style draws them (fill-antialias off): anti-aliased,
+    the edges of rings thinner than a pixel let the background through."""
+    from qgis.core import QgsMapRendererSequentialJob, QgsMapSettings
+    from qgis.PyQt.QtCore import QSize
+    settings = QgsMapSettings()
+    settings.setLayers(layers)
+    settings.setDestinationCrs(layers[0].crs())
+    settings.setExtent(EXTENT)
+    settings.setOutputSize(QSize(300, 300))
+    settings.setBackgroundColor(QColor("white"))
+    settings.setFlag(Qgis.MapSettingsFlag.Antialiasing, False)
+    job = QgsMapRendererSequentialJob(settings)
+    job.start()
+    job.waitForFinished()
+    return job.renderedImage()
+
+
+@pytest.mark.parametrize("case", ["transparent", "opacity", "layer_opacity", "gradient"])
+def test_translucent_bands_do_not_overlap(plugin, tmp_path, case):
+    """A shapeburst fading to transparent, or a shapeburst / gradient drawn
+    at 50 % symbol or layer opacity: each pixel is in one band. Nested bands
+    (each reaching the middle) stacked ~256 translucent layers into an
+    opaque tint over the inside QGIS leaves see-through."""
+    if case == "gradient":
+        fill = QgsGradientFillSymbolLayer(QColor("#1f4e9c"), QColor("#ffd23f"),
+                                          Qgis.GradientColorSource.SimpleTwoColor, Qgis.GradientType.Radial)
+    else:
+        fill = QgsShapeburstFillSymbolLayer(QColor("#08306b"), QColor(222, 235, 247, 0)
+                                            if case == "transparent" else QColor("#deebf7"))
+        fill.setUseWholeShape(False)
+        fill.setMaxDistance(25)
+        fill.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+        fill.setBlurRadius(0)
+    symbol = QgsFillSymbol([fill])
+    if case in ("opacity", "gradient"):
+        symbol.setOpacity(0.5)
+    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    if case == "layer_opacity":
+        layer.setOpacity(0.5)
+    expected = _pixels(render([layer], EXTENT))
+    rendered, rules, _ = _export(layer, tmp_path, min_zoom=0)
+    for out in rendered:
+        out.setOpacity(layer.opacity())
+    got = _pixels(_render_aliased(list(reversed(rendered))))
+    assert len(rules) == 1
+    recipe = rules[0].recipe
+    assert recipe.kind == "color_bands" and recipe.param("bands")[0].param("overlap") is False
+    # One polygon per pixel: the bands' areas add up to the house's.
+    area = sum(f.geometry().area() for f in rendered[0].getFeatures())
+    assert area == pytest.approx(QgsGeometry.fromWkt(HOUSE).area(), rel=0.01)
+    assert all(len(part.asPolygon()) == 1 for f in rendered[0].getFeatures()
+               for part in f.geometry().asGeometryCollection())  # without holes
+    diff = np.abs(expected - got).max(axis=2)[_inside_house()]
+    assert diff.mean() < 6 and np.percentile(diff, 99) < 30, (diff.mean(), np.percentile(diff, 99))
+
+
+def test_translucent_bands_stay_apart_in_the_tiles(plugin, tmp_path):
+    """Publish defaults (zooms 0-16): the rings of a shapeburst fading to
+    transparent are far thinner than a tile unit at low zooms. Tiled with
+    holes, a ring's hole collapsed and the ring covered the whole inside;
+    simplified, neighbouring rings opened gaps. The bands keep one band per
+    pixel at every zoom and are drawn without anti-aliased outlines (which
+    would cover their neighbours)."""
+    from osgeo import gdal
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    from q2vt_fixtures import reset_project
+    fill = QgsShapeburstFillSymbolLayer(QColor("#08306b"), QColor(222, 235, 247, 0))
+    fill.setUseWholeShape(False)
+    fill.setMaxDistance(25)
+    fill.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    layer = _layer("Polygon", [HOUSE], str(tmp_path / "src.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    result = QGIS2VectorTiles(min_zoom=0, max_zoom=16, extent=EXTENT, output_dir=str(out),
+                              serve=False).convert_project_to_vector_tiles()
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    fills = [l for l in style["layers"] if l["type"] == "fill"]
+    assert fills and all(l["paint"]["fill-antialias"] is False for l in fills)
+    house = QgsGeometry.fromWkt(HOUSE).area()
+    for zoom in (10, 13, 16):
+        tiles = gdal.OpenEx(os.path.join(result, "tiles.mbtiles"), open_options=[f"ZOOM_LEVEL={zoom}"])
+        area = sum(feature.GetGeometryRef().GetArea()
+                   for i in range(tiles.GetLayerCount()) for feature in tiles.GetLayer(i))
+        # Tile units are coarse at zoom 10 (38 m): the house's own outline moves.
+        assert area == pytest.approx(house, rel=0.5 if zoom == 10 else 0.1), zoom
+
+
 def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     from qgis.core import QgsDrawSourceEffect, QgsDropShadowEffect, QgsEffectStack, QgsOuterGlowEffect
     from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error

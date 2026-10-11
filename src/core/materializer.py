@@ -34,6 +34,7 @@ from qgis.core import (
     QgsSimpleLineSymbolLayer,
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleMarkerSymbolLayerBase,
+    QgsSymbol,
     QgsSymbolLayer,
     QgsSymbolLayerUtils,
     QgsUnitTypes,
@@ -64,6 +65,34 @@ def replace_symbol_layer(symbol, layer, index: int = 0) -> None:
     old = symbol.takeSymbolLayer(index)
     symbol.insertSymbolLayer(index, layer)
     del old
+
+
+# QgsSymbol opacity property key: "PropertyOpacity" up to 3.3x, "Opacity" later.
+_SYMBOL_OPACITY_KEY = getattr(QgsSymbol.Property, "Opacity",
+                              getattr(QgsSymbol.Property, "PropertyOpacity", None))
+
+
+def inherit_opacity(parent, symbol):
+    """``symbol`` drawn as the sub-symbol of ``parent``: QGIS multiplies the
+    parent's opacity (its data-defined Opacity when set, 0-100) into the
+    sub-symbol's (QgsMarkerLineSymbolLayer::renderPolyline,
+    QgsPointPatternFillSymbolLayer, pattern images...). Returns ``symbol``."""
+    if parent is None or symbol is None:
+        return symbol
+    props = (parent.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY),
+             symbol.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY))
+    if not any(prop is not None and prop.isActive() for prop in props):
+        symbol.setOpacity(symbol.opacity() * parent.opacity())
+        return symbol
+    # A data-defined value replaces the symbol's own opacity: one expression
+    # for both, the static opacity left at 1.
+    terms = [f"({prop.asExpression()})" if prop is not None and prop.isActive()
+             else repr(round(owner.opacity() * 100.0, 6))
+             for prop, owner in zip(props, (parent, symbol))]
+    symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty.fromExpression(
+        f"{terms[1]} * {terms[0]} / 100"))
+    symbol.setOpacity(1.0)
+    return symbol
 
 
 def _flag_names(flags) -> set:
@@ -1284,7 +1313,8 @@ class SymbolMaterializer:
                                           self.project_crs or flat_rule.layer.crs().authid())
 
         def points(rule):
-            return [self._with_symbol(rule, marker.clone(), 0, 1, recipe)]
+            return [self._with_symbol(rule, inherit_opacity(flat_rule.rule.symbol(), marker.clone()),
+                                      0, 1, recipe)]
         if not density:
             if self._over_budget(flat_rule, count * self._layer_totals(flat_rule.layer)[2],
                                  "Random marker fill"):
@@ -1349,7 +1379,8 @@ class SymbolMaterializer:
             self.project_crs or flat_rule.layer.crs().authid(), self._anchor(layer, flat_rule),
             inset, rows_from_top=clip != int(Qgis.MarkerClipMode.Shape),
             deviation=self._deviation(layer, flat_rule), seed=layer.seed())
-        return [self._with_symbol(flat_rule, marker.clone(), 0, 1, recipe)]
+        return [self._with_symbol(flat_rule, inherit_opacity(flat_rule.rule.symbol(), marker.clone()),
+                                  0, 1, recipe)]
 
     @staticmethod
     def _whole_marker_pattern(layer) -> bool:
@@ -1422,7 +1453,7 @@ class SymbolMaterializer:
         if not steps:
             self._over_budget(flat_rule, elements, "Point pattern")
             return None
-        symbol = marker.clone()
+        symbol = inherit_opacity(flat_rule.rule.symbol(), marker.clone())
         rules = []
         visibility = flat_rule.visibility
         if visibility is None or visibility.max_zoom is None or visibility.max_zoom > high + 1:
@@ -1542,6 +1573,7 @@ class SymbolMaterializer:
             fill.setStrokeStyle(Qt.PenStyle.NoPen)
             symbol = QgsFillSymbol([fill])
             symbol.setOpacity(marker.opacity())
+            inherit_opacity(flat_rule.rule.symbol(), symbol)
             parts.append(self._with_symbol(flat_rule, symbol, 2, 1, recipe(True)))
         if simple.strokeStyle() != Qt.PenStyle.NoPen and simple.strokeColor().alpha() > 0:
             stroke = QgsSimpleLineSymbolLayer(simple.strokeColor(), simple.strokeWidth())
@@ -1551,6 +1583,7 @@ class SymbolMaterializer:
             stroke.setPenJoinStyle(simple.penJoinStyle())
             symbol = QgsLineSymbol([stroke])
             symbol.setOpacity(marker.opacity())
+            inherit_opacity(flat_rule.rule.symbol(), symbol)
             outline = self._with_symbol(flat_rule, symbol, 1, 3, recipe(False))
             outline.order = flat_rule.order + (1,) if flat_rule.order else ()
             parts.append(outline)
@@ -1602,6 +1635,7 @@ class SymbolMaterializer:
                                                            QgsProperty(colour))
             symbol = QgsLineSymbol([stroke])
         symbol.setOpacity(marker.opacity())
+        inherit_opacity(flat_rule.rule.symbol(), symbol)
         recipe = mat.grid_recipe(
             layer.distanceX(), layer.distanceY(),
             self._map_units(layer.displacementX(), layer.displacementXUnit(), "displacement", flat_rule),
@@ -1643,13 +1677,15 @@ class SymbolMaterializer:
         recipe = mat.grid_recipe(width, height, 0.0, 0.0, width / 2.0, -height / 2.0,
                                  self.project_crs or flat_rule.layer.crs().authid(),
                                  self._anchor(layer, flat_rule))
-        return [self._with_symbol(flat_rule, QgsMarkerSymbol([marker]), 0, 1, recipe)]
+        # QGIS multiplies the fill symbol's opacity into the SVG texture.
+        return [self._with_symbol(flat_rule, inherit_opacity(flat_rule.rule.symbol(),
+                                                             QgsMarkerSymbol([marker])), 0, 1, recipe)]
 
     # -- marker lines --------------------------------------------------------
     def _marker_points_symbol(self, sub_symbol: QgsMarkerSymbol, rotate: bool,
                               extra_angle: float, offset: float, offset_unit,
                               flat_rule: FlattenedRule) -> QgsMarkerSymbol:
-        symbol = sub_symbol.clone()
+        symbol = inherit_opacity(flat_rule.rule.symbol(), sub_symbol.clone())
         for index in range(symbol.symbolLayerCount()):
             marker = symbol.symbolLayer(index)
             if rotate:
@@ -2084,7 +2120,8 @@ class SymbolMaterializer:
 
         # QGIS fills each arrow with every layer before the next arrow: with
         # opaque, outline-free simple fills each layer keeps its visible part.
-        painter = len(fill_layers) > 1 and fill.opacity() >= 1.0 and all(
+        painter = len(fill_layers) > 1 and fill.opacity() >= 1.0 and \
+            flat_rule.rule.symbol().opacity() >= 1.0 and all(
             l.layerType() == "SimpleFill" and l.strokeStyle() == Qt.PenStyle.NoPen
             and l.brushStyle() == Qt.BrushStyle.SolidPattern and l.color().alpha() == 255
             and not l.dataDefinedProperties().hasActiveProperties() for l in fill_layers)
@@ -2136,9 +2173,11 @@ class SymbolMaterializer:
                     # device pixel inside the edge whatever the width).
                     outline = QgsLineSymbol([self._fill_stroke_as_line(fill_layer)])
                     outline.setOpacity(fill.opacity())
+                    inherit_opacity(flat_rule.rule.symbol(), outline)
                     fill_layer.setStrokeStyle(Qt.PenStyle.NoPen)
             symbol = QgsFillSymbol([fill_layer])
             symbol.setOpacity(fill.opacity())
+            inherit_opacity(flat_rule.rule.symbol(), symbol)
             brush = outline is None or fill_layer.brushStyle() != Qt.BrushStyle.NoBrush
             for band_rule, zoom in bands:
                 if brush:
@@ -2256,7 +2295,13 @@ class SymbolMaterializer:
         probe = [ramp.color(i / 64) for i in range(65)]
         bands = self._band_count(probe)
         colors = [ramp.color((i + 0.5) / bands) for i in range(bands)]
-        overlap = overlap_ok and all(c.alpha() == 255 for c in colors)
+        # Nested bands only where every pixel ends up opaque: below 100 %
+        # symbol or layer opacity they would show through each other.
+        parent = flat_rule.rule.symbol()
+        opacity = parent.dataDefinedProperties().property(_SYMBOL_OPACITY_KEY)
+        overlap = overlap_ok and all(c.alpha() == 255 for c in colors) \
+            and parent.opacity() >= 1.0 and flat_rule.layer.opacity() >= 1.0 \
+            and not (opacity is not None and opacity.isActive())
         encoded = [QgsSymbolLayerUtils.encodeColor(c) for c in colors]  # "r,g,b,a", as QGIS reads it
         fill = QgsSimpleFillSymbolLayer(colors[0], Qt.BrushStyle.SolidPattern, colors[0],
                                         Qt.PenStyle.NoPen)
@@ -2264,8 +2309,7 @@ class SymbolMaterializer:
                                     QgsProperty.fromField(mat.COLOR_FIELD))
         fill.setOffset(layer.offset())
         fill.setOffsetUnit(layer.offsetUnit())
-        symbol = QgsFillSymbol([fill])
-        symbol.setOpacity(flat_rule.rule.symbol().opacity())
+        symbol = inherit_opacity(parent, QgsFillSymbol([fill]))
         recipe = mat.color_bands_recipe([recipe_of(band, bands, overlap) for band in range(bands)], encoded)
         return [self._with_symbol(flat_rule, symbol, 2, 1, recipe)]
 
@@ -2312,8 +2356,9 @@ class SymbolMaterializer:
         ramp = self._ramp_of(layer)
 
         def bands(rule, distance):
-            def recipe(band, count, _overlap):
-                return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, count, crs)
+            def recipe(band, count, overlap):
+                return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, count, crs,
+                                                  overlap)
             return self._band_rules(rule, layer, ramp, recipe)
 
         if whole:
@@ -2384,4 +2429,13 @@ class SymbolMaterializer:
             return None
         crs = self.project_crs or flat_rule.layer.crs().authid()
         recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, "feature")
-        return [self._with_symbol(flat_rule, sub.clone(), 1, 1, recipe)]
+        symbol = sub.clone()
+        # QgsLinePatternFillSymbolLayer: the pattern image takes the fill
+        # symbol's opacity; hatches QGIS draws line by line (clipped other
+        # than at the painter, data-defined line) keep the line's own.
+        by_line = sub.hasDataDefinedProperties() or \
+            layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyLineClipping) or \
+            _enum_value(layer.clipMode()) != _enum_value(Qgis.LineClipMode.ClipPainterOnly)
+        if not by_line:
+            inherit_opacity(flat_rule.rule.symbol(), symbol)
+        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]

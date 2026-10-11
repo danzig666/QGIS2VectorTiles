@@ -833,14 +833,16 @@ def gradient_band_recipe(gradient_type: int, ref1, ref2, centroid1: bool, centro
 
 
 def shapeburst_band_recipe(distance: float, whole_shape: bool, ignore_rings: bool, band: int,
-                           bands: int, construction_crs: str) -> Recipe:
+                           bands: int, construction_crs: str, overlap: bool = True) -> Recipe:
     """Band ``band`` of a shapeburst fill: t = distance to the boundary /
     ``distance`` (map units of ``construction_crs``), or / the largest
-    distance inside the polygon (``whole_shape``). Bands overlap (inset
-    polygons drawn from the edge inwards)."""
+    distance inside the polygon (``whole_shape``). ``overlap``: inset
+    polygons drawn from the edge inwards (opaque colours); otherwise rings
+    between this band's inset and the next one's."""
     return Recipe("shapeburst_band", (), (
         ("distance", float(distance)), ("whole", bool(whole_shape)), ("ignore_rings", bool(ignore_rings)),
-        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs)))
+        ("band", int(band)), ("bands", int(bands)), ("crs", construction_crs),
+        ("overlap", bool(overlap))))
 
 
 def _band_interval(band: int, bands: int, overlap: bool):
@@ -857,6 +859,17 @@ def color_bands_recipe(band_recipes, colors) -> Recipe:
     feature and band (fidelity.bands) with BAND_FIELD and COLOR_FIELD; the
     style draws them in band order."""
     return Recipe("color_bands", (), (("bands", tuple(band_recipes)), ("colors", tuple(colors))))
+
+
+def color_bands_disjoint(recipe) -> bool:
+    """Whether a color_bands recipe's bands do not overlap (translucent
+    colours or opacity): each pixel is in one band, drawn without
+    anti-aliased outlines (they would cover the neighbouring bands). Opaque
+    bands grown under their neighbour (``extend``) are not."""
+    if recipe is None or recipe.kind != "color_bands" or not recipe.param("bands"):
+        return False
+    band = recipe.param("bands")[0]
+    return band.param("overlap") is False and not band.param("extend")
 
 
 

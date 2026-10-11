@@ -179,12 +179,17 @@ class GDALTilesGenerator:
         dataset_keys: Optional[Dict[str, str]] = None,
         layer_groups: Optional[Dict[str, List[str]]] = None,
         progress_range: Tuple[float, float] = (0.0, 100.0),
+        exact_datasets: Optional[set] = None,
     ):
         # With a cache: one tile set per QGIS layer (its datasets), reused
         # while the layer's datasets are unchanged, then merged.
         self.cache = cache
         self.dataset_keys = dataset_keys or {}
         self.layer_groups = layer_groups or {}
+        # Datasets tiled without simplification: colour bands that do not
+        # overlap share their edges, which must stay the same in both bands
+        # (simplified apart, they open cracks and lose thin rings).
+        self.exact_datasets = exact_datasets or set()
         self.layers = layers
         self.style = style
         self.output_dir = output_dir
@@ -374,7 +379,8 @@ class GDALTilesGenerator:
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
                          conf_path: Optional[str] = None,
                          top_simplification: float = _SIMPLIFICATION_MAX_ZOOM,
-                         buffer: int = _MIN_BUFFER) -> List[str]:
+                         buffer: int = _MIN_BUFFER,
+                         simplification: float = _SIMPLIFICATION) -> List[str]:
         """``top_simplification``: of each dataset's last zoom (its CONF
         maxzoom), as the writer applies SIMPLIFICATION_MAX_ZOOM."""
         cmd = [
@@ -384,8 +390,8 @@ class GDALTilesGenerator:
             "-t_srs", f"EPSG:{_EPSG_CRS}",
             "-dsco", "MAX_SIZE=5000000",
             "-dsco", "MAX_FEATURES=2000000",
-            "-dsco", f"SIMPLIFICATION={_SIMPLIFICATION}",
-            "-dsco", f"SIMPLIFICATION_MAX_ZOOM={top_simplification}",
+            "-dsco", f"SIMPLIFICATION={simplification}",
+            "-dsco", f"SIMPLIFICATION_MAX_ZOOM={min(top_simplification, simplification)}",
             "-dsco", f"BUFFER={buffer}",
         ]
         if conf_path:
@@ -484,11 +490,12 @@ class GDALTilesGenerator:
         layer, in the order of the datasets (the order of one combined export)."""
         by_name = {self._layer_name(layer): layer for layer in self.layers}
         owner = {name: lid for lid, names in self.layer_groups.items() for name in names}
-        groups: Dict[str, List[QgsVectorLayer]] = {}
+        groups: Dict[Tuple[str, bool], List[QgsVectorLayer]] = {}
         for name, layer in by_name.items():
-            groups.setdefault(owner.get(name, f"dataset:{name}"), []).append(layer)
+            groups.setdefault((owner.get(name, f"dataset:{name}"), name in self.exact_datasets),
+                              []).append(layer)
         out = []
-        for owner_id, members in groups.items():
+        for (owner_id, exact), members in groups.items():
             if self.cache is None:
                 out.append((owner_id, None, members))
                 continue
@@ -502,10 +509,17 @@ class GDALTilesGenerator:
                 parts.append([name, key, list(self._layer_zoom_range(layer)),
                               self._dataset_fields(layer)])
             out.append((owner_id, export_cache.make_key("tiles", self._zooms, parts,
-                                                        _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM,
+                                                        self._simplification(members),
+                                                        _SIMPLIFICATION_MAX_ZOOM,
                                                         self._buffer(members))
                         if parts is not None else None, members))
         return out
+
+    def _simplification(self, members: List[QgsVectorLayer]) -> float:
+        """SIMPLIFICATION of a tile group (see ``exact_datasets``)."""
+        if members and all(self._layer_name(m) in self.exact_datasets for m in members):
+            return 0
+        return _SIMPLIFICATION
 
     def _generate_per_layer(self, output: str, min_zoom: int, max_zoom: int):
         """Tiles of each QGIS layer's datasets (from the cache when unchanged),
@@ -537,9 +551,11 @@ class GDALTilesGenerator:
         for index, (key, target, vrt, conf, members, owner) in enumerate(groups):
             pieces = self._pieces(members, target_cost) if cpu > 1 else [(min_zoom, max_zoom, 0.0)]
             buffer = self._buffer(members)
+            simplification = self._simplification(members)
             if len(pieces) == 1:
                 jobs.append((index, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf,
-                                                                  buffer=buffer),
+                                                                  buffer=buffer,
+                                                                  simplification=simplification),
                              pieces[0][2] or self._job_cost(members), owner))
                 continue
             number = 0
@@ -551,7 +567,7 @@ class GDALTilesGenerator:
                           and self._layer_zoom_range(m)[1] >= low]
                 ending = [m for m in inside if self._layer_zoom_range(m)[1] <= high]
                 going_on = [m for m in inside if self._layer_zoom_range(m)[1] > high]
-                for part, top in ((ending, _SIMPLIFICATION_MAX_ZOOM), (going_on, _SIMPLIFICATION)):
+                for part, top in ((ending, _SIMPLIFICATION_MAX_ZOOM), (going_on, simplification)):
                     if not part:
                         continue
                     piece = f"{target[:-8]}_{number:02d}.mbtiles"
@@ -560,7 +576,8 @@ class GDALTilesGenerator:
                     self._build_vrt(piece_vrt, part)
                     self._write_layer_conf(piece_conf, part, (low, high))
                     command = self._ogr2ogr_command(piece_vrt, piece, low, high, piece_conf,
-                                                    top_simplification=top, buffer=buffer)
+                                                    top_simplification=top, buffer=buffer,
+                                                    simplification=simplification)
                     jobs.append((index, piece, command, cost * len(part) / max(1, len(inside)), owner))
         self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
         for index, (key, target, *_rest) in enumerate(groups):
