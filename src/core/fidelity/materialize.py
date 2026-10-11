@@ -42,8 +42,13 @@ VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVe
                                "CurvePoint"})
 POINT_PLACEMENTS = VERTEX_PLACEMENTS | {"CentralPoint", "SegmentCenter"}
 
-# Hatch budget: lines per feature before the recipe refuses (reported).
-MAX_HATCH_LINES = 20000
+# Hatch lines one feature may generate: the materializer's pattern budget
+# (lines of the whole layer) keeps exports below it, so a hatch is never
+# silently dropped.
+MAX_HATCH_LINES = 2000000
+# Hatch lines clipped to the polygon at a time: GEOS clips a multiline in
+# quadratic time (20,000 lines took 1.5 minutes), chunks in linear time.
+HATCH_CHUNK_LINES = 32
 
 
 @dataclass(frozen=True)
@@ -209,27 +214,35 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     crs = recipe.param("crs")
     if not d or d <= 0:
         raise ValueError("Hatch spacing must be positive")
+    chunk = HATCH_CHUNK_LINES
     feature_anchor = recipe.param("anchor") == "feature"
     origin_x = "x_min(@q2vt_g)" if feature_anchor else "0"
     origin_y = "y_min(@q2vt_g)" if feature_anchor else "0"
     geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    # Few nested calls: QGIS parses deeply nested function calls in
+    # exponential time (a second per dataset at 20 levels).
     body = (
         f"with_variable('q2vt_g', {geom}, "
-        f"with_variable('q2vt_ox', {origin_x}, with_variable('q2vt_oy', {origin_y}, "
         f"with_variable('q2vt_c', centroid(bounds(@q2vt_g)), "
         f"with_variable('q2vt_r', 0.5 * sqrt(bounds_width(@q2vt_g)^2 + bounds_height(@q2vt_g)^2) + {d!r}, "
-        f"with_variable('q2vt_s0', {nx!r} * (x(@q2vt_c) - @q2vt_ox) + {ny!r} * (y(@q2vt_c) - @q2vt_oy), "
-        f"with_variable('q2vt_k0', floor((@q2vt_s0 - @q2vt_r - {p!r}) / {d!r}), "
-        f"with_variable('q2vt_k1', ceil((@q2vt_s0 + @q2vt_r - {p!r}) / {d!r}), "
-        f"if(@q2vt_k1 - @q2vt_k0 > {MAX_HATCH_LINES}, NULL, "
+        f"with_variable('q2vt_s0', {nx!r} * (x(@q2vt_c) - {origin_x}) + {ny!r} * (y(@q2vt_c) - {origin_y}), "
+        f"with_variable('q2vt_k', array(floor((@q2vt_s0 - @q2vt_r - {p!r}) / {d!r}), "
+        f"ceil((@q2vt_s0 + @q2vt_r - {p!r}) / {d!r})), "
+        f"if(@q2vt_k[1] - @q2vt_k[0] > {MAX_HATCH_LINES}, NULL, "
+        # Only the clipped line work: a line that merely touches the polygon
+        # at a vertex (the k = 0 line through the bounding box corner of a
+        # rectangle at 90-180 degrees) adds a point, and a mixed collection
+        # cannot be written to the line dataset (the whole hatch was lost).
+        f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_foreach("
+        f"generate_series(@q2vt_k[0], @q2vt_k[1], {chunk}), "
         f"intersection(@q2vt_g, collect_geometries(array_foreach("
-        f"generate_series(@q2vt_k0, @q2vt_k1), "
-        f"with_variable('q2vt_t', {p!r} + @element * {d!r} - @q2vt_s0, "
+        f"generate_series(@element, min(@q2vt_k[1], @element + {chunk - 1})), "
         f"make_line("
-        f"make_point(x(@q2vt_c) + {nx!r} * @q2vt_t - {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * @q2vt_t - {uy!r} * @q2vt_r), "
-        f"make_point(x(@q2vt_c) + {nx!r} * @q2vt_t + {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * @q2vt_t + {uy!r} * @q2vt_r)))))))))))))))"
+        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {ux!r} * @q2vt_r, "
+        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {uy!r} * @q2vt_r), "
+        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {ux!r} * @q2vt_r, "
+        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {uy!r} * @q2vt_r)))))))), "
+        f"geometry_type(@element) = 'Line'))))))))"
     )
     if crs == export_crs:
         return body

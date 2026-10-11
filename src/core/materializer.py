@@ -20,7 +20,7 @@ attribute keeps output datasets of derived components apart.
 """
 
 import math
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from qgis.core import (
     Qgis,
@@ -525,17 +525,30 @@ class SymbolMaterializer:
             return None
         zoom_rules = self._per_zoom(flat_rule)
         vertices = self._layer_vertices(flat_rule.layer)
-        steps = next((n for n in (8, 4, 2, 1)
-                      if vertices * len(zoom_rules) * n <= self.MAX_PATTERN_ELEMENTS), 0)
-        if not steps:
+        steps = self._zoom_steps({rule.get_attr("o"): vertices for rule in zoom_rules},
+                                 (8, 4, 2, 1))
+        exact = [rule for rule in zoom_rules if steps[rule.get_attr("o")]]
+        if not exact:
             self._report("Q2VT_PATTERN_BUDGET",
                          "Polygon outline offsets would exceed the output budget; drawn with "
                          "the browser's line offset.", flat_rule)
             return None
         rules = []
-        for rule in zoom_rules:
+        cut = exact[0].get_attr("o")
+        if cut > low:  # the budget ends below the last zooms: native there
+            self._report("Q2VT_PATTERN_BUDGET",
+                         f"Polygon outline offsets below zoom {cut} would exceed the output "
+                         "budget; drawn there with the browser's line offset.", flat_rule)
+            native = flat_rule.derive()
+            native.set_attr("i", cut - 1)
+            native.visibility = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
+                ZoomInterval(0.0, float(cut)))
+            native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
+            native.set_attr("m", 1)
+            rules.append(native)
+        for rule in exact:
             start = float(rule.get_attr("o"))
-            for band, zoom in self._sub_zoom_bands(rule, steps, False):
+            for band, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")], False):
                 derived = band.derive()
                 derived.visibility = (band.visibility or ZoomInterval(start, start + 1.0)).intersect(
                     ZoomInterval(start, start + 1.0))
@@ -652,9 +665,10 @@ class SymbolMaterializer:
             return None
         vertices = len(zooms) * 2 + self._layer_totals(flat_rule.layer)[2] * 2
         zoom_rules = [r for r in self._per_zoom(flat_rule) if r.get_attr("o") < cut]
-        steps = next((n for n in (8, 4, 2, 1)
-                      if vertices * len(zoom_rules) * n <= self.MAX_PATTERN_ELEMENTS), 0)
-        if not steps:
+        steps = self._zoom_steps({rule.get_attr("o"): vertices for rule in zoom_rules},
+                                 (8, 4, 2, 1))
+        exact = [rule for rule in zoom_rules if steps[rule.get_attr("o")]]
+        if not exact:
             self._report("Q2VT_PATTERN_BUDGET",
                          "Line offset curves would exceed the output budget; drawn with the "
                          "browser's line offset.", flat_rule)
@@ -662,9 +676,19 @@ class SymbolMaterializer:
         crs = self.project_crs or flat_rule.layer.crs().authid()
         offset_mm = _to_mm(layer.offset(), layer.offsetUnit())
         rules = []
-        for rule in zoom_rules:
+        first = exact[0].get_attr("o")
+        if first > low:  # the budget ends below the last zooms: native there
+            self._report("Q2VT_PATTERN_BUDGET",
+                         f"Line offset curves below zoom {first} would exceed the output "
+                         "budget; drawn there with the browser's line offset.", flat_rule)
+            below = flat_rule.derive()
+            below.set_attr("i", first - 1)
+            below.visibility = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
+                ZoomInterval(0.0, float(first)))
+            rules.append(below)
+        for rule in exact:
             start = float(rule.get_attr("o"))
-            for band, zoom in self._sub_zoom_bands(rule, steps, False):
+            for band, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")], False):
                 derived = band.derive()
                 derived.visibility = (band.visibility or ZoomInterval(start, start + 1.0)).intersect(
                     ZoomInterval(start, start + 1.0))
@@ -874,8 +898,9 @@ class SymbolMaterializer:
     MAX_PATTERN_ELEMENTS = 2_000_000
 
     def _layer_totals(self, layer):
-        """``(area, length, features)`` of a source layer in project map units
-        (cached): the basis of pattern size estimates."""
+        """``(area, length, features, diagonals)`` of a source layer in project
+        map units (cached; ``diagonals``: the sum of the features' bounding
+        box diagonals): the basis of pattern size estimates."""
         from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
                                QgsFeatureRequest)
         cache = self.__dict__.setdefault("_totals", {})
@@ -887,8 +912,9 @@ class SymbolMaterializer:
             transform = QgsCoordinateTransform(layer.crs(),
                                                QgsCoordinateReferenceSystem(self.project_crs),
                                                QgsProject.instance())
-        area = length = 0.0
+        area = length = diagonals = 0.0
         count = 0
+        radii = []
         request = QgsFeatureRequest().setNoAttributes()
         for feature in layer.getFeatures(request):
             geometry = feature.geometry()
@@ -899,8 +925,56 @@ class SymbolMaterializer:
             count += 1
             area += geometry.area()
             length += geometry.length()
-        cache[key] = (area, length, count)
+            bounds = geometry.boundingBox()
+            diagonals += math.hypot(bounds.width(), bounds.height())
+            # 2 * area / perimeter: the inradius of a convex polygon or more.
+            radii.append(2.0 * geometry.area() / max(geometry.length(), 1e-12))
+        cache[key] = (area, length, count, diagonals)
+        self.__dict__.setdefault("_radii", {})[key] = radii
         return cache[key]
+
+    # The last zooms of an export share the output budget first: an export
+    # from zoom 0 spends it on the zooms where a layer is drawn large, not on
+    # the zooms where it is a few pixels (where per-zoom copies cost as much).
+    BUDGET_TOP_ZOOMS = 4
+
+    def _zoom_steps(self, costs: Dict[int, float], choices: Tuple[int, ...],
+                    floor: int = 0) -> Dict[int, int]:
+        """Sub-zoom steps per zoom within the output budget; ``costs`` maps
+        each zoom to its output size per step, ``choices`` the step counts
+        from fine to coarse. The last BUDGET_TOP_ZOOMS zooms get the finest
+        step count that fits them together, then the zooms below, highest
+        first, the finest that still fits (coarser and coarser). When every
+        zoom fits at the coarsest steps, each keeps at least those, so no zoom
+        gets fewer steps than one count for all would give. Zooms past the
+        budget get ``floor`` (0: not materialized)."""
+        budget = self.MAX_PATTERN_ELEMENTS
+        zooms = sorted(costs, reverse=True)
+        coarsest = choices[-1]
+        reserve = coarsest if sum(costs.values()) * coarsest <= budget else 0
+        below, total = {}, 0.0  # cost of the zooms below each zoom
+        for zoom in reversed(zooms):
+            below[zoom] = total
+            total += costs[zoom]
+        top = zooms[:self.BUDGET_TOP_ZOOMS]
+        top_cost = sum(costs[zoom] for zoom in top)
+        level = next((n for n in choices
+                      if top and top_cost * n + below[top[-1]] * reserve <= budget), coarsest)
+        steps = {zoom: floor for zoom in zooms}
+        for zoom in zooms:
+            while level and costs[zoom] * level + below[zoom] * reserve > budget:
+                level = next((n for n in choices if n < level), 0)
+            if not level:
+                break
+            steps[zoom] = level
+            budget -= costs[zoom] * level
+        return steps
+
+    def _layer_radii(self, layer) -> List[float]:
+        """Per feature of a polygon layer, about the largest inset that is not
+        empty (project map units, cached with _layer_totals)."""
+        self._layer_totals(layer)
+        return self.__dict__["_radii"][layer.id()]
 
     def _over_budget(self, flat_rule: FlattenedRule, elements: float, what: str) -> bool:
         if elements <= self.MAX_PATTERN_ELEMENTS:
@@ -1783,11 +1857,13 @@ class SymbolMaterializer:
         low, high = self._zoom_range(flat_rule)
         if screen and low <= high:
             features = self._layer_totals(flat_rule.layer)[2]
-            arrows = features * (10 if layer.isRepeated() else 1) * (high - low + 1)
-            steps = next((n for n in self.ARROW_BAND_STEPS if arrows * n <= self.MAX_PATTERN_ELEMENTS), 1)
+            arrows = features * (10 if layer.isRepeated() else 1)
             zoom_rules = self._per_zoom(flat_rule)
+            steps = self._zoom_steps({rule.get_attr("o"): arrows for rule in zoom_rules},
+                                     self.ARROW_BAND_STEPS, 1)
             bands = [band for index, rule in enumerate(zoom_rules)
-                     for band in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1)]
+                     for band in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
+                                                      index == len(zoom_rules) - 1)]
         else:
             # Map units: one dataset; arcs flattened at the finest zoom.
             bands = [(flat_rule, max(low, high) + 0.5)]
@@ -2001,20 +2077,33 @@ class SymbolMaterializer:
             self._report("Q2VT_GRADIENT_APPROXIMATE",
                          "Shapeburst distance in screen units is fixed at zoom 16.", flat_rule)
             return bands(flat_rule, mm * self._map_units_per_mm(flat_rule, 16.0))
-        low, high = self._zoom_range(flat_rule)
         count = self._band_count([ramp.color(i / 64) for i in range(65)])
-        features = self._layer_totals(flat_rule.layer)[2]
-        steps = next((n for n in self.SHAPEBURST_ZOOM_STEPS
-                      if features * count * (high - low + 1) * n <= self.MAX_PATTERN_ELEMENTS), 1)
-        if steps < self.SHAPEBURST_ZOOM_STEPS[0]:
-            self._report("Q2VT_GRADIENT_APPROXIMATE",
-                         "Shapeburst distance in screen units is set per {} to stay within the "
-                         "output size (width within about {} %).".format(
-                             "half zoom" if steps == 2 else "zoom", 19 if steps == 2 else 41), flat_rule)
+        radii = self._layer_radii(flat_rule.layer)
+
+        def cost(zoom):
+            """Bands of the layer at ``zoom``: insets deeper than a feature
+            are empty (a feature a few pixels wide has one band)."""
+            width = mm * self._map_units_per_mm(flat_rule, zoom + 1.0) / count
+            return sum(min(count, int(radius / width) + 1) for radius in radii)
         zoom_rules = self._per_zoom(flat_rule)
+        steps = self._zoom_steps({rule.get_attr("o"): cost(rule.get_attr("o")) for rule in zoom_rules},
+                                 self.SHAPEBURST_ZOOM_STEPS, 1)
+        coarse = sorted((zoom for zoom, n in steps.items() if n < self.SHAPEBURST_ZOOM_STEPS[0]),
+                        reverse=True)
+        if coarse:
+            parts = []
+            for n, label, within in ((2, "half zoom", 19), (1, "zoom", 41)):
+                zooms = [zoom for zoom in coarse if steps[zoom] == n]
+                if zooms:
+                    parts.append(f"per {label} at zooms {zooms[-1]}-{zooms[0]} "
+                                 f"(width within about {within} %)")
+            self._report("Q2VT_GRADIENT_APPROXIMATE",
+                         "Shapeburst distance in screen units is set {} to stay within the "
+                         "output size.".format(", ".join(parts)), flat_rule)
         rules = []
         for index, rule in enumerate(zoom_rules):
-            for band_rule, zoom in self._sub_zoom_bands(rule, steps, index == len(zoom_rules) - 1):
+            for band_rule, zoom in self._sub_zoom_bands(rule, steps[rule.get_attr("o")],
+                                                        index == len(zoom_rules) - 1):
                 rules.extend(bands(band_rule, mm * self._map_units_per_mm(flat_rule, zoom)))
         return rules
 
@@ -2032,6 +2121,15 @@ class SymbolMaterializer:
         if mus.minScale or mus.maxScale or mus.minSizeMMEnabled or mus.maxSizeMMEnabled:
             self._report("Q2VT_PATTERN_APPROXIMATE",
                          "Hatch spacing scale limits are ignored.", flat_rule)
+        if layer.distance() <= 0:
+            return None
+        # Lines generated per feature (mat.hatch_expression): at most its
+        # bounding box diagonal / spacing + 5. Past the budget the hatch is a
+        # texture, never dropped (a feature past mat.MAX_HATCH_LINES would
+        # get no hatch at all).
+        _, _, count, diagonals = self._layer_totals(flat_rule.layer)
+        if self._over_budget(flat_rule, diagonals / layer.distance() + 5 * count, "Hatch"):
+            return None
         crs = self.project_crs or flat_rule.layer.crs().authid()
         recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, "feature")
         return [self._with_symbol(flat_rule, sub.clone(), 1, 1, recipe)]

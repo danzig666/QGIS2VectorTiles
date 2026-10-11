@@ -170,6 +170,86 @@ def test_rotated_map_unit_hatch_keeps_angle_and_spacing(plugin, tmp_path):
     assert gaps == {15.0}
 
 
+def _export_zooms(plugin, layer, tmp_path, low, high, extent):
+    """Flatten and export ``layer`` for zooms ``low``-``high`` within ``extent``."""
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity.diagnostics import DiagnosticCollector
+    reset_project(layer)
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    utils = tmp_path / f"utils{low}_{high}"
+    utils.mkdir()
+    layers, rules = RulesExporter(rules, extent, low, high, str(utils), 0, QgsProcessingFeedback(),
+                                  diagnostics=diags).export()
+    by_name = {l.name(): l for l in layers}
+    return [by_name[rule.output_dataset] for rule in rules], rules, diags
+
+
+def _map_unit_hatch(angle, distance):
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(angle)
+    lp.setDistance(distance)
+    lp.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    return QgsFillSymbol([lp])
+
+
+@pytest.mark.parametrize("angle", [135, 120])
+def test_hatch_line_touching_a_corner_keeps_the_hatch(plugin, tmp_path, angle):
+    """At 90-180 degrees the first hatch line passes through the bounding box
+    corner the hatch is anchored at: on a rectangle it touches the polygon
+    there, the clip added a point, and the mixed collection could not be
+    written to the line dataset: the rectangle lost its whole hatch."""
+    x, y = 2110000.0, 6030000.0
+    wkts = [f"POLYGON(({x0} {y}, {x0 + w} {y}, {x0 + w} {y + h}, {x0} {y + h}, {x0} {y}))"
+            for x0, w, h in ((x, 300, 200), (x + 1000, 301, 204), (x + 2000, 300, 200))]
+    layer = _layer("Polygon", wkts, str(tmp_path / "corner.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(angle, 9)))
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16,
+                                          QgsRectangle(x - 100, y - 100, x + 2400, y + 300))
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = {}  # length per rectangle (1000 m apart)
+    for feature in outputs[0].getFeatures():
+        assert feature.geometry().type() == Qgis.GeometryType.Line
+        index = round((feature.geometry().boundingBox().xMinimum() - x) / 1000)
+        hatch[index] = hatch.get(index, 0.0) + feature.geometry().length()
+    assert sorted(hatch) == [0, 1, 2]
+    for index, (w, h) in enumerate(((300, 200), (301, 204), (300, 200))):
+        assert hatch[index] == pytest.approx(w * h / 9, rel=0.03)
+    assert not diags.by_code("Q2VT_RULE_OUTPUT_EMPTY")
+
+
+def test_hatch_of_a_large_polygon_is_kept(plugin, tmp_path):
+    """A polygon needing more than 20,000 hatch lines got no hatch at all,
+    unreported (the per-feature cap returned NULL)."""
+    x, y = 2110000.0, 6030000.0
+    side = 75000.0  # 5 m spacing: about 21,000 lines
+    layer = _layer("Polygon", [f"POLYGON(({x} {y}, {x + side} {y}, {x + side} {y + side}, "
+                               f"{x} {y + side}, {x} {y}))"], str(tmp_path / "big.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(45, 5)))
+    view = QgsRectangle(x + 1000, y + 1000, x + 1500, y + 1500)
+    outputs, rules, diags = _export_zooms(plugin, layer, tmp_path, 0, 16, view)
+    assert [r.recipe.kind for r in rules] == ["hatch_lines"]
+    hatch = QgsGeometry.unaryUnion([f.geometry() for f in outputs[0].getFeatures()])
+    inside = hatch.intersection(QgsGeometry.fromRect(view))
+    # 500 x 500 m at 5 m spacing: 100 diagonals' worth of lines
+    assert inside.length() == pytest.approx(500 * 500 / 5, rel=0.02)
+    assert not diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def test_hatch_over_the_budget_is_a_texture(plugin, tmp_path, monkeypatch):
+    """Hatch lines past the output budget: drawn as a texture and reported,
+    never dropped."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", 1000)
+    layer = _layer("Polygon", ["POLYGON((-100 -100, 100 -100, 100 100, -100 100, -100 -100))"],
+                   str(tmp_path / "hb.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_map_unit_hatch(30, 0.2)))  # about 1,400 lines
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    assert not any(r.recipe for r in rules)
+    assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
 @pytest.mark.parametrize("disp_x,disp_y,off_x,off_y", [(0, 0, 0, 0), (0, 0, 3, 2), (5, 0, 0, 0), (0, 4, 0, 0), (5, 0, 3, 2)])
 def test_map_unit_point_pattern_matches_qgis(plugin, tmp_path, disp_x, disp_y, off_x, off_y):
     from qgis.core import QgsPointPatternFillSymbolLayer
@@ -1030,6 +1110,83 @@ def test_patterns_over_the_budget_become_textures(plugin, tmp_path, monkeypatch)
     _, rules, diags = _export(plugin, layer, tmp_path)
     assert not any(r.recipe for r in rules)
     assert diags.by_code("Q2VT_PATTERN_BUDGET")
+
+
+def _budget_symbol(kind):
+    from qgis.core import QgsArrowSymbolLayer, QgsShapeburstFillSymbolLayer
+    if kind == "polygon_offset":
+        line = QgsSimpleLineSymbolLayer(QColor("red"), 0.6)
+        line.setOffset(0.5)
+        line.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+        return QgsFillSymbol([line])
+    if kind == "shapeburst":
+        burst = QgsShapeburstFillSymbolLayer(QColor("black"), QColor("white"))
+        burst.setUseWholeShape(False)
+        burst.setMaxDistance(2)
+        burst.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+        return QgsFillSymbol([burst])
+    arrow = QgsArrowSymbolLayer()
+    for name in ("ArrowWidth", "ArrowStartWidth", "HeadLength", "HeadThickness"):
+        getattr(arrow, f"set{name}")(1.5)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.Millimeters)
+    arrow.setIsRepeated(False)
+    return QgsLineSymbol([arrow])
+
+
+def _zoom_rules(tmp_path, low, high):
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(low, high, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    return rules, diags
+
+
+def _band_key(rule):
+    visible = rule.visibility
+    return (rule.get_attr("o"), rule.get_attr("i"), rule.get_attr("b"),
+            visible and (visible.min_zoom, visible.max_zoom),
+            rule.recipe and (rule.recipe.kind, rule.recipe.params))
+
+
+@pytest.mark.parametrize("kind", ["polygon_offset", "shapeburst", "arrow"])
+def test_a_map_from_zoom_0_keeps_the_exact_last_zooms(plugin, tmp_path, monkeypatch, kind):
+    """Per-zoom output budgets counted every exported zoom alike: from zoom 0
+    (the Publish window's default) the low zooms, where a layer is a few
+    pixels, used up the budget, and the last zooms lost their exact offsets
+    (drawn with the browser's line offset) or sub-zoom bands. The last zooms
+    now get what an export of only them gets."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    if kind == "arrow":
+        wkts = [f"LINESTRING({x} 0, {x + 30} 40, {x + 60} 0)" for x in range(-100, 100, 50)]
+        layer = _layer("LineString", wkts, str(tmp_path / f"{kind}.gpkg"))
+        per_zoom = len(wkts)  # arrows per zoom step
+    else:
+        size = 150 if kind == "shapeburst" else 40  # a 2 mm inset fits inside at 13-16
+        wkts = [f"POLYGON(({x} 0, {x + size} 0, {x + size} {size}, {x} {size}, {x} 0))"
+                for x in range(0, 800, 200)]
+        layer = _layer("Polygon", wkts, str(tmp_path / f"{kind}.gpkg"))
+        per_zoom = 5 * len(wkts)  # vertices per zoom step
+    layer.setRenderer(QgsSingleSymbolRenderer(_budget_symbol(kind)))
+    reset_project(layer)
+    budget = per_zoom * 8  # the last four zooms with two steps; not every zoom with one
+    if kind == "shapeburst":
+        # Bands per zoom step at 13-16: every band of every feature; below
+        # them a feature a few pixels wide has few. The last four zooms fit
+        # with four steps, every zoom with one but not with two.
+        rules, _ = _zoom_rules(tmp_path, 16, 16)
+        per_zoom = len(wkts) * len(rules[0].recipe.param("colors"))
+        budget = per_zoom * 20
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
+    narrow, narrow_diags = _zoom_rules(tmp_path, 13, 16)
+    wide, wide_diags = _zoom_rules(tmp_path, 0, 16)
+    top = sorted(repr(_band_key(r)) for r in narrow)
+    assert len(top) > 4 and not narrow_diags.by_code("Q2VT_PATTERN_BUDGET")
+    assert sorted(repr(_band_key(r)) for r in wide if r.get_attr("o") >= 13) == top
+    if kind == "polygon_offset":  # native (right-hand-rule rings) only below
+        below = [r for r in wide if r.get_attr("o") < 13]
+        assert below and all(dict(r.recipe.params).get("rhr") for r in below)
+        assert below[0].get_attr("i") < 13
+        assert "below zoom" in wide_diags.by_code("Q2VT_PATTERN_BUDGET")[0].message
 
 
 def test_map_unit_line_offset_is_the_offset_line(plugin, tmp_path):
