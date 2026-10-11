@@ -52,7 +52,11 @@ a double-size copy after every whole zoom. The patch:
 8. the line atlas holding dash patterns (512 rows; a round-cap pattern takes
    15) grows to 4096 rows when full, then starts over, instead of returning
    no pattern, which threw and stopped the whole map from drawing (a dash
-   array per zoom of a few layers fills it within a session).
+   array per zoom of a few layers fills it within a session);
+
+9. tells a polygon's shells from its holes by the winding of its largest
+   ring, not of its first: GDAL's MVT writer can put a tiny hole-wound
+   sliver before the shell, and the shell then became that sliver's hole.
 
 Idempotent; run after updating MapLibre:
 
@@ -379,6 +383,51 @@ def _rotated_stretch_patch(text: str) -> str:
     return text[:q.end()] + "q2px:q2Q," + segment + text[end:]
 
 
+RINGS_MARK = "/*q2vt-ring-winding*/"
+# Fill bucket: let n=[],r,i;for(let t of e){let e=oi(t);e!==0&&(t.area=Math.abs(e),
+#   i===void 0&&(i=e<0),i===e<0?(r&&n.push(r),r=[t]):r.push(t))}
+FILL_RINGS = re.compile(
+    r"let (\w)=\[\],(\w),(\w);for\(let (\w) of (\w)\)\{let (\w)=(\w+)\(\4\);\6!==0&&"
+    r"\(\4\.area=Math\.abs\(\6\),\3===void 0&&\(\3=\6<0\),\3===\6<0\?\(\2&&\1\.push\(\2\),"
+    r"\2=\[\4\]\):\2\.push\(\4\)\)\}")
+# Vector tile feature (toGeoJSON): let n=[],r,i;for(let a=0;a<t;a++){let t=Op(e[a]);
+#   t!==0&&(i===void 0&&(i=t<0),...
+TILE_RINGS = re.compile(
+    r"let (\w)=\[\],(\w),(\w);(for\(let (\w)=0;\5<(\w);\5\+\+\)\{let (\w)=(\w+)\((\w)\[\5\]\);"
+    r"\7!==0&&\(\3===void 0&&\(\3=\7<0\),)")
+
+
+def _ring_winding_patch(text: str) -> str:
+    """Shared bundle: a polygon's rings are told apart by the winding of
+    its largest ring (always a shell: a hole is smaller than its shell),
+    not of its first one. GDAL's MVT writer can put a sliver of a few
+    square tile units, wound as a hole, before the shell (MakeValid after
+    quantizing): stock MapLibre then took the shell for that sliver's hole
+    and filled a large wrong area. Hole-wound rings before any shell are
+    dropped (invisible slivers)."""
+    fills, tiles = FILL_RINGS.findall(text), TILE_RINGS.findall(text)
+    if len(fills) != 1 or len(tiles) != 1:
+        raise SystemExit(f"classifyRings: {len(fills)} fill / {len(tiles)} tile matches "
+                         "(expected 1 each)")
+
+    def fill(m):
+        rings, current, winding, ring, all_rings, area, signed = m.groups()
+        return (f"let {rings}=[],{current},{winding},q2M=0;{RINGS_MARK}"
+                f"for(let {ring} of {all_rings}){{let {area}={signed}({ring});{ring}.q2a={area};"
+                f"Math.abs({area})>q2M&&(q2M=Math.abs({area}),{winding}={area}<0)}}"
+                f"for(let {ring} of {all_rings}){{let {area}={ring}.q2a;{area}!==0&&"
+                f"({ring}.area=Math.abs({area}),{winding}==={area}<0?"
+                f"({current}&&{rings}.push({current}),{current}=[{ring}]):"
+                f"{current}&&{current}.push({ring}))}}")
+
+    def tile(m):
+        rings, current, winding, loop, index, count, _area, signed, all_rings = m.groups()
+        return (f"let {rings}=[],{current},{winding},q2M=0;{RINGS_MARK}"
+                f"for(let {index}=0;{index}<{count};{index}++){{let q2s={signed}({all_rings}[{index}]);"
+                f"Math.abs(q2s)>q2M&&(q2M=Math.abs(q2s),{winding}=q2s<0)}}{loop}")
+    return TILE_RINGS.sub(tile, FILL_RINGS.sub(fill, text))
+
+
 def _shared_patch(text: str) -> str:
     if BUCKET_MARK not in text:
         text = _bucket_patch(text)
@@ -386,6 +435,8 @@ def _shared_patch(text: str) -> str:
         text = _closed_line_patch(text)
     if ROTATED_MARK not in text:
         text = _rotated_stretch_patch(text)
+    if RINGS_MARK not in text:
+        text = _ring_winding_patch(text)
     return text
 
 
@@ -440,7 +491,7 @@ def main() -> int:
         done = all(mark in text for mark in (MARK, SAMPLING_MARK, WIDTH_MARK, FILL_MARK, ANCHOR_MARK,
                                              PATTERN_ZOOM_MARK, ATLAS_MARK)) \
             and BUCKET_MARK in shared and CLOSED_MARK in shared \
-            and ROTATED_MARK in shared
+            and ROTATED_MARK in shared and RINGS_MARK in shared
         print("patched" if done else "NOT patched")
         return 0 if done else 1
     for path, old, new in ((BUNDLE, text, patch(text)),

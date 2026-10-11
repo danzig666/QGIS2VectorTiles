@@ -132,3 +132,38 @@ def test_a_failed_tile_job_runs_once_more(plugin, tmp_path):
     with pytest.raises(RuntimeError, match="NaN/Inf"):
         generator._run_parallel([[_sys.executable, str(script), str(tmp_path / "tried"), str(output), "always"]],  # pylint: disable=protected-access
                                 [1.0], ["layer"])
+
+
+def test_a_tile_over_five_megabytes_keeps_every_feature(plugin, tmp_path):
+    """The MVT writer drops features from a tile over MAX_SIZE without a
+    word: 5 MB was reached at the low zooms of an export from zoom 0 (all
+    marker positions of a rule in a few tiles). A ~6 MB tile keeps them all."""
+    import base64  # pylint: disable=import-outside-toplevel
+    import random  # pylint: disable=import-outside-toplevel
+    import subprocess  # pylint: disable=import-outside-toplevel
+    from osgeo import ogr, osr  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import tiles_generator as tg  # pylint: disable=import-error
+    rng = random.Random(5)
+    source = str(tmp_path / "heavy.gpkg")
+    dataset = ogr.GetDriverByName("GPKG").CreateDataSource(source)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(3857)
+    layer = dataset.CreateLayer("heavy", srs, ogr.wkbPoint)
+    layer.CreateField(ogr.FieldDefn("note", ogr.OFTString))
+    layer.StartTransaction()
+    count = 2000
+    for _ in range(count):  # ~3 kB of incompressible text per point
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetField(0, base64.b64encode(rng.randbytes(3000)).decode())
+        feature.SetGeometry(ogr.CreateGeometryFromWkt(
+            f"POINT({2100000 + rng.uniform(0, 3000)} {6000000 + rng.uniform(0, 3000)})"))
+        layer.CreateFeature(feature)
+    layer.CommitTransaction()
+    dataset = None
+    generator = tg.GDALTilesGenerator([], {}, str(tmp_path), None, 100, Bar())
+    output = str(tmp_path / "heavy.mbtiles")
+    command = generator._ogr2ogr_command(source, output, 5, 5)  # pylint: disable=protected-access
+    subprocess.run(command, check=True, capture_output=True)
+    assert os.path.getsize(output) > 5_000_000
+    tiles = ogr.Open(output)
+    assert tiles.GetLayerByName("heavy").GetFeatureCount() == count

@@ -403,6 +403,13 @@ class GDALTilesGenerator:
         except (ex.ExpressionError, TypeError, IndexError):
             return 0.0
 
+    # The MVT writer silently drops features from a tile over these limits
+    # (5 MB / 2 million features were hit at zooms 0-8 by marker positions
+    # materialized for every zoom): QGIS draws every feature, so no limit
+    # that a tile of an export can reach.
+    _MAX_TILE_BYTES = 1_000_000_000
+    _MAX_TILE_FEATURES = 1_000_000_000
+
     def _ogr2ogr_command(self, vrt_path: str, output: str, min_zoom: int, max_zoom: int,
                          conf_path: Optional[str] = None,
                          top_simplification: float = _SIMPLIFICATION_MAX_ZOOM,
@@ -415,8 +422,8 @@ class GDALTilesGenerator:
             "-dsco", f"MINZOOM={min_zoom}",
             "-dsco", f"MAXZOOM={max_zoom}",
             "-t_srs", f"EPSG:{_EPSG_CRS}",
-            "-dsco", "MAX_SIZE=5000000",
-            "-dsco", "MAX_FEATURES=2000000",
+            "-dsco", f"MAX_SIZE={self._MAX_TILE_BYTES}",
+            "-dsco", f"MAX_FEATURES={self._MAX_TILE_FEATURES}",
             "-dsco", f"SIMPLIFICATION={simplification}",
             "-dsco", f"SIMPLIFICATION_MAX_ZOOM={min(top_simplification, simplification)}",
             "-dsco", f"BUFFER={buffer}",

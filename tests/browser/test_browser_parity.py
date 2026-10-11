@@ -1006,6 +1006,82 @@ def test_a_fill_offset_moves_its_outline_too(tmp_path):
     assert _compare(tmp_path, layer, metric="shape") < 0.05
 
 
+def _mvt_polygon_tile(layer_name, rings):
+    """A vector tile (extent 4096) of one polygon feature with ``rings`` (tile
+    units, in the order given)."""
+    def varint(value):
+        out = bytearray()
+        while True:
+            byte, value = value & 0x7F, value >> 7
+            out.append(byte | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+
+    def field(number, payload):  # length-delimited
+        return varint(number << 3 | 2) + varint(len(payload)) + payload
+
+    def zigzag(value):
+        return (value << 1) ^ (value >> 31)
+
+    commands, cursor = [], (0, 0)
+    for ring in rings:
+        commands += [9, zigzag(ring[0][0] - cursor[0]), zigzag(ring[0][1] - cursor[1]),
+                     2 | (len(ring) - 1) << 3]
+        for previous, point in zip(ring, ring[1:]):
+            commands += [zigzag(point[0] - previous[0]), zigzag(point[1] - previous[1])]
+        commands.append(15)
+        cursor = ring[-1]
+    feature = varint(3 << 3) + varint(3) + field(4, b"".join(varint(c) for c in commands))
+    layer = (field(1, layer_name.encode()) + field(2, feature) + varint(5 << 3) + varint(4096)
+             + varint(15 << 3) + varint(2))
+    return field(3, layer)
+
+
+@pytest.mark.parametrize("zoom", [16.0, 17.5])
+def test_a_tiny_reversed_first_ring_does_not_hollow_the_polygon(tmp_path, zoom):
+    """GDAL's MVT writer can put a sliver ring of a few square tile units,
+    wound as a hole, before a polygon's shell (MakeValid of a quantized
+    outline). MapLibre took the polygon orientation from that first ring:
+    the shell became its hole and the fill went wrong (a large black
+    segment inside a curved arrow) at the last tile zoom and in all its
+    overzoom. The largest ring now gives the orientation, as QGIS reads the
+    shell as the shell."""
+    import gzip
+    import sqlite3
+    half_world = gallery.EARTH / 2
+    size = gallery.EARTH / 2 ** 16  # a z16 tile, metres
+    column = int((CENTER[0] + half_world) // size)
+    row = int((half_world - CENTER[1]) // size)
+    left, top = column * size - half_world, half_world - row * size
+    shell = [(1000, 1000), (3000, 1000), (3000, 3000), (1000, 3000)]  # positive area: a shell
+
+    def at(u, v):
+        return f"{left + u * size / 4096} {top - v * size / 4096}"
+    memory = QgsVectorLayer("Polygon?crs=EPSG:3857", "square", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt(
+        "POLYGON((" + ", ".join(at(u, v) for u, v in shell + shell[:1]) + "))"))
+    memory.dataProvider().addFeature(feature)
+    layer = to_geopackage(memory, str(tmp_path / "square.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsFillSymbol.createSimple({"color": "0,0,0", "outline_style": "no"})))
+
+    def reversed_first_ring(export_dir):
+        with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+            fill = next(l for l in json.load(handle)["layers"] if l["type"] == "fill")
+        sliver = [(1500, 1500), (1500, 1502), (1502, 1500)]  # area -2: hole winding
+        tile = gzip.compress(_mvt_polygon_tile(fill["source-layer"], [sliver, shell]))
+        with sqlite3.connect(os.path.join(export_dir, "tiles.mbtiles")) as tiles:
+            changed = tiles.execute(
+                "UPDATE tiles SET tile_data=? WHERE zoom_level=16 AND tile_column=? AND tile_row=?",
+                (tile, column, 2 ** 16 - 1 - row)).rowcount
+        assert changed == 1
+    middle = (left + 2000 * size / 4096, top - 2000 * size / 4096)
+    qgis, browser = _compare(tmp_path, layer, metric="darkness", center=middle, zoom=zoom,
+                             zooms=(0, 16), prepare=reversed_first_ring)
+    assert browser == pytest.approx(qgis, rel=0.03)
+
+
 @pytest.mark.parametrize("join", ["miter", "bevel"])
 def test_a_ring_is_joined_at_its_first_vertex(tmp_path, join):
     """A polygon outline travels as a closed line. Qt strokes a closed path
