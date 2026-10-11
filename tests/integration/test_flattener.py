@@ -146,7 +146,7 @@ def test_else_skips_what_its_siblings_match_at_every_scale(flattener):
     from qgis.core import QgsPalLayerSettings, QgsRuleBasedLabeling
     layer = rule_based(zoning_layer(), [
         ("k1 zoomed in", "\"zone\" = 'K1'", zm.zoom_to_scale(10), 0, True, "255,0,0"),
-        ("k2 disabled", "\"zone\" = 'K2'", 0, 0, False, "0,255,0"),
+        ("k2 unchecked", "\"zone\" = 'K2'", 0, 0, False, "0,255,0"),
         ("else", "ELSE", 0, 0, True, "0,0,255"),
     ])
 
@@ -179,9 +179,86 @@ def test_else_skips_what_its_siblings_match_at_every_scale(flattener):
     else_labels = {zoom: sorted(i for r in _shown_at(rules, zoom, 1) if r.get_attr("r") == 2
                                 for i in _matches(r, labels)) for zoom in (5.0, 12.0)}
     assert else_labels == {5.0: ["A", "C", "D"], 12.0: ["C", "D"]}
+    assert len({r.output_dataset for r in rules}) == len(rules)
     # Project ELSE rule untouched.
     project_else = layer.renderer().rootRule().children()[2]
     assert project_else.filterExpression() == "ELSE"
+
+
+def test_an_unchecked_category_is_not_drawn_as_all_other_values(flattener):
+    """Categorized renderer with an "all other values" class: QGIS draws
+    nothing for an unchecked category. The export dropped the category and
+    drew its features in the catch-all colour."""
+    from qgis.core import QgsCategorizedSymbolRenderer, QgsFillSymbol, QgsRendererCategory
+    layer = zoning_layer()
+    layer.setRenderer(QgsCategorizedSymbolRenderer("zone", [
+        QgsRendererCategory("K1", QgsFillSymbol.createSimple({"color": "0,0,255"}), "K1", False),
+        QgsRendererCategory("K2", QgsFillSymbol.createSimple({"color": "0,255,0"}), "K2"),
+        QgsRendererCategory(None, QgsFillSymbol.createSimple({"color": "255,0,0"}), "")]))
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    drawn = {}
+    for rule in rules:
+        if rule.get_attr("c") == 2:
+            color = rule.rule.symbol().color().name()
+            drawn.setdefault(color, set()).update(_matching_ids(layer, rule.rule.filterExpression()))
+    assert drawn == {"#00ff00": {"B"}, "#ff0000": {"C", "D"}}
+
+
+def test_a_label_else_excludes_unchecked_siblings_inside_their_scale_range(flattener):
+    """Rule-based labels: an unchecked sibling label rule still keeps the
+    ELSE label off its features (QGIS: Inactive). Outside the sibling's
+    scale range the ELSE labels them (QGIS checks label scale first)."""
+    from qgis.core import QgsPalLayerSettings, QgsRuleBasedLabeling
+    layer = rule_based(zoning_layer(), [("all", "", 0, 0, True, "200,200,200")])
+    root = QgsRuleBasedLabeling.Rule(None)
+    for flt, low, active in (("\"zone\" = 'K1'", 0, False), ("\"zone\" = 'K2'", zm.zoom_to_scale(10), True),
+                             ("ELSE", 0, True)):
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "id"
+        rule = QgsRuleBasedLabeling.Rule(settings, 0, 0, flt)
+        rule.setMinimumScale(low)
+        rule.setActive(active)
+        root.appendChild(rule)
+    layer.setLabeling(QgsRuleBasedLabeling(root))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    labels = sorted((r for r in rules if r.get_attr("t") == 1 and r.get_attr("r") == 2),
+                    key=lambda r: r.visibility.min_zoom)
+    assert [_matching_ids(layer, r.rule.filterExpression()) for r in labels] == \
+        [["B", "C", "D"], ["C", "D"]]
+    assert labels[0].visibility.max_zoom == pytest.approx(10)
+    assert labels[1].visibility.min_zoom == pytest.approx(10) and labels[1].visibility.max_zoom is None
+    assert len({r.output_dataset for r in rules}) == len(rules)
+
+
+def test_label_else_variants_inside_one_zoom_get_their_own_datasets(flattener):
+    """Label siblings with scale limits inside one tile zoom split the ELSE
+    rule into variants with the same zooms: they shared a dataset (and the
+    first variant's filter)."""
+    from qgis.core import QgsPalLayerSettings, QgsRuleBasedLabeling
+    layer = rule_based(zoning_layer(), [("all", "", 0, 0, True, "200,200,200")])
+    root = QgsRuleBasedLabeling.Rule(None)
+    for flt, low, high in (("\"zone\" = 'K1'", 15.2, 15.5), ("\"zone\" = 'K2'", 15.5, 15.9),
+                           ("ELSE", None, None)):
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "id"
+        rule = QgsRuleBasedLabeling.Rule(settings, 0, 0, flt)
+        if low is not None:
+            rule.setMinimumScale(zm.zoom_to_scale(low))
+            rule.setMaximumScale(zm.zoom_to_scale(high))
+        root.appendChild(rule)
+    layer.setLabeling(QgsRuleBasedLabeling(root))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    labels = sorted((r for r in rules if r.get_attr("t") == 1 and r.get_attr("r") == 2),
+                    key=lambda r: r.visibility.min_zoom)
+    assert [_matching_ids(layer, r.rule.filterExpression()) for r in labels] == \
+        [["A", "B", "C", "D"], ["B", "C", "D"], ["A", "C", "D"], ["A", "B", "C", "D"]]
+    assert [(r.get_attr("o"), r.get_attr("i")) for r in labels[1:3]] == [(15, 15), (15, 15)]
+    assert len({r.output_dataset for r in rules}) == len(rules)
 
 
 def _draw_colors(rules):
@@ -817,3 +894,161 @@ def test_point_clusters_break_apart_beyond_the_last_tile_zoom(flattener):
     assert all((r.get_attr("o"), r.get_attr("i")) == (16, 16) for r in _shown_at(rules, 18.5))
     names = [r.output_dataset for r in rules]
     assert len(names) == len(set(names))
+
+
+def _points(name="points", values=(0, 1, 0, 1)):
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsVectorLayer
+    layer = QgsVectorLayer("Point?crs=EPSG:3857&field=id:string&field=v:integer&field=lim:integer",
+                           name, "memory")
+    features = []
+    for i, value in enumerate(values):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([f"P{i}", value, 100000 if value else 10000])
+        feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(2120000 + 100 * i, 6020000)))
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    return layer
+
+
+def _simple_labels(layer, **settings_attrs):
+    from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "id"
+    for key, value in settings_attrs.items():
+        setattr(settings, key, value)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return settings
+
+
+@pytest.mark.parametrize("layers", [2, 1])
+def test_a_symbol_layer_enabled_condition_does_not_restrict_the_labels(flattener, layers):
+    """QGIS labels every feature the renderer draws, whichever symbol layers
+    a data-defined *enabled* switches off. The label rule took the filter of
+    the symbol layer with the condition: only those features were labelled."""
+    from qgis.core import (QgsMarkerSymbol, QgsProperty, QgsSimpleMarkerSymbolLayer,
+                           QgsSingleSymbolRenderer, QgsSymbolLayer)
+    layer = _points()
+    symbol = QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,255"})
+    if layers == 2:
+        symbol.appendSymbolLayer(QgsSimpleMarkerSymbolLayer())
+    symbol.symbolLayer(layers - 1).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyLayerEnabled, QgsProperty.fromExpression('"v" = 1'))
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    _simple_labels(layer)
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    drawn = [r for r in rules if r.get_attr("t") == 0 and r.get_attr("s") == layers - 1]
+    assert [_matching_ids(layer, r.rule.filterExpression()) for r in drawn] == [["P1", "P3"]]
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    assert labels and all(_matching_ids(layer, r.rule.filterExpression()) == ["P0", "P1", "P2", "P3"]
+                          for r in labels)
+
+
+def _rule_labels(layer, rules_spec):
+    """rules_spec: [(filter, rule min scale, settings min scale or None)]"""
+    from qgis.core import QgsPalLayerSettings, QgsRuleBasedLabeling
+    root = QgsRuleBasedLabeling.Rule(None)
+    for flt, rule_min, settings_min in rules_spec:
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "id"
+        if settings_min is not None:
+            settings.scaleVisibility = True
+            settings.minimumScale = settings_min
+        rule = QgsRuleBasedLabeling.Rule(settings, 0, 0, flt)
+        rule.setMinimumScale(rule_min)
+        root.appendChild(rule)
+    layer.setLabeling(QgsRuleBasedLabeling(root))
+    layer.setLabelsEnabled(True)
+
+
+def test_label_settings_scale_visibility_narrows_the_rule_range(flattener):
+    """QGIS applies a label rule's scale range and its Rendering tab scale
+    visibility both. With a rule range the settings range was ignored: the
+    labels showed from 1:50000 instead of 1:10000."""
+    from qgis.core import QgsMarkerSymbol, QgsSingleSymbolRenderer
+    layer = _points()
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    _rule_labels(layer, [("", 50000, 10000), ("", 10000, 50000), ("", 50000, None)])
+    reset_project(layer)
+    rules, diags = flattener(0, 16)
+    starts = {r.get_attr("r"): r.visibility for r in rules if r.get_attr("t") == 1}
+    assert starts[0].min_zoom == pytest.approx(zm.scale_to_zoom(10000))
+    assert starts[1].min_zoom == pytest.approx(zm.scale_to_zoom(10000))
+    assert starts[2].min_zoom == pytest.approx(zm.scale_to_zoom(50000))
+    assert all(v.max_zoom is None for v in starts.values())
+    assert not diags.by_code("Q2VT_ZOOM_EMPTY_INTERVAL")
+
+
+def test_label_else_keeps_its_settings_scale_visibility(flattener):
+    """An ELSE label split at a sibling's scale limit: its variants carry a
+    scale range, so its own settings range was dropped and the labels showed
+    from zoom 0."""
+    from qgis.core import QgsMarkerSymbol, QgsSingleSymbolRenderer
+    layer = _points()
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    _rule_labels(layer, [('"v" = 1', 50000, None), ("ELSE", 0, 10000)])
+    reset_project(layer)
+    rules, diags = flattener(0, 16)
+    labels = [r for r in rules if r.get_attr("t") == 1 and r.get_attr("r") == 1]
+    assert [r.visibility.min_zoom for r in labels] == [pytest.approx(zm.scale_to_zoom(10000))]
+    assert labels[0].visibility.max_zoom is None
+    assert _matching_ids(layer, labels[0].rule.filterExpression()) == ["P0", "P2"]
+    assert not diags.by_code("Q2VT_ZOOM_EMPTY_INTERVAL")
+
+
+def test_data_defined_label_scale_visibility_per_feature(flattener):
+    """A data-defined label minimum scale read from a field: each feature's
+    labels show from its own scale (evaluated per zoom)."""
+    from qgis.core import (QgsMarkerSymbol, QgsPalLayerSettings, QgsProperty,
+                           QgsSingleSymbolRenderer)
+    layer = _points()
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    settings = _simple_labels(layer, scaleVisibility=True)
+    props = settings.dataDefinedProperties()
+    props.setProperty(QgsPalLayerSettings.Property.MinimumScale, QgsProperty.fromField("lim"))
+    settings.setDataDefinedProperties(props)
+    layer.labeling().setSettings(settings)
+    reset_project(layer)
+    rules, _ = flattener(10, 16)
+    labelled = {}
+    for rule in rules:
+        if rule.get_attr("t") == 1:
+            for zoom in range(rule.get_attr("o"), rule.get_attr("i") + 1):
+                labelled.setdefault(zoom, set()).update(
+                    _matching_ids(layer, rule.rule.filterExpression()))
+    # 1:100000 is between zooms 11 and 12, 1:10000 between 14 and 15.
+    assert labelled.get(11, set()) == set()
+    assert labelled[12] == labelled[14] == {"P1", "P3"}
+    assert labelled[15] == labelled[16] == {"P0", "P1", "P2", "P3"}
+
+
+def test_geometry_generator_sub_layers_have_their_own_datasets(flattener):
+    """A line geometry generator at symbol layer 0 with two sub-symbol
+    layers, under a plain line: its second sub-layer got the dataset name of
+    symbol layer 1 and was drawn on the source line."""
+    from qgis.core import (QgsFeature, QgsGeometry, QgsGeometryGeneratorSymbolLayer,
+                           QgsLineSymbol, QgsSimpleLineSymbolLayer, QgsSingleSymbolRenderer,
+                           QgsVectorLayer)
+    from qgis.PyQt.QtGui import QColor
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857", "lines", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(2120000 6020000, 2120400 6020000)"))
+    layer.dataProvider().addFeatures([feature])
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "translate($geometry, 0, 100)", "SymbolType": "Line"})
+    sub = QgsLineSymbol.createSimple({"line_color": "255,0,0", "line_width": "1.5"})
+    sub.appendSymbolLayer(QgsSimpleLineSymbolLayer(QColor(0, 0, 255), 0.6))
+    generator.setSubSymbol(sub)
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsLineSymbol([generator, QgsSimpleLineSymbolLayer(QColor(0, 255, 0), 2.0)])))
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    datasets = {}
+    for rule in rules:
+        datasets.setdefault(rule.output_dataset, []).append(
+            (rule.rule.symbol().color().name(), rule.pre_generator))
+    assert sorted(entry for group in datasets.values() for entry in group) == [
+        ("#0000ff", "translate($geometry, 0, 100)"), ("#00ff00", None),
+        ("#ff0000", "translate($geometry, 0, 100)")]
+    assert all(len(group) == 1 for group in datasets.values()), datasets

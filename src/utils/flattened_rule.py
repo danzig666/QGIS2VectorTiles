@@ -77,6 +77,11 @@ class FlattenedRule:
     # are matched to the features of the renderer rule, then bound at their
     # own zoom); None: the filter itself.
     unbound_filter: Optional[str] = None
+    # Renderer rule filter before a symbol layer's data-defined *enabled*
+    # was folded into it: the features QGIS labels (it labels every feature
+    # the rule renders, whichever symbol layers are enabled). None: the
+    # rule's own filter.
+    label_filter: Optional[str] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -86,6 +91,7 @@ class FlattenedRule:
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
             self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
+            self.label_filter,
         )
 
     def evaluation_zoom(self) -> float:

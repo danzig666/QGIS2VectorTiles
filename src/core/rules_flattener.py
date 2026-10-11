@@ -26,6 +26,8 @@ from qgis.core import (
     QgsCategorizedSymbolRenderer,
     QgsReadWriteContext,
     QgsExpression,
+    QgsExpressionContext,
+    QgsExpressionContextUtils,
     QgsSimpleLineSymbolLayer,
     QgsFillSymbol,
     QgsSymbolLayer,
@@ -243,7 +245,7 @@ class RulesFlattener:
 
         Rule-based renderers keep their rule keys when cloned (identity);
         single/categorized/graduated renderers were converted to rules in
-        the order of their active legend items, which carry the stable
+        the order of their legend items, which carry the stable
         category/range keys. Labeling rules keep their own keys."""
         mapping = {}
         if rule_type != 0:
@@ -259,10 +261,6 @@ class RulesFlattener:
                      if item.symbol() is not None]
         except (AttributeError, RuntimeError):
             return mapping
-        if isinstance(renderer, (QgsCategorizedSymbolRenderer, QgsGraduatedSymbolRenderer)):
-            states = (renderer.categories() if isinstance(renderer, QgsCategorizedSymbolRenderer)
-                      else renderer.ranges())
-            items = [item for item, state in zip(items, states) if state.renderState()]
         for rule, item in zip(rule_system.rootRule().children(), items):
             mapping[rule.ruleKey()] = (item.ruleKey() or "single", item.label() or "")
         return mapping
@@ -710,15 +708,20 @@ class RulesFlattener:
             cls._quote_class_fields(embedded(), fields)
 
     def _as_rule_renderer(self, system):
-        """Rule-based copy of a (non rule-based) renderer, active items only."""
+        """Rule-based copy of a (non rule-based) renderer; unchecked items
+        become inactive rules. QGIS draws nothing for the features of an
+        unchecked category (they never fall to "all other values"), so
+        they stay as siblings that the ELSE rule excludes."""
         if isinstance(system, QgsRuleBasedRenderer):
             return system.clone()
         inactive_indices = self._get_inactive_item_indices(system)
         rule_renderer = QgsRuleBasedRenderer.convertFromRenderer(system)
 
         if rule_renderer and inactive_indices:
-            for idx in sorted(inactive_indices, reverse=True):
-                rule_renderer.rootRule().removeChildAt(idx)
+            children = rule_renderer.rootRule().children()
+            for idx in inactive_indices:
+                if idx < len(children):
+                    children[idx].setActive(False)
 
         return rule_renderer
 
@@ -817,18 +820,22 @@ class RulesFlattener:
         inherited_parent=None,
         origin=None,
         ancestors=(),
+        segment=None,
     ):
         """Recursively flatten the rule hierarchy with property inheritance.
 
         ``origin``: the original rule of a split ELSE variant; ``ancestors``:
-        original parent rules (both only for publication provenance)."""
+        original parent rules (both only for publication provenance);
+        ``segment``: the variant's number when an ELSE rule was split into
+        several (its own dataset)."""
         # Children of an unprocessed node (the root) inherit from the node itself;
         # children of a processed node inherit from its accumulated (flattened) state.
         parent_for_children = rule
         if rule.parent() or rule_level > 0:  # split ELSE variants are parentless clones
             self._current_provenance = self._provenance(layer, rule, rule_type, origin, ancestors)
             inheritance_source = self._process_rule(
-                layer, layer_idx, rule, rule_type, rule_level, rule_idx, inherited_parent
+                layer, layer_idx, rule, rule_type, rule_level, rule_idx, inherited_parent,
+                segment=segment,
             )
             if inheritance_source is not None:
                 parent_for_children = inheritance_source
@@ -843,12 +850,12 @@ class RulesFlattener:
                 continue
             variants = [child]
             if self._is_else_rule(child):
-                variants = self._split_else_rule(child, rule, layer)
-            for variant in variants:
+                variants = self._split_else_rule(child, rule, layer, rule_type)
+            for number, variant in enumerate(variants):
                 self._flatten_rule(
                     layer, layer_idx, variant, rule_type, rule_level + 1, base + child_idx,
                     parent_for_children, origin=child if variant is not child else None,
-                    ancestors=child_ancestors,
+                    ancestors=child_ancestors, segment=number if len(variants) > 1 else None,
                 )
 
     @staticmethod
@@ -869,19 +876,20 @@ class RulesFlattener:
     def _scale_interval(rule) -> ZoomInterval:
         return fidelity_zoom.interval_from_scales(rule.minimumScale(), rule.maximumScale())
 
-    def _split_else_rule(self, else_rule, parent_rule, layer) -> list:
+    def _split_else_rule(self, else_rule, parent_rule, layer, rule_type: int = 0) -> list:
         """Replace an ELSE rule by explicit exclusion rules.
 
         QGIS 3.34 applies an ELSE rule to the features no sibling *matched*.
         A sibling matches a feature its filter passes even where it draws
-        nothing: out of its scale range (renderer only) or switched off; it
-        then returns "Inactive", which the ELSE rule counts as matched. Only
-        an active sibling with nothing to draw never matches. Rule-based
-        labels check a sibling's scale range first, so there a sibling only
-        excludes features inside its range: the ELSE label is split at
-        every sibling scale breakpoint.
+        nothing: switched off, or (renderer only) out of its scale range, as
+        no symbol levels were prepared; it then returns "Inactive", which the
+        ELSE rule counts as matched. Only an active sibling with nothing to
+        draw never matches. A renderer ELSE therefore excludes every sibling
+        at every scale. Rule-based labels check a sibling's scale range
+        first (Filtered outside it), so a label ELSE is split at every
+        sibling scale breakpoint; each piece excludes the siblings (checked
+        or not) whose scale range covers it.
         """
-        renderer = hasattr(else_rule, "symbol")
         siblings = [
             sibling for sibling in parent_rule.children()
             if sibling is not else_rule and not self._is_else_rule(sibling)
@@ -894,12 +902,18 @@ class RulesFlattener:
                 "are treated as matching whenever their own filter matches.",
                 layer_id=layer.id(), rule_id=self._rule_key(else_rule),
             )
-
-        def in_range(sibling, zoom):
-            return renderer or self._scale_interval(sibling).contains(zoom)
-        own = self._scale_interval(else_rule)
+        if rule_type == 0:
+            variant = else_rule.clone()
+            variant.setFilterExpression(self._exclusion_filter(
+                [sibling.filterExpression() for sibling in siblings]))
+            return [variant]
+        # The label ELSE's own range, narrowed by its settings' scale
+        # visibility (no empty pieces outside it).
+        scaled = else_rule.clone()
+        self._apply_label_scale_visibility(scaled, layer)
+        own = self._scale_interval(scaled)
         breakpoints = {own.min_zoom}
-        for sibling in siblings if not renderer else ():
+        for sibling in siblings:
             interval = self._scale_interval(sibling)
             for value in (interval.min_zoom, interval.max_zoom):
                 if value is not None and own.contains(value):
@@ -913,23 +927,25 @@ class RulesFlattener:
             probe = segment.min_zoom + (1e-3 if segment.max_zoom is None
                                         else (segment.max_zoom - segment.min_zoom) / 2)
             filters = [sibling.filterExpression() for sibling in siblings
-                       if in_range(sibling, probe)]
+                       if self._scale_interval(sibling).contains(probe)]
             variant = else_rule.clone()
             variant.setMinimumScale(fidelity_zoom.zoom_to_scale(segment.min_zoom)
                                     if segment.min_zoom > 0 else else_rule.minimumScale())
             variant.setMaximumScale(fidelity_zoom.zoom_to_scale(segment.max_zoom)
                                     if segment.max_zoom is not None else 0)
-            if any(not f for f in filters):
-                # A sibling without a filter matches every feature.
-                variant.setFilterExpression("FALSE")
-            elif filters:
-                variant.setFilterExpression(
-                    f'NOT ({" OR ".join(f"({f})" for f in filters)}) IS 1'
-                )
-            else:
-                variant.setFilterExpression("")
+            variant.setFilterExpression(self._exclusion_filter(filters))
             variants.append(variant)
         return variants
+
+    @staticmethod
+    def _exclusion_filter(filters) -> str:
+        """Filter of the features no expression in ``filters`` matches."""
+        if any(not f for f in filters):
+            # A sibling without a filter matches every feature.
+            return "FALSE"
+        if filters:
+            return f'NOT ({" OR ".join(f"({f})" for f in filters)}) IS 1'
+        return ""
 
     @staticmethod
     def _is_feature_dependent(expression: str) -> bool:
@@ -947,6 +963,8 @@ class RulesFlattener:
         prop = props.property(QgsSymbolLayer.Property.PropertyLayerEnabled)
         if not prop or not prop.isActive() or not self._is_feature_dependent(prop.asExpression()):
             return
+        if flat_rule.label_filter is None:
+            flat_rule.label_filter = flat_rule.rule.filterExpression()
         flat_rule.rule.setFilterExpression(and_filters(
             flat_rule.rule.filterExpression(), enabled_condition(prop.asExpression())))
         prop.setActive(False)
@@ -983,11 +1001,9 @@ class RulesFlattener:
         rule_level: int,
         rule_idx: int,
         inherited_parent,
+        segment=None,
     ):
         """Inherit, validate, split, register; return the cumulative source for descendants."""
-        if rule_type == 1:
-            self._sync_labeling_scale_range(rule)
-
         inherited_rule = self._inherit_rule_properties(rule, rule_type, inherited_parent)
         if not inherited_rule:
             return None
@@ -997,15 +1013,20 @@ class RulesFlattener:
         # output-only exclusion (otherwise C inherits "... AND NOT C" from B*).
         inheritance_source = inherited_rule.clone()
         if rule_type == 1:
-            # After the snapshot: a label's Show condition must not restrict
-            # the labels of child rules.
+            # After the snapshot: a label's Show condition and its settings'
+            # scale visibility must not restrict the labels of child rules.
             self._fold_show_property(inherited_rule)
+            self._apply_label_scale_visibility(inherited_rule, layer)
         # self._exclude_children_from_filter(inherited_rule, rule)
 
         flat_rule = FlattenedRule(inherited_rule, layer,
                                   provenance=getattr(self, "_current_provenance", None))
         flat_rule.rule.setDescription("")
         self._set_rule_attributes(flat_rule, layer_idx, rule_type, rule_level, rule_idx)
+        if segment is not None:
+            # ELSE variants differ only in filter and exact visibility: two
+            # inside one tile zoom had the same dataset (one filter for both).
+            flat_rule.set_attr("e", segment)
 
         if flat_rule.visibility.is_empty:
             self.diagnostics.add(
@@ -1045,15 +1066,66 @@ class RulesFlattener:
                 self.flattened_rules.extend(self._split_line_label_windows(zoom_rule))
         return inheritance_source
 
-    def _sync_labeling_scale_range(self, rule):
-        """Copy label settings scale visibility to the rule if the rule has no range set."""
-        if rule.minimumScale() != 0 or rule.maximumScale() != 0:
-            return
+    SCALE_VISIBILITY_KEYS = (QgsPalLayerSettings.Property.ScaleVisibility,
+                             QgsPalLayerSettings.Property.MinimumScale,
+                             QgsPalLayerSettings.Property.MaximumScale)
+
+    def _apply_label_scale_visibility(self, rule, layer) -> None:
+        """Apply the label settings' scale visibility (Rendering tab) to the rule.
+
+        QGIS checks the rule's scale range and these settings both: the
+        ranges intersect. Data-defined visibility or scales that depend on
+        the feature (or the scale) become part of the rule filter."""
         settings = rule.settings()
-        if settings and settings.scaleVisibility:
-            rule.setMinimumScale(settings.minimumScale)
-            rule.setMaximumScale(settings.maximumScale)
-            settings.scaleVisibility = False
+        if settings is None:
+            return
+        props = settings.dataDefinedProperties()
+        active = {key: props.property(key).asExpression() for key in self.SCALE_VISIBILITY_KEYS
+                  if props.property(key) and props.property(key).isActive()}
+        visibility_key, min_key, max_key = self.SCALE_VISIBILITY_KEYS
+        if any(self._is_feature_dependent(expression)
+               or "map_scale" in QgsExpression(expression).referencedVariables()
+               for expression in active.values()):
+            def value(key, static):
+                return f"coalesce(to_real({active[key]}), {static!r})" if key in active else repr(static)
+            visible = (f"coalesce(({active[visibility_key]}), {str(settings.scaleVisibility).upper()})"
+                       if visibility_key in active else str(settings.scaleVisibility).upper())
+            condition = (
+                f"with_variable('q2vt_low', {value(min_key, float(settings.minimumScale))}, "
+                f"with_variable('q2vt_high', {value(max_key, float(settings.maximumScale))}, "
+                f"NOT if({visible}, TRUE, FALSE) OR ("
+                "(@q2vt_high = 0 OR @map_scale >= if(@q2vt_high < 0, 1 / abs(@q2vt_high), @q2vt_high))"
+                " AND (@q2vt_low = 0 OR @map_scale <= if(@q2vt_low < 0, 1 / abs(@q2vt_low), @q2vt_low)))))")
+            rule.setFilterExpression(and_filters(rule.filterExpression(), condition))
+        else:
+            context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+            use, low, high = settings.scaleVisibility, settings.minimumScale, settings.maximumScale
+            if visibility_key in active:
+                use = props.valueAsBool(visibility_key, context, use)[0]
+            if min_key in active:
+                low = props.valueAsDouble(min_key, context, low)[0]
+            if max_key in active:
+                high = props.valueAsDouble(max_key, context, high)[0]
+            if use:
+                self._intersect_scale_range(rule, low, high)
+        settings.scaleVisibility = False
+        for key in active:
+            prop = props.property(key)
+            prop.setActive(False)
+            props.setProperty(key, prop)
+        settings.setDataDefinedProperties(props)
+
+    @staticmethod
+    def _intersect_scale_range(rule, low: float, high: float) -> None:
+        """Narrow the rule's scale range to ``low`` (zoomed-out edge) ..
+        ``high`` (zoomed-in edge); 0 is no limit, a negative scale -s is
+        1:1/s (closer than 1:1), as QGIS reads label scales."""
+        low = 1 / abs(low) if low < 0 else low
+        high = 1 / abs(high) if high < 0 else high
+        if low:
+            rule.setMinimumScale(min(rule.minimumScale(), low) if rule.minimumScale() else low)
+        if high:
+            rule.setMaximumScale(max(rule.maximumScale(), high) if rule.maximumScale() else high)
 
     def _inherit_rule_properties(self, rule, rule_type: int, inherited_parent):
         """Clone and inherit scale range, filter expression, and symbol layers from cumulative parent."""
@@ -1378,8 +1450,11 @@ class RulesFlattener:
             rule_clone.rule.setSymbol(single)
             rule_clone.set_attr("g", 1)
             rule_clone.set_attr("c", 1)
-            # A distinct dataset per sub-symbol layer (their recipes differ).
-            rule_clone.set_attr("s", layer_idx * 100 + inner_idx)
+            # A distinct dataset per sub-symbol layer (their recipes differ),
+            # apart from the ordinary symbol layers' (s = their index): with
+            # layer_idx * 100 the generator at layer 0 gave its sub-layer 1
+            # the dataset of symbol layer 1, drawn on the source geometry.
+            rule_clone.set_attr("s", (layer_idx + 1) * 100 + inner_idx)
             rule_clone.pre_generator = generator.geometryExpression()
             clone_layer = single.symbolLayers()[0]
             self._fold_enabled_property(rule_clone, clone_layer)
@@ -1713,7 +1788,10 @@ class RulesFlattener:
         has no filter)."""
         filters: Optional[List[str]] = []
         for _, renderer_rule, _, _ in active:
-            expression = renderer_rule.renderer_filter()
+            # The features the rule renders: its filter before a symbol
+            # layer's data-defined "enabled" was folded in, @map_scale unbound.
+            expression = renderer_rule.label_filter if renderer_rule.label_filter is not None \
+                else renderer_rule.renderer_filter()
             if not expression:
                 filters = None
                 break
@@ -2001,6 +2079,8 @@ class RulesFlattener:
                 return None
             rule_clone.rule.setFilterExpression(bound)
             rule_clone.unbound_filter = flat_rule.renderer_filter()
+        # label_filter stays unbound like unbound_filter: labels are matched
+        # to it, then bound at their own zoom.
 
         if flat_rule.get_attr("t") == 1 and flat_rule.rule.settings():
             settings = flat_rule.rule.settings()
