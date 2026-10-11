@@ -3377,14 +3377,30 @@ class RulesExporter:
         centres the label on every piece), so the label is exported as the
         line's midpoint instead: an over-point label rotated to the line
         (kept upright), above/below/on the point as the placement flags say.
+        The web viewer moves it to the visible part of the line, and lays
+        out a repeated label there when the flattener says so
+        (FlattenedRule.visible_repeat). Horizontal placement on a line: a
+        level label centred on the line (pal
+        createHorizontalCandidatesAlongLine), not at its first vertex.
         """
         settings = flat_rule.rule.settings()
         if settings is None or flat_rule.get_attr("g") not in (1, 2) or \
                 settings.geometryGeneratorEnabled or self._pinned_position(settings):
             return
-        if not self._labels_along_line(flat_rule):
+        horizontal = flat_rule.get_attr("g") == 1 and \
+            _enum_value(settings.placement) == _enum_value(Qgis.LabelPlacement.Horizontal)
+        if not horizontal and not self._labels_along_line(flat_rule):
             return
-        if float(settings.repeatDistance or 0) > 0:
+        if float(settings.repeatDistance or 0) > 0 and not flat_rule.visible_repeat:
+            return
+        if horizontal:
+            settings.placement = Qgis.LabelPlacement.OverPoint
+            settings.quadOffset = Qgis.LabelQuadrantPosition.Over
+            settings.xOffset = settings.yOffset = 0.0
+            settings.angleOffset = 0.0
+            settings.dataDefinedProperties().setProperty(
+                QgsPalLayerSettings.Property.LabelRotation, QgsProperty())
+            flat_rule.line_label_midpoint = True
             return
         try:
             flags = int(settings.lineSettings().placementFlags())

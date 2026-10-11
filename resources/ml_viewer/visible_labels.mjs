@@ -41,6 +41,12 @@
 // line labels inside the extent; clear also of the point labels MapLibre
 // draws itself (building numbers, names), as "around point" and "pole"
 // labels are (QGIS places all labels together). No clear spot: no label.
+// The pieces of a line in neighbouring tiles are joined where their cuts
+// meet within a pixel. QGIS's Horizontal placement on lines
+// (metadata["q2vt:line-orient"]) is drawn level, centred on the line. A
+// repeated line label (metadata["q2vt:repeat"]) gets one label per repeat
+// part of the longest visible stretch, as QGIS chops the line clipped to
+// the map extent.
 // While the map moves
 // (drag, zoom animation) placed labels do not move at all - only polygons
 // without a label get one - and the rule above is applied once the map
@@ -120,6 +126,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     // "Label every part of multi-part features": one label per part, else
     // only on the biggest part (QGIS).
     if (layer.metadata["q2vt:label-per-part"]) groups.get(polygons).perPart = true;
+    // QGIS Horizontal placement on lines: level, centred on the line.
+    if (layer.metadata["q2vt:line-orient"] === "horizontal") groups.get(polygons).level = true;
+    // A repeated line label: one label per repeat part of the visible line.
+    if (layer.metadata["q2vt:repeat"]) groups.get(polygons).repeat = layer.metadata["q2vt:repeat"];
     if (layer.metadata["q2vt:label-orient"] === "free") groups.get(polygons).orient = "free";
     // "Around point" (QGIS): beside the point at the label distance, not on it.
     if (layer.metadata["q2vt:label-around"]) groups.get(polygons).around = layer.metadata["q2vt:label-around"];
@@ -248,6 +258,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         degraded: Boolean(group.degraded), overlap: group.overlap || null, perPart: Boolean(group.perPart),
+        level: Boolean(group.level), repeat: repeatOption(group.repeat, zoom, perPx),
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
         eligible: eligible ? (properties) => eligible(properties, polygons) : null,
@@ -329,6 +340,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     },
   };
 }
+
+// The labels of a repeated line label are kept as "<feature key><sep><k>".
+const PART_SEPARATOR = "\u0000";
+const baseKey = (key) => (key.includes(PART_SEPARATOR) ? key.slice(0, key.indexOf(PART_SEPARATOR)) : key);
 
 // Label positions kept between updates, and stable feature ids (for the
 // overlap fallback's feature state).
@@ -461,6 +476,11 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   // default): a label beside one polygon keeps off its neighbours if it can.
   const obstacles = options.around && options.around.outside
     ? boxIndex(ordered.map(([key, { rings }]) => ({ key, rings, bounds: bounds(rings) })), view) : null;
+  // The labels kept of each repeated line label.
+  const partsOf = new Map();
+  for (const part of options.repeat > 0 ? state.points.keys() : []) {
+    if (part.includes(PART_SEPARATOR)) partsOf.set(baseKey(part), [...(partsOf.get(baseKey(part)) || []), part]);
+  }
   for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
@@ -476,6 +496,21 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         boxes.push(box);
         avoid.push(box);
       }
+      continue;
+    }
+    if (options.kind === "line" && options.repeat > 0) {  // one label per repeat part
+      const parts = partsOf.get(key) || [];
+      if (options.freeze && parts.length) {
+        for (const part of parts) points.set(part, state.points.get(part));
+        continue;
+      }
+      placeRepeatedOnLine(loaded, properties, view, avoid, options).forEach((placed, k) => {
+        points.set(key + PART_SEPARATOR + k, { ...placed, orig });
+        if (placed.box) {
+          boxes.push(placed.box);
+          avoid.push(placed.box);
+        }
+      });
       continue;
     }
     if (options.kind === "line") {
@@ -693,7 +728,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     points.set(key, slot === undefined ? { point, properties, orig } : { point, properties, slot, orig });
   }
   for (const [key, old] of state.points) {
-    if (!points.has(key) && !excluded.has(old.orig ?? key) && (options.freeze || within(inner, old.point))
+    if (!points.has(key) && !excluded.has(old.orig ?? baseKey(key)) && (options.freeze || within(inner, old.point))
         && unchecked(old.point) && (!options.eligible || options.eligible(old.properties))) points.set(key, old);
   }
   state.points = points;
@@ -705,6 +740,15 @@ export function labelPoints(features, view, maplibregl, options = {}) {
                geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
   }
   return { type: "FeatureCollection", features: out, boxes };
+}
+
+// The repeat distance of a repeated line label (metadata q2vt:repeat: px,
+// at "zoom" for map units) in world units at this zoom; 0 without one.
+export function repeatOption(repeat, zoom, perPx) {
+  if (!repeat) return 0;
+  let px = Number(repeat.px) || 0;
+  if (Number.isFinite(Number(repeat.zoom))) px *= 2 ** (zoom - Number(repeat.zoom));  // map units
+  return px > 0 ? px * perPx : 0;
 }
 
 // "Around point" settings for labelPoints from the style metadata
@@ -1296,9 +1340,11 @@ function clipLine(points, [x0, y0, x1, y1]) {
 }
 
 // Pieces of one line (cut at tile edges and the screen) joined where their
-// ends meet.
-function stitch(pieces) {
-  const same = (a, b) => Math.abs(a[0] - b[0]) <= 1e-10 && Math.abs(a[1] - b[1]) <= 1e-10;
+// ends meet. Neighbouring tiles cut their own rounded, buffered copies of a
+// line, so the two cuts on a shared tile edge miss each other by up to a
+// few tile units: ends within ``tolerance`` (world units) meet.
+function stitch(pieces, tolerance = 1e-10) {
+  const same = (a, b) => Math.abs(a[0] - b[0]) <= tolerance && Math.abs(a[1] - b[1]) <= tolerance;
   const chains = pieces.map((piece) => piece.slice());
   for (let joined = true; joined;) {
     joined = false;
@@ -1361,27 +1407,24 @@ function project(chain, [x, y]) {
   return best;
 }
 
-// A line label on the visible part of its line: the middle of the longest
-// visible stretch if the label fits there (along the line, on the screen)
-// and is clear of the labels placed before, else the nearest such spot
-// along that stretch or a shorter one; a wholly visible line too short for
-// the label gets it level at the line (QGIS degraded placement) if allowed;
-// no clear spot: overlapping if QGIS allows it ("if required"), else no label.
-function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
+// The visible stretches of a line (longest first) and the label spots
+// along them: a label along the line (rotated to it) or, for QGIS's
+// Horizontal placement on lines (options.level), level and centred on the
+// line point; each spot with its box, how far it fits inside the screen
+// and whether it keeps clear of ``avoid``.
+function lineSpots(loaded, properties, view, avoid, options) {
   const withRotation = (rotation) => (options.rotationField
     ? { ...properties, [options.rotationField]: rotation } : properties);
-  const chains = (pieces) => stitch(pieces).map((chain) => ({ chain, length: chainLength(chain) }))
+  // One CSS pixel: a tile cut's mismatch, never a visible gap in the line.
+  const joinTolerance = Math.max(1e-10, options.precision || 0);
+  const chains = (pieces) => stitch(pieces, joinTolerance).map((chain) => ({ chain, length: chainLength(chain) }))
     .sort((a, b) => b.length - a.length);
   const visible = chains(loaded.flatMap((piece) => clipLine(piece, view)));
-  if (!visible.length) {  // off the screen: in advance, away from the screen edge
-    const whole = chains(loaded)[0];
-    const at = whole && along(whole.chain, whole.length / 2);
-    if (!at || within(guarded, at.point)) return null;
-    return { point: at.point, properties: withRotation(at.rotation) };
-  }
   const half = options.labelBox ? options.labelBox(properties) : null;
+  const level = Boolean(options.level);
   const candidate = (chain, s) => {
-    const at = along(chain, s);
+    let at = along(chain, s);
+    if (at && level) at = { ...at, rotation: 0 };
     if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null };
     const angle = at.rotation * Math.PI / 180;
     const [x, y] = at.point;
@@ -1391,7 +1434,42 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     return { ...at, fit, clear: !avoid.some((other) => intersect(other, box)), box };
   };
   const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box });
-  const lo = half ? half[0] : 0;
+  // Half the label along the line: it must fit along the stretch (a level
+  // label only needs its centre on the line).
+  const lo = half && !level ? half[0] : 0;
+  // The first clear spot from the middle of [a, b] outwards, in steps of a
+  // quarter label (at most 40), and the first that only fits the screen.
+  const search = (chain, a, b) => {
+    const length = b - a;
+    let overlapping = null;
+    const step = Math.max(length / 40, half ? half[0] / 2 : length / 20);
+    for (let k = 0; k <= 2 * Math.ceil(length / 2 / step); k++) {
+      const s = a + length / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
+      if (s < a + lo - 1e-12 || s > b - lo + 1e-12) continue;
+      const c = candidate(chain, s);
+      if (c && c.fit >= 0 && c.clear) return { clear: c, overlapping };
+      if (c && c.fit >= 0 && !overlapping) overlapping = c;
+    }
+    return { clear: null, overlapping };
+  };
+  return { chains, visible, half, lo, candidate, result, search, withRotation };
+}
+
+// A line label on the visible part of its line: the middle of the longest
+// visible stretch if the label fits there (along the line, on the screen)
+// and is clear of the labels placed before, else the nearest such spot
+// along that stretch or a shorter one; a wholly visible line too short for
+// the label gets it level at the line (QGIS degraded placement) if allowed;
+// no clear spot: overlapping if QGIS allows it ("if required"), else no label.
+function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
+  const { chains, visible, half, lo, candidate, result, search, withRotation } =
+    lineSpots(loaded, properties, view, avoid, options);
+  if (!visible.length) {  // off the screen: in advance, away from the screen edge
+    const whole = chains(loaded)[0];
+    const at = whole && along(whole.chain, whole.length / 2);
+    if (!at || within(guarded, at.point)) return null;
+    return { point: at.point, properties: withRotation(options.level ? 0 : at.rotation) };
+  }
   const longest = visible[0];
   if (old && !options.freeze && longest.length >= 2 * lo) {  // kept while near the middle and still fine
     const { s, d } = project(longest.chain, old.point);
@@ -1407,15 +1485,9 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
   let overlapping = null;
   for (const { chain, length } of visible) {
     if (length < 2 * lo) break;  // the label does not fit along it (nor along shorter ones)
-    // From the middle outwards, in steps of a quarter label (at most 40).
-    const step = Math.max(length / 40, half ? half[0] / 2 : length / 20);
-    for (let k = 0; k <= 2 * Math.ceil(length / 2 / step); k++) {
-      const s = length / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
-      if (s < lo - 1e-12 || s > length - lo + 1e-12) continue;
-      const c = candidate(chain, s);
-      if (c && c.fit >= 0 && c.clear) return result(c);
-      if (c && c.fit >= 0 && !overlapping) overlapping = c;
-    }
+    const found = search(chain, 0, length);
+    if (found.clear) return result(found.clear);
+    if (!overlapping) overlapping = found.overlapping;
   }
   // A wholly visible line too short for its label (a dimension line):
   // with "Allow degraded placement" QGIS draws the label level with its
@@ -1438,6 +1510,48 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     if (fit >= 0 && options.overlap && !overlapping) return spot;
   }
   return options.overlap && overlapping ? result(overlapping) : null;
+}
+
+// A repeated line label (QGIS repeat distance, options.repeat in world
+// units) on the visible part of its line, as QGIS lays it out: the line
+// clipped to the map extent, its longest part (labelled alone unless every
+// part is) cut into equal parts at a whole multiple of the repeat distance
+// at least as long as the label (pal Layer::chopFeaturesAtRepeatDistance),
+// one label per part, from the part's middle outwards (QGIS's cheapest
+// candidates). An empty list when no part has room.
+function placeRepeatedOnLine(loaded, properties, view, avoid, options) {
+  const taken = avoid.slice();
+  const { visible, half, lo, result, search } = lineSpots(loaded, properties, view, taken, options);
+  if (!visible.length) return [];
+  const precision = options.precision || 0;
+  // pal chops with the label's own width (no margin around it).
+  const width = half ? 2 * Math.max(half[0] - LABEL_MARGIN_PX * precision, half[0] / 2) : 0;
+  const out = [];
+  for (const { chain, length } of options.perPart ? visible : visible.slice(0, 1)) {
+    for (const [a, b] of repeatParts(length, width, options.repeat)) {
+      if (b - a < 2 * lo) continue;
+      const found = search(chain, a, b);
+      const spot = found.clear || (options.overlap ? found.overlapping : null);
+      if (!spot) continue;
+      out.push(result(spot));
+      if (spot.box) taken.push(spot.box);
+    }
+  }
+  return out;
+}
+
+// (start, end) along a line of the parts pal labels one by one
+// (Layer::chopFeaturesAtRepeatDistance; core/label_lines.py repeat_parts).
+export function repeatParts(length, labelWidth, repeat) {
+  if (repeat > 0 && length > repeat) {
+    const interval = repeat * Math.max(1, Math.ceil(labelWidth / repeat));
+    const count = Math.floor(length / interval);
+    if (count > 1) {
+      const size = length / count;
+      return Array.from({ length: count }, (_, k) => [k * size, (k + 1) * size]);
+    }
+  }
+  return [[0, length]];
 }
 
 // GEOS InteriorPointLine: the interior vertex nearest the line's centroid,

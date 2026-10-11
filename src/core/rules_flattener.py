@@ -1831,6 +1831,13 @@ class RulesFlattener:
                    "MultiLineWrapChar", "LineAnchorPercent", "LineAnchorType",
                    "LineAnchorTextPoint", "OverrunDistance")
 
+    # A repeated line label's repeat distance from which the web viewer lays
+    # it out on the visible part of the line (CSS px, a tile): QGIS chops the
+    # line clipped to the map extent, so the visible stretch always has a
+    # label; labels laid out on the whole line (windows, MapLibre's own
+    # spacing) this far apart left most views without one.
+    VISIBLE_REPEAT_PX = 512.0
+
     def _split_line_label_windows(self, label_rule: FlattenedRule) -> List[FlattenedRule]:
         """A repeated curved line label as one rule per zoom whose labels are
         laid out at export time, as QGIS lays them out (core/label_lines.py,
@@ -1838,26 +1845,110 @@ class RulesFlattener:
         a few fixed anchors and dropped the labels of wiggly rivers at low
         zooms. Labels these windows cannot reproduce (data-defined size,
         font or repeat, generated or pinned positions, merged lines, ...)
-        keep MapLibre's placement."""
-        if label_rule.get_attr("t") != 1 or not self._lays_out_windows(label_rule):
+        keep MapLibre's placement.
+
+        From the zoom where the repeat distance is VISIBLE_REPEAT_PX, and
+        always above the tile zooms (the windows and MapLibre's anchors are
+        fixed on the whole line), the web viewer places the labels on the
+        visible part of the line instead (_visible_repeat_rules)."""
+        if label_rule.get_attr("t") != 1:
             return [label_rule]
+        visible_from = self._visible_repeat_zoom(label_rule)
+        if not self._lays_out_windows(label_rule):
+            return self._split_visible_repeat(label_rule, visible_from)
         low, high = label_rule.get_attr("o"), label_rule.get_attr("i")
+        last = high if visible_from is None else min(high, visible_from - 1)
         rules = []
-        for zoom in range(low, high + 1):
+        for zoom in range(low, last + 1):
             recipe = self._label_window_recipe(label_rule, zoom)
             if recipe is None:
-                return [label_rule]
+                return self._split_visible_repeat(label_rule, visible_from)
             rule = label_rule.derive()
             rule.set_attr("o", zoom)
             rule.set_attr("i", zoom)
-            if label_rule.visibility is not None:  # the last zoom keeps its overzoom
-                rule.visibility = label_rule.visibility.intersect(
-                    ZoomInterval(float(zoom), float(zoom + 1) if zoom < high else None))
+            if label_rule.visibility is not None:
+                # The last zoom keeps its overzoom unless the viewer takes it.
+                end = None if zoom == high and visible_from is None else float(zoom + 1)
+                rule.visibility = label_rule.visibility.intersect(ZoomInterval(float(zoom), end))
                 if rule.visibility.is_empty:
                     continue
             rule.recipe = recipe
             rules.append(rule)
+        if visible_from is not None:
+            rules.extend(self._visible_repeat_rules(label_rule, visible_from))
         return rules or [label_rule]
+
+    def _visible_repeat_zoom(self, label_rule: FlattenedRule) -> Optional[int]:
+        """The first zoom from which the web viewer places a repeated line
+        label (one past the tile zooms: only while overzooming), or None
+        when it cannot (a data-defined repeat, generated or pinned
+        positions...). QGIS's Horizontal placement on lines: at every zoom
+        (MapLibre puts a point label on a line at its first vertex)."""
+        from .maplibre_converter import PropertyExtractor, TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+        settings = label_rule.rule.settings()
+        if settings is None or label_rule.get_attr("g") != 1 or label_rule.get_attr("c") != 1 \
+                or label_rule.recipe is not None or label_rule.pre_generator \
+                or settings.geometryGeneratorEnabled:
+            return None
+        placement = TextPropertyExtractor.placement_name(settings)
+        if placement not in ("Line", "Curved", "Horizontal") or float(settings.repeatDistance or 0) <= 0:
+            return None
+        P = QgsPalLayerSettings.Property
+        props = settings.dataDefinedProperties()
+        x_prop, y_prop = props.property(P.PositionX), props.property(P.PositionY)
+        if x_prop and y_prop and x_prop.isActive() and y_prop.isActive():
+            return None
+        for key in (P.RepeatDistance, P.RepeatDistanceUnit):
+            prop = props.property(key)
+            if prop is not None and prop.isActive():
+                return None
+        low, high = label_rule.get_attr("o"), label_rule.get_attr("i")
+        if placement == "Horizontal":
+            return low
+        try:
+            repeat = self.lengths.static(settings.repeatDistance, settings.repeatDistanceUnit,
+                                         PropertyExtractor.map_unit_scale(
+                                             settings.repeatDistanceMapUnitScale))
+            for zoom in range(low, high + 1):
+                px = repeat if ex.is_number(repeat) else ex.evaluate_zoom_curve(repeat, zoom)
+                if float(px) >= self.VISIBLE_REPEAT_PX:
+                    return zoom
+        except (ValueError, ex.ExpressionError):  # a unit without pixels (percentage)
+            return None
+        return high + 1
+
+    def _split_visible_repeat(self, label_rule: FlattenedRule,
+                              visible_from: Optional[int]) -> List[FlattenedRule]:
+        """The label as it is (MapLibre's placement) below ``visible_from``,
+        placed by the web viewer from there on."""
+        if visible_from is None:
+            return [label_rule]
+        low, high = label_rule.get_attr("o"), label_rule.get_attr("i")
+        rules = []
+        if visible_from > low:
+            rule = label_rule.derive()
+            rule.set_attr("i", min(high, visible_from - 1))
+            visibility = label_rule.visibility or ZoomInterval(float(low), None)
+            rule.visibility = visibility.intersect(ZoomInterval(float(low), float(visible_from)))
+            if not rule.visibility.is_empty:
+                rules.append(rule)
+        rules.extend(self._visible_repeat_rules(label_rule, visible_from))
+        return rules or [label_rule]
+
+    @staticmethod
+    def _visible_repeat_rules(label_rule: FlattenedRule, visible_from: int) -> List[FlattenedRule]:
+        """The label from ``visible_from`` on, placed by the web viewer on the
+        visible part of its lines (RulesExporter._single_line_label_as_point:
+        exported at the line's middle, a point: target geometry 0). Above the
+        tile zooms the deepest tiles hold the lines."""
+        high = label_rule.get_attr("i")
+        rule = label_rule.derive()
+        rule.set_attr("o", min(visible_from, high))
+        rule.set_attr("c", 0)
+        rule.visible_repeat = True
+        visibility = label_rule.visibility or ZoomInterval(float(label_rule.get_attr("o")), None)
+        rule.visibility = visibility.intersect(ZoomInterval(float(visible_from), None))
+        return [] if rule.visibility.is_empty else [rule]
 
     def _lays_out_windows(self, label_rule: FlattenedRule) -> bool:
         from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel

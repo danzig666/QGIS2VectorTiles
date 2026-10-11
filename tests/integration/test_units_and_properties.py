@@ -300,3 +300,79 @@ def test_map_unit_translate_grows_with_the_map(mc):
     assert z16 == pytest.approx(math.hypot(30, 20) * px_per_unit_z16, rel=1e-3)
     assert mc.PropertyExtractor.translate(1, 2, Qgis.RenderUnit.Pixels) == [1, 2]
     assert GDALTilesGenerator._translate_px([3, 4], 16) == 5  # pylint: disable=protected-access
+
+
+def _evaluate(expression, properties, scope=None):
+    """The style expression forms keep_upright writes, evaluated."""
+    scope = scope or {}
+    if not isinstance(expression, list) or not expression or not isinstance(expression[0], str):
+        return expression
+    op, args = expression[0], expression[1:]
+
+    def ev(value):
+        return _evaluate(value, properties, scope)
+    if op == "literal":
+        return args[0]
+    if op == "get":
+        return properties.get(args[0])
+    if op == "var":
+        return scope[args[0]]
+    if op == "let":
+        return _evaluate(args[2], properties, {**scope, args[0]: ev(args[1])})
+    if op in ("to-number", "coalesce"):
+        values = [ev(a) for a in args]
+        return next((float(v) for v in values if v is not None), 0.0)
+    if op == "%":
+        return math.fmod(ev(args[0]), ev(args[1]))
+    if op in ("+", "-", ">=", "<"):
+        a, b = ev(args[0]), ev(args[1])
+        return {"+": a + b, "-": a - b, ">=": a >= b, "<": a < b}[op]
+    if op == "all":
+        return all(ev(a) for a in args)
+    if op == "case":
+        for i in range(0, len(args) - 1, 2):
+            if ev(args[i]):
+                return ev(args[i + 1])
+        return ev(args[-1])
+    raise AssertionError(op)
+
+
+def test_upside_down_labels_are_turned_upright_as_qgis_does(mc):
+    """QGIS ("Show upside-down labels: never", the default) turns a straight
+    label whose clockwise angle lies in [90, 270) by 180 degrees within its
+    box; MapLibre never turns point labels (text-keep-upright is for line
+    placement). A fixed or data-defined angle was drawn upside down."""
+    from qgis.core import QgsPalLayerSettings
+    settings = QgsPalLayerSettings()
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.angleOffset = 150
+    assert mc.TextPropertyExtractor.flips_upside_down(settings)
+    layout = {"text-rotate": mc.TextPropertyExtractor.get_text_rotate(settings),
+              "text-anchor": "bottom-left", "text-offset": [1.0, -0.5]}
+    mc.TextPropertyExtractor.keep_upright(layout)
+    # The box stays: the anchor and the offset turn with the label.
+    assert layout == {"text-rotate": -30, "text-anchor": "top-right", "text-offset": [-1.0, 0.5]}
+    upright = {"text-rotate": 60, "text-anchor": "bottom"}
+    mc.TextPropertyExtractor.keep_upright(upright)
+    assert upright == {"text-rotate": 60, "text-anchor": "bottom"}
+
+    # A data-defined rotation as the export writes it (a dataset field).
+    field = "q2vt_property_labelrotation"
+    layout = {"text-rotate": ["to-number", ["coalesce", ["get", field], 0], 0],
+              "text-anchor": "bottom", "text-offset": [0, -1.0]}
+    mc.TextPropertyExtractor.keep_upright(layout)
+    turned = {value: _evaluate(layout["text-rotate"], {field: value})
+              for value in (0, 60, 90, 120, 200, 269, 270, 300, -100, 420)}
+    assert turned == {0: 0, 60: 60, 90: -90, 120: -60, 200: 20, 269: 89, 270: 270, 300: 300,
+                      -100: 80, 420: 60}
+    assert _evaluate(layout["text-anchor"], {field: 120}) == "top"
+    assert _evaluate(layout["text-anchor"], {field: 60}) == "bottom"
+    assert _evaluate(layout["text-offset"], {field: 120}) == [0, 1.0]
+    assert _evaluate(layout["text-offset"], {field: 300}) == [0, -1.0]
+
+    # Curved labels are always upright; the other modes keep the angle.
+    settings.placement = Qgis.LabelPlacement.Curved
+    assert not mc.TextPropertyExtractor.flips_upside_down(settings)
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    settings.upsidedownLabels = Qgis.UpsideDownLabelHandling.AlwaysAllowUpsideDown
+    assert not mc.TextPropertyExtractor.flips_upside_down(settings)

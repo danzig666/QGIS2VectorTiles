@@ -395,6 +395,86 @@ console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, .
     return {item[0]: item[1:] for item in json.loads(run.stdout)}
 
 
+def _tile_pieces(pieces, view, options):
+    """labelPoints of one line feature given as z1 tile pieces
+    [(tile x, [[x, y], ...] in tile units)]: {key: (x, y, rot)}."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(pieces)}.map(([tx, points]) => ({{
+  _x: tx, _y: 0, _z: 1, properties: {{ q2vt_orig_id: 5, rot: 99 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), tileZoom: 1,
+  ...{json.dumps(options)} }};
+if (options.box) {{ const box = options.box; options.labelBox = () => box; }}
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
+console.log(JSON.stringify(out.features.map((f) => [...f.geometry.coordinates, f.properties.rot])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return json.loads(run.stdout)
+
+
+def test_line_pieces_of_neighbouring_tiles_are_joined():
+    """Each tile cuts its own rounded, buffered copy of a line: the two cuts
+    on a shared tile edge miss each other by a fraction of a pixel. The
+    pieces were not joined (1e-10 tolerance) and a label longer than either
+    piece, though shorter than the visible line, was dropped."""
+    left = (0, [[2048, 2048], [4096 + 80, 2048]])      # buffered past the tile edge
+    right = (1, [[-80, 2049], [2048, 2049]])           # the same line, rounded a unit lower
+    view, box = [0, 0, 1, 0.5], [0.15, 0.01]           # a label 0.3 long, pieces 0.25
+    assert _tile_pieces([left, right], view, {"box": box}) == []
+    labels = _tile_pieces([left, right], view, {"box": box, "precision": 1 / 1000})
+    assert len(labels) == 1 and labels[0][0] == pytest.approx(0.5, abs=0.01)
+
+
+def test_horizontal_line_label_is_level_and_centred_on_the_line():
+    """QGIS Horizontal placement on lines: a level label centred on a point
+    of the line near its middle (pal createHorizontalCandidatesAlongLine),
+    on the visible part; it need not fit along the line."""
+    steep = [(1, [[2048, 0], [2048, 4096]])]  # vertical: 0.1 of it on the screen
+    view = [0, 0.2, 1, 0.3]
+    x, y, rotation = _lines(steep, view, {"box": [0.1, 0.01], "level": True})[1]
+    assert (x, y) == pytest.approx((0.5, 0.25)) and rotation == 0  # not turned to the line
+    assert _lines(steep, view, {"box": [0.1, 0.01]}) == {}  # along it: no room
+
+
+def test_repeated_line_label_is_chopped_on_the_visible_line():
+    """A repeated line label (QGIS repeat distance): the line clipped to the
+    screen is cut into equal parts at a whole multiple of the repeat at
+    least as long as the label, one label in the middle of each part, as
+    pal chops the line clipped to the map extent. Laid out on the whole
+    line (windows, MapLibre's spacing) most views had none."""
+    script = f"""
+import {{ labelPoints, newLabelState, repeatParts, repeatOption }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const line = [[0, 2048], [4096, 2048]].map(([x, y]) => ({{ x, y }}));
+const feature = {{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: 3, rot: 0 }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [line] }} }};
+const run = (view, repeat) => labelPoints([feature], view, maplibregl, {{ kind: "line",
+  rotationField: "rot", state: newLabelState(), repeat, labelBox: () => [0.05, 0.01] }})
+  .features.map((f) => f.geometry.coordinates[0]);
+console.log(JSON.stringify({{
+  parts: repeatParts(1000, 80, 264.6), long: repeatParts(1000, 300, 200),
+  whole: run([0, 0, 1, 1], 0.3), half: run([0.2, 0, 0.8, 1], 0.3), sparse: run([0.2, 0, 0.8, 1], 2),
+  mapUnits: repeatOption({{ px: 100, zoom: 16 }}, 18, 0.5), screen: repeatOption({{ px: 100 }}, 18, 0.5),
+}}));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    out = json.loads(run.stdout)
+    assert [round(b - a, 2) for a, b in out["parts"]] == [333.33] * 3
+    assert out["long"] == [[0, 500], [500, 1000]]
+    assert sorted(out["whole"]) == pytest.approx([1 / 6, 1 / 2, 5 / 6])
+    assert sorted(out["half"]) == pytest.approx([0.35, 0.65])    # the visible 0.6: two parts
+    assert out["sparse"] == pytest.approx([0.5])                 # repeat longer than the view
+    assert out["mapUnits"] == pytest.approx(200) and out["screen"] == pytest.approx(50)
+
+
 def test_free_placement_turns_labels_along_narrow_polygons():
     # A street rising to the right at 30° (narrower than the label is long),
     # a wide square, and a tall narrow strip.

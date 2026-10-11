@@ -70,6 +70,20 @@ def test_labels_sit_in_the_middle_of_their_parts_on_a_straight_line():
         assert window[-1][0] - window[0][0] == pytest.approx(60 + 2 * 2.0)  # the margins
 
 
+def test_a_narrower_chop_never_cuts_parts_shorter_than_the_label():
+    """The cut is made with the label width at the zoom's middle (0.71 of
+    the drawn width for point text): a repeat close to the label width cut
+    the line into parts shorter than the label, and the zoom had no label
+    at all. pal never chops into parts shorter than the label."""
+    xs, ys = [20.0, 580.0], [100.0, 100.0]
+    advances = [10.2] * 10  # a 102 px label
+    narrow = ll.label_windows(xs, ys, advances, 93.0, 2.0, chop_width=102 / math.sqrt(2),
+                              angle_window=7.2, margin=2.0)
+    assert len(narrow) == len(ll.repeat_parts(560, 102, 93.0)) == 3
+    for window in narrow:
+        assert window[-1][0] - window[0][0] == pytest.approx(102 + 2 * 2.0)
+
+
 def test_a_wiggly_river_gets_its_labels():
     """Koornlands at zoom 12: a vertex every 4 px turning 30 degrees.
     MapLibre's check rejects the river itself (two turns per 0.6 em); the

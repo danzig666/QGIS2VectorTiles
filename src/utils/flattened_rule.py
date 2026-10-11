@@ -87,6 +87,10 @@ class FlattenedRule:
     # simple fill's offset in map units, exact at every zoom (a translate
     # would show tile edges where it exceeds the tile buffer).
     shift: Optional[tuple] = None
+    # A repeated line label placed by the web viewer on the visible part of
+    # its line (RulesFlattener._split_line_label_windows), one label per
+    # repeat part, as QGIS chops the line clipped to the map extent.
+    visible_repeat: bool = False
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -96,7 +100,7 @@ class FlattenedRule:
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
             self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
-            self.label_filter, self.shift,
+            self.label_filter, self.shift, self.visible_repeat,
         )
 
     def evaluation_zoom(self) -> float:

@@ -276,8 +276,11 @@ def label_windows(xs: Sequence[float], ys: Sequence[float], advances: Sequence[f
     layout = (xs, ys, cumulative, advances, width, max_in, max_out, anchor)
     check = (width, angle_window, math.radians(max_angle), margin)
     windows = []
-    for start, end in repeat_parts(cumulative[-1], width if chop_width is None else chop_width,
-                                   repeat):
+    # pal never chops a line into parts shorter than the label it draws
+    # (Layer::chopFeaturesAtRepeatDistance): a part shorter than the label
+    # the window must hold would have none.
+    chop = width if chop_width is None else max(chop_width, width)
+    for start, end in repeat_parts(cumulative[-1], chop, repeat):
         window = _drawable(_candidates(layout, start, end, max(step, 1e-3)), check)
         if window is None and fine_step < step:
             # QGIS's grid is one sample of the offsets it tries at the other

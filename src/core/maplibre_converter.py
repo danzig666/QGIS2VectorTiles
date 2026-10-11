@@ -1722,6 +1722,99 @@ class TextPropertyExtractor:
         )
         return PropertyExtractor.get_value_or_expression(base_rotation, rotation_prop, "number")
 
+    _MIRRORED_ANCHOR = {"top": "bottom", "bottom": "top", "left": "right", "right": "left",
+                        "top-left": "bottom-right", "bottom-right": "top-left",
+                        "top-right": "bottom-left", "bottom-left": "top-right"}
+
+    @staticmethod
+    def flips_upside_down(label_settings: QgsPalLayerSettings) -> bool:
+        """QGIS turns a straight label whose angle reads upside down by 180
+        degrees within its box ("Show upside-down labels: never", the
+        default; pal LabelPosition, FeaturePart::onlyShowUprightLabels).
+        "When rotation defined" keeps every defined rotation as it is, and
+        an undefined one is 0, which never reads upside down."""
+        if TextPropertyExtractor.placement_name(label_settings) in ("Curved", "PerimeterCurved"):
+            return False
+        try:
+            mode = _enum_int(label_settings.upsidedownLabels, 0)
+        except AttributeError:
+            return False
+        return mode == 0
+
+    @staticmethod
+    def keep_upright(layout: dict) -> None:
+        """Turn ``text-rotate`` (clockwise degrees) by 180 where it lies in
+        [90, 270), as QGIS does: the label keeps its box, so its anchor and
+        offset (in the label's turned frame) are mirrored with it."""
+        rotate = layout.get("text-rotate", 0)
+        anchor = layout.get("text-anchor", "center")
+        offset = layout.get("text-offset")
+        mirror = TextPropertyExtractor._MIRRORED_ANCHOR
+        if ex.is_number(rotate):
+            angle = float(rotate) % 360
+            if not 90 <= angle < 270:
+                return
+            angle -= 180
+            layout["text-rotate"] = round(angle, 6) if angle != int(angle) else int(angle)
+            if isinstance(anchor, str) and anchor in mirror:
+                layout["text-anchor"] = mirror[anchor]
+            if offset is not None:
+                layout["text-offset"] = TextPropertyExtractor._negated(offset)
+            variable = layout.get("text-variable-anchor")
+            if isinstance(variable, list):
+                layout["text-variable-anchor"] = [mirror.get(a, a) for a in variable]
+            return
+        if not ex.is_expression(rotate) or ex.contains_zoom(rotate):
+            return
+        r = ["var", "q2vt_r"]
+        normal = ["%", ["+", ["%", ["to-number", rotate, 0], 360], 360], 360]
+        flipped = ["all", [">=", r, 90], ["<", r, 270]]
+        layout["text-rotate"] = ["let", "q2vt_r", normal,
+                                 ["case", flipped, ["-", r, 180], r]]
+        flip = ["let", "q2vt_r", normal, flipped]
+        if isinstance(anchor, str) and anchor in mirror:
+            layout["text-anchor"] = ["case", flip, mirror[anchor], anchor]
+        if offset is not None:
+            layout["text-offset"] = TextPropertyExtractor._flip_case(offset, flip)
+
+    @staticmethod
+    def _negated(value):
+        """``value`` (an ``[x, y]`` offset, a literal or a zoom curve of
+        them) pointing the other way."""
+        if isinstance(value, list) and len(value) == 2 and all(ex.is_number(v) for v in value):
+            return [-v if v else 0 for v in value]
+        if ex.is_expression(value) and value[0] == "literal":
+            return ["literal", TextPropertyExtractor._negated(value[1])]
+        if ex.is_zoom_curve(value):
+            head = 3 if value[0] == "interpolate" else 2
+            out = list(value[:head])
+            if value[0] == "step":
+                out.append(TextPropertyExtractor._negated(value[2]))
+                head = 3
+            for i in range(head, len(value)):
+                out.append(value[i] if (i - head) % 2 == 0
+                           else TextPropertyExtractor._negated(value[i]))
+            return out
+        return value
+
+    @staticmethod
+    def _flip_case(value, flip):
+        """``value`` negated where ``flip`` holds (inside a zoom curve's
+        outputs: MapLibre wants the zoom curve outermost)."""
+        if ex.is_zoom_curve(value):
+            head = 3 if value[0] == "interpolate" else 2
+            out = list(value[:head])
+            if value[0] == "step":
+                out.append(TextPropertyExtractor._flip_case(value[2], flip))
+                head = 3
+            for i in range(head, len(value)):
+                out.append(value[i] if (i - head) % 2 == 0
+                           else TextPropertyExtractor._flip_case(value[i], flip))
+            return out
+        literal = (lambda v: ["literal", v]) if isinstance(value, list) and \
+            all(ex.is_number(v) for v in value) else (lambda v: v)
+        return ["case", flip, literal(TextPropertyExtractor._negated(value)), literal(value)]
+
     @staticmethod
     def get_text_rotation_alignment() -> str:
         """Return ``text-rotation-alignment`` (default ``"map"``)."""
@@ -4056,6 +4149,12 @@ class QgisMapLibreStyleExporter:
             # anchors along it, half a label + 2 em from its start).
             layer_def["layout"]["symbol-placement"] = "line-center"
             layer_def["layout"].pop("symbol-spacing", None)
+        visible = tuple(self.visible_polygons.get(style_name) or ())
+        if layer_def["layout"]["symbol-placement"] == "point" and visible[2:3] != ("line",) and \
+                TextPropertyExtractor.flips_upside_down(label_settings):
+            # Line labels at a line's middle come upright already. Before the
+            # background takes the text's angle (icon-rotate).
+            TextPropertyExtractor.keep_upright(layer_def["layout"])
 
         layer_def["paint"].update({
             "text-color": TextPropertyExtractor.get_text_color(text_format, label_settings),
@@ -4115,6 +4214,14 @@ class QgisMapLibreStyleExporter:
                 # A line too short for its label: QGIS draws it level at a
                 # point of the line ("Allow degraded placement").
                 layer_def["metadata"]["q2vt:line-degraded"] = True
+            if layer_def["metadata"]["q2vt:visible-kind"] == "line":
+                if ex.is_number(layer_def["layout"].get("text-rotate", 0)):
+                    # Horizontal placement on lines: level, not along the line
+                    # (a line label along it reads its angle from a field).
+                    layer_def["metadata"]["q2vt:line-orient"] = "horizontal"
+                repeat = self._line_label_repeat(label_settings)
+                if repeat:
+                    layer_def["metadata"]["q2vt:repeat"] = repeat
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around
@@ -4169,6 +4276,24 @@ class QgisMapLibreStyleExporter:
             around["px"] = float(f"{value:.6g}")
             around["zoom"] = zoom
         return around
+
+    @staticmethod
+    def _line_label_repeat(label_settings) -> Optional[dict]:
+        """The repeat distance of a line label the viewer lays out on the
+        visible line: CSS px, at ``zoom`` for map units (doubling with each
+        zoom level)."""
+        try:
+            distance = float(label_settings.repeatDistance or 0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if distance <= 0:
+            return None
+        pixels = PropertyExtractor.length(distance, label_settings.repeatDistanceUnit,
+                                          map_unit_scale=label_settings.repeatDistanceMapUnitScale)
+        if ex.is_number(pixels):
+            return {"px": round(max(0.0, float(pixels)), 3)}
+        zoom = float(PropertyExtractor.context.reference_zoom)
+        return {"px": round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3), "zoom": zoom}
 
     def _line_label_zoom_split(self, layer_def: dict) -> list:
         """A label with a zoom-curve ``text-size`` as one style layer per

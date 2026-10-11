@@ -509,11 +509,12 @@ def _curved_river(tmp_path, name="river", **options):
 def test_repeated_curved_line_labels_are_laid_out_per_zoom(flattener, tmp_path):
     """Swellendam rivers: a curved label repeated along its line becomes one
     rule per zoom that lays its labels out at export time (MapLibre's line
-    placement dropped them on wiggly rivers); the last zoom keeps its
-    overzoom. The recipe holds the zoom's pixels: the text size, and QGIS's
-    repeat distance as at zoom + 0.5 in the tile zoom's pixels. Labels the
-    export cannot lay out as QGIS does (once per line, parallel,
-    data-defined size, merged lines) stay one rule on MapLibre's placement."""
+    placement dropped them on wiggly rivers); above the tile zooms the web
+    viewer places them on the visible line. The recipe holds the zoom's
+    pixels: the text size, and QGIS's repeat distance as at zoom + 0.5 in
+    the tile zoom's pixels. Labels the export cannot lay out as QGIS does
+    (parallel, data-defined size, merged lines) stay on MapLibre's
+    placement over the tile zooms; a label drawn once per line is one rule."""
     import math
     from qgis.core import Qgis
     others = {"once": {"repeat": 0}, "parallel": {"placement": Qgis.LabelPlacement.Line},
@@ -525,13 +526,20 @@ def test_repeated_curved_line_labels_are_laid_out_per_zoom(flattener, tmp_path):
     for rule in rules:
         if rule.get_attr("t") == 1:
             labels.setdefault(rule.layer.name(), []).append(rule)
-    for name in others:
-        assert [(r.recipe, r.get_attr("o"), r.get_attr("i")) for r in labels[name]] == \
-            [(None, 11, 14)], name
-    river = sorted(labels["river"], key=lambda r: r.get_attr("o"))
-    assert [(r.get_attr("o"), r.get_attr("i")) for r in river] == [(z, z) for z in range(11, 15)]
-    assert [r.visibility.max_zoom for r in river] == [12, 13, 14, None]
-    assert len({r.output_dataset for r in river}) == 4
+    assert [(r.recipe, r.get_attr("o"), r.get_attr("i"), r.visibility.max_zoom)
+            for r in labels["once"]] == [(None, 11, 14, None)]
+    for name in ("parallel", "sized", "merged"):
+        native, viewer = labels[name]
+        assert (native.recipe, native.get_attr("o"), native.get_attr("i")) == (None, 11, 14)
+        assert native.visibility.max_zoom == 15 and not native.visible_repeat, name
+        assert viewer.visible_repeat and viewer.visibility.min_zoom == 15, name
+        assert viewer.visibility.max_zoom is None and viewer.get_attr("c") == 0, name
+    river = sorted(labels["river"], key=lambda r: (r.visible_repeat, r.get_attr("o")))
+    assert [(r.get_attr("o"), r.get_attr("i")) for r in river[:-1]] == [(z, z) for z in range(11, 15)]
+    assert [r.visibility.max_zoom for r in river[:-1]] == [12, 13, 14, 15]
+    assert river[-1].visible_repeat and river[-1].recipe is None
+    assert (river[-1].visibility.min_zoom, river[-1].visibility.max_zoom) == (15, None)
+    assert len({r.output_dataset for r in river}) == 5
     recipe = river[0].recipe
     assert recipe.kind == "label_windows" and recipe.param("zoom") == 11
     assert recipe.param("size") == pytest.approx(12.0)                 # 9 pt
@@ -542,13 +550,39 @@ def test_repeated_curved_line_labels_are_laid_out_per_zoom(flattener, tmp_path):
         (25.0, -25.0, 25.0)
 
 
+def test_repeated_line_labels_above_the_tile_zooms_go_to_the_viewer(flattener, tmp_path):
+    """Publish defaults (0-16, the map overzooms to 22): the z16 windows
+    were reused up to z22, map-unit labels outgrew them from z17 and
+    screen-unit repeats thinned out to none. Above the tile zooms, and from
+    the zoom where the repeat reaches a tile (QGIS's 300 mm repeat: at
+    every zoom), the viewer lays the labels out on the visible line."""
+    from qgis.core import Qgis
+    reset_project(_curved_river(tmp_path, "mapunit", size=20, unit=Qgis.RenderUnit.MapUnits),
+                  _curved_river(tmp_path, "sparse", repeat=300),
+                  _curved_river(tmp_path, "level", placement=Qgis.LabelPlacement.Horizontal))
+    rules, _ = flattener(0, 16)
+    labels = {}
+    for rule in rules:
+        if rule.get_attr("t") == 1:
+            labels.setdefault(rule.layer.name(), []).append(rule)
+    windows = [r for r in labels["mapunit"] if r.recipe is not None]
+    assert max(r.get_attr("i") for r in windows) == 16
+    assert all(r.visibility.max_zoom is not None and r.visibility.max_zoom <= 17 for r in windows)
+    viewer = [r for r in labels["mapunit"] if r.visible_repeat]
+    assert [(r.get_attr("o"), r.get_attr("i"), r.visibility.min_zoom, r.visibility.max_zoom)
+            for r in viewer] == [(16, 16, 17, None)]
+    for name in ("sparse", "level"):  # 1134 px apart; Horizontal on lines: always
+        assert [(r.visible_repeat, r.recipe, r.visibility.min_zoom, r.visibility.max_zoom)
+                for r in labels[name]] == [(True, None, 0, None)], name
+
+
 def test_map_unit_curved_labels_fit_maplibre_line_check(flattener, tmp_path):
     """Map-unit text: the recipe's size is the tile zoom's; MapLibre checks
     the fit of zoom 17's labels with their zoom-18 size (twice as long)."""
     from qgis.core import Qgis
     reset_project(_curved_river(tmp_path, size=20, unit=Qgis.RenderUnit.MapUnits))
     rules, _ = flattener(16, 17)
-    labels = {r.get_attr("o"): r.recipe for r in rules if r.get_attr("t") == 1}
+    labels = {r.get_attr("o"): r.recipe for r in rules if r.get_attr("t") == 1 and r.recipe}
     assert labels[16].param("size") == pytest.approx(20 * 512 * 2 ** 16 / 40075016.68557849)
     assert labels[17].param("size") == pytest.approx(2 * labels[16].param("size"))
     assert labels[16].param("fit") == 1.0 and labels[17].param("fit") == pytest.approx(2.0)

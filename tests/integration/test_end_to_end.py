@@ -677,6 +677,59 @@ def test_line_labels_once_per_line_ship_their_lines(export, tmp_path):
     assert "q2vt_label" in archive["vector_layers"][lines]["fields"]
 
 
+def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp_path):
+    """Horizontal placement on a line was a point label on the line itself
+    (MapLibre: at its first vertex, none once that is off the screen); a
+    label repeated every 300 mm got MapLibre anchors 1134 px apart, most
+    views had none. Both are exported at the line's middle with their lines
+    for the viewer: level (q2vt:line-orient), or chopped at the repeat
+    (q2vt:repeat), as QGIS lays them out on the line clipped to the map.
+    Exported from zoom 0, as the Publish window does."""
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsField, QgsLineSymbol, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
+
+    def labels_for(name, placement, repeat):
+        layer = QgsVectorLayer("LineString?crs=EPSG:3857", name, "memory")
+        layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes(["Alpha Lane"])
+        feature.setGeometry(QgsGeometry.fromWkt(
+            "LineString (2119500 6019500, 2121000 6021000, 2122500 6020000)"))
+        layer.dataProvider().addFeatures([feature])
+        layer = to_geopackage(layer, str(tmp_path / f"{name}.gpkg"))
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({"color": "blue"})))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "name"
+        settings.placement = placement
+        settings.repeatDistance = repeat
+        settings.repeatDistanceUnit = Qgis.RenderUnit.Millimeters
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        _, result = export(layer, min_zoom=0, max_zoom=14)
+        style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+        return [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+
+    for labels in (labels_for("level", Qgis.LabelPlacement.Horizontal, 0),
+                   labels_for("level_repeated", Qgis.LabelPlacement.Horizontal, 300)):
+        assert len(labels) == 1 and labels[0]["layout"]["symbol-placement"] == "point"
+        assert labels[0]["layout"]["text-rotate"] == 0
+        assert labels[0]["metadata"]["q2vt:visible-kind"] == "line"
+        assert labels[0]["metadata"]["q2vt:line-orient"] == "horizontal"
+    assert labels[0]["metadata"]["q2vt:repeat"] == {"px": pytest.approx(300 * 96 / 25.4, abs=0.01)}
+    sparse = labels_for("sparse", Qgis.LabelPlacement.Line, 300)
+    assert len(sparse) == 1 and sparse[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert "q2vt:line-orient" not in sparse[0]["metadata"]
+    assert sparse[0]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(300 * 96 / 25.4, abs=0.01)
+    # A small repeat keeps MapLibre's spacing over the tile zooms, the viewer
+    # takes over while the map overzooms.
+    dense = sorted(labels_for("dense", Qgis.LabelPlacement.Line, 20), key=lambda l: l["minzoom"])
+    assert [l["layout"]["symbol-placement"] for l in dense] == ["line", "point"]
+    assert dense[0]["maxzoom"] == 15 and dense[1]["minzoom"] == 15
+    assert dense[1]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(20 * 96 / 25.4, abs=0.01)
+
+
 def test_perimeter_labels_follow_the_polygon_outline(export, tmp_path):
     """Polygon labels "Using perimeter (curved)" follow the outline. They
     were exported at the polygon's centroid, a point MapLibre's line
