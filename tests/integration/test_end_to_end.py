@@ -858,10 +858,17 @@ def test_curved_repeated_line_labels_are_placed_per_zoom(export, tmp_path):
     layer.setLabelsEnabled(True)
     _, result = export(layer, min_zoom=11, max_zoom=13)
     style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
-    labels = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    texts = [l for l in style["layers"] if "text-field" in l.get("layout", {})]
+    labels = [l for l in texts if l["layout"]["symbol-placement"] == "line-center"]
     assert sorted(l["minzoom"] for l in labels) == [11, 12, 13]   # one layer per zoom
-    assert {l["layout"]["symbol-placement"] for l in labels} == {"line-center"}
+    assert max(l["maxzoom"] for l in labels) == 14   # the last tile zoom only
     assert labels[0]["layout"]["text-max-angle"] == 25
+    # Overzoomed, the web viewer chops the visible part of the river.
+    viewer = [l for l in texts if l not in labels]
+    assert [l["minzoom"] for l in viewer] == [14]
+    assert viewer[0]["layout"]["symbol-placement"] == "point"
+    assert viewer[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert viewer[0]["metadata"]["q2vt:repeat"]["px"] == pytest.approx(70 * 96 / 25.4, abs=0.01)
 
     from q2vt_plugin.src.core import label_lines  # pylint: disable=import-error,import-outside-toplevel
     layout = labels[0]["layout"]

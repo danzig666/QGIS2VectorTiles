@@ -1880,11 +1880,13 @@ class RulesFlattener:
 
     def _visible_repeat_zoom(self, label_rule: FlattenedRule) -> Optional[int]:
         """The first zoom from which the web viewer places a repeated line
-        label (one past the tile zooms: only while overzooming), or None
+        label (one past the tile zooms: only while overzooming; map-unit
+        text: from tile zoom 17, where its windows no longer hold it), or None
         when it cannot (a data-defined repeat, generated or pinned
         positions...). QGIS's Horizontal placement on lines: at every zoom
         (MapLibre puts a point label on a line at its first vertex)."""
-        from .maplibre_converter import PropertyExtractor, TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+        from .maplibre_converter import (PropertyExtractor, QgisMapLibreStyleExporter,  # pylint: disable=import-outside-toplevel
+                                         TextPropertyExtractor)
         settings = label_rule.rule.settings()
         if settings is None or label_rule.get_attr("g") != 1 or label_rule.get_attr("c") != 1 \
                 or label_rule.recipe is not None or label_rule.pre_generator \
@@ -1909,13 +1911,22 @@ class RulesFlattener:
             repeat = self.lengths.static(settings.repeatDistance, settings.repeatDistanceUnit,
                                          PropertyExtractor.map_unit_scale(
                                              settings.repeatDistanceMapUnitScale))
+            first = high + 1
             for zoom in range(low, high + 1):
                 px = repeat if ex.is_number(repeat) else ex.evaluate_zoom_curve(repeat, zoom)
                 if float(px) >= self.VISIBLE_REPEAT_PX:
-                    return zoom
+                    first = zoom
+                    break
+            # Map-unit text: MapLibre's line check measures the label at
+            # LINE_LABEL_FIT_ZOOM, beyond a window cut at tile zoom 17 or more.
+            text_format = settings.format()
+            size = self.lengths.static(text_format.size(), text_format.sizeUnit(),
+                                       PropertyExtractor.map_unit_scale(text_format.sizeMapUnitScale()))
+            if not ex.is_number(size):
+                first = min(first, max(low, QgisMapLibreStyleExporter.LINE_LABEL_FIT_ZOOM - 1))
         except (ValueError, ex.ExpressionError):  # a unit without pixels (percentage)
             return None
-        return high + 1
+        return first
 
     def _split_visible_repeat(self, label_rule: FlattenedRule,
                               visible_from: Optional[int]) -> List[FlattenedRule]:

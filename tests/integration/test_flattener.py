@@ -577,16 +577,21 @@ def test_repeated_line_labels_above_the_tile_zooms_go_to_the_viewer(flattener, t
 
 
 def test_map_unit_curved_labels_fit_maplibre_line_check(flattener, tmp_path):
-    """Map-unit text: the recipe's size is the tile zoom's; MapLibre checks
-    the fit of zoom 17's labels with their zoom-18 size (twice as long)."""
+    """Map-unit text: the recipe's size is the tile zoom's. MapLibre checks
+    the fit of zoom 17's labels with their zoom-18 size (twice as long), so
+    their windows lost most labels: from tile zoom 17 the viewer places
+    them on the visible line."""
     from qgis.core import Qgis
     reset_project(_curved_river(tmp_path, size=20, unit=Qgis.RenderUnit.MapUnits))
     rules, _ = flattener(16, 17)
     labels = {r.get_attr("o"): r.recipe for r in rules if r.get_attr("t") == 1 and r.recipe}
+    assert list(labels) == [16]
     assert labels[16].param("size") == pytest.approx(20 * 512 * 2 ** 16 / 40075016.68557849)
-    assert labels[17].param("size") == pytest.approx(2 * labels[16].param("size"))
-    assert labels[16].param("fit") == 1.0 and labels[17].param("fit") == pytest.approx(2.0)
+    assert labels[16].param("fit") == 1.0
     assert labels[16].param("chop") == pytest.approx(1.0)               # grows with the map
+    viewer = [r for r in rules if r.get_attr("t") == 1 and r.visible_repeat]
+    assert [(r.get_attr("o"), r.get_attr("i"), r.visibility.min_zoom, r.visibility.max_zoom)
+            for r in viewer] == [(17, 17, 17, None)]
 
 
 # --- zooms beyond the export's last tile zoom (Publish: tiles 0-16, the

@@ -395,8 +395,8 @@ console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, .
     return {item[0]: item[1:] for item in json.loads(run.stdout)}
 
 
-def _tile_pieces(pieces, view, options):
-    """labelPoints of one line feature given as z1 tile pieces
+def _tile_pieces(pieces, view, options, z=1):
+    """labelPoints of one line feature given as tile pieces of zoom z
     [(tile x, [[x, y], ...] in tile units)]: {key: (x, y, rot)}."""
     script = f"""
 import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
@@ -404,7 +404,7 @@ const maplibregl = {{ MercatorCoordinate: class {{
   constructor(x, y) {{ this.x = x; this.y = y; }}
   toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
 const features = {json.dumps(pieces)}.map(([tx, points]) => ({{
-  _x: tx, _y: 0, _z: 1, properties: {{ q2vt_orig_id: 5, rot: 99 }},
+  _x: tx, _y: 0, _z: {z}, properties: {{ q2vt_orig_id: 5, rot: 99 }},
   _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
 const options = {{ kind: "line", rotationField: "rot", state: newLabelState(), tileZoom: 1,
   ...{json.dumps(options)} }};
@@ -425,9 +425,20 @@ def test_line_pieces_of_neighbouring_tiles_are_joined():
     left = (0, [[2048, 2048], [4096 + 80, 2048]])      # buffered past the tile edge
     right = (1, [[-80, 2049], [2048, 2049]])           # the same line, rounded a unit lower
     view, box = [0, 0, 1, 0.5], [0.15, 0.01]           # a label 0.3 long, pieces 0.25
-    assert _tile_pieces([left, right], view, {"box": box}) == []
     labels = _tile_pieces([left, right], view, {"box": box, "precision": 1 / 1000})
     assert len(labels) == 1 and labels[0][0] == pytest.approx(0.5, abs=0.01)
+    gap = (1, [[-80, 2088], [2048, 2088]])             # 40 units off: a real gap, not joined
+    assert _tile_pieces([left, gap], view, {"box": box, "precision": 1 / 1000}) == []
+    # Overzoomed: z3 tiles cut from z1 data (tileZoom, the source's max
+    # zoom), whose rounding misses by 3 z3 units, several screen pixels at
+    # this precision. The tolerance follows the data's tile unit, not the
+    # screen: the pieces are still joined.
+    left = (0, [[2048, 2048], [4096 + 80, 2048]])
+    right = (1, [[-80, 2051], [2048, 2051]])
+    view, box = [0, 0, 0.25, 0.125], [0.15 / 4, 0.01 / 4]
+    options = {"box": box, "precision": 1 / 4000 / 8 / 4}
+    labels = _tile_pieces([left, right], view, options, z=3)
+    assert len(labels) == 1 and labels[0][0] == pytest.approx(0.125, abs=0.01)
 
 
 def test_horizontal_line_label_is_level_and_centred_on_the_line():

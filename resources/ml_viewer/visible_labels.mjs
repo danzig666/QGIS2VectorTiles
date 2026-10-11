@@ -387,6 +387,9 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     if (f._z === options.tileZoom) wanted = true;
   }
   if (wanted) deepest = options.tileZoom;
+  // A tile unit of the data (overzoomed tiles are cut from the max zoom's):
+  // neighbouring tiles round a line's cut on their shared edge to it.
+  let tileUnit = 0;
   const loaded = new Set(); // deepest tiles with data
   const byFeature = new Map();
   const excluded = new Set();
@@ -400,6 +403,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     const key = String(f.properties.q2vt_orig_id ?? f.id ?? JSON.stringify(f.properties));
     const tile = f._vectorTileFeature;
     const scale = 1 / (tile.extent * 2 ** f._z);
+    tileUnit = Math.max(tileUnit, 1 / (tile.extent * 2 ** Math.min(f._z, options.tileZoom ?? f._z)));
     const ox = f._x / 2 ** f._z, oy = f._y / 2 ** f._z;
     const clip = intersect(reach, [ox, oy, ox + 1 / 2 ** f._z, oy + 1 / 2 ** f._z]);
     if (!clip) continue;
@@ -481,6 +485,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   for (const part of options.repeat > 0 ? state.points.keys() : []) {
     if (part.includes(PART_SEPARATOR)) partsOf.set(baseKey(part), [...(partsOf.get(baseKey(part)) || []), part]);
   }
+  const lineOptions = { ...options, tileUnit };
   for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
@@ -504,7 +509,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
         for (const part of parts) points.set(part, state.points.get(part));
         continue;
       }
-      placeRepeatedOnLine(loaded, properties, view, avoid, options).forEach((placed, k) => {
+      placeRepeatedOnLine(loaded, properties, view, avoid, lineOptions).forEach((placed, k) => {
         points.set(key + PART_SEPARATOR + k, { ...placed, orig });
         if (placed.box) {
           boxes.push(placed.box);
@@ -514,7 +519,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       continue;
     }
     if (options.kind === "line") {
-      const placed = placeOnLine(loaded, properties, old, view, guarded, avoid, options);
+      const placed = placeOnLine(loaded, properties, old, view, guarded, avoid, lineOptions);
       if (placed) {
         points.set(key, { ...placed, orig });
         if (placed.box) {
@@ -1415,8 +1420,10 @@ function project(chain, [x, y]) {
 function lineSpots(loaded, properties, view, avoid, options) {
   const withRotation = (rotation) => (options.rotationField
     ? { ...properties, [options.rotationField]: rotation } : properties);
-  // One CSS pixel: a tile cut's mismatch, never a visible gap in the line.
-  const joinTolerance = Math.max(1e-10, options.precision || 0);
+  // A tile cut's mismatch: a few units of the data's tiles (it grows on
+  // the screen with every overzoom level), at least one CSS pixel; never a
+  // visible gap in the line.
+  const joinTolerance = Math.max(1e-10, options.precision || 0, 4 * (options.tileUnit || 0));
   const chains = (pieces) => stitch(pieces, joinTolerance).map((chain) => ({ chain, length: chainLength(chain) }))
     .sort((a, b) => b.length - a.length);
   const visible = chains(loaded.flatMap((piece) => clipLine(piece, view)));
