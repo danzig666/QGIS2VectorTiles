@@ -5,6 +5,7 @@ import json
 import pytest
 from qgis.core import (Qgis, QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsMarkerSymbol,
                        QgsSimpleMarkerSymbolLayer)
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from fidelity.diagnostics import DiagnosticCollector
@@ -214,3 +215,50 @@ def test_data_defined_stroke_width_is_kept_in_sprites(sg):
     symbol = QgsMarkerSymbol([layer])
     sg._hairlines_to_one_pixel(symbol)  # pylint: disable=protected-access
     assert symbol.symbolLayer(0).strokeWidth() == 0
+
+
+def _limited_scale(kind):
+    from qgis.core import QgsMapUnitScale
+    if kind == "range":
+        return QgsMapUnitScale(50000, 5000)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    return limits
+
+
+@pytest.mark.parametrize("kind", ["mm", "range"])
+@pytest.mark.parametrize("reference_zoom", [6, 12, 15, 19])
+def test_map_unit_marker_limits_apply_once(plugin, sg, kind, reference_zoom):
+    """A map-unit square with min/max sizes or a scale range: QGIS limits the
+    size when it draws the sprite, and icon-size applied the limits again
+    against the unlimited size (a blob at mid zooms, specks when zoomed in);
+    with a scale range the sprite's render context had scale 1 and the
+    marker came out empty."""
+    import math
+    from fidelity import expressions as ex
+    from fidelity.zoom import scale_to_zoom
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    layer = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Square, 100)
+    layer.setColor(QColor("black"))
+    layer.setStrokeStyle(Qt.PenStyle.NoPen)
+    layer.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    layer.setSizeMapUnitScale(_limited_scale(kind))
+    symbol = QgsMarkerSymbol([layer])
+    mc.PropertyExtractor.context = mc.ConversionContext(DiagnosticCollector())
+    mc.PropertyExtractor.context.reference_zoom = float(reference_zoom)
+    icon_size, map_units_per_pixel, oversampling = mc.IconPropertyExtractor.marker_scale(
+        symbol, layer)
+    image = sg.SymbolImage(symbol, "m", oversampling, False, map_units_per_pixel)
+    assert not image.transparent
+    sprite_px = image.img.width / oversampling
+    for zoom in (reference_zoom, reference_zoom + 0.5, reference_zoom + 3):
+        clamped_zoom = zoom
+        if kind == "range":
+            clamped_zoom = min(max(zoom, scale_to_zoom(50000)), scale_to_zoom(5000))
+        expected = 100 * 512 * 2 ** clamped_zoom / 40075016.68557849
+        if kind == "mm":
+            expected = min(max(expected, 96 / 25.4), 4 * 96 / 25.4)
+        drawn = sprite_px * ex.evaluate_zoom_curve(icon_size, zoom)
+        assert drawn == pytest.approx(expected, rel=0.15, abs=1.0), (zoom, sprite_px)
+    assert math.isfinite(sprite_px)

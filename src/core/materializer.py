@@ -93,6 +93,13 @@ def _to_mm(value: float, unit) -> Optional[float]:
     return value * factor / physical_factor(MM)
 
 
+def _limited(scale) -> bool:
+    """Whether a QgsMapUnitScale limits its map-unit length (min/max size in
+    mm or a scale range)."""
+    return bool(scale.minScale or scale.maxScale or scale.minSizeMMEnabled
+                or scale.maxSizeMMEnabled)
+
+
 def _enum_value(value) -> int:
     return int(getattr(value, "value", value))
 
@@ -852,6 +859,11 @@ class SymbolMaterializer:
             return None
         if (layer.offset().x() or layer.offset().y()) and \
                 normalize_unit(layer.offsetUnit()) != "map":
+            return None
+        if _limited(layer.sizeMapUnitScale()) or ((layer.offset().x() or layer.offset().y())
+                                                  and _limited(layer.offsetMapUnitScale())):
+            # Min/max size or a scale range: the glyph is not proportional
+            # to the map; the sprite marker applies the limits per zoom.
             return None
         wkt = self.glyph_outline(layer)
         if wkt is None:

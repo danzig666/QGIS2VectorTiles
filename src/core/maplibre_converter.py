@@ -846,16 +846,31 @@ class IconPropertyExtractor:
             size = 1.0
         context = PropertyExtractor.context
         unit_name = "map" if unit not in ("map", "m") else unit
-        reference_px = max(1.0, PropertyExtractor.static_pixels(size, unit_name, context.reference_zoom))
+        unclamped_px = PropertyExtractor.static_pixels(size, unit_name, context.reference_zoom)
+        reference_px = max(1.0, unclamped_px)
         map_units_per_pixel = size / reference_px
+        # QGIS applies the size's QgsMapUnitScale (min/max mm, scale range)
+        # when it draws the sprite (at the scale of map_units_per_pixel), so
+        # the sprite is the limited size at that scale: icon-size is relative
+        # to it, or the limits would apply twice.
+        mus = symbol.sizeMapUnitScale()
+        px = PropertyExtractor.length(value, unit_name, None, mus)
+        sprite_px = reference_px
+        if unclamped_px > 0 and (mus.minScale or mus.maxScale or mus.minSizeMMEnabled
+                                 or mus.maxSizeMMEnabled):
+            sprite_zoom = context.reference_zoom + math.log2(reference_px / unclamped_px)
+            limited = PropertyExtractor.length(size, unit_name, None, mus)
+            limited = limited if ex.is_number(limited) else \
+                ex.evaluate_zoom_curve(limited, sprite_zoom)
+            if limited > 0:
+                sprite_px = limited
         span = max(0.0, min(3.0, context.reference_zoom_span))
         oversampling = max(float(_SPRITE_QUALITY),
-                           min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / reference_px))
+                           min(_SPRITE_QUALITY * 2.0 ** span, 512.0 / sprite_px))
         if context.sprite_oversampling:
             # Very large markers far into overzoom: a smaller image, scaled up.
-            oversampling = min(context.sprite_oversampling, 256.0 / reference_px)
-        px = PropertyExtractor.length(value, unit_name, None, symbol.sizeMapUnitScale())
-        return ex.clamp(ex.mul(px, 1.0 / reference_px), 0, None), \
+            oversampling = min(context.sprite_oversampling, 256.0 / sprite_px)
+        return ex.clamp(ex.mul(px, 1.0 / sprite_px), 0, None), \
             map_units_per_pixel, oversampling
 
     @staticmethod
@@ -2519,8 +2534,11 @@ class QgisMapLibreStyleExporter:
         # at the reference zoom (scaling both factors keeps map pixels).
         scale = self._screen_scale()
         reference = self._reference_map_units_per_px() * scale
-        one = SymbolImage(marker, "pattern-marker", scale, True, reference).img
-        two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference).img
+        map_scale = self._reference_map_units_per_px() * 96.0 / 0.0254
+        one = SymbolImage(marker, "pattern-marker", scale, True, reference,
+                          renderer_scale=map_scale).img
+        two = SymbolImage(marker, "pattern-marker", 2 * scale, True, reference,
+                          renderer_scale=map_scale).img
         return one, two
 
     @staticmethod

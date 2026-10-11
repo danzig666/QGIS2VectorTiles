@@ -939,6 +939,24 @@ def test_map_unit_font_markers_become_their_glyphs(plugin, tmp_path, text, angle
     assert mask_difference(reference, ours) < 0.05
 
 
+def test_limited_map_unit_font_marker_stays_a_sprite(plugin, tmp_path):
+    """A map-unit font marker with a minimum and maximum size: its glyph
+    outlines grew with the map past the maximum (4x too large when zoomed
+    in); the sprite marker applies the limits."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsMapUnitScale
+    layer = _layer("Point", ["POINT(-30 -10)"], str(tmp_path / "fm.gpkg"))
+    marker = QgsFontMarkerSymbolLayer("DejaVu Sans", "A", 10)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    limits = QgsMapUnitScale()
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 4.0
+    marker.setSizeMapUnitScale(limits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert rules and not any(r.recipe for r in rules)
+    assert rules[0].rule.symbol().symbolLayer(0).layerType() == "FontMarker"
+
+
 def test_point_pattern_random_deviation_stays_in_range(plugin):
     """QGIS moves every pattern marker by a uniform ±max deviation (its own
     random sequence): the exported markers deviate within the same range."""

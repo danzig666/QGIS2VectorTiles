@@ -165,6 +165,9 @@ class SymbolImage:
     bake_rotation: bool = True
     map_units_per_pixel: float = 1.0
     attributes: Optional[Dict[str, object]] = None
+    # Map scale of the render context (QgsMapUnitScale scale ranges read
+    # it); None: the scale of map_units_per_pixel per CSS pixel.
+    renderer_scale: Optional[float] = None
     img: Img = field(init=False)
     width: int = field(init=False)
     height: int = field(init=False)
@@ -226,6 +229,9 @@ class SymbolImage:
         context = QgsRenderContext.fromQPainter(painter)
         context.setScaleFactor(_PX_PER_MM * self.scale_factor)
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
+        # Left at 1, a scale range of a map-unit size (QgsMapUnitScale::
+        # computeMapUnitsPerPixel) shrank the marker thousands of times.
+        context.setRendererScale(self.renderer_scale or self.map_units_per_pixel * 96.0 / 0.0254)
         context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
         return context
 
