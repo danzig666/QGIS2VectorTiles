@@ -1884,6 +1884,10 @@ class QgisMapLibreStyleExporter:
             background_type: ``0`` for OSM, ``1`` for NASA Blue Marble; any
                              other value emits a solid-colour background
                              using the project's background colour.
+
+        The layer has no zoom range: QGIS draws the background at every
+        scale, and MapLibre hides a layer at its ``maxzoom`` (the browser
+        may zoom to 24). Raster sources overzoom their deepest tiles.
         """
         if background_type == 0:
             self.style["sources"]["osm"] = {
@@ -1894,13 +1898,13 @@ class QgisMapLibreStyleExporter:
                     "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
                 ],
                 "tileSize": 256,
+                "maxzoom": 19,
                 "attribution": (
                     '&copy; <a href="https://www.openstreetmap.org/copyright">'
                     "OpenStreetMap</a> contributors"
                 ),
             }
-            return {"id": "osm-background", "type": "raster", "source": "osm",
-                    "minzoom": 0, "maxzoom": 22}
+            return {"id": "osm-background", "type": "raster", "source": "osm"}
 
         if background_type == 1:
             self.style["sources"]["bluemarbel"] = {
@@ -1910,15 +1914,15 @@ class QgisMapLibreStyleExporter:
                     "BlueMarble_ShadedRelief/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg"
                 ],
                 "tileSize": 256,
+                "maxzoom": 8,
             }
-            return {"id": "bluemarbel-background", "type": "raster", "source": "bluemarbel",
-                    "minzoom": 0, "maxzoom": 22}
+            return {"id": "bluemarbel-background", "type": "raster", "source": "bluemarbel"}
 
         bg_color = PropertyExtractor.convert_qcolor_to_maplibre(
             QgsProject.instance().backgroundColor()
         )
         return {
-            "id": "background", "type": "background", "minzoom": 0, "maxzoom": 22,
+            "id": "background", "type": "background",
             "paint": {"background-color": bg_color},
         }
 
