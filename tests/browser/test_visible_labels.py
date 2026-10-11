@@ -813,6 +813,7 @@ const features = {json.dumps(features)}.map(([id, rings, extra]) => ({{
   _vectorTileFeature: {{ extent: 4096, loadGeometry: () => rings.map((ring) => ring.map(([x, y]) => ({{ x, y }}))) }} }}));
 const options = {{ state: newLabelState(), precision: 0.0005, ...{json.dumps(options)} }};
 const box = options.box;
+if (box && options.text) box.text = options.text;  // the bare text (box: with its margin)
 if (box) options.labelBox = () => box;
 const out = labelPoints(features, {json.dumps(view)}, maplibregl, options);
 console.log(JSON.stringify(out.features.map((f) => {{
@@ -907,6 +908,59 @@ def test_outside_polygons_labels_go_beside_the_polygon():
         assert gap == pytest.approx(outside["distance"], abs=0.003)
     assert _place([(1, [_square(0, 0, 4096, 4096)], {})], [0.2, 0.2, 0.8, 0.8],
                   {"box": box, "around": outside}) == []
+
+
+@pytest.mark.parametrize("distance", [0, 0.001, 0.01])
+def test_outside_polygons_labels_at_a_small_distance(distance):
+    """"Outside polygons" at the QGIS default distance 0 (or a small one):
+    the text beside the polygon's edge at that distance. The candidates were
+    tested with the label's box including its margin for other labels and
+    all touched the polygon: no label at distances below ~4 px."""
+    box, text = [0.052, 0.009], [0.05, 0.007]
+    square = _square(1500, 1500, 2600, 2400)
+    [(_, x, y, _rotation, _label)] = _place([(1, [square], {})], [0, 0, 1, 1],
+                                            {"box": box, "text": text, "precision": 1 / 1024,
+                                             "around": {**AROUND, "outside": True, "distance": distance}})
+    polygon = [v / 4096 for v in square[0] + square[2]]
+    drawn = [x - text[0], y - text[1], x + text[0], y + text[1]]
+    gap = max(polygon[0] - drawn[2], drawn[0] - polygon[2], polygon[1] - drawn[3], drawn[1] - polygon[3])
+    assert gap == pytest.approx(distance, abs=1e-6)
+
+
+def test_outside_polygons_labels_keep_off_neighbouring_polygons():
+    """"Outside polygons": the layer's other polygons are obstacles, as in
+    QGIS. The label above a wide polygon (its cheapest spot) went over the
+    small polygon just above it."""
+    wide, small = _square(1000, 1000, 1800, 1300), _square(1350, 900, 1450, 970)
+    placed = _place([(1, [wide], {}), (2, [small], {})], [0, 0, 1, 1],
+                    {"box": [0.03, 0.006], "around": {**AROUND, "outside": True, "distance": 0}})
+    label = next(box for (fid, *_rest, box) in placed if fid == 1)
+    shape = [v / 4096 for v in small[0] + small[2]]
+    assert not _overlaps(label, shape)
+
+
+def test_labels_kept_while_moving_are_avoided_by_newcomers():
+    """While the map moves (freeze) the labels already shown stay; a polygon
+    arriving then keeps clear of them ("Never overlap"). It was placed on
+    top of them, and at the next update the label shown first vanished."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const square = (id, x0, y0, x1, y1) => ({{ _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    .map(([x, y]) => ({{ x, y }}))] }} }});
+const options = {{ state: newLabelState(), precision: 0.0002, labelBox: () => [0.05, 0.01] }};
+const a = square(1, 1000, 1000, 1200, 1300), b = square(2, 1250, 1000, 1500, 1350);
+const ids = (out) => out.features.map((f) => f.properties.q2vt_orig_id);
+console.log(JSON.stringify([ids(labelPoints([a], [0, 0, 1, 1], maplibregl, options)),
+  ids(labelPoints([a, b], [0, 0, 1, 1], maplibregl, {{ ...options, freeze: true }}))]));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    alone, moving = json.loads(run.stdout)
+    assert alone == [1] and moving == [1]
 
 
 def test_html_labels_get_a_box():

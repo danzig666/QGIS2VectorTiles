@@ -54,7 +54,8 @@
 // keeps them clear of each other, and a label with no free spot is left out
 // (QGIS "Never overlap", the default), drawn overlapping where QGIS allows
 // it (metadata["q2vt:overlap"] "if-required"; with
-// "q2vt:overlap-at-no-cost" at its best spot whatever it overlaps). Other
+// "q2vt:overlap-at-no-cost" at its best spot whatever it overlaps, and the
+// others do not keep clear of it). Other
 // label layers QGIS may overlap "if required" use MapLibre's cooperative
 // overlap (enableOverlapFallback).
 
@@ -254,7 +255,9 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         around: aroundOption(group.around, zoom, perPx),
       });
       write(map.getSource(group.source), data, polygons);
-      if (data.boxes && groupShown(map, group, zoom)) placed.push(...data.boxes);
+      // "Allow overlap at no cost" works both ways (QGIS: no conflict when
+      // either label has it): the others need not keep clear of these.
+      if (data.boxes && group.overlap !== "always" && groupShown(map, group, zoom)) placed.push(...data.boxes);
     }
   };
   // Only what changed goes to the source: an incremental update reloads just
@@ -449,12 +452,30 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       for (const [part, entry] of parts) entries.push([`${key}#${part}`, entry, key]);
     }
   }
+  // While the map moves (freeze) the labels already shown go first: they
+  // stay, and newcomers keep clear of them.
+  const frozen = (key) => (options.freeze && state.points.has(key) ? 1 : 0);
   const ordered = entries.map(([key, value, orig]) => [key, value, area(value.rings), orig])
-    .sort((a, b) => b[2] - a[2]);
+    .sort((a, b) => frozen(b[0]) - frozen(a[0]) || b[2] - a[2]);
+  // "Outside polygons": the layer's other polygons are obstacles (QGIS
+  // default): a label beside one polygon keeps off its neighbours if it can.
+  const obstacles = options.around && options.around.outside
+    ? ordered.map(([key, { rings }]) => ({ key, rings, bounds: bounds(rings) })) : [];
   for (let [key, { properties, rings: loaded, extent }, , orig] of ordered) {
     const old = state.points.get(key);
     if (old && options.freeze) {
-      points.set(key, { point: old.point, properties: old.properties || properties, orig });
+      const kept = old.properties || properties;
+      points.set(key, { point: old.point, properties: kept, orig });
+      // Its box at this zoom (shrunk and turned as drawn), for the others.
+      const label = options.labelBox ? options.labelBox(kept) : null;
+      if (label) {
+        const scale = Number(kept[LABEL_SCALE]) || 1;
+        const angle = (Number(options.rotationField && kept[options.rotationField]) || 0) * Math.PI / 180;
+        const [hx, hy] = envelope([label[0] * scale, label[1] * scale], angle);
+        const box = [old.point[0] - hx, old.point[1] - hy, old.point[0] + hx, old.point[1] + hy];
+        boxes.push(box);
+        avoid.push(box);
+      }
       continue;
     }
     if (options.kind === "line") {
@@ -624,7 +645,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       let candidates;
       if (outside) {
         candidates = outsideCandidates(loaded, rings, label.text || half, half, options.around.distance,
-                                       options.precision);
+                                       options.precision, obstacles.filter((other) => other.key !== key));
       } else {
         const target = labelPoint(rings);
         if (!target) continue;
@@ -637,8 +658,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       const nearby = (p) => Math.hypot(old.point[0] - p[0], old.point[1] - p[1]) <= (options.keepDistance ?? Infinity);
       const kept = old && Number.isInteger(old.slot) && within(inner, old.point) && (outside
         ? candidates.some(nearby) && free(old.point)
-          && !boxHitsPolygon(loaded, [old.point[0] - half[0], old.point[1] - half[1],
-                                      old.point[0] + half[0], old.point[1] + half[1]])
+          && !besidePolygon(loaded, old.point, label.text || half, options.around.distance, options.precision)
         : candidates[old.slot] && nearby(candidates[old.slot])
           && (unchecked(old.point) || free(old.point)));
       slot = kept ? old.slot : candidates.findIndex(free);
@@ -715,10 +735,13 @@ export function aroundCandidates(point, [hx, hy], { anchors, distance }) {
 // it, horizontal; a box (``half``) that reaches the polygon (or nearer to
 // it than half the distance) is no candidate. Cheapest first: the nearest
 // to the centroid of the visible part (``rings``). ``text``: the bare text's
-// half size, from which the distance is measured.
+// half size, from which the distance is measured (and tested: the margin
+// of ``half`` is for keeping clear of other labels, not of the polygon).
+// A label over one of the ``obstacles`` ({rings, bounds}: other polygons)
+// comes after all those that are not (QGIS obstacle cost).
 const OUTSIDE_CANDIDATES = 64;
 const SIDE_TOLERANCE = Math.sin(5 * Math.PI / 180);  // QGIS: within 5° of an axis
-export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0) {
+export function outsideCandidates(loaded, rings, [tx, ty], half, distance, precision = 0, obstacles = []) {
   const edges = realEdges(loaded);
   const total = edges.reduce((sum, [a, b]) => sum + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
   if (!(total > 0)) return [];
@@ -741,13 +764,24 @@ export function outsideCandidates(loaded, rings, [tx, ty], half, distance, preci
       const t = offset / length;
       const [px, py] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
       const p = [px + sx * (d + tx), py + sy * (d + ty)];
+      if (!besidePolygon(loaded, p, [tx, ty], distance, eps)) continue;
       const box = [p[0] - half[0], p[1] - half[1], p[0] + half[0], p[1] + half[1]];
-      if (boxHitsPolygon(loaded, grow(box, distance / 2 - precision, distance / 2 - precision))) continue;
-      out.push({ p, cost: centre ? Math.max(0, rectDistance(centre[0], centre[1], box)) : 0 });
+      const text = [p[0] - tx, p[1] - ty, p[0] + tx, p[1] + ty];
+      const over = obstacles.some((other) => intersect(other.bounds, text) && boxHitsPolygon(other.rings, text));
+      out.push({ p, over, cost: centre ? Math.max(0, rectDistance(centre[0], centre[1], box)) : 0 });
     }
     offset -= length;
   }
-  return out.sort((x, y) => x.cost - y.cost).map(({ p }) => p);
+  return out.sort((x, y) => x.over - y.over || x.cost - y.cost).map(({ p }) => p);
+}
+
+// An "outside polygons" label centred at ``point`` (bare text half size
+// ``[tx, ty]``) keeps at least half the label distance from the polygon
+// (``slack``: rounding, so a label touching the polygon at distance 0 counts).
+function besidePolygon(rings, point, [tx, ty], distance, slack = 0) {
+  const reach = distance / 2 - Math.max(slack, 1e-12);
+  return !boxHitsPolygon(rings, [point[0] - tx - reach, point[1] - ty - reach,
+                                 point[0] + tx + reach, point[1] + ty + reach]);
 }
 
 // Does a box touch the polygon (a corner inside it, an edge across it)?

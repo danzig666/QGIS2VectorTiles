@@ -4161,9 +4161,13 @@ class QgisMapLibreStyleExporter:
         if ex.is_number(pixels):
             around["px"] = round(max(0.0, float(pixels)), 3)
         else:
-            zoom = float(PropertyExtractor.context.reference_zoom)
-            around["px"] = round(max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom))), 3)
-            around["zoom"] = zoom  # map units: doubles with each zoom level
+            # Map units: doubles with each zoom level. Taken at the curve's
+            # last stop, to full precision: at a low reference zoom (0) a
+            # distance of metres rounded to 0 px.
+            zoom = float(pixels[-2]) if ex.is_zoom_curve(pixels) else float(PropertyExtractor.context.reference_zoom)
+            value = max(0.0, float(ex.evaluate_zoom_curve(pixels, zoom)))
+            around["px"] = float(f"{value:.6g}")
+            around["zoom"] = zoom
         return around
 
     def _line_label_zoom_split(self, layer_def: dict) -> list:

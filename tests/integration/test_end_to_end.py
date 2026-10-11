@@ -531,18 +531,18 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
     """QGIS "Around point" on polygons: the label goes beside its point at
     the label distance (the viewer places it, see visible_labels.mjs), not
     on it; other placements carry no such hint."""
-    def labels_for(placement, name):
+    def labels_for(placement, name, dist=3, units=Qgis.RenderUnit.Millimeters, **kwargs):
         layer = zoning_layer(path=str(tmp_path / f"{name}.gpkg"))
         layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
         settings = QgsPalLayerSettings()
         settings.fieldName = "zone"
         settings.placement = placement
-        settings.dist = 3
-        settings.distUnits = Qgis.RenderUnit.Millimeters
+        settings.dist = dist
+        settings.distUnits = units
         settings.centroidWhole = False
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
-        _, result = export(layer)
+        _, result = export(layer, **kwargs)
         style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
         return [l for l in style["layers"] if "text-field" in l.get("layout", {})]
 
@@ -556,6 +556,11 @@ def test_around_point_polygon_labels_tell_the_viewer_their_distance(export, tmp_
     outside = labels_for(Qgis.LabelPlacement.OutsidePolygons, "outside")[0]["metadata"]["q2vt:label-around"]
     assert outside["outside"] is True and outside["px"] == pytest.approx(3 * 96 / 25.4, rel=0.01)
     assert len(outside["anchors"]) == 8
+    # A map-unit distance survives an export from zoom 0: it was taken at
+    # zoom 0 and rounded to 0 px (10 m: about 8.4 px at zoom 16).
+    metres = labels_for(Qgis.LabelPlacement.OutsidePolygons, "outside_mu", dist=10,
+                        units=Qgis.RenderUnit.MapUnits, min_zoom=0, max_zoom=2)[0]["metadata"]["q2vt:label-around"]
+    assert metres["px"] * 2 ** (16 - metres["zoom"]) == pytest.approx(10 * 512 * 2 ** 16 / 40075016.686, rel=0.01)
 
 
 def test_detail_below_a_metre_survives_at_the_max_zoom(export, tmp_path):
