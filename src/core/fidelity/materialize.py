@@ -91,12 +91,27 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
     average = float(recipe.param("average", 0.0) or 0.0)
     crs = recipe.param("crs") or export_crs
 
+    def head(line):
+        """Azimuth (degrees) of the first segment of non-zero length: QGIS
+        skips repeated vertices (``lastPt == pt``) and extends the line before
+        its start along that segment. Only needed for a negative offset."""
+        return (f"line_interpolate_angle(make_line(start_point({line}), coalesce(array_first("
+                f"array_filter(array_foreach(generate_series(2, num_points({line})), "
+                f"point_n({line}, @element)), x(@element) <> x(start_point({line})) "
+                f"OR y(@element) <> y(start_point({line})))), point_n({line}, 2))), 0)")
+
     def before(line, distance):
         """The point ``distance`` (negative) before the start of an open
-        line, along its first segment."""
-        return (f"with_variable('q2vt_a0', radians(line_interpolate_angle({line}, 0)), "
-                f"make_point(x(start_point({line})) + ({distance}) * sin(@q2vt_a0), "
-                f"y(start_point({line})) + ({distance}) * cos(@q2vt_a0)))")
+        line, along its first segment (azimuth @q2vt_a0, see head())."""
+        return (f"make_point(x(start_point({line})) + ({distance}) * sin(radians(@q2vt_a0)), "
+                f"y(start_point({line})) + ({distance}) * cos(radians(@q2vt_a0)))")
+
+    def local_angle(line):
+        """line_interpolate_angle at the marker; at or before the start of an
+        open line (negative offsets only), the first segment's azimuth."""
+        if along < 0:
+            return f"if(@q2vt_d <= 0, @q2vt_a0, line_interpolate_angle({line}, @q2vt_d))"
+        return f"line_interpolate_angle({line}, max(0, @q2vt_d))"
 
     def angle(line):
         """Marker azimuth: QGIS averages the direction over ``average``
@@ -106,19 +121,18 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
         (collectOffsetPoints): a marker more than half of it before the start
         is turned around, as in QGIS."""
         if average <= 0:
-            return f"line_interpolate_angle({line}, max(0, @q2vt_d))"
+            return local_angle(line)
         half = average / 2.0
 
         def at(distance, extend=False):
             point = (f"line_interpolate_point({line}, if(is_closed({line}), "
                      f"({distance} + @q2vt_len) % @q2vt_len, "
                      f"max(0, min(@q2vt_len, {distance}))))")
-            if not extend:
+            if not extend or along >= 0:  # only a negative offset reaches before the start
                 return point
             return f"if(NOT is_closed({line}) AND {distance} < 0, {before(line, distance)}, {point})"
         return (f"coalesce(degrees(azimuth({at(f'@q2vt_d - {half!r}')}, "
-                f"{at(f'@q2vt_d + {half!r}', True)})), "
-                f"line_interpolate_angle({line}, max(0, @q2vt_d)))")
+                f"{at(f'@q2vt_d + {half!r}', True)})), {local_angle(line)})")
 
     def turned(point, azimuth):
         """The azimuth in the export CRS: a step along it from the point,
@@ -134,10 +148,7 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
                 f"transform({ahead}, '{crs}', '{export_crs}'))) - @q2vt_a + 540) % 360 - 180)")
 
     def body(line):
-        return (
-            f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
-            f"if(is_closed({line}) AND {along!r} < 0, @q2vt_len - (({-along!r}) % @q2vt_len), "
-            f"if(is_closed({line}), {along!r} % @q2vt_len, {along!r})), "
+        points = (
             f"if(@q2vt_off > @q2vt_len, NULL, collect_geometries(array_foreach("
             f"array_filter(generate_series(0, floor((@q2vt_len - @q2vt_off) / {interval!r} + 1e-9)), "
             f"NOT (is_closed({line}) AND @element > 0 AND "
@@ -145,7 +156,13 @@ def interval_points_expression(recipe: Recipe, export_crs: str = "EPSG:3857") ->
             f"with_variable('q2vt_d', min(@q2vt_off + @element * {interval!r}, @q2vt_len), "
             f"with_variable('q2vt_p', if(@q2vt_d < 0, {before(line, '@q2vt_d')}, "
             f"line_interpolate_point({line}, @q2vt_d)), "
-            f"make_point(x(@q2vt_p), y(@q2vt_p), {turned('@q2vt_p', angle(line))}))))))))")
+            f"make_point(x(@q2vt_p), y(@q2vt_p), {turned('@q2vt_p', angle(line))}))))))")
+        if along < 0:
+            points = f"with_variable('q2vt_a0', if(is_closed({line}), 0, {head(line)}), {points})"
+        return (
+            f"with_variable('q2vt_len', length({line}), with_variable('q2vt_off', "
+            f"if(is_closed({line}) AND {along!r} < 0, @q2vt_len - (({-along!r}) % @q2vt_len), "
+            f"if(is_closed({line}), {along!r} % @q2vt_len, {along!r})), {points}))")
     if crs == export_crs:
         return body("@geometry")
     # Positions and azimuths in the project CRS (QGIS draws in it), the

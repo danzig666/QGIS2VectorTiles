@@ -178,6 +178,9 @@ def interval_positions(line: Line, interval: float, along: float,
     if last > 10_000_000:
         return None  # the expression's integer series; not worth emulating
     half = average / 2.0
+    # a negative offset on an open line: the azimuth of its first segment of
+    # non-zero length (the expression's @q2vt_a0)
+    head = _head_angle(line) if along < 0 and not closed else None
     out = []
     for element in range(int(last) + 1):
         position = offset + element * interval
@@ -185,41 +188,58 @@ def interval_positions(line: Line, interval: float, along: float,
             continue
         distance = min(position, length)
         # a negative offset on an open line: markers before its start
-        point = line.point(distance) if distance >= 0 else _before(line, distance)
+        point = line.point(distance) if distance >= 0 else _before(line, distance, head)
         if point is None:
             return None
         if average > 0:
-            angle = _averaged_angle(line, distance, half)
+            angle = _averaged_angle(line, distance, half, head)
         else:
-            angle = line.angle(max(0, distance))
+            angle = _local_angle(line, distance, head)
         out.append((point[0], point[1], angle))
     return out
 
 
-def _before(line: Line, distance: float) -> Tuple[float, float]:
+def _head_angle(line: Line) -> float:
+    """line_interpolate_angle(make_line(start, first vertex not equal to it), 0):
+    QGIS skips repeated vertices and extends the line along that segment."""
+    xs, ys = line.xs, line.ys
+    k = next((i for i in range(1, len(xs)) if xs[i] != xs[0] or ys[i] != ys[0]), 1)
+    return _line_angle(xs[0], ys[0], xs[k], ys[k]) * 180.0 / math.pi
+
+
+def _local_angle(line: Line, distance: float, head: Optional[float]) -> float:
+    """The expression's line_interpolate_angle at the marker, or ``head`` at
+    or before the start of an open line with a negative offset."""
+    if head is not None:
+        return head if distance <= 0 else line.angle(distance)
+    return line.angle(max(0, distance))
+
+
+def _before(line: Line, distance: float, head: float) -> Tuple[float, float]:
     """The point ``distance`` (negative) before the start of an open line,
     along its first segment (the expression's make_point with sin / cos of
-    radians(line_interpolate_angle(0)))."""
-    radians = (line.angle(0.0) * math.pi) / 180
+    radians(@q2vt_a0))."""
+    radians = (head * math.pi) / 180
     return line.xs[0] + distance * math.sin(radians), line.ys[0] + distance * math.cos(radians)
 
 
-def _averaged_angle(line: Line, distance: float, half: float) -> float:
+def _averaged_angle(line: Line, distance: float, half: float, head: Optional[float]) -> float:
     """coalesce(degrees(azimuth(at(d - half), at(d + half))), line_interpolate_angle(d));
-    on an open line the end of the span is not stopped at the line's start."""
+    on an open line with a negative offset the end of the span is not
+    stopped at the line's start."""
     length = line.length
 
     def at(value, extend=False):
         if line.closed:
             value = math.fmod(value + length, length)
-        elif extend and value < 0:
-            return _before(line, value)
+        elif extend and head is not None and value < 0:
+            return _before(line, value, head)
         else:
             value = max(0, min(length, value))
         return line.point(value)
     start, end = at(distance - half), at(distance + half, True)
     if start is None or end is None:  # a NULL point: azimuth is NULL, coalesce goes on
-        return line.angle(max(0, distance))
+        return _local_angle(line, distance, head)
     return _azimuth(start[0], start[1], end[0], end[1]) * 180 / math.pi
 
 

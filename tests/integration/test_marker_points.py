@@ -196,3 +196,43 @@ def test_negative_offset_along_an_open_line_places_markers_before_it(plugin, alo
         assert angle == pytest.approx(270 if turned else 90)
     line = marker_points.Line(*marker_points.linestring_coords(bytes(feature.geometry().asWkb())))
     assert marker_points.interval_positions(line, 20.0, along, average) == found
+
+
+@pytest.mark.parametrize("wkt, plain", [
+    ("LINESTRING(0 0, 0 0, 0 100)", "LINESTRING(0 0, 0 100)"),
+    ("LINESTRING(0 0, 0 0, 100 30)", "LINESTRING(0 0, 100 30)"),
+    ("LINESTRING(5 5, 5 5, 5 5, 5 50, 40 50)", "LINESTRING(5 5, 5 50, 40 50)"),
+])
+@pytest.mark.parametrize("along, average", [(-20.0, 0.0), (-40.0, 0.0), (-20.0, 6.0)])
+def test_negative_offset_along_skips_a_repeated_first_vertex(plugin, wkt, plain, along, average):
+    """QGIS skips repeated vertices (``lastPt == pt``): the markers before
+    the start follow the first segment of non-zero length, so a repeated
+    first vertex changes nothing. They were placed and turned along the
+    zero-length segment (due east)."""
+    from q2vt_plugin.src.core import marker_points  # pylint: disable=import-error
+    from qgis.core import QgsExpression, QgsExpressionContext  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.fidelity import materialize as mat  # pylint: disable=import-error
+    recipe = mat.interval_points(40.0, along)
+    if average:
+        recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (("average", average),))
+    expression = QgsExpression(mat.interval_points_expression(recipe))
+
+    def markers(text):
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromWkt(text))
+        context = QgsExpressionContext()
+        context.setFeature(feature)
+        points = expression.evaluate(context)
+        found = [(p.x(), p.y(), p.z()) for p in points.constGet().vertices()]
+        line = marker_points.Line(*marker_points.linestring_coords(bytes(feature.geometry().asWkb())))
+        assert marker_points.interval_positions(line, 40.0, along, average) == found
+        return found
+    found, expected = markers(wkt), markers(plain)
+    assert len(found) == len(expected)
+    for (x, y, angle), (ex, ey, eangle) in zip(found, expected):
+        assert (x, y) == (pytest.approx(ex, abs=1e-9), pytest.approx(ey, abs=1e-9))
+        assert (angle - eangle + 180) % 360 - 180 == pytest.approx(0, abs=1e-9)
+    if wkt.startswith("LINESTRING(0 0, 0 0, 100 30)") and along == -20 and not average:
+        # the first marker as QGIS renders it: 20 m back along (100, 30)
+        assert found[0][:2] == (pytest.approx(-19.157, abs=1e-3), pytest.approx(-5.747, abs=1e-3))
+        assert found[0][2] == pytest.approx(73.301, abs=1e-3)
