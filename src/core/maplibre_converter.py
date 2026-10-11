@@ -3460,9 +3460,14 @@ class QgisMapLibreStyleExporter:
         prop = props.property(_SYMBOL_OPACITY_KEY) if props else None
         sprite_symbol, opacity = symbol, IconPropertyExtractor.get_icon_opacity()
         if prop is not None and prop.isActive():
-            sprite_symbol = symbol.clone()
-            sprite_symbol.setOpacity(1.0)
             opacity = replaced(symbol.opacity(), prop)
+            # The sprite is drawn opaque and without the data-defined value:
+            # one read without a feature (e.g. a parent opacity folded in as
+            # coalesce(..., 30), see materializer.inherit_opacity) was
+            # applied twice, in the sprite and by icon-opacity.
+            sprite_symbol = symbol.clone()
+            sprite_symbol.setDataDefinedProperty(_SYMBOL_OPACITY_KEY, QgsProperty())
+            sprite_symbol.setOpacity(1.0)
         if symbol.symbolLayerCount() == 1:
             layer = sprite_symbol.symbolLayer(0)
             layer_prop = layer.dataDefinedProperties().property(
@@ -3472,9 +3477,9 @@ class QgisMapLibreStyleExporter:
                 if sprite_symbol is symbol:
                     sprite_symbol = symbol.clone()
                     layer = sprite_symbol.symbolLayer(0)
-                static = layer.opacity()
+                opacity = ex.mul(opacity, replaced(layer.opacity(), layer_prop))
+                layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyOpacity, QgsProperty())
                 layer.setOpacity(1.0)
-                opacity = ex.mul(opacity, replaced(static, layer_prop))
         return sprite_symbol, opacity
 
     def _convert_line_symbol(

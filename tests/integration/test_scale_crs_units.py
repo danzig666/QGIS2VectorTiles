@@ -354,9 +354,12 @@ def _generator(expression, unit, geometry_type="Fill"):
 
 def _generated(flat_rule, geometry):
     from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
-    layer = flat_rule.rule.symbol().symbolLayer(0)
+    # A fill generator's sub-symbol layers are drawn on its output
+    # (pre_generator); others keep the generator symbol layer.
+    generator = flat_rule.pre_generator or \
+        flat_rule.rule.symbol().symbolLayer(0).geometryExpression()
     expression = QgsExpression(RulesExporter._generator_in_layer_crs(  # pylint: disable=protected-access
-        layer.geometryExpression(), flat_rule))
+        generator, flat_rule))
     context = QgsExpressionContext()
     feature = QgsFeature()
     feature.setGeometry(geometry)
@@ -409,9 +412,12 @@ def test_screen_unit_translation_points_down_the_screen(plugin, tmp_path):
     reset_project(layer)
     rules = RulesFlattener(14, 19, str(tmp_path), QgsProcessingFeedback(),
                            DiagnosticCollector()).flatten_all_rules()
-    generated = [r for r in rules if r.rule.symbol().symbolLayer(0).layerType() == "GeometryGenerator"]
+    generated = [r for r in rules if r.pre_generator is not None
+                 or r.rule.symbol().symbolLayer(0).layerType() == "GeometryGenerator"]
     plain = [r for r in rules if r not in generated]
-    assert plain and len(generated) == 22 - 14 + 1
+    # One generator per zoom (its fill, and its outline drawn as a line).
+    assert plain and len({r.visibility.min_zoom for r in generated}) == 22 - 14 + 1
+    assert len({r.visibility.min_zoom for r in generated if r.get_attr("c") == 2}) == 22 - 14 + 1
     for rule in generated:
         zoom = rule.visibility.min_zoom
         moved = _generated(rule, QgsGeometry.fromWkt(square)).centroid().asPoint()

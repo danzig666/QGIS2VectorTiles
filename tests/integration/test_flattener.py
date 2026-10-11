@@ -1047,11 +1047,13 @@ def test_geometry_generator_sub_layers_have_their_own_datasets(flattener):
     rules, _ = flattener(0, 16)
     datasets = {}
     for rule in rules:
+        # The generator's expression (wrapped to coerce its output to lines).
+        generated = rule.pre_generator is not None and \
+            "translate($geometry, 0, 100)" in rule.pre_generator
         datasets.setdefault(rule.output_dataset, []).append(
-            (rule.rule.symbol().color().name(), rule.pre_generator))
+            (rule.rule.symbol().color().name(), generated))
     assert sorted(entry for group in datasets.values() for entry in group) == [
-        ("#0000ff", "translate($geometry, 0, 100)"), ("#00ff00", None),
-        ("#ff0000", "translate($geometry, 0, 100)")]
+        ("#0000ff", True), ("#00ff00", False), ("#ff0000", True)]
     assert all(len(group) == 1 for group in datasets.values()), datasets
 
 

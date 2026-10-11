@@ -195,3 +195,21 @@ def test_marker_line_sprite_layer_takes_the_line_opacity(plugin, tmp_path):
     assert along and lines
     assert all(l["paint"]["icon-opacity"] == pytest.approx(0.3) for l in along)
     assert all(l["paint"]["line-opacity"] == pytest.approx(0.3) for l in lines)
+
+
+def test_marker_sprite_leaves_out_the_data_defined_opacity(plugin):
+    """icon-opacity carries a data-defined symbol opacity; the sprite is
+    drawn without it (a value read without a feature, such as an inherited
+    coalesce(..., 30), was applied in the sprite and again by icon-opacity)."""
+    from q2vt_plugin.src.core import maplibre_converter as mc  # pylint: disable=import-error
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter  # pylint: disable=import-error
+    from fidelity.diagnostics import DiagnosticCollector
+    mc.PropertyExtractor.context = mc.ConversionContext(DiagnosticCollector())
+    symbol = _square_marker()
+    symbol.setOpacity(0.5)
+    symbol.setDataDefinedProperty(OPACITY_KEY, QgsProperty.fromExpression(
+        'coalesce(CASE WHEN "id" > 0 THEN 60 END, 30)'))
+    sprite, _ = QgisMapLibreStyleExporter._marker_opacity(symbol)  # pylint: disable=protected-access
+    assert sprite.opacity() == 1.0
+    assert not sprite.dataDefinedProperties().isActive(OPACITY_KEY)
+    assert symbol.dataDefinedProperties().isActive(OPACITY_KEY)  # the original is untouched
