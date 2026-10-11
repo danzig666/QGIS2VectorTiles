@@ -1256,6 +1256,32 @@ def test_polygon_offset_budget_keeps_the_uniform_steps_of_a_narrow_export(plugin
     assert not diags.by_code("Q2VT_PATTERN_BUDGET")
 
 
+@pytest.mark.parametrize("budget, exact_zooms", [(350, [14, 15, 16, 17, 18, 19]), (10, [])])
+def test_polygon_offset_overzoom_has_its_own_dataset(plugin, tmp_path, monkeypatch, budget,
+                                                     exact_zooms):
+    """With one sub-zoom step at the last zoom, its exact rule and the
+    overzoom rule (browser's line offset) had the same dataset name: one
+    style layer id twice, both shown only from the overzoom on (no outline
+    at the last zoom, a double one past it). Fully native: one rule from
+    the first zoom on, overzoom included."""
+    from q2vt_plugin.src.core import materializer as materializer_module
+    _offset_squares(tmp_path, [40] * 10)  # 50 vertices per zoom step at 14-19
+    monkeypatch.setattr(materializer_module.SymbolMaterializer, "MAX_PATTERN_ELEMENTS", budget)
+    rules, _ = _zoom_rules(tmp_path, 14, 19)
+    names = [r.output_dataset for r in rules]
+    assert len(set(names)) == len(names)
+    exact = [r for r in rules if not dict(r.recipe.params).get("rhr")]
+    assert sorted(r.get_attr("o") for r in exact) == exact_zooms  # one step each
+    native = [(r.visibility.min_zoom, r.visibility.max_zoom) for r in rules
+              if dict(r.recipe.params).get("rhr")]
+    if exact_zooms:
+        last = next(r for r in exact if r.get_attr("o") == 19)
+        assert (last.visibility.min_zoom, last.visibility.max_zoom) == (19.0, 20.0)
+        assert native == [(20.0, None)]
+    else:
+        assert native == [(14.0, None)]
+
+
 def test_map_unit_line_offset_is_the_offset_line(plugin, tmp_path):
     """Gyorsforgalmi út: +-15 m offsets of a 10 m line; MapLibre's
     line-offset crossed itself at sharp corners, the offset line is exported."""

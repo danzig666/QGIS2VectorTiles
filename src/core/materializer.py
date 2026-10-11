@@ -507,6 +507,9 @@ class SymbolMaterializer:
             replace_symbol_layer(rule.rule.symbol(), converted)
         return [rule]
 
+    # Band attribute ("b") of an overzoom rule next to sub-zoom bands (0-7).
+    OVERZOOM_BAND = 9
+
     def _screen_polygon_offset(self, flat_rule: FlattenedRule, layer,
                                params) -> Optional[List[FlattenedRule]]:
         """A screen-unit polygon outline offset as QGIS draws it: every ring
@@ -536,6 +539,8 @@ class SymbolMaterializer:
         exact = [rule for rule in drawn if steps[rule.get_attr("o")]]
         native_zooms = [rule.get_attr("o") for rule in drawn if not steps[rule.get_attr("o")]]
         rules = []
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
         if native_zooms:  # the budget ends below the last zooms: native there
             cut = max(native_zooms) + 1
             if exact:
@@ -549,8 +554,14 @@ class SymbolMaterializer:
             native = flat_rule.derive()
             native.set_attr("o", min(native_zooms))
             native.set_attr("i", max(native_zooms))
-            native.visibility = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
-                ZoomInterval(float(min(native_zooms)), float(cut)))
+            if cut > high:
+                # Native up to the last zoom: the same rule overzooms (a
+                # separate overzoom rule would share its tiles and name).
+                native.visibility = visible.intersect(ZoomInterval(float(min(native_zooms)), None))
+                overzoom = None
+            else:
+                native.visibility = visible.intersect(
+                    ZoomInterval(float(min(native_zooms)), float(cut)))
             native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
             native.set_attr("m", 1)
             rules.append(native)
@@ -565,14 +576,16 @@ class SymbolMaterializer:
                     ("offset", offset_mm * self._map_units_per_mm(flat_rule, zoom)),))
                 derived.set_attr("m", 1)
                 rules.append(derived)
-        visible = flat_rule.visibility or ZoomInterval(float(low), None)
-        overzoom = visible.intersect(ZoomInterval(float(high + 1), None))
-        if not overzoom.is_empty:  # past the last tiles: native, right-hand-rule rings
+        if overzoom is not None and not overzoom.is_empty:
+            # Past the last tiles: native, right-hand-rule rings.
             native = flat_rule.derive()
             native.set_attr("o", high)
             native.visibility = overzoom
             native.recipe = mat.Recipe("polygon_offset", params=tuple(params) + (("rhr", True),))
             native.set_attr("m", 1)
+            # Its own dataset: the last zoom's exact rule has the same zooms
+            # and, in one sub-zoom step, no band ("b" 0-7) to tell them apart.
+            native.set_attr("b", self.OVERZOOM_BAND)
             rules.append(native)
         return rules
 
@@ -2203,7 +2216,8 @@ class SymbolMaterializer:
         # Lines generated per feature (mat.hatch_expression): at most its
         # bounding box diagonal / spacing + 5. Past the budget the hatch is a
         # texture, never dropped (a feature past mat.MAX_HATCH_LINES would
-        # get no hatch at all).
+        # get no hatch at all). Counted over the whole layer, also for a rule
+        # drawing some of its features: on the safe side.
         _, _, count, diagonals = self._layer_totals(flat_rule.layer)
         if self._over_budget(flat_rule, diagonals / layer.distance() + 5 * count, "Hatch"):
             return None
