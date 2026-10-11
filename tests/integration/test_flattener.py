@@ -138,24 +138,47 @@ def _matching_ids(layer, expression):
     return sorted(f["id"] for f in layer.getFeatures(request))
 
 
-def test_else_respects_sibling_scale_ranges_and_disabled_siblings(flattener):
+def test_else_skips_what_its_siblings_match_at_every_scale(flattener):
+    """QGIS 3.34 counts a renderer sibling out of its scale range or
+    switched off as matched ("Inactive"): its features never fall to the
+    ELSE rule. Rule-based labels check a sibling's scale range first, so
+    there the ELSE label takes them where the sibling is out of range."""
+    from qgis.core import QgsPalLayerSettings, QgsRuleBasedLabeling
     layer = rule_based(zoning_layer(), [
         ("k1 zoomed in", "\"zone\" = 'K1'", zm.zoom_to_scale(10), 0, True, "255,0,0"),
         ("k2 disabled", "\"zone\" = 'K2'", 0, 0, False, "0,255,0"),
         ("else", "ELSE", 0, 0, True, "0,0,255"),
     ])
-    reset_project(layer)
+
+    def label(flt, min_scale, active=True):
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "id"
+        rule = QgsRuleBasedLabeling.Rule(settings, 0, min_scale, flt, "", flt == "ELSE")
+        rule.setActive(active)
+        return rule
+    root = QgsRuleBasedLabeling.Rule(None)
+    for rule in (label("\"zone\" = 'K1'", zm.zoom_to_scale(10)), label("\"zone\" = 'K2'", 0, False),
+                 label("ELSE", 0)):
+        root.appendChild(rule)
+    labels = zoning_layer("labels")  # every feature drawn
+    labels.setLabeling(QgsRuleBasedLabeling(root))
+    labels.setLabelsEnabled(True)
+    reset_project(layer, labels)
     rules, _ = flattener(0, 14)
-    else_rules = sorted((r for r in rules if r.rule.symbol().color().blue() == 255
-                         and r.get_attr("c") == 2), key=lambda r: r.visibility.min_zoom)
-    assert len(else_rules) == 2
-    low, high = else_rules
-    # Below zoom 10 the K1 rule is invisible, so ELSE covers every feature
-    # (including NULL zones); the disabled K2 rule never excludes anything.
-    assert low.visibility.max_zoom == pytest.approx(10)
-    assert _matching_ids(layer, low.rule.filterExpression()) == ["A", "B", "C", "D"]
-    assert high.visibility.min_zoom == pytest.approx(10)
-    assert _matching_ids(layer, high.rule.filterExpression()) == ["B", "C", "D"]
+    else_rules = [r for r in rules if r.get_attr("t") == 0 and r.get_attr("c") == 2
+                  and r.rule.symbol().color().blue() == 255]
+    # One ELSE rule at every zoom, for the features neither sibling matches
+    # (NULL zones included).
+    [else_rule] = else_rules
+    assert else_rule.visibility.min_zoom == 0 and else_rule.visibility.max_zoom is None
+    assert _matching_ids(layer, else_rule.rule.filterExpression()) == ["C", "D"]
+    labelled = {zoom: sorted(i for r in _shown_at(rules, zoom, 1) for i in _matches(r, labels))
+                for zoom in (5.0, 12.0)}
+    assert labelled == {5.0: ["A", "C", "D"], 12.0: ["A", "C", "D"]}
+    # Below zoom 10 A gets the ELSE label, from zoom 10 the K1 label.
+    else_labels = {zoom: sorted(i for r in _shown_at(rules, zoom, 1) if r.get_attr("r") == 2
+                                for i in _matches(r, labels)) for zoom in (5.0, 12.0)}
+    assert else_labels == {5.0: ["A", "C", "D"], 12.0: ["C", "D"]}
     # Project ELSE rule untouched.
     project_else = layer.renderer().rootRule().children()[2]
     assert project_else.filterExpression() == "ELSE"
@@ -515,12 +538,12 @@ def test_rules_shown_only_beyond_the_last_tile_zoom_are_drawn_from_its_tiles(fla
             assert rule.visibility.min_zoom == pytest.approx(zm.scale_to_zoom(scale))
             assert rule.visibility.max_zoom is None
         assert not [r for r in _shown_at(rules, 16.5, rule_type) if r.layer.name() == name]
-    # ELSE: the features A does not draw while A is shown, then all of them.
+    # ELSE: the features A does not match, also beyond A's scale range.
     everything = sorted(f["id"] for f in other.getFeatures())
-    for zoom in (17.0, 20.0, 23.0):
+    for zoom, expected in ((17.0, everything), (20.0, ["B", "C", "D"]), (23.0, ["B", "C", "D"])):
         drawn = sorted(i for r in _fills(_shown_at(rules, zoom)) if r.layer.name() == "other"
                        for i in _matches(r, other))
-        assert drawn == everything, zoom
+        assert drawn == expected, zoom
 
 
 def test_rules_beyond_max_zoom_plus_one_are_reported_when_the_map_stops(flattener):
@@ -600,6 +623,54 @@ def test_map_scale_rules_switch_where_qgis_switches_them(flattener):
     lag = zm.scale_to_zoom(5000)
     assert [_matches(r, layer) for r in shown("#000000", lag + 0.02)] == [everything]
     assert not [r for r in shown("#000000", lag - 0.02) if _matches(r, layer)]
+
+
+def test_zooms_valued_alike_by_a_map_scale_expression_are_one_piece(flattener):
+    """A width read from the scale ('min(1.5, 0.5 + 4000 / @map_scale)',
+    1.5 mm from zoom 17) gave one piece per zoom up to 22, each a copy of
+    the zoom-16 data. Zooms where it has the same value share one piece,
+    named after the zoom it starts at (not a count over the export)."""
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    layer = rule_based(zoning_layer(), [("w", "", 0, 0, True, "0,160,0")])
+    layer.renderer().rootRule().children()[0].symbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyStrokeWidth,
+        QgsProperty.fromExpression("min(1.5, 0.5 + 4000 / @map_scale)"))
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    assert len({r.rule.description() for r in rules}) == len(rules)
+    for component in (1, 2):  # the outline, the fill
+        pieces = [r for r in rules if r.get_attr("c") == component]
+        [last] = [r for r in pieces if r.visibility.contains(17.5)]
+        assert all(r in (last,) for zoom in (19.0, 22.5) for r in _shown_at(rules, zoom)
+                   if r.get_attr("c") == component)
+        assert (last.visibility.min_zoom, last.visibility.max_zoom) == (17.0, None)
+        assert (last.get_attr("o"), last.get_attr("i"), last.get_attr("z")) == (16, 16, 1700)
+        assert len([r for r in pieces if r.visibility.min_zoom >= 16]) == 2  # 16, then 17-
+
+
+def test_a_line_shown_beyond_the_last_tile_zoom_does_not_widen_the_tile_buffer(plugin):
+    """A line piece shown from zoom 22 draws the zoom-16 tiles 64 times
+    magnified: its 60 px width is under a pixel of those tiles. Read at
+    zoom 16 it set the largest clip buffer, which grew every tile."""
+    from q2vt_plugin.src.core.tiles_generator import GDALTilesGenerator  # pylint: disable=import-error
+
+    class Dataset:
+        def __init__(self, name):
+            self.name = name
+
+        def source(self):
+            return f"/data/{self.name}.gpkg"
+    names = ["l00t00d01r00g01c01o16i16s00", "l00t00d01r00g01c01o16i16s00z2200"]
+    generator = GDALTilesGenerator.__new__(GDALTilesGenerator)
+    generator.layers, generator.layer_zooms = [Dataset(name) for name in names], {}
+    generator.style = {"layers": [
+        {"type": "line", "source-layer": names[0], "minzoom": 16, "maxzoom": 17,
+         "paint": {"line-width": 4}},
+        {"type": "line", "source-layer": names[1], "minzoom": 22, "maxzoom": 24,
+         "paint": {"line-width": 60}}]}
+    assert generator._buffer() == 80  # pylint: disable=protected-access
+    generator.style["layers"][1]["minzoom"] = 16
+    assert generator._buffer() == 60 * 8 + 8  # pylint: disable=protected-access
 
 
 def test_labels_of_a_map_scale_rule_follow_its_features_at_every_zoom(flattener):

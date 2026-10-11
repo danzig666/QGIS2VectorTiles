@@ -33,6 +33,11 @@ def uses_map_scale(expression: str) -> bool:
     return bool(expression) and _SCALE_VARIABLE_RE.search(expression) is not None
 
 
+def map_scale_reads(text: str) -> int:
+    """How many times ``text`` reads a map-scale variable."""
+    return len(_SCALE_VARIABLE_RE.findall(text or ""))
+
+
 def vector_tile_zoom(scale: float) -> float:
     """``@vector_tile_zoom`` at a map scale (QgsVectorTileUtils::scaleToZoom)."""
     return math.log2(VECTOR_TILE_Z0_SCALE / float(scale)) - 1.0

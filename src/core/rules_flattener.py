@@ -44,8 +44,9 @@ from .fidelity.model import OverzoomPolicy, ZoomInterval
 from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.units import LengthConverter
-from .fidelity.qgis_expr import (and_filters, enabled_condition, scale_thresholds,
-                                 substitute_geometry, uses_map_scale, with_map_scale)
+from .fidelity.qgis_expr import (and_filters, enabled_condition, map_scale_reads,
+                                 scale_thresholds, substitute_geometry, uses_map_scale,
+                                 with_map_scale)
 from .fidelity.materialize import coerce_to_symbol_type
 from .materializer import SymbolMaterializer
 
@@ -869,28 +870,36 @@ class RulesFlattener:
         return fidelity_zoom.interval_from_scales(rule.minimumScale(), rule.maximumScale())
 
     def _split_else_rule(self, else_rule, parent_rule, layer) -> list:
-        """Replace an ELSE rule by explicit, scale-aware exclusion rules.
+        """Replace an ELSE rule by explicit exclusion rules.
 
-        QGIS applies an ELSE rule to features that no *active sibling rendered
-        at the current scale*. A sibling limited to a scale range therefore
-        only excludes features inside that range. The ELSE rule is split at
-        every sibling scale breakpoint; each piece excludes exactly the
-        siblings visible in its interval. Disabled siblings never exclude.
+        QGIS 3.34 applies an ELSE rule to the features no sibling *matched*.
+        A sibling matches a feature its filter passes even where it draws
+        nothing: out of its scale range (renderer only) or switched off; it
+        then returns "Inactive", which the ELSE rule counts as matched. Only
+        an active sibling with nothing to draw never matches. Rule-based
+        labels check a sibling's scale range first, so there a sibling only
+        excludes features inside its range: the ELSE label is split at
+        every sibling scale breakpoint.
         """
+        renderer = hasattr(else_rule, "symbol")
         siblings = [
             sibling for sibling in parent_rule.children()
-            if sibling is not else_rule and sibling.active() and not self._is_else_rule(sibling)
+            if sibling is not else_rule and not self._is_else_rule(sibling)
+            and (not sibling.active() or sibling.children() or self._rule_has_payload(sibling))
         ]
-        if any(sibling.children() or not self._rule_has_payload(sibling) for sibling in siblings):
+        if any(sibling.children() for sibling in siblings):
             self.diagnostics.add(
                 "Q2VT_ELSE_NESTED_SIBLINGS",
                 f"ELSE rule of layer '{layer.name()}': sibling rules with nested children "
                 "are treated as matching whenever their own filter matches.",
                 layer_id=layer.id(), rule_id=self._rule_key(else_rule),
             )
+
+        def in_range(sibling, zoom):
+            return renderer or self._scale_interval(sibling).contains(zoom)
         own = self._scale_interval(else_rule)
         breakpoints = {own.min_zoom}
-        for sibling in siblings:
+        for sibling in siblings if not renderer else ():
             interval = self._scale_interval(sibling)
             for value in (interval.min_zoom, interval.max_zoom):
                 if value is not None and own.contains(value):
@@ -903,17 +912,15 @@ class RulesFlattener:
                 continue
             probe = segment.min_zoom + (1e-3 if segment.max_zoom is None
                                         else (segment.max_zoom - segment.min_zoom) / 2)
-            filters = [
-                sibling.filterExpression() for sibling in siblings
-                if self._scale_interval(sibling).contains(probe)
-            ]
+            filters = [sibling.filterExpression() for sibling in siblings
+                       if in_range(sibling, probe)]
             variant = else_rule.clone()
             variant.setMinimumScale(fidelity_zoom.zoom_to_scale(segment.min_zoom)
                                     if segment.min_zoom > 0 else else_rule.minimumScale())
             variant.setMaximumScale(fidelity_zoom.zoom_to_scale(segment.max_zoom)
                                     if segment.max_zoom is not None else 0)
             if any(not f for f in filters):
-                # A visible sibling without a filter matches every feature.
+                # A sibling without a filter matches every feature.
                 variant.setFilterExpression("FALSE")
             elif filters:
                 variant.setFilterExpression(
@@ -1844,7 +1851,10 @@ class RulesFlattener:
         edges = [interval.min_zoom] + sorted(
             {zoom for zoom in cuts if zoom > interval.min_zoom + 1e-9 and interval.contains(zoom)}
         ) + [interval.max_zoom]
-        split_rules = []
+        # Neighbouring zooms whose expressions all have the same value are
+        # one piece (no copy of the last zoom's data per overzoom zoom).
+        expressions = self._scale_expressions(flat_rule, text) if thresholds is None else None
+        pieces = []  # [interval, zoom valued at, values]
         for low, high in zip(edges[:-1], edges[1:]):
             piece = ZoomInterval(low, high)
             if piece.is_empty:
@@ -1853,12 +1863,70 @@ class RulesFlattener:
                 at = math.floor(low + 1e-9)  # the zoom's start, as within a tile zoom
             else:
                 at = low + 0.5 if high is None else (low + high) / 2.0  # same value throughout
+            values = self._scale_values(expressions, at, flat_rule.layer)
+            if pieces and values is not None and values == pieces[-1][2]:
+                pieces[-1][0] = ZoomInterval(pieces[-1][0].min_zoom, high)
+                continue
+            pieces.append([piece, at, values])
+        split_rules = []
+        for piece, at, _ in pieces:
             clone = self._create_zoom_specific_rule(flat_rule, piece, at)
             if clone is not None and (flat_rule.get_attr("t") == 1 or
                                       self._symbol_layer_visible_at_zoom(clone, at)):
                 split_rules.append(clone)
         self.materializer.distinguish(split_rules)
         return split_rules
+
+    def _scale_expressions(self, flat_rule: FlattenedRule, text: str) -> Optional[List[str]]:
+        """The rule's expressions that read the map scale, if none reads a
+        feature and they are all of the scale reads in ``text`` (its
+        serialized XML); else None (their values cannot be compared)."""
+        found = [flat_rule.rule.filterExpression()]
+
+        def collect(properties):
+            for key in properties.propertyKeys():
+                prop = properties.property(key)
+                if prop.isActive():
+                    found.append(prop.asExpression())
+
+        def walk(symbol):
+            if symbol is None:
+                return
+            collect(symbol.dataDefinedProperties())
+            for index in range(symbol.symbolLayerCount()):
+                collect(symbol.symbolLayer(index).dataDefinedProperties())
+                walk(symbol.symbolLayer(index).subSymbol())
+
+        if flat_rule.get_attr("t") == 1:
+            settings = flat_rule.rule.settings()
+            if settings is not None:
+                found.append(settings.getLabelExpression().expression())
+                collect(settings.dataDefinedProperties())
+                collect(settings.format().dataDefinedProperties())
+        else:
+            walk(flat_rule.rule.symbol())
+        found = [expression for expression in found if uses_map_scale(expression)]
+        if sum(map_scale_reads(expression) for expression in found) != map_scale_reads(text) or \
+                any(self._is_feature_dependent(expression) for expression in found):
+            return None
+        return found
+
+    @staticmethod
+    def _scale_values(expressions: Optional[List[str]], zoom: float, layer) -> Optional[tuple]:
+        """The values of feature-independent ``expressions`` at a zoom's
+        scale; None if unknown."""
+        if expressions is None:
+            return None
+        from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        values = []
+        for text in expressions:
+            expression = QgsExpression(with_map_scale(text, fidelity_zoom.zoom_to_scale(zoom)))
+            value = expression.evaluate(context)
+            if expression.hasEvalError():
+                return None
+            values.append(repr(value))
+        return tuple(values)
 
     def _split_interval(self, flat_rule: FlattenedRule) -> ZoomInterval:
         """The browser interval a rule is drawn in: its visibility within its

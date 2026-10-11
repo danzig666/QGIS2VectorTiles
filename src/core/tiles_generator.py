@@ -357,14 +357,17 @@ class GDALTilesGenerator:
             if layer.get("type") != "line" or layer.get("source-layer") not in top:
                 continue
             paint, zoom = layer.get("paint") or {}, top[layer["source-layer"]]
+            # A style layer shown only beyond the last tile zoom draws its
+            # tiles magnified: its width there is that much less of a tile.
+            shown = max(zoom, float(layer.get("minzoom") or 0))
             try:
-                values = [ex.evaluate_zoom_curve(paint.get(name, default), zoom)
+                values = [ex.evaluate_zoom_curve(paint.get(name, default), shown)
                           for name, default in (("line-width", 1), ("line-gap-width", 0),
                                                 ("line-offset", 0))]
             except (ex.ExpressionError, TypeError, IndexError):
                 continue  # feature-dependent: unknown
             width, gap, offset = (float(v) for v in values)
-            widest = max(widest, width + 2 * gap + abs(offset))
+            widest = max(widest, (width + 2 * gap + abs(offset)) / 2 ** (shown - zoom))
         units = math.ceil(widest * 8) + 8  # 8 tile units a CSS px (512 px tiles)
         return max(self._MIN_BUFFER, min(self._MAX_BUFFER, units))
 

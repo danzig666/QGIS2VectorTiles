@@ -144,9 +144,6 @@ class SymbolMaterializer:
         # Last zoom evaluated on its own beyond the archive's last zoom (the
         # browser draws that zoom's tiles there); max_zoom: none.
         self.overzoom_top = max_zoom if overzoom_top is None else max(max_zoom, overzoom_top)
-        # Pieces of a rule that share their tile zooms (beyond the last
-        # zoom) get distinct names: attribute "z", unique in the export.
-        self._pieces = 0
         # The export's first zoom: rules are materialized before the flattener
         # clamps their zoom range, so a rule without a scale limit still
         # starts at zoom 0 here (see _zoom_range).
@@ -163,15 +160,25 @@ class SymbolMaterializer:
         last: none of them)."""
         return max(rule.get_attr("o"), self.min_zoom), min(rule.get_attr("i"), self.max_zoom)
 
-    def distinguish(self, rules: List[FlattenedRule]) -> None:
+    @staticmethod
+    def distinguish(rules: List[FlattenedRule]) -> None:
         """Rules split from one rule that share a name (pieces with the same
-        tile zooms) get distinct ones (attribute "z")."""
+        tile zooms, beyond the last zoom) get distinct ones: attribute "z",
+        the hundredths of the zoom they start at. Kept from export to export
+        (the export cache finds their tiles by name), whatever other layers
+        hold."""
         seen = set()
         for rule in rules:
-            if rule.rule.description() in seen:
-                self._pieces += 1
-                rule.set_attr("z", self._pieces)
-            seen.add(rule.rule.description())
+            name = rule.rule.description()
+            if name in seen:
+                start = rule.visibility.min_zoom if rule.visibility is not None else 0.0
+                value = int(round(start * 100))
+                rule.set_attr("z", value)
+                while rule.rule.description() in seen:
+                    value += 1
+                    rule.set_attr("z", value)
+                name = rule.rule.description()
+            seen.add(name)
 
     def _report(self, code: str, message: str, flat_rule: FlattenedRule, **extra):
         self.diagnostics.add(code, message, layer_id=flat_rule.layer.id(),
