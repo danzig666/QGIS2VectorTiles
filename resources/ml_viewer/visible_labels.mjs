@@ -111,6 +111,24 @@ export function curvedScale(map, zoom) {
   return 2 ** (zoom - Math.min(Math.floor(zoom), curvedMaxzoom(map.getMaxZoom())));
 }
 
+// The labelPath options of a curved line label layer at ``zoom``. MapLibre
+// lays a tile's labels out with the text size of the tile's zoom + 1
+// (symbol_bucket layoutTextSize): a size that grows with the zoom (map-unit
+// text) is that much longer on the line than drawn (``ratio``).
+export function curvedOption(map, layout, zoom, perPx) {
+  const size = layout["text-size"] ?? 16;
+  const tileZoom = Math.min(Math.floor(zoom), curvedMaxzoom(map.getMaxZoom()));
+  return {
+    perPx, scale: curvedScale(map, zoom),
+    maxAngle: Number(layout["text-max-angle"]) || 45,
+    ratio: (properties) => {
+      const laid = Number(evaluate(size, tileZoom + 1, properties || {}));
+      const drawn = Number(evaluate(size, zoom, properties || {}));
+      return laid > 0 && drawn > 0 ? laid / drawn : 1;
+    },
+  };
+}
+
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
 //     get a label (layer/rule toggles, attribute filters);
@@ -301,8 +319,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         degraded: Boolean(group.degraded), overlap: group.overlap || null, perPart: Boolean(group.perPart),
         level: Boolean(group.level),
-        curved: group.curved && !group.level ? { perPx, scale: curvedScale(map, zoom),
-          maxAngle: Number((activeLayer(group, zoom).layout || {})["text-max-angle"]) || 45 } : null,
+        curved: group.curved && !group.level ? curvedOption(map, activeLayer(group, zoom).layout || {}, zoom, perPx)
+          : null,
         repeat: repeatOption(group.repeat, zoom, perPx),
         mergeText: group.merge ? textKey((activeLayer(group, zoom).layout || {})["text-field"]) : null,
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
@@ -838,7 +856,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     // A curved label: its piece of line (MapLibre lays the glyphs along it),
     // for the label size and tile scale of this zoom.
     const path = line && options.curved ? labelPath(line.chain, line.s,
-      options.labelBox ? options.labelBox(properties) : null, options.curved) : null;
+      options.labelBox ? options.labelBox(properties) : null, options.curved, properties) : null;
     const geometry = path ? { type: "LineString", coordinates: path.map(lngLatOf) }
       : { type: "Point", coordinates: lngLatOf(point) };
     out.push({ type: "Feature", id: state.ids.get(key), properties, geometry });
@@ -1738,16 +1756,22 @@ export function curvedBendsOk(chain, s, half, maxAngle) {
 // The piece of line a curved label is laid out on (MapLibre's
 // "line-center"), centred on ``s`` along ``chain``. MapLibre drops a label
 // longer than its line, measured in tile pixels: the piece reaches half the
-// label times the tile's scale (``curved.scale``) and some room on either
-// side, run on straight past the chain's ends (the label itself fits the
+// label times the tile's scale (``curved.scale``) and its layout text size
+// (``curved.ratio``) and some room on either side, run on straight past the chain's ends (the label itself fits the
 // chain: it is placed so).
 const CURVED_ROOM = 1.1;
 const CURVED_PAD_PX = 4;
-export function labelPath(chain, s, half, curved) {
+const CURVED_MAX_PX = 256;  // tile pixels
+export function labelPath(chain, s, half, curved, properties) {
   if (!chain || chain.length < 2) return null;
   const { perPx = 0, scale = 1 } = curved || {};
-  const reach = ((half ? half[0] : 0) * CURVED_ROOM + CURVED_PAD_PX * perPx) * scale;
+  const ratio = curved && curved.ratio ? curved.ratio(properties) : 1;
   const total = chainLength(chain);
+  // More of the line where there is (the label's size estimate is not
+  // MapLibre's shaping), at most half a tile on either side: the 512 tile
+  // buffer then holds the whole piece in every tile it crosses.
+  const need = ((half ? half[0] : 0) * ratio * CURVED_ROOM + CURVED_PAD_PX * perPx) * scale;
+  const reach = Math.max(need, Math.min(s, total - s, CURVED_MAX_PX * perPx * scale));
   const a = s - reach, b = s + reach;
   const out = [];
   let walked = 0;
