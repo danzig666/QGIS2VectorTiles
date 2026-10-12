@@ -135,6 +135,22 @@ def test_settings_are_saved_in_the_project_file(project, messages, tmp_path):
     again.close()
 
 
+def test_settings_saved_without_a_folder_export_next_to_the_project(project, messages, tmp_path):
+    """Shared projects carry no export folder: an empty one exported into
+    QGIS's working folder. The window offers web_maps next to the project."""
+    project, _ = project
+    from q2vt_plugin.src.gui import publication_profiles as store  # pylint: disable=import-error
+    dialog = _dialog()
+    profile = dialog.profile
+    dialog.close()
+    profile.output.local_directory = ""
+    store.save_profile(project, profile)
+    again = _dialog()
+    assert again.profile.output.local_directory == str(tmp_path / "web_maps")
+    assert again.o_dir.text() == str(tmp_path / "web_maps")
+    again.close()
+
+
 def test_export_preview_and_local_publish(project, messages, tmp_path):
     project, parcels = project
     tree = [(n.layer().id(), n.isVisible()) for n in project.layerTreeRoot().findLayers()]
