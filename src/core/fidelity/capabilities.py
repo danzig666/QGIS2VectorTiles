@@ -134,7 +134,10 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("LinePatternFill", "pattern", Strategy.SPRITE,
                "Screen units: periodic hatch texture with a verified repeat cell (angle and "
                "spacing within tolerance). Map units: hatch lines materialized as line "
-               "features clipped to each polygon, anchored like QGIS. "
+               "features clipped to each polygon, anchored like QGIS; clipped during render, "
+               "map-unit lines are the strips QGIS paints (cut at the edge, from 2 px wide), "
+               "flat-capped lines below; clipped before render or not clipped, laid out "
+               "line by line from each part's bounds as QGIS draws them. "
                "Textures start where QGIS starts them: \"Align pattern to: "
                "Feature\" at the bottom-left of each feature's bounding box, \"Viewport\" "
                "at the view's corner (patched MapLibre), rounded to whole pixels.",
