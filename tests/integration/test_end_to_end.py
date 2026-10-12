@@ -896,6 +896,11 @@ def test_horizontal_and_sparse_repeated_line_labels_go_to_the_viewer(export, tmp
     # as one line (a river split into short features).
     merged = labels_for("merged", Qgis.LabelPlacement.Line, 300, merge=True)
     assert len(merged) == 1 and merged[0]["metadata"]["q2vt:merge-lines"] is True
+    assert "q2vt:line-curved" not in sparse[0]["metadata"]
+    # Curved placement: the viewer bends the label along the line under it.
+    curved = labels_for("curved", Qgis.LabelPlacement.Curved, 0)
+    assert len(curved) == 1 and curved[0]["metadata"]["q2vt:visible-kind"] == "line"
+    assert curved[0]["metadata"]["q2vt:line-curved"] is True
     # A map-unit repeat: px at zoom 24. At the export's first zoom (0) it was
     # a fraction of a pixel, rounded to 3 decimals: 30 m became no repeat.
     meters = labels_for("level_meters", Qgis.LabelPlacement.Horizontal, 30, unit=Qgis.RenderUnit.MapUnits)

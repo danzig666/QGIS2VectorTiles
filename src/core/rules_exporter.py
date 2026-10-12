@@ -3452,6 +3452,11 @@ class RulesExporter:
         if wrap:  # QGIS breaks the line at every wrap character
             quoted = wrap.replace("'", "''")
             filter_exp = f"replace({filter_exp}, '{quoted}', '\n')"
+        if not settings.format().allowHtmlFormatting():
+            from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
+            spaces = TextPropertyExtractor.word_spacing_spaces(settings.format())
+            if spaces:  # QGIS word spacing: wider spaces (MapLibre has none)
+                filter_exp = f"replace({filter_exp}, ' ', '{' ' * (spaces + 1)}')"
         fields.append((10, filter_exp, field_name))
         if settings.format().allowHtmlFormatting():
             # MapLibre has no markup: text sections with their own scale.
@@ -3602,8 +3607,10 @@ class RulesExporter:
         except (AttributeError, TypeError):
             flags = 1
         from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
-        side = TextPropertyExtractor.side_of(
-            flags, TextPropertyExtractor.placement_name(settings) in ("Curved", "PerimeterCurved"))
+        curved = TextPropertyExtractor.placement_name(settings) in ("Curved", "PerimeterCurved")
+        # The viewer bends a curved label along the line (glyph by glyph).
+        flat_rule.line_label_curved = curved
+        side = TextPropertyExtractor.side_of(flags, curved)
         quadrant = {"on": Qgis.LabelQuadrantPosition.Over,
                     "above": Qgis.LabelQuadrantPosition.Above,
                     "below": Qgis.LabelQuadrantPosition.Below}[side]
@@ -3858,6 +3865,7 @@ class RulesExporter:
             rule.visible_polygons = name
             rule.label_per_part = bool(flat_rule.rule.settings().labelPerPart)
             rule.visible_kind = "line"
+            rule.line_curved = bool(getattr(flat_rule, "line_label_curved", False))
             # "Merge connected lines" (line layers; not with direction
             # symbols, QgsVectorLayerLabelProvider): the viewer labels lines
             # of one text that meet end to end as one line.

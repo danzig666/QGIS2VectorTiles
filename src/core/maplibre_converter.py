@@ -10,7 +10,7 @@ import os
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from qgis.PyQt.QtGui import QColor, QFont, QFontInfo
+from qgis.PyQt.QtGui import QColor, QFont, QFontInfo, QFontMetricsF
 from ..utils.config import Qt
 from qgis.core import (
     QgsVectorTileLayer,
@@ -28,7 +28,7 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsExpressionContext, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
+from qgis.core import NULL, Qgis, QgsExpressionContext, QgsFontUtils, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
@@ -1834,6 +1834,32 @@ class TextPropertyExtractor:
             size = float(text_format.size() or 0)
             em = spacing / size if size > 0 else 0.0
         return round(em, 4) if abs(em) >= 1e-4 else 0
+
+    @staticmethod
+    def word_spacing_spaces(text_format: QgsTextFormat = None) -> int:
+        """How many spaces one space of the label text stands for, so that
+        the text keeps QGIS's word spacing (MapLibre has none).
+
+        QGIS keeps the word spacing like the letter spacing, as the font's
+        absolute spacing in the format's size units (QgsTextFormat::scaledFont):
+        spacing / size ems more after every space; one space is its advance
+        in the drawn face plus the letter spacing."""
+        if text_format is None:
+            return 0
+        spacing = float(text_format.font().wordSpacing() or 0)
+        size = float(text_format.size() or 0)
+        if spacing <= 0 or size <= 0:
+            return 0
+        font = QFont(TextPropertyExtractor.drawn_font(text_format))
+        if text_format.namedStyle():
+            QgsFontUtils.updateFontViaStyle(font, text_format.namedStyle())
+        font.setPixelSize(100)
+        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0)
+        font.setWordSpacing(0.0)
+        space = QFontMetricsF(font).horizontalAdvance(" ") / 100.0
+        letter = TextPropertyExtractor.get_text_letter_spacing(text_format)
+        per_space = space + (letter if ex.is_number(letter) else 0)
+        return max(0, round(spacing / size / per_space)) if per_space > 0 else 0
 
     @staticmethod
     def get_text_transform(label_settings: QgsPalLayerSettings = None) -> str:
@@ -4792,6 +4818,10 @@ class QgisMapLibreStyleExporter:
                     # "Merge connected lines": one label for the lines of one
                     # text that meet end to end (pal joinConnectedFeatures).
                     layer_def["metadata"]["q2vt:merge-lines"] = True
+                if len(polygons) > 4 and polygons[4]:
+                    # Curved placement: the viewer lays the label along the
+                    # line's piece under it, bent with the line.
+                    layer_def["metadata"]["q2vt:line-curved"] = True
             around = self._label_around(label_settings, placement)
             if around:
                 layer_def["metadata"]["q2vt:label-around"] = around

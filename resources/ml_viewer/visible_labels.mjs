@@ -101,6 +101,16 @@ export function pointMaxzoom(maxZoom) {
   return Math.max(POINT_MAXZOOM, Math.ceil(maxZoom) - 4);
 }
 
+// The curved label source's maxzoom (MapLibre's GeoJSON limit: 24).
+export function curvedMaxzoom(maxZoom) {
+  return Math.min(24, Math.max(POINT_MAXZOOM, Math.ceil(maxZoom)));
+}
+
+// Screen pixels per tile pixel of the curved label source at ``zoom``.
+export function curvedScale(map, zoom) {
+  return 2 ** (zoom - Math.min(Math.floor(zoom), curvedMaxzoom(map.getMaxZoom())));
+}
+
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
 //     get a label (layer/rule toggles, attribute filters);
@@ -133,6 +143,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     if (layer.metadata["q2vt:label-per-part"]) groups.get(polygons).perPart = true;
     // QGIS Horizontal placement on lines: level, centred on the line.
     if (layer.metadata["q2vt:line-orient"] === "horizontal") groups.get(polygons).level = true;
+    // QGIS Curved placement: bent along the line, glyph by glyph.
+    if (layer.metadata["q2vt:line-curved"]) groups.get(polygons).curved = true;
     // A repeated line label: one label per repeat part of the visible line.
     if (layer.metadata["q2vt:repeat"]) groups.get(polygons).repeat = layer.metadata["q2vt:repeat"];
     // "Merge connected lines": lines of one text meeting end to end are one line.
@@ -167,7 +179,13 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     }, firstLayer);
     map.addSource(group.source, {
       type: "geojson", data: { type: "FeatureCollection", features: [] },
-      maxzoom: pointMaxzoom(map.getMaxZoom()),
+      // A curved label's piece of line whole in every tile it crosses: each
+      // tile then finds the same middle, kept by the one tile it falls in
+      // (cut at the tile edge, each piece got a label of its own). Not
+      // overzoomed: MapLibre fits the label on its line in tile pixels, so
+      // the piece is longer by the tile's scale (curvedScale).
+      ...(group.curved ? { buffer: 512, maxzoom: curvedMaxzoom(map.getMaxZoom()) }
+        : { maxzoom: pointMaxzoom(map.getMaxZoom()) }),
     });
     for (const { def } of group.layers) map.removeLayer(def.id);
   }
@@ -179,7 +197,24 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       // The position is computed here (room, screen fit, other labels):
       // MapLibre must not shift the label a box width off it (that pushed
       // labels out of their polygon and off the screen).
-      moved.layout = { ...moved.layout, "text-anchor": "center" };
+      // A line label above or below its line keeps its anchor: the box
+      // edge on the line (the point is on the line).
+      const anchor = moved.layout["text-anchor"];
+      moved.layout = { ...moved.layout, "text-anchor": group.kind === "line"
+        && (anchor === "top" || anchor === "bottom") ? anchor : "center" };
+      if (group.curved && !group.level) {
+        // The label is laid out along its piece of line (written below):
+        // MapLibre bends it with the line and keeps it upright.
+        moved.layout["symbol-placement"] = "line-center";
+        moved.layout["text-rotation-alignment"] = "map";
+        moved.layout["text-keep-upright"] = true;
+        delete moved.layout["text-rotate"];
+        delete moved.layout["symbol-spacing"];
+        // The bends were judged here as QGIS does (curvedBendsOk): MapLibre's
+        // own check adds up the turns of a few pixels of line and dropped
+        // labels QGIS bends round a corner.
+        moved.layout["text-max-angle"] = 179;
+      }
       if (group.always) moved.layout["text-size"] = scaledTextSize(moved.layout["text-size"]);
       delete moved.layout["text-variable-anchor"];
       delete moved.layout["text-radial-offset"];
@@ -265,7 +300,10 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         avoid: avoidFor(group, placed, others),
         kind: group.kind || "polygon", orient: group.orient || "horizontal",
         degraded: Boolean(group.degraded), overlap: group.overlap || null, perPart: Boolean(group.perPart),
-        level: Boolean(group.level), repeat: repeatOption(group.repeat, zoom, perPx),
+        level: Boolean(group.level),
+        curved: group.curved && !group.level ? { perPx, scale: curvedScale(map, zoom),
+          maxAngle: Number((activeLayer(group, zoom).layout || {})["text-max-angle"]) || 45 } : null,
+        repeat: repeatOption(group.repeat, zoom, perPx),
         mergeText: group.merge ? textKey((activeLayer(group, zoom).layout || {})["text-field"]) : null,
         textAnchor: (activeLayer(group, zoom).layout || {})["text-anchor"],
         rotationField: group.orient === "free" ? FREE_ROTATION : rotationField(group, zoom),
@@ -527,7 +565,8 @@ export function labelPoints(features, view, maplibregl, options = {}) {
       old.point[1] - p[1]) <= REFINE_UNITS * old.unit + 2 * (old.prec || 0) ? p : old.point);
     if (old && options.freeze) {
       const kept = old.properties || properties;
-      points.set(key, { point: old.point, properties: kept, orig, unit: old.unit, prec: old.prec });
+      points.set(key, { point: old.point, properties: kept, orig, unit: old.unit, prec: old.prec,
+                        line: old.line });
       // Its box at this zoom (shrunk and turned as drawn), for the others.
       const label = options.labelBox ? options.labelBox(kept) : null;
       if (label) {
@@ -790,11 +829,19 @@ export function labelPoints(features, view, maplibregl, options = {}) {
   }
   state.points = points;
   const out = [];
-  for (const [key, { point, properties }] of points) {
+  const lngLatOf = ([x, y]) => {
+    const lngLat = new maplibregl.MercatorCoordinate(x, y, 0).toLngLat();
+    return [lngLat.lng, lngLat.lat];
+  };
+  for (const [key, { point, properties, line }] of points) {
     if (!state.ids.has(key)) state.ids.set(key, state.nextId++);
-    const lngLat = new maplibregl.MercatorCoordinate(point[0], point[1], 0).toLngLat();
-    out.push({ type: "Feature", id: state.ids.get(key), properties,
-               geometry: { type: "Point", coordinates: [lngLat.lng, lngLat.lat] } });
+    // A curved label: its piece of line (MapLibre lays the glyphs along it),
+    // for the label size and tile scale of this zoom.
+    const path = line && options.curved ? labelPath(line.chain, line.s,
+      options.labelBox ? options.labelBox(properties) : null, options.curved) : null;
+    const geometry = path ? { type: "LineString", coordinates: path.map(lngLatOf) }
+      : { type: "Point", coordinates: lngLatOf(point) };
+    out.push({ type: "Feature", id: state.ids.get(key), properties, geometry });
   }
   return { type: "FeatureCollection", features: out, boxes };
 }
@@ -1653,6 +1700,92 @@ function project(chain, [x, y]) {
   return best;
 }
 
+// QGIS's curved label limit (maxCurvedCharAngleIn/Out, here text-max-angle):
+// its characters sit on chords of the line, one per character, and two
+// next to each other may turn by ``maxAngle`` degrees at most. A corner
+// inside a character's chord is shared by the turns on both sides of it.
+// The characters here are as wide as half the label's height (about
+// 0.55 em), along the label's stretch centred on ``s``; QGIS tries spots
+// every few millimetres, so the characters also half a width on.
+export function curvedBendsOk(chain, s, half, maxAngle) {
+  const advance = half[1];
+  if (!(advance > 0) || !(maxAngle > 0)) return true;
+  const limit = maxAngle * Math.PI / 180;
+  const fits = (shift) => {
+    let heading = null, last = null;
+    for (let d = s - half[0] + shift; d <= s + half[0] + shift + 1e-12; d += advance) {
+      const at = along(chain, Math.max(0, d));
+      if (!at) continue;
+      if (last) {
+        const dx = at.point[0] - last[0], dy = at.point[1] - last[1];
+        if (!dx && !dy) continue;
+        const next = Math.atan2(dy, dx);
+        if (heading !== null) {
+          let turn = next - heading;
+          while (turn > Math.PI) turn -= 2 * Math.PI;
+          while (turn < -Math.PI) turn += 2 * Math.PI;
+          if (Math.abs(turn) > limit) return false;
+        }
+        heading = next;
+      }
+      last = at.point;
+    }
+    return true;
+  };
+  return fits(0) || fits(advance / 2);
+}
+
+// The piece of line a curved label is laid out on (MapLibre's
+// "line-center"), centred on ``s`` along ``chain``. MapLibre drops a label
+// longer than its line, measured in tile pixels: the piece reaches half the
+// label times the tile's scale (``curved.scale``) and some room on either
+// side, run on straight past the chain's ends (the label itself fits the
+// chain: it is placed so).
+const CURVED_ROOM = 1.1;
+const CURVED_PAD_PX = 4;
+export function labelPath(chain, s, half, curved) {
+  if (!chain || chain.length < 2) return null;
+  const { perPx = 0, scale = 1 } = curved || {};
+  const reach = ((half ? half[0] : 0) * CURVED_ROOM + CURVED_PAD_PX * perPx) * scale;
+  const total = chainLength(chain);
+  const a = s - reach, b = s + reach;
+  const out = [];
+  let walked = 0;
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const [ax, ay] = chain[i], [bx, by] = chain[i + 1];
+    const step = Math.hypot(bx - ax, by - ay);
+    const from = walked, to = walked + step;
+    walked = to;
+    if (to < a || from > b || !step) continue;
+    const t0 = Math.max(0, (a - from) / step), t1 = Math.min(1, (b - from) / step);
+    if (!out.length) out.push([ax + (bx - ax) * t0, ay + (by - ay) * t0]);
+    out.push([ax + (bx - ax) * t1, ay + (by - ay) * t1]);
+  }
+  if (out.length < 2) return null;
+  // Past an end: straight on in the direction of the last bit of line.
+  const extend = (end, next, by) => {
+    const dx = end[0] - next[0], dy = end[1] - next[1], d = Math.hypot(dx, dy);
+    return d ? [end[0] + dx / d * by, end[1] + dy / d * by] : null;
+  };
+  if (a < 0) {
+    const p = extend(out[0], out.find((q) => q[0] !== out[0][0] || q[1] !== out[0][1]) || out[1], -a);
+    if (p) out.unshift(p);
+  }
+  if (b > total) {
+    const last = out[out.length - 1];
+    const p = extend(last, [...out].reverse().find((q) => q[0] !== last[0] || q[1] !== last[1]) || out[out.length - 2],
+                     b - total);
+    if (p) out.push(p);
+  }
+  // Written from the label's left end to its right end: MapLibre turns a
+  // label running right to left upside up and then puts its text-anchor and
+  // text-offset on the other side of the line (an "above" label below it).
+  const first = along(chain, Math.max(0, s - (half ? half[0] : 0)));
+  const last = along(chain, Math.min(total, s + (half ? half[0] : 0)));
+  if (first && last && last.point[0] < first.point[0]) out.reverse();
+  return out;
+}
+
 // The visible stretches of a line (longest first) and the label spots
 // along them: a label along the line (rotated to it) or, for QGIS's
 // Horizontal placement on lines (options.level), level and centred on the
@@ -1669,7 +1802,9 @@ function lineSpots(loaded, properties, view, avoid, options) {
   const candidate = (chain, s) => {
     let at = along(chain, s);
     if (at && level) at = { ...at, rotation: 0 };
+    if (at) at = { ...at, chain, s };
     if (!at || !half) return at && { ...at, fit: 0, clear: true, box: null };
+    if (options.curved && !curvedBendsOk(chain, s, half, options.curved.maxAngle)) return null;
     const angle = at.rotation * Math.PI / 180;
     const [x, y] = at.point;
     const [ex, ey] = envelope(half, angle);
@@ -1677,7 +1812,8 @@ function lineSpots(loaded, properties, view, avoid, options) {
     const box = [x - ex, y - ey, x + ex, y + ey];
     return { ...at, fit, clear: !avoid.some((other) => intersect(other, box)), box };
   };
-  const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box });
+  const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box,
+                           line: options.curved ? { chain: c.chain, s: c.s } : null });
   // Half the label along the line: it must fit along the stretch (a level
   // label only needs its centre on the line).
   const lo = half && !level ? half[0] : 0;
@@ -1714,7 +1850,8 @@ function placeOnLine(loaded, properties, old, view, guarded, avoid, options) {
     const whole = chains(loaded)[0];
     const at = whole && along(whole.chain, whole.length / 2);
     if (!at || within(guarded, at.point)) return null;
-    return { point: at.point, properties: withRotation(options.level ? 0 : at.rotation) };
+    return { point: at.point, properties: withRotation(options.level ? 0 : at.rotation),
+             line: options.curved ? { chain: whole.chain, s: whole.length / 2 } : null };
   }
   const longest = visible[0];
   if (old && !options.freeze && longest.length >= 2 * lo) {  // kept while near the middle and still fine
