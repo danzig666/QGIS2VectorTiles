@@ -5,7 +5,7 @@ QWebMap started as a fork of [GallPeters/QGIS2VectorTiles](https://github.com/Ga
 This is the **generic** edition — the one to download. (A special Hungarian zoning-plan edition, not for general use, is released separately with a `-hu` tag.)
 
 ### Exports that failed or never finished
-- **Layer names with an apostrophe** (`Regioni d'Italia`) broke the export: the name went into a QGIS expression unquoted, every rule of the layer failed and there was nothing to publish. Names, field names and expressions are now quoted and escaped everywhere the exporter builds expressions, filters and launch scripts (quotes, backslashes, `--` comments at the end of an expression).
+- **Layer names with an apostrophe** (`Regioni d'Italia`) broke the export: the name went into a QGIS expression unquoted, every rule of the layer failed and there was nothing to publish. It is quoted now (quotes and backslashes).
 - **Huge exports of coarse data finish.** Country borders of a continent down to zoom 16 were tens of millions of filled tiles: the export seemed to hang near its end for hours. When the tiles would be far too many (over 200,000), they now end at the zoom that holds all of the data's detail, and the web map zooms in further on them — it looks the same. Small and detailed maps (a town's parcels or buildings) keep every zoom. The export log and the fidelity report say where the tiles end.
 - **Nothing to publish** now stops right after the export with the cause (the rules that failed), instead of an unclear "No MBTiles file" error at the end. Rules that fail in an otherwise successful export are listed in the Publish window.
 
