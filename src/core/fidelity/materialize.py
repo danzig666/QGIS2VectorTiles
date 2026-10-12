@@ -959,13 +959,19 @@ def _band_interval(band: int, bands: int, overlap: bool):
     return start, end
 
 
-def color_bands_recipe(band_recipes, colors) -> Recipe:
+def color_bands_recipe(band_recipes, colors, feature_colors=None) -> Recipe:
     """All bands of one gradient / shapeburst fill in one dataset: the
     per-band recipes (gradient_band_recipe / shapeburst_band_recipe) and
     their colours (encodeColor strings). The exporter writes one polygon per
     feature and band (fidelity.bands) with BAND_FIELD and COLOR_FIELD; the
-    style draws them in band order."""
-    return Recipe("color_bands", (), (("bands", tuple(band_recipes)), ("colors", tuple(colors))))
+    style draws them in band order. ``feature_colors``: data-defined colours,
+    (colour 1 expression, colour 2 expression, static colour 1, static
+    colour 2, premultiplied blend): each feature's bands are blended from its
+    own two colours (QGIS evaluates them per feature)."""
+    params = [("bands", tuple(band_recipes)), ("colors", tuple(colors))]
+    if feature_colors:
+        params.append(("feature_colors", tuple(feature_colors)))
+    return Recipe("color_bands", (), tuple(params))
 
 
 def color_bands_disjoint(recipe) -> bool:

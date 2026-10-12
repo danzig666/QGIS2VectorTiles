@@ -152,4 +152,9 @@ class FlattenedRule:
             geom_desc_str = 'conversion: none'
         else:
             geom_desc_str = f'conversion: {source_geom} to {target_geom}'
-        return  "'{" + f'{lyr_name},{rule_type},{rule_index},{geom_desc_str}' + "}'"
+        # A QGIS string literal: a quote or backslash in a layer name
+        # ("Regioni d'Italia") is escaped, else the expression did not parse
+        # and the rule's export failed.
+        from qgis.core import QgsExpression  # pylint: disable=import-outside-toplevel
+        return QgsExpression.quotedString(
+            "{" + f'{lyr_name},{rule_type},{rule_index},{geom_desc_str}' + "}")

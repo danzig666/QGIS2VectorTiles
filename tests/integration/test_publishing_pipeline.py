@@ -310,3 +310,25 @@ def test_layer_data_only_in_the_project_is_published(project, tmp_path, kind):
     assert _label_texts(result) == expected
     if kind == "edits":
         parcels.rollBack()
+
+
+def test_nothing_drawn_stops_with_the_cause(project, tmp_path, monkeypatch):
+    """Every rule failed (a layer name that broke its expression): the
+    publication went on through every stage and ended on "No MBTiles file".
+    It stops after the export and names the failed rule."""
+    import q2vt_plugin.src.core.rules_exporter as rules_exporter  # pylint: disable=import-error
+
+    def broken(self, grp, source_path):
+        raise RuntimeError("Parser error for field q2vt_description")
+
+    monkeypatch.setattr(rules_exporter.RulesExporter, "_export_one_rule_group", broken)
+    project, parcels = project
+    profile = _profile(parcels, tmp_path, key_fields=[])
+    stages = []
+    with pytest.raises(PublishingError) as error:
+        export_local(project, profile, EXTENT, stage_callback=stages.append)
+    assert error.value.code == "Q2VT_PUB_EMPTY_ARCHIVE"
+    assert stages == ["PLAN", "EXPORT_MVT"]
+    assert error.value.message.startswith("Nothing to publish")
+    assert "could not be exported" in error.value.message and "Parser error" in error.value.message
+    assert "MBTiles" not in error.value.message

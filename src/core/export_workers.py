@@ -106,6 +106,7 @@ def worker_state(exporter) -> dict:
     from qgis.core import QgsApplication, QgsReadWriteContext, QgsUnitTypes
     from qgis.PyQt.QtXml import QDomDocument
     from .fidelity import zoom as fidelity_zoom
+    from .fidelity import map_view
     document = QDomDocument()
     root = document.createElement("transformContext")
     document.appendChild(root)
@@ -129,6 +130,7 @@ def worker_state(exporter) -> dict:
         "layer_names": dict(exporter._layer_names),
         "top_scale": fidelity_zoom.TOP_SCALE,
         "map_units_per_mm_0": fidelity_zoom.MAP_UNITS_PER_MM_0,
+        "view": map_view.state(),
     }
 
 
@@ -298,7 +300,9 @@ def _build_exporter(state: dict):
     from ..utils.zoom_levels import ZoomLevels
     from .fidelity.diagnostics import DiagnosticCollector
     from .rules_exporter import RulesExporter
+    from .fidelity import map_view
     ZoomLevels.configure(state["top_scale"], state.get("map_units_per_mm_0"))
+    map_view.restore(state.get("view"))  # @map_extent & co. of the main export
     document = QDomDocument()
     document.setContent(state["transform_context"])
     transform_context = QgsCoordinateTransformContext()

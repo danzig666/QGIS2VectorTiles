@@ -42,7 +42,17 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.33.1**. Newest first:
+This README describes QWebMap **4.34.0**. Newest first:
+
+**4.34.0** — huge exports finish, map-view expressions, export fixes
+- **Huge exports of coarse data finish:** when the tiles would be far too many (over 200,000),
+  they end at the zoom that holds all of the data's detail and the web map zooms in on them —
+  it looks the same. Country borders of a continent down to zoom 16 took hours.
+- **Map-view expressions** (`@map_extent_center`, `@map_extent_width`, `@map_crs`…) hold the web
+  map's starting view instead of nothing.
+- **Fixed:** a layer name with an apostrophe broke the export; "Nothing to publish" now names the
+  cause; data-defined colours of gradient and shapeburst fills; labels with a geometry generator
+  on polygon layers.
 
 **4.33.1** — curved line labels follow the road
 - **Curved line labels** are laid along the line letter by letter, as in QGIS, round bends within

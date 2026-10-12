@@ -149,6 +149,18 @@ def _copy_logs(export_folder: str, profile: PublicationProfile, base: Optional[s
         pass  # the logs stay in the local work folder
 
 
+def _nothing_to_publish(diagnostics):
+    """(message, detail) of an export that drew no feature in the extent."""
+    failed = diagnostics.by_code("Q2VT_RULE_EXPORT_FAILED")
+    message = "Nothing to publish: no feature of the published layers is drawn in the extent."
+    if failed:
+        message += f" {len(failed)} rule(s) could not be exported, e.g. {failed[0].message}"
+    else:
+        message += " Check the extent, layer visibility, scale ranges and rule filters."
+    detail = "\n".join(f"{d.code}: {d.message}" for d in failed[:20])
+    return message, (detail + "\n" if detail else "") + "Details: fidelity_report.html in the export folder."
+
+
 def _filter_fields(manifest_layers: List[dict], profile: PublicationProfile, domains) -> None:
     by_id = {}
     from .provenance import layer_logical_id  # pylint: disable=import-outside-toplevel
@@ -340,7 +352,8 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
                       for c in vector_profile.layers
                       if c.included and (c.min_scale or c.max_scale or c.labels_min_scale)},
         background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1",
-        fast_markers=profile.output.fast_markers, view_max_zoom=profile.view.max_view_zoom)
+        fast_markers=profile.output.fast_markers, view_max_zoom=profile.view.max_view_zoom,
+        cap_tiles=True)
     progress.check()
     # The tiles are made in the background (ogr2ogr processes) while the
     # stages after the datasets run: finish_tiles() before BUILD_RELEASE.
@@ -348,6 +361,10 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         if not exporter.convert_project_to_vector_tiles():
             raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                                   "The vector tile export produced no tiles (see the export log).")
+        if exporter.diagnostics.by_code("Q2VT_EXPORT_EMPTY"):
+            # Nothing drawn: stop here with the cause (the next stages ran on
+            # and failed on the missing tiles, "No MBTiles file").
+            raise PublishingError("Q2VT_PUB_EMPTY_ARCHIVE", *_nothing_to_publish(exporter.diagnostics))
         bundle = exporter.export_bundle(profile.publication_id)
         bundle.crs = crs_info
         progress.check()
@@ -472,6 +489,10 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
             raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                                   "The vector tile export produced no tiles (see the export log).")
         bundle.diagnostics_summary = exporter.diagnostics.counts()
+        # Rules that could not be exported are missing from the map: said in
+        # the Publish window too, not only in the fidelity report.
+        bundle.warnings.extend(f"Not published (rule failed): {d.message}"
+                               for d in exporter.diagnostics.by_code("Q2VT_RULE_EXPORT_FAILED")[:10])
         if cache is not None:
             cache.prune()
         progress.check()

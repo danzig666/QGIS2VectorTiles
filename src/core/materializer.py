@@ -48,6 +48,7 @@ from ..utils.flattened_rule import FlattenedRule
 from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
+from .fidelity import map_view
 from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector, Severity
@@ -345,7 +346,7 @@ class SymbolMaterializer:
                 continue
             expression = QgsExpression(prop.asExpression())
             if expression.referencedColumns() - {""} or \
-                    set(expression.referencedVariables()) - set(SCALE_VARIABLES):
+                    set(expression.referencedVariables()) - set(SCALE_VARIABLES) - map_view.VIEW_VARIABLES:
                 return None  # feature-dependent: not placed exactly
             if set(expression.referencedVariables()) & set(SCALE_VARIABLES):
                 scale_only.append(key)
@@ -776,7 +777,7 @@ class SymbolMaterializer:
         """Replace an active data-defined property whose expression reads no
         field or variable (``@map_scale`` taken as ``scale`` for a one-zoom
         rule) by its value."""
-        from qgis.core import QgsExpression, QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsExpression  # pylint: disable=import-outside-toplevel
         from .fidelity.qgis_expr import with_map_scale  # pylint: disable=import-outside-toplevel
         props = layer.dataDefinedProperties()
         prop = props.property(key)
@@ -784,14 +785,14 @@ class SymbolMaterializer:
             return
         text = prop.asExpression()
         original = QgsExpression(text)
-        allowed = set(SCALE_VARIABLES) if scale is not None else set()
+        allowed = (set(SCALE_VARIABLES) if scale is not None else set()) | map_view.VIEW_VARIABLES
         if original.hasParserError() or original.referencedColumns() - {""} or \
                 set(original.referencedVariables()) - allowed:
             return
         if scale is not None and uses_map_scale(text):
             text = with_map_scale(text, scale)
         expression = QgsExpression(text)
-        value = expression.evaluate(QgsExpressionContext([QgsExpressionContextUtils.globalScope()]))
+        value = expression.evaluate(map_view.context())
         if expression.hasEvalError():
             return
         try:
@@ -3171,6 +3172,12 @@ class SymbolMaterializer:
             and parent.opacity() >= 1.0 and flat_rule.layer.opacity() >= 1.0 \
             and not (opacity is not None and opacity.isActive())
         encoded = [QgsSymbolLayerUtils.encodeColor(c) for c in colors]  # "r,g,b,a", as QGIS reads it
+        feature_colors = self._data_defined_band_colors(layer, color_of is not ramp.color)
+        if feature_colors and bands < self.DATA_DEFINED_BANDS:
+            # Each feature has its own colours: enough bands for any of them.
+            bands = self.DATA_DEFINED_BANDS
+            colors = [color_of((i + 0.5) / bands) for i in range(bands)]
+            encoded = [QgsSymbolLayerUtils.encodeColor(c) for c in colors]
         fill = QgsSimpleFillSymbolLayer(colors[0], Qt.BrushStyle.SolidPattern, colors[0],
                                         Qt.PenStyle.NoPen)
         fill.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
@@ -3178,8 +3185,33 @@ class SymbolMaterializer:
         fill.setOffset(layer.offset())
         fill.setOffsetUnit(layer.offsetUnit())
         symbol = inherit_opacity(parent, QgsFillSymbol([fill]))
-        recipe = mat.color_bands_recipe([recipe_of(band, bands, overlap) for band in range(bands)], encoded)
+        recipe = mat.color_bands_recipe([recipe_of(band, bands, overlap) for band in range(bands)], encoded,
+                                        feature_colors)
         return [self._with_symbol(flat_rule, symbol, 2, 1, recipe)]
+
+    # Bands of a fill with data-defined colours (the colours of the static
+    # ones may be close together, the features' are not).
+    DATA_DEFINED_BANDS = 64
+
+    def _data_defined_band_colors(self, layer, premultiplied: bool):
+        """(colour 1 expression, colour 2 expression, static colour 1, static
+        colour 2, premultiplied) of a two-colour gradient / shapeburst fill
+        with a data-defined colour (QGIS's random or attribute colours); None
+        without one, or with a colour ramp (QGIS ignores the colours then)."""
+        two_colors = _enum_value(layer.gradientColorType() if hasattr(layer, "gradientColorType")
+                                 else layer.colorType()) == 0
+        if not two_colors and layer.colorRamp() is not None:
+            return None
+        props = layer.dataDefinedProperties()
+        expressions = []
+        for key in (QgsSymbolLayer.Property.PropertyFillColor,
+                    QgsSymbolLayer.Property.PropertySecondaryColor):
+            prop = props.property(key)
+            expressions.append(prop.asExpression() if prop is not None and prop.isActive() else "")
+        if not any(expressions):
+            return None
+        return (expressions[0], expressions[1], QgsSymbolLayerUtils.encodeColor(layer.color()),
+                QgsSymbolLayerUtils.encodeColor(layer.color2()), bool(premultiplied))
 
     def _gradient(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A gradient fill as solid colour bands (linear strips, radial rings,

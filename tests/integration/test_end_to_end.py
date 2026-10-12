@@ -1188,3 +1188,103 @@ def test_source_without_prj_uses_the_project_crs(export, tmp_path):
     assert result
     archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
     assert archive["vector_layers"], archive
+
+
+def test_layer_names_with_quotes_export(export, tmp_path):
+    """A layer named "Regioni d'Italia": its name went into a QGIS string
+    literal unescaped, the expression did not parse and the layer's rules
+    were not exported (nothing to publish)."""
+    layer = zoning_layer(path=str(tmp_path / "quoted.gpkg"))
+    layer.setName('Regioni d\'Italia "nord" \\ sud\\\'s')
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    exporter, result = export(layer)
+    assert result
+    report = json.loads(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8").read())
+    assert report["counts"]["error"] == 0, report
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    assert archive["vector_layers"], archive
+
+
+def _tile_properties(result, source_layer_prefix):
+    """{source layer: [feature properties]} of the tiles' layers starting
+    with ``source_layer_prefix`` (all zooms)."""
+    import sqlite3  # pylint: disable=import-outside-toplevel
+    from publishing import mvt  # pylint: disable=import-outside-toplevel,import-error
+    found = {}
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        for (data,) in conn.execute("SELECT tile_data FROM tiles"):
+            for name, info in mvt.decode(data).items():
+                if name.startswith(source_layer_prefix):
+                    found.setdefault(name, []).extend(f["properties"] for f in info["features"])
+    return found
+
+
+def test_map_view_variables_hold_the_starting_view(plugin, tmp_path):
+    """@map_extent_center & co. were NULL at export: a rule filtered by
+    contains($geometry, @map_extent_center) and a label generated from the
+    centre exported nothing. They hold the export extent (the web map's
+    starting view), with a warning that they do not follow the view."""
+    from qgis.core import (QgsLabeling, QgsRuleBasedRenderer,  # pylint: disable=import-outside-toplevel
+                           QgsFillSymbol, QgsPalLayerSettings, QgsTextFormat,
+                           QgsVectorLayerSimpleLabeling, QgsProcessingFeedback)
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error,import-outside-toplevel
+    layer = zoning_layer(path=str(tmp_path / "view.gpkg"))
+    root = QgsRuleBasedRenderer.Rule(None)
+    root.appendChild(QgsRuleBasedRenderer.Rule(QgsFillSymbol.createSimple({"color": "red"}),
+                                               filterExp="contains($geometry, @map_extent_center)"))
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "zone"
+    settings.geometryGeneratorEnabled = True
+    settings.geometryGeneratorType = Qgis.GeometryType.Point
+    settings.geometryGenerator = "@map_extent_center"
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    out = tmp_path / "out"
+    out.mkdir()
+    # Centred in square A (2120000..2121000, 6020000..6021000).
+    extent = QgsRectangle(2119500, 6019500, 2121500, 6021500)
+    exporter = QGIS2VectorTiles(min_zoom=12, max_zoom=14, extent=extent, output_dir=str(out),
+                                feedback=QgsProcessingFeedback(), serve=False)
+    result = exporter.convert_project_to_vector_tiles()
+    assert result
+    report = json.load(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8"))
+    codes = [d["code"] for d in report["diagnostics"]]
+    assert codes.count("Q2VT_EXPR_MAP_VIEW_STATIC") == 1, report["diagnostics"]
+    assert report["counts"]["error"] == 0, report
+    fills = _tile_properties(result, "l00t00")
+    ids = {props["q2vt_orig_id"] for features in fills.values() for props in features}
+    names = {f.id(): f["zone"] for f in layer.getFeatures()}
+    assert {names[int(i)] for i in ids} == {"K1"}  # square A only
+    labels = _tile_properties(result, "l00t01")
+    assert labels and all(props.get("q2vt_label") for features in labels.values() for props in features)
+    assert not any(name.endswith("_vp") for name in labels)  # on the generated point, not the polygon
+
+
+def test_shapeburst_with_a_data_defined_colour_colours_each_feature(export, tmp_path):
+    """A shapeburst (or gradient) fill whose colour is data-defined (a random
+    or per-attribute colour) drew every feature in the static colour."""
+    from qgis.core import QgsShapeburstFillSymbolLayer  # pylint: disable=import-outside-toplevel
+    layer = zoning_layer(path=str(tmp_path / "burst.gpkg"))
+    burst = QgsShapeburstFillSymbolLayer(QColor("gray"), QColor("white"))
+    burst.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor, QgsProperty.fromExpression(
+        "if(\"zone\" = 'K1', '255,0,0,255', '0,0,255,255')"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst])))
+    _, result = export(layer, min_zoom=12, max_zoom=13)
+    assert result
+    bands = _tile_properties(result, "l00t00")
+    outer = {}  # the outermost band's colour of each feature: colour 1
+    for features in bands.values():
+        for props in features:
+            if props.get("q2vt_mat_band") == 0:
+                colour = next(v for k, v in props.items() if k.startswith("q2vt_property_fillcolor"))
+                outer[props["q2vt_orig_id"]] = colour
+    names = {f.id(): f["zone"] for f in layer.getFeatures()}
+    by_zone = {names[int(i)]: colour for i, colour in outer.items()}
+    assert by_zone["K1"].upper().startswith("#F") and by_zone["K1"][1:3].upper() >= "F0"
+    assert by_zone["K2"][5:7].upper() >= "F0" and by_zone["K2"][1:3].upper() < "40"
