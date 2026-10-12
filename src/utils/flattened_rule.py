@@ -152,4 +152,8 @@ class FlattenedRule:
             geom_desc_str = 'conversion: none'
         else:
             geom_desc_str = f'conversion: {source_geom} to {target_geom}'
-        return  "'{" + f'{lyr_name},{rule_type},{rule_index},{geom_desc_str}' + "}'"
+        # A QGIS string literal: a quote in a layer name ("Regioni d'Italia")
+        # is doubled, else the expression did not parse and the rule's
+        # export failed.
+        text = "{" + f'{lyr_name},{rule_type},{rule_index},{geom_desc_str}' + "}"
+        return "'" + text.replace("'", "''") + "'"

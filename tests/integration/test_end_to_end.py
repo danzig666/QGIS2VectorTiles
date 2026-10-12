@@ -1188,3 +1188,18 @@ def test_source_without_prj_uses_the_project_crs(export, tmp_path):
     assert result
     archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
     assert archive["vector_layers"], archive
+
+
+def test_layer_names_with_quotes_export(export, tmp_path):
+    """A layer named "Regioni d'Italia": its name went into a QGIS string
+    literal unescaped, the expression did not parse and the layer's rules
+    were not exported (nothing to publish)."""
+    layer = zoning_layer(path=str(tmp_path / "quoted.gpkg"))
+    layer.setName('Regioni d\'Italia "nord"')
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    exporter, result = export(layer)
+    assert result
+    report = json.loads(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8").read())
+    assert report["counts"]["error"] == 0, report
+    archive = inspect_mbtiles(os.path.join(result, "tiles.mbtiles"))
+    assert archive["vector_layers"], archive
