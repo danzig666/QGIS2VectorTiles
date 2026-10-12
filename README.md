@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.35.3**. Newest first:
+This README describes QWebMap **4.35.4**. Newest first:
+
+**4.35.4** — no more tiles flooded with a polygon's colour
+- A polygon that is valid in the project CRS can cross itself once reprojected to Web Mercator
+  (edges that nearly touch); the tiles then showed large areas filled with its colour at some
+  zooms. Reprojected polygons are now repaired too.
 
 **4.35.3** — labels of features drawn with an invisible symbol
 - Features of a renderer rule whose symbol draws nothing (no fill, no outline; often the ELSE

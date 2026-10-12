@@ -1076,19 +1076,25 @@ class RulesExporter:
             fixed = (f"with_variable('q2vt_f', {fixed}, if(\"{_RING_FIELD}\" = 1, "
                      f"force_polygon_cw(@q2vt_f), if(\"{_RING_FIELD}\" = 0, "
                      f"force_polygon_ccw(@q2vt_f), @q2vt_f)))")
+        repair = f"if(@geometry IS NULL OR is_valid(@geometry), @geometry, {fixed})"
         fixed_struct = self._run_alg_safe(
             "geometrybyexpression", "native", INPUT=clipped,
-            OUTPUT_GEOMETRY={0: 2, 1: 1, 2: 0}.get(geometry_type, 0),
-            EXPRESSION=f"if(@geometry IS NULL OR is_valid(@geometry), @geometry, {fixed})")
-        if is_polygon:
-            fixed_struct = self._run_alg_safe(
-                "deletecolumn", "native", INPUT=fixed_struct, COLUMN=[_RING_FIELD])
+            OUTPUT_GEOMETRY={0: 2, 1: 1, 2: 0}.get(geometry_type, 0), EXPRESSION=repair)
         self._check_cancel()
         reprojected = self._run_alg_safe(
             "reprojectlayer", "native",
             INPUT=fixed_struct,
             TARGET_CRS=QgsCoordinateReferenceSystem(f"EPSG:{_EPSG_CRS}"),
         )
+        if is_polygon:
+            # A valid polygon can cross itself once reprojected (edges that
+            # nearly touch): the tile writer clipped such a ring into whole
+            # tiles filled with its colour. Repaired again, the same way.
+            reprojected = self._run_alg_safe(
+                "geometrybyexpression", "native", INPUT=reprojected, OUTPUT_GEOMETRY=0,
+                EXPRESSION=repair)
+            reprojected = self._run_alg_safe(
+                "deletecolumn", "native", INPUT=reprojected, COLUMN=[_RING_FIELD])
         orig_id = self._run_alg_safe(
             "fieldcalculator", "native",
             INPUT=reprojected,
