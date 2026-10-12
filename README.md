@@ -42,7 +42,13 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.34.0**. Newest first:
+This README describes QWebMap **4.34.1**. Newest first:
+
+**4.34.1** — names and expressions that broke the export
+- Field names with a double quote, filter fields with capital letters, expressions ending in a
+  `-- comment`, a backslash wrap character, invalid whole-word label replacements, `$area` after a
+  comment, heatmap weights from text fields and export folders with special characters no longer
+  drop layers or labels or stop the export.
 
 **4.34.0** — huge exports finish, map-view expressions, export fixes
 - **Huge exports of coarse data finish:** when the tiles would be far too many (over 200,000),
