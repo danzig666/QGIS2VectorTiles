@@ -97,6 +97,9 @@ def test_map_theme_selects_layers_and_becomes_a_view(setup):
     dialog._apply_theme(publish=True)  # pylint: disable=protected-access
     assert items[parcels.id()].checkState(1) == CHECKED and items[ortho.id()].checkState(1) == CHECKED
     assert items[zones.id()].checkState(1) == UNCHECKED  # hidden in the theme: not published
+    # ... and the theme is offered as a view of the web map.
+    assert dialog.themes_list.item(0).text() == "Csak telkek"
+    assert dialog.themes_list.item(0).checkState() == CHECKED
     # Additive: a second theme publishes its layers too and unpublishes none.
     root = project.layerTreeRoot()
     for layer, shown in ((parcels, False), (zones, True), (ortho, False)):

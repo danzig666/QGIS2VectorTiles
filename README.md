@@ -42,7 +42,14 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.34.1**. Newest first:
+This README describes QWebMap **4.35.0**. Newest first:
+
+**4.35.0** — views that fit, a closed map panel
+- **Map theme views that do not fit** in one row of the web map become a drop-down instead of
+  buttons running off the screen.
+- **Map panel closed at start** (Interaction, off by default): the web map opens with more of the
+  map on screen; the menu button opens the panel.
+- **Publish its layers** on a map theme also offers that theme as a view of the web map.
 
 **4.34.1** — names and expressions that broke the export
 - Field names with a double quote, filter fields with capital letters, expressions ending in a

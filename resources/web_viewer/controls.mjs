@@ -113,7 +113,10 @@ function buildPanel(manifest) {
     }, { passive: true });
     handle.addEventListener("touchend", () => { startY = null; });
   }
-  setOpen(!isMobile() && !document.body.classList.contains("q2vt-embed"));
+  // Open at start on wide screens, unless the publisher chose a closed
+  // panel (more of the map on screen) or the map is embedded.
+  setOpen(!isMobile() && !document.body.classList.contains("q2vt-embed")
+          && manifest.interaction?.panelClosed !== true);
   return { panes: result, select, setOpen };
 }
 
@@ -276,12 +279,44 @@ function themeBar(manifest, state) {
     bar.append(chip);
     return [preset, chip];
   });
+  // Too many views for one row: a drop-down instead of buttons running off
+  // the screen (the bar does not scroll visibly).
+  const select = el("select", "q2vt-theme-select");
+  select.setAttribute("aria-label", t("app.themes"));
+  const none = el("option", "", "—");
+  none.value = "";
+  none.disabled = true;
+  select.append(none, ...list.map((preset) => {
+    const option = el("option", "", preset.title);
+    option.value = preset.id;
+    return option;
+  }));
+  select.addEventListener("change", () => { if (select.value) state.applyTheme(select.value); });
+  select.hidden = true;
+  bar.append(select);
   const sync = () => {
-    for (const [preset, chip] of chips) chip.setAttribute("aria-pressed", String(presetMatches(manifest, state.value, preset)));
+    let current = "";
+    for (const [preset, chip] of chips) {
+      const on = presetMatches(manifest, state.value, preset);
+      chip.setAttribute("aria-pressed", String(on));
+      if (on && !current) current = preset.id;
+    }
+    select.value = current;  // "" (—) when the layers match no view
+  };
+  const fit = () => {
+    for (const [, chip] of chips) chip.hidden = false;
+    select.hidden = true;
+    if (bar.scrollWidth > bar.clientWidth + 1) {
+      for (const [, chip] of chips) chip.hidden = true;
+      select.hidden = false;
+    }
   };
   state.onChange(sync);
   sync();
   bar.hidden = false;
+  fit();
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(fit).observe(bar);
+  else window.addEventListener("resize", fit);
   return bar;
 }
 
