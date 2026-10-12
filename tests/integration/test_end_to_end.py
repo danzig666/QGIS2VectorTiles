@@ -1373,3 +1373,39 @@ def test_quoted_names_and_commented_expressions_export(export, tmp_path):
     # Square C (no zone) is not drawn; A is pinned.
     assert {"A ex\ny", "B ex\ny"} <= labels and "C ex\ny" not in labels, labels
     assert 'my"field' in fields
+
+
+def test_output_folder_with_shell_and_url_characters(plugin, tmp_path, monkeypatch):
+    """An output folder named like "Maps & Data O'Brien\\x $(…)": the
+    result layer's MBTiles URI was cut at the "&" (an invalid layer, and
+    tiles.qlr pointing nowhere) and the launcher script split the paths
+    at the spaces (and would run the "$(…)")."""
+    import shlex
+    from qgis.core import QgsProject
+    from q2vt_plugin.src.qgis2vectortiles import QGIS2VectorTiles  # pylint: disable=import-error
+    layer = zoning_layer(path=str(tmp_path / "zoning.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
+    reset_project(layer)
+    out = tmp_path / "Maps & Data O'Brien\\x $(touch pwned)"
+    out.mkdir()
+    exporter = QGIS2VectorTiles(min_zoom=10, max_zoom=11, extent=EXTENT, output_dir=str(out),
+                                feedback=Feedback(), serve=False)
+    result = exporter.convert_project_to_vector_tiles()
+    assert result and result.startswith(str(out))
+    [tiles] = QgsProject.instance().mapLayersByName("Vector Tiles")
+    assert tiles.isValid(), tiles.source()
+    with open(os.path.join(result, "activate_server.sh"), encoding="utf-8") as handle:
+        [line] = [l for l in handle.read().splitlines() if "tiles_server.py" in l]
+    command = shlex.split(line)
+    assert command[1] == os.path.join(result, "utils", "tiles_server.py"), line
+    assert command[2:] == ["--port", command[3], "&"]
+    # The Windows batch file: the paths in double quotes, % doubled.
+    from q2vt_plugin.src.core import server_initializer  # pylint: disable=import-error
+    monkeypatch.setattr(server_initializer.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(server_initializer.ServerInitializer, "_get_python_exe",
+                        staticmethod(lambda: "C:\\Q%GIS%\\pythonw3.exe"))
+    server_initializer.ServerInitializer(EXTENT, 10, 0, result, 11).serve_tiles(launch=False)
+    with open(os.path.join(result, "utils", "activate_server.bat"), encoding="utf-8") as handle:
+        batch = handle.read()
+    server = os.path.join(result, "utils", "tiles_server.py")
+    assert f'"C:\\Q%%GIS%%\\pythonw3.exe" "{server}" --port' in batch, batch

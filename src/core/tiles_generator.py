@@ -35,7 +35,7 @@ from os import cpu_count
 from os.path import join, basename
 from typing import Dict, List, Optional, Tuple
 from osgeo import ogr
-from qgis.core import QgsVectorLayer, QgsProcessingFeedback, QgsProcessingUtils
+from qgis.core import QgsDataSourceUri, QgsVectorLayer, QgsProcessingFeedback, QgsProcessingUtils
 
 from ..utils import main_thread
 from ..utils.config import _EPSG_CRS, _SIMPLIFICATION, _SIMPLIFICATION_MAX_ZOOM
@@ -44,6 +44,16 @@ from . import export_cache
 from .datasets import drop_fields, gpkg_info
 
 _MVT_MAX_ZOOM = 22
+
+
+def mbtiles_uri(path: str) -> str:
+    """Vector tile layer URI of an MBTiles file, the path encoded as QGIS
+    decodes it (an output folder named "Maps & Data" cut the plain path
+    short at the "&")."""
+    uri = QgsDataSourceUri()
+    uri.setParam("type", "mbtiles")
+    uri.setParam("url", path)
+    return bytes(uri.encodedUri()).decode()
 
 
 class TilesGenerationCancelled(RuntimeError):
@@ -784,7 +794,7 @@ class GDALTilesGenerator:
 
     def _prepare_output_paths(self) -> Tuple[str, str]:
         output = join(self.output_dir, "tiles.mbtiles")
-        return output, f"type=mbtiles&url={output}"
+        return output, mbtiles_uri(output)
 
     def _layer_zoom_range(self, layer: QgsVectorLayer) -> Tuple[int, int]:
         name = self._layer_name(layer)
