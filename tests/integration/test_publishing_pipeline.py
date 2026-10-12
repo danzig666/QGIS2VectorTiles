@@ -334,6 +334,43 @@ def test_nothing_drawn_stops_with_the_cause(project, tmp_path, monkeypatch):
     assert "MBTiles" not in error.value.message
 
 
+@pytest.mark.parametrize("name,all_fields", [("Zóna", False), ("Zóna", True), ('my"zone', False)])
+def test_filter_fields_keep_their_names_in_the_tiles(plugin, tmp_path, name, all_fields):
+    """A filter field with an upper-case letter was left out of the tiles
+    (the work copy of the layer has its field names lower-cased), one with a
+    double quote stopped the export: its reference did not parse."""
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "Zónák", "memory")
+    layer.dataProvider().addAttributes([QgsField("hrsz", QVariant.String),
+                                        QgsField(name, QVariant.String)])
+    layer.updateFields()
+    for (fid, zone, wkt), hrsz in zip(SQUARES, PARCELS):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([hrsz, zone])
+        feature.setGeometry(QgsGeometry.fromWkt(wkt))
+        layer.dataProvider().addFeatures([feature])
+    saved = to_geopackage(layer, str(tmp_path / "zones.gpkg"))
+    saved.setRenderer(QgsCategorizedSymbolRenderer(name, [
+        QgsRendererCategory(value, QgsFillSymbol.createSimple({"color": "red"}), value, True)
+        for value in ("K1", "K2", "Lk")]))
+    project = reset_project(saved)
+    profile = PublicationProfile(title="Zónák", slug="zonak", locale="hu")
+    profile.view.min_zoom, profile.view.max_zoom = 11, 12
+    profile.output.local_directory = str(tmp_path / "out")
+    profile.output.include_all_fields = all_fields
+    profile.layers = [LayerConfig(saved.id(), key_fields=["hrsz"],
+                                  filter_fields=[FilterField(name, "values", "Övezet")])]
+    result = export_local(project, profile, EXTENT)
+    values, props = set(), set()
+    with open_pmtiles(os.path.join(result.release.release_dir, "data", "map.pmtiles")) as archive:
+        for _, data in archive.tiles():
+            for info in mvt.decode(data).values():
+                for feature in info["features"]:
+                    props.update(feature["properties"])
+                    values.add(feature["properties"].get(name))
+    assert values == {"K1", "K2", "Lk"}
+    assert [p for p in props if p.lower() == name.lower()] == [name]  # once, its own name
+
+
 def test_membership_of_filters_ending_in_a_comment(plugin):
     """The features a layer's rules draw, their filters OR-ed: a filter
     ending in "-- note" swallowed the rest (no records, silently)."""

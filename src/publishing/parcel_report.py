@@ -289,7 +289,8 @@ def guess_zone_field(layer) -> str:
     if labeling is not None:
         try:
             settings = labeling.settings()
-            expressions.append(settings.fieldName if settings.isExpression else f'"{settings.fieldName}"')
+            expressions.append(settings.fieldName if settings.isExpression
+                               else QgsExpression.quotedColumnRef(settings.fieldName))
         except (AttributeError, TypeError):
             pass
     for text in expressions:

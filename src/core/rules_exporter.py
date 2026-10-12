@@ -2874,7 +2874,7 @@ class RulesExporter:
             if tmp.isValid():
                 for f in tmp.fields():
                     if 'ogc_fid' not in f.name().lower() and f.name() != PART_FIELD:
-                        mapping.append((f.type(), f'"{f.name()}"', f.name()))
+                        mapping.append((f.type(), QgsExpression.quotedColumnRef(f.name()), f.name()))
 
 
         mapping.append(
@@ -2903,9 +2903,16 @@ class RulesExporter:
                 if grp.rule_type == 1 and grp.source_geometry == 2:
                     mapping.extend(LABEL_ANCHOR_FIELDS)
                 continue
-            index = source_fields.indexFromName(name)
+            # The base layer can hold the field under another case (OGR's
+            # SQLite driver lowercases names): read under its name there,
+            # written under the name the publication asked for.
+            index = source_fields.lookupField(name)
             if index >= 0 and name not in [m[2] for m in mapping]:
-                mapping.append((source_fields.at(index).type(), f'"{name}"', name))
+                column = source_fields.at(index).name()
+                reference = QgsExpression.quotedColumnRef(column)
+                # The same column copied with every field: once, published name.
+                mapping = [m for m in mapping if m[1:] != (reference, column)]
+                mapping.append((source_fields.at(index).type(), reference, name))
         for anchor in (mat.ANCHOR_X_FIELD, mat.ANCHOR_Y_FIELD):
             if source_fields.indexFromName(anchor) >= 0:
                 mapping.append((6, f'"{anchor}"', anchor))
@@ -3523,7 +3530,7 @@ class RulesExporter:
         field_name = f"{_FIELD_PREFIX}_label"
         settings = flat_rule.rule.settings()
         filter_exp = (
-            f'"{label_exp}"'
+            QgsExpression.quotedColumnRef(label_exp)
             if not settings.isExpression
             else enclosed(label_exp)
         )
@@ -3531,8 +3538,7 @@ class RulesExporter:
             filter_exp = self._substituted(filter_exp, settings.substitutions)
         wrap = settings.wrapChar
         if wrap:  # QGIS breaks the line at every wrap character
-            quoted = wrap.replace("'", "''")
-            filter_exp = f"replace({filter_exp}, '{quoted}', '\n')"
+            filter_exp = f"replace({filter_exp}, {QgsExpression.quotedString(wrap)}, '\n')"
         if not settings.format().allowHtmlFormatting():
             from .maplibre_converter import TextPropertyExtractor  # pylint: disable=import-outside-toplevel
             spaces = TextPropertyExtractor.word_spacing_spaces(settings.format())

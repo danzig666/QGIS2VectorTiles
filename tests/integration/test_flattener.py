@@ -1280,3 +1280,28 @@ def test_rule_filters_ending_in_a_comment_combine(flattener):
         ids = {f["id"] for f in layer.getFeatures(QgsFeatureRequest(expression))}
         matched.setdefault(rule.rule.symbol().color().name(), set()).update(ids)
     assert matched == {"#ffffff": {"A", "B", "D"}, "#ff0000": {"A"}, "#0000ff": {"B", "D"}}
+
+
+def test_heatmap_weight_from_a_text_field_is_quoted_and_converted(plugin):
+    """A heatmap weighted by a text field named "peso relativo" handed the
+    bare name on as an expression (no parse); QGIS reads the attribute as a
+    number, 1 when it is none."""
+    from qgis.core import (QgsExpressionContext, QgsExpressionContextUtils, QgsFeature, QgsField,
+                           QgsHeatmapRenderer, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener  # pylint: disable=import-error
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "pts", "memory")
+    layer.dataProvider().addAttributes([QgsField("peso relativo", QVariant.String)])
+    layer.updateFields()
+    heatmap = QgsHeatmapRenderer()
+    heatmap.setWeightExpression("peso relativo")
+    weight = QgsExpression(RulesFlattener._heatmap_weight(heatmap, layer.fields()))
+    assert not weight.hasParserError(), weight.expression()
+    context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+    values = []
+    for value in ("2.5", "abc", None):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([value])
+        context.setFeature(feature)
+        values.append(weight.evaluate(context))
+    assert values == [2.5, 1, 1]

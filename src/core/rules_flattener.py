@@ -676,9 +676,14 @@ class RulesFlattener:
         expression = QgsExpression(weight)
         if index < 0 and expression.isField():  # a quoted field name
             index = fields.lookupField(next(iter(expression.referencedColumns())))
-        if index >= 0 and fields.at(index).isNumeric():
-            return f"coalesce({QgsExpression.quotedColumnRef(fields.at(index).name())}, 0)"
-        return weight
+        if index < 0:
+            return weight
+        column = QgsExpression.quotedColumnRef(fields.at(index).name())
+        if fields.at(index).isNumeric():
+            return f"coalesce({column}, 0)"
+        # A text field: its value converted as QGIS does (toDouble), 1 when it
+        # is no number.
+        return f"coalesce(try(to_real({column})), 1)"
 
     @classmethod
     def _heatmap_placeholder(cls, heatmap, fields):
