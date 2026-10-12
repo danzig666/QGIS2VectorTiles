@@ -89,7 +89,7 @@ from dataclasses import dataclass, field
 from os.path import exists, join
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from uuid import uuid4
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QRegularExpression, QVariant
 from processing import run as run_processing
 from qgis.core import (
     Qgis,
@@ -3588,10 +3588,16 @@ class RulesExporter:
                 # QGIS builds QRegularExpression("\\b%1\\b") from the match
                 # unescaped (it is a pattern), and its \\b knows only ASCII word
                 # characters ("Zöld" has a boundary after the Z). regexp_replace's
-                # \\b is Unicode-aware, so QGIS's boundary is spelt out.
+                # \\b is Unicode-aware, so QGIS's boundary is spelt out, where
+                # QGIS puts its \\b ("a|b" is "\\ba" or "b\\b").
                 word = "[A-Za-z0-9_]"
                 boundary = (f"(?:(?<={word})(?!{word})|(?<!{word})(?={word}))")
-                pattern = f"{boundary}(?:{match}){boundary}"
+                pattern = f"{boundary}{match}{boundary}"
+                if not (QRegularExpression(f"\\b{match}\\b").isValid()
+                        and QRegularExpression(pattern).isValid()):
+                    # QString::replace leaves the text as it is; regexp_replace
+                    # would fail and drop the label.
+                    continue
             else:
                 pattern = regex_escape(match)
             if not replacement.caseSensitive():

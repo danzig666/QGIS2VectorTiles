@@ -288,6 +288,27 @@ def test_label_text_replacements_match_qgis(plugin):
         assert expression.evaluate(QgsExpressionContext()) == collection.process(text), text
 
 
+def test_label_whole_word_replacements_are_patterns_as_in_qgis(plugin):
+    """QGIS puts its word boundaries around the whole-word match as written
+    ("a|b" is "\\ba" or "b\\b") and skips a match that is no valid pattern
+    ("St.(": QString::replace leaves the text); regexp_replace failed on it
+    and the label had no text."""
+    from qgis.core import (QgsExpression, QgsExpressionContext, QgsStringReplacement,
+                           QgsStringReplacementCollection)
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
+    collection = QgsStringReplacementCollection([
+        QgsStringReplacement("St.(", "Saint", True, True),
+        QgsStringReplacement("[A", "?", False, True),
+        QgsStringReplacement("a|b", "X", True, True),
+        QgsStringReplacement("St.", "Str.", False, True),
+    ])
+    for text in ["St.( Ana", "ab ba", "xa bx", "a-b", "St. Ana [A", ""]:
+        literal = QgsExpression.quotedString(text)
+        expression = QgsExpression(RulesExporter._substituted(literal, collection))
+        assert not expression.hasParserError(), expression.parserErrorString()
+        assert expression.evaluate(QgsExpressionContext()) == collection.process(text), text
+
+
 def test_map_unit_translate_grows_with_the_map(mc):
     """A fill offset in map units drawn with a translate (a map unit scale
     limits it) is a zoom curve of [x, y] reaching past the last tile zoom,

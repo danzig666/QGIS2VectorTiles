@@ -1288,3 +1288,88 @@ def test_shapeburst_with_a_data_defined_colour_colours_each_feature(export, tmp_
     by_zone = {names[int(i)]: colour for i, colour in outer.items()}
     assert by_zone["K1"].upper().startswith("#F") and by_zone["K1"][1:3].upper() >= "F0"
     assert by_zone["K2"][5:7].upper() >= "F0" and by_zone["K2"][1:3].upper() < "40"
+
+
+def _commented_layer(path):
+    """Zoning squares with a field named my"field (values like "A x\\y"),
+    drawn and labelled through expressions that end in "-- comments"."""
+    from qgis.core import (QgsField, QgsGeometryGeneratorSymbolLayer, QgsLineSymbol,
+                           QgsRuleBasedRenderer, QgsStringReplacement,
+                           QgsStringReplacementCollection, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QVariant
+    from q2vt_fixtures import SQUARES, to_geopackage
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "commented", "memory")
+    layer.dataProvider().addAttributes([QgsField("zone", QVariant.String),
+                                        QgsField('my"field', QVariant.String)])
+    layer.updateFields()
+    for fid, zone, wkt in SQUARES:
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([zone, f"{fid} x\\y"])
+        feature.setGeometry(QgsGeometry.fromWkt(wkt))
+        layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, path)
+    fill = QgsFillSymbol.createSimple({"color": "white"})
+    fill.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                               QgsProperty.fromExpression("color_rgb(255, 0, 0) -- red"))
+    ring = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "boundary(buffer($geometry, -100)) -- ring", "SymbolType": "Line"})
+    line = QgsLineSymbol.createSimple({"color": "black"})
+    line.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.PropertyStrokeWidth,
+                                               QgsProperty.fromExpression("length($geometry) / 4000 -- w"))
+    ring.setSubSymbol(line)
+    fill.appendSymbolLayer(ring)
+    root = QgsRuleBasedRenderer.Rule(None)
+    zoned = QgsRuleBasedRenderer.Rule(None, 0, 0, '"zone" IS NOT NULL -- zoned')
+    zoned.appendChild(QgsRuleBasedRenderer.Rule(fill, 0, 0, "\"zone\" <> 'Lk' -- not Lk"))
+    root.appendChild(zoned)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = 'my"field'
+    settings.isExpression = False
+    settings.wrapChar = "\\"
+    settings.useSubstitutions = True
+    settings.substitutions = QgsStringReplacementCollection([
+        QgsStringReplacement("St.(", "?", True, True),  # no valid pattern: QGIS skips it
+        QgsStringReplacement("x", "ex", True, True)])
+    settings.placement = Qgis.LabelPlacement.OverPoint
+    props = settings.dataDefinedProperties()
+    props.setProperty(QgsPalLayerSettings.Property.PositionX, QgsProperty.fromExpression(
+        "if(\"zone\" = 'K1', x(centroid($geometry)) + 200, NULL) -- moved"))
+    props.setProperty(QgsPalLayerSettings.Property.PositionY, QgsProperty.fromExpression(
+        "if(\"zone\" = 'K1', y(centroid($geometry)) + 200, NULL) -- moved"))
+    settings.setDataDefinedProperties(props)
+    fmt = QgsTextFormat()
+    fmt.setSize(10)
+    settings.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    return layer
+
+
+def test_quoted_names_and_commented_expressions_export(export, tmp_path):
+    """A field named my"field (label text, copied with every field) and
+    expressions ending in "-- comment" (rule filters, colour, generator and
+    its per-part width, label position), as QGIS accepts them: the field
+    reference and the wrappers around them did not parse and the rules
+    exported nothing. A wrap character "\\" and a whole-word replacement
+    that is no valid pattern (QGIS skips it) broke the label text."""
+    import sqlite3
+    from publishing import mvt
+    layer = _commented_layer(str(tmp_path / "commented.gpkg"))
+    exporter, result = export(layer, include_required_fields_only=1)
+    assert result
+    for code in ("Q2VT_RULE_EXPORT_FAILED", "Q2VT_EXPR_INVALID", "Q2VT_EXPORT_EMPTY"):
+        assert not exporter.diagnostics.by_code(code), exporter.diagnostics.by_code(code)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    assert {"fill", "line", "symbol"} <= {l["type"] for l in style["layers"]}
+    labels, fields = set(), set()
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as conn:
+        for (data,) in conn.execute("SELECT tile_data FROM tiles"):
+            for tile in mvt.decode(data).values():
+                for feature in tile["features"]:
+                    fields.update(feature["properties"])
+                    if "q2vt_label" in feature["properties"]:
+                        labels.add(feature["properties"]["q2vt_label"])
+    # Square C (no zone) is not drawn; A is pinned.
+    assert {"A ex\ny", "B ex\ny"} <= labels and "C ex\ny" not in labels, labels
+    assert 'my"field' in fields
