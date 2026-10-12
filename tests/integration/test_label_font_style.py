@@ -177,3 +177,30 @@ def test_frame_padding_of_map_unit_text_keeps_the_buffer(plugin):
     buffer_x, buffer_y = 1.4 * 96 / 25.4, 0.7 * 96 / 25.4
     assert layer_def["layout"]["icon-text-fit-padding"] == pytest.approx(
         [2 * buffer_y, 2 * buffer_x, 2 * buffer_y, 2 * buffer_x], abs=1e-3)
+
+
+@pytest.mark.parametrize("word, letter", [(20.0, 0.0), (20.0, 0.375), (6.0, 0.0), (0.0, 0.0), (-2.0, 0.0)])
+def test_word_spacing_becomes_wider_spaces(extractor, word, letter):
+    """QGIS word spacing (absolute, in the text size's units) widens every
+    space; MapLibre has none, so a space of the label text stands for as
+    many spaces as come nearest to its width in QGIS (labels of streets with
+    20 pt word spacing at 9 pt were set tight on the web)."""
+    from qgis.PyQt.QtGui import QFontMetricsF
+    text_format = _format()
+    font = text_format.font()
+    font.setWordSpacing(word)
+    if letter:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, letter)
+    text_format.setFont(font)
+    text_format.setSize(9.0)
+    spaces = extractor.word_spacing_spaces(text_format)
+    if word <= 0:
+        assert spaces == 0
+        return
+    probe = QFont(text_format.font())
+    probe.setPixelSize(100)
+    probe.setWordSpacing(0.0)
+    probe.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0)
+    space = QFontMetricsF(probe).horizontalAdvance(" ") / 100 + letter / 9
+    # The nearest whole number of spaces to QGIS's extra width.
+    assert abs(spaces * space - word / 9) <= space / 2 + 1e-9

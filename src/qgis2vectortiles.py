@@ -741,7 +741,8 @@ class QGIS2VectorTiles:
             visible_polygons={rule.rule.description(): (rule.visible_polygons,
                                                         rule.label_per_part,
                                                         getattr(rule, "visible_kind", "polygon"),
-                                                        bool(getattr(rule, "merge_lines", False)))
+                                                        bool(getattr(rule, "merge_lines", False)),
+                                                        bool(getattr(rule, "line_curved", False)))
                               for rule in rules or [] if getattr(rule, "visible_polygons", None)},
             lengths=self.lengths,
             ordered_styles={rule.rule.description() for rule in rules or []

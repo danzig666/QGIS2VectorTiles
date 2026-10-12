@@ -1449,3 +1449,138 @@ console.log(JSON.stringify({{ count: candidates.length, onParcel, inHole }}));
     assert result["count"] >= 40 and result["onParcel"] == 0, result
     if hole:
         assert result["inHole"] > 0, result
+
+
+# QGIS Curved placement on lines: the label is laid out along the piece of
+# its line under it (MapLibre "line-center"), bent with the line.
+CURVED = {"perPx": 0.0001, "scale": 1.5, "maxAngle": 25}
+
+
+def _curved(lines, view, box, curved=None):
+    """labelPoints geometries {id: geometry} of curved line labels."""
+    script = f"""
+import {{ labelPoints, newLabelState }} from {json.dumps('file://' + MODULE)};
+const maplibregl = {{ MercatorCoordinate: class {{
+  constructor(x, y) {{ this.x = x; this.y = y; }}
+  toLngLat() {{ return {{ lng: this.x, lat: this.y }}; }} }} }};
+const features = {json.dumps(lines)}.map(([id, points]) => ({{
+  _x: 0, _y: 0, _z: 0, properties: {{ q2vt_orig_id: id }},
+  _vectorTileFeature: {{ extent: 4096, loadGeometry: () => [points.map(([x, y]) => ({{ x, y }}))] }} }}));
+const box = {json.dumps(box)};
+const out = labelPoints(features, {json.dumps(view)}, maplibregl, {{ kind: "line", state: newLabelState(),
+  labelBox: () => box, curved: {json.dumps(curved or CURVED)} }});
+console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, f.geometry])));
+"""
+    run = subprocess.run(["node", "--input-type=module", "-e", script],
+                         capture_output=True, text=True, check=True)
+    return {item[0]: item[1] for item in json.loads(run.stdout)}
+
+
+def _length(points):
+    return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+
+
+def _middle(points):
+    """The point halfway along a line (where MapLibre centres the label)."""
+    rest = _length(points) / 2
+    for a, b in zip(points, points[1:]):
+        step = math.dist(a, b)
+        if rest <= step:
+            return [a[0] + (b[0] - a[0]) * rest / step, a[1] + (b[1] - a[1]) * rest / step]
+        rest -= step
+    return points[-1]
+
+
+def test_curved_line_label_is_laid_out_along_its_line_round_a_bend():
+    """A road bending 27 degrees at the middle: QGIS lays the characters on
+    chords of the line, the bend shared by two of them, within its 25 degree
+    limit; the web label was a straight one turned to the line. Its piece of
+    line goes round the bend, half the label times the tile's scale (MapLibre
+    fits the label in tile pixels and dropped it from a shorter piece) and
+    some room on either side."""
+    turn = math.radians(27)
+    end = [2048 + 2048 * math.cos(turn), 2048 - 2048 * math.sin(turn)]
+    box = [0.05, 0.01]
+    geometry = _curved([(1, [[0, 2048], [2048, 2048], end])], [0, 0, 1, 1], box)[1]
+    assert geometry["type"] == "LineString"
+    points = geometry["coordinates"]
+    assert [0.5, 0.5] in points[1:-1]  # round the bend
+    reach = (box[0] * 1.1 + 4 * CURVED["perPx"]) * CURVED["scale"]
+    assert _length(points) == pytest.approx(2 * reach)
+
+
+def test_curved_line_label_keeps_off_a_corner_sharper_than_qgis_allows():
+    # A right angle at the middle: QGIS puts the label on one of the legs.
+    box = [0.05, 0.01]
+    geometry = _curved([(1, [[0, 2048], [2048, 2048], [2048, 0]])], [0, 0, 1, 1], box)[1]
+    assert math.dist(_middle(geometry["coordinates"]), [0.5, 0.5]) >= box[0] - box[1]
+    # Without a limit (0) the corner does not count.
+    free = _curved([(1, [[0, 2048], [2048, 2048], [2048, 0]])], [0, 0, 1, 1], box,
+                   {**CURVED, "maxAngle": 0})[1]
+    assert [0.5, 0.5] in free["coordinates"]
+
+
+def test_curved_line_label_piece_runs_on_past_a_short_line():
+    """A line just long enough for the label on the screen, but not in tile
+    pixels (zoom 17.9: the tile is drawn 1.87 times its size): the piece
+    runs on straight past the line's ends."""
+    box = [0.1, 0.01]
+    line = [[1500, 2048], [2596, 2048]]  # 0.268 long, the label 0.2
+    curved = {**CURVED, "scale": 2}
+    points = _curved([(1, line)], [0, 0, 1, 1], box, curved)[1]["coordinates"]
+    reach = (box[0] * 1.1 + 4 * curved["perPx"]) * curved["scale"]
+    assert points[0] == pytest.approx([0.5 - reach, 0.5]) and points[-1] == pytest.approx([0.5 + reach, 0.5])
+    assert all(y == pytest.approx(0.5) for _, y in points)
+
+
+def test_curved_label_source_is_not_overzoomed():
+    # MapLibre fits a line label in tile pixels: an overzoomed tile (drawn
+    # 2^n times its size) needed a piece of line 2^n times the label.
+    assert _js("[22, 23.99, 26, 10].map(m.curvedMaxzoom)") == [22, 24, 24, 15]
+    scales = _js("[17.5, 21, 23.5].map((z) => m.curvedScale({getMaxZoom: () => 22}, z))")
+    assert scales == pytest.approx([2 ** 0.5, 1, 2 ** 1.5])
+
+
+def test_curved_line_layer_is_bent_by_maplibre_and_keeps_its_side():
+    """The moved layer of a curved line label: "line-center" on its piece of
+    line, upright, MapLibre's own angle check off (the bends are judged as
+    QGIS does), and a label above its line keeps its bottom anchor (it was
+    centred on the line)."""
+    expr = """(() => {
+      const road = {id: 'road', type: 'symbol', source: 't', 'source-layer': 'roads',
+        layout: {'text-field': ['get', 'name'], 'text-size': 12, 'text-anchor': 'bottom',
+                 'text-rotate': ['get', 'rot'], 'text-max-angle': 25},
+        metadata: {'q2vt:visible-polygons': 'roads', 'q2vt:visible-kind': 'line', 'q2vt:line-curved': true}};
+      const layers = [road], sources = {t: {type: 'vector', minzoom: 0, maxzoom: 14}};
+      const map = {
+        getStyle: () => ({sources, layers: layers.slice()}), getLayer: (id) => layers.find((l) => l.id === id),
+        addLayer: (l) => layers.push(l), removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
+        addSource: (id, spec) => { sources[id] = spec; }, getSource: () => ({setData: () => {}}),
+        getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},
+        isMoving: () => false, isSourceLoaded: () => true, getZoom: () => 0, getMaxZoom: () => 22,
+        getContainer: () => ({clientWidth: 1000}),
+        getBounds: () => ({getSouthWest: () => ({lng: 0, lat: 1}), getNorthEast: () => ({lng: 1, lat: 0})}),
+        querySourceFeatures: () => [], queryRenderedFeatures: () => [],
+      };
+      const maplibregl = {MercatorCoordinate: class {
+        constructor(x, y) { this.x = x; this.y = y; }
+        static fromLngLat(ll) { return Array.isArray(ll) ? new this(ll[0], ll[1]) : new this(ll.lng, ll.lat); }
+        toLngLat() { return {lng: this.x, lat: this.y}; } }};
+      m.enableVisibleLabels(map, maplibregl, 't');
+      const moved = layers.find((l) => l.id === 'road');
+      return [sources[moved.source], moved.layout];
+    })()"""
+    source, layout = _js(expr)
+    assert source["buffer"] == 512 and source["maxzoom"] == 22
+    assert layout["symbol-placement"] == "line-center" and layout["text-keep-upright"] is True
+    assert layout["text-rotation-alignment"] == "map" and "text-rotate" not in layout
+    assert layout["text-max-angle"] == 179 and layout["text-anchor"] == "bottom"
+
+
+def test_curved_line_label_piece_runs_left_to_right():
+    """A line drawn right to left: its piece is written left to right, so
+    MapLibre need not turn the label upside up (which put an "above the
+    line" label below it)."""
+    box = [0.05, 0.01]
+    points = _curved([(1, [[3000, 2048], [1000, 2100]])], [0, 0, 1, 1], box)[1]["coordinates"]
+    assert points[0][0] < points[-1][0]
