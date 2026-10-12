@@ -144,6 +144,9 @@ class RulesFlattener:
         # Layers whose renderer draws features (not "No symbols"): QGIS
         # labels only the features drawn.
         self._drawn_layers = set()
+        # Renderer rules whose symbol draws nothing (no brush, no pen): no
+        # tiles, but QGIS renders their features and labels them.
+        self._invisible_rules: List[FlattenedRule] = []
 
     def flatten_all_rules(self) -> List[FlattenedRule]:
         """Extract and flatten all rules from visible vector layers."""
@@ -1157,6 +1160,8 @@ class RulesFlattener:
         if rule_type == 0:
             self._draw_seq += 1
         split_rules = self._split_rule(flat_rule, rule_type)
+        if rule_type == 0 and not split_rules and flat_rule.rule.symbol() is not None:
+            self._invisible_rules.append(flat_rule)
         if rule_type == 1:
             split_rules = [part for rule in split_rules for part in self._split_pinned_labels(rule)]
         self._clip_rules_to_zoom_range(split_rules)
@@ -2261,7 +2266,7 @@ class RulesFlattener:
         slice's bound filter labelled the features of the first zoom at
         every zoom)."""
         groups: Dict[tuple, list] = {}
-        for renderer_rule in self.flattened_rules:
+        for renderer_rule in self.flattened_rules + self._invisible_rules:
             if renderer_rule.layer.id() != layer.id() or renderer_rule.get_attr("t") == 1:
                 continue
             if renderer_rule.recipe is not None and renderer_rule.recipe.kind == "callout":

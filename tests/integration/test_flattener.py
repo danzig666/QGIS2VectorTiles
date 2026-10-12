@@ -1305,3 +1305,27 @@ def test_heatmap_weight_from_a_text_field_is_quoted_and_converted(plugin):
         context.setFeature(feature)
         values.append(weight.evaluate(context))
     assert values == [2.5, 1, 1]
+
+
+def test_features_of_an_invisible_else_rule_are_labelled(flattener):
+    """A rule-based renderer's ELSE rule with a symbol that draws nothing (no
+    fill, no outline): QGIS renders its features, invisibly, and labels
+    them. The rule exported nothing, so its features got no labels (most
+    zone codes of a plan missing)."""
+    from qgis.core import QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    layer = zoning_layer()
+    rule_based(layer, [("first", "\"zone\" = 'K1'", 0, 0, True, "255,0,0"),
+                       ("rest", "ELSE", 0, 0, True, "0,0,255")])
+    rest = layer.renderer().rootRule().children()[1].symbol().symbolLayer(0)
+    assert isinstance(rest, QgsSimpleFillSymbolLayer)
+    rest.setBrushStyle(Qt.BrushStyle.NoBrush)
+    rest.setStrokeStyle(Qt.PenStyle.NoPen)
+    _simple_labels(layer)
+    reset_project(layer)
+    rules, _ = flattener(0, 16)
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    everyone = sorted(f["id"] for f in layer.getFeatures())
+    assert labels and all(sorted(_matching_ids(layer, r.rule.filterExpression())) == everyone
+                          for r in labels)
+    assert not any(r.get_attr("t") == 0 and r.get_attr("r") == 1 for r in rules)  # nothing drawn
