@@ -201,6 +201,8 @@ class RulesFlattener:
 
     def _is_valid_layer(self, layer) -> bool:
         """Return True if the layer is a visible non-geometry-collection vector layer."""
+        if layer is None:  # a legend entry whose layer QGIS could not create
+            return False
         is_vector = layer.type() == 0 and layer.geometryType() != 4
         if self.layer_ids is not None:
             return is_vector and layer.id() in self.layer_ids

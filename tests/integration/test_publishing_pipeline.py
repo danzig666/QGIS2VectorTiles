@@ -386,3 +386,15 @@ def test_membership_of_filters_ending_in_a_comment(plugin):
     expression = QgsExpression(membership)
     assert not expression.hasParserError(), membership
     assert expression.referencedColumns() == {"tipo"}
+
+
+def test_legend_entry_without_its_layer_does_not_stop_the_export(project, tmp_path):
+    """A virtual layer QGIS could not create (its source missing) leaves a
+    legend entry without a layer: the export stopped ('NoneType' object has
+    no attribute 'id')."""
+    from qgis.core import QgsLayerTreeLayer
+    project, parcels = project
+    project.layerTreeRoot().addChildNode(QgsLayerTreeLayer("vlayer_missing", "virtual clip"))
+    assert any(n.layer() is None for n in project.layerTreeRoot().findLayers())
+    result = export_local(project, _profile(parcels, tmp_path), EXTENT)
+    assert result.state.value == "LOCAL_READY"
