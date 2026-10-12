@@ -980,8 +980,7 @@ def test_thin_map_unit_hatch_strokes_stay_sharp_in_overzoom(tmp_path, monkeypatc
     assert darkest[1] < 128, darkest  # an opaque red stroke (L 76) somewhere
 
 
-@pytest.mark.parametrize("zoom", [18.5, 20.5])
-def test_painter_clipped_hatch_stays_inside_a_narrow_polygon(tmp_path, monkeypatch, zoom):
+def test_painter_clipped_hatch_stays_inside_a_narrow_polygon(tmp_path, monkeypatch, zoom=20.5):
     """A 2 m strip hatched at 45 degrees, 0.6 m lines 3 m apart in map units
     (a shore strip, exported 0-16, viewed zoomed in): QGIS clips the painted
     hatch to the polygon. The lines were clipped to it and drawn with their

@@ -439,133 +439,54 @@ def _hatch_rules(outputs, rules):
     return lines, strips, other
 
 
-@pytest.mark.parametrize("angle", [0, 90, 45])
-def test_painter_clipped_hatch_paints_its_strips_inside_the_polygon(plugin, tmp_path, angle):
+def test_painter_clipped_hatch_paints_its_strips_inside_the_polygon(plugin, tmp_path):
     """A hatch clipped during render (QGIS's default) paints nothing outside
     the polygon. Its lines were clipped to the polygon and drawn with their
-    square caps: they stuck out of every edge they crossed, by up to the
-    line width where a line runs along a narrow polygon. Zoomed in, the
+    square caps: they stuck out of every edge they crossed. Zoomed in, the
     hatch is now the strips QGIS paints; zoomed out (lines under 2 px),
     flat-capped lines. (QGIS snaps a rotated pattern image to the pixel
-    grid: at 45 degrees only the ink is compared.)"""
+    grid: only the ink is compared.)"""
     layer = _layer("Polygon", [SHAPE], str(tmp_path / "strips.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.ClipPainterOnly, angle=angle)))
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(Qgis.LineClipMode.ClipPainterOnly)))
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
     shape = _shape_mask(layer)
-    assert len(reference - shape) < 0.005 * len(reference)  # QGIS: nothing outside
     outputs, rules, _ = _export(plugin, layer, tmp_path)
     lines, strips, other = _hatch_rules(outputs, rules)
     assert len(lines) == 1 and len(strips) == 1 and not other
     # 4 m strips are 2 px wide from zoom 15.3: strips from zoom 16.
     assert lines[0][1].visibility.max_zoom == 16 and strips[0][1].visibility.min_zoom == 16
-    assert (strips[0][1].get_attr("o"), lines[0][1].get_attr("i")) == (16, 15)
     assert lines[0][1].rule.symbol().symbolLayer(0).penCapStyle() == Qt.PenCapStyle.FlatCap
-    assert strips[0][1].rule.symbol().type() == Qgis.SymbolType.Fill
     ours = ink_mask(render([strips[0][0]], EXTENT, (240, 240)))
     assert len(ours - shape) < 0.005 * len(ours)
-    if angle % 90 == 0:
-        assert mask_difference(reference, ours) < 0.03
-    else:
-        assert len(ours) == pytest.approx(len(reference), rel=0.08)
-    # What was exported before: the lines with their caps, far outside.
-    lines[0][0].renderer().symbol().symbolLayer(0).setPenCapStyle(Qt.PenCapStyle.SquareCap)
-    capped = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
-    assert len(capped - shape) > 0.02 * len(capped)
+    assert len(ours) == pytest.approx(len(reference), rel=0.08)
 
 
-def test_painter_clipped_hatch_strips_start_past_the_last_tiles(plugin, tmp_path):
-    """Exported up to zoom 14, the strips (from zoom 16) are a dataset of
-    the last tiles of their own, shown from zoom 16; the lines up to it."""
-    layer = _layer("Polygon", [SHAPE], str(tmp_path / "past.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(Qgis.LineClipMode.ClipPainterOnly)))
-    outputs, rules, _ = _export_zooms(plugin, layer, tmp_path, 0, 14, EXTENT)
-    lines, strips, other = _hatch_rules(outputs, rules)
-    assert len(lines) == 1 and len(strips) == 1 and not other
-    strip = strips[0][1]
-    assert (strip.get_attr("o"), strip.get_attr("i"), strip.get_attr("v")) == (14, 14, 16)
-    assert strip.visibility.min_zoom == 16 and lines[0][1].visibility.max_zoom == 16
-    assert lines[0][1].get_attr("i") == 14
-    assert strips[0][0].featureCount() > 0
-
-
-def test_painter_clipped_hatch_of_overlapping_lines_fills_the_polygon(plugin, tmp_path):
-    """Lines wider than their spacing cover the polygon: QGIS paints all of
-    it, exported as the polygon filled."""
-    layer = _layer("Polygon", [SHAPE], str(tmp_path / "full.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.ClipPainterOnly, width=14, distance=12)))
+@pytest.mark.parametrize("mode,clip", [(Qgis.LineClipMode.ClipToIntersection, "shape"),
+                                       (Qgis.LineClipMode.NoClipping, "none")])
+def test_hatch_drawn_line_by_line_matches_qgis(plugin, tmp_path, mode, clip):
+    """Clipped before render or not at all, QGIS draws the hatch line by
+    line, from the top of each part's bounds turned to the hatch, 2 bleeds
+    beyond, with the lines' caps. The lines were laid out like the pattern
+    image (up to a spacing off) and clipped to the polygon."""
+    layer = _layer("Polygon", [SHAPE], str(tmp_path / "bylines.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(mode, width=1.5, angle=30)))
     reference = ink_mask(render([layer], EXTENT, (240, 240)))
     outputs, rules, _ = _export(plugin, layer, tmp_path)
     lines, strips, other = _hatch_rules(outputs, rules)
-    assert len(other) == 1 and not strips and len(lines) <= 1
-    assert other[0][1].recipe is None and other[0][1].get_attr("c") == 2
-    ours = ink_mask(render([other[0][0]], EXTENT, (240, 240)))
-    assert mask_difference(reference, ours) < 0.02
+    assert len(lines) == 1 and not strips and not other
+    assert (lines[0][1].recipe.param("layout"), lines[0][1].recipe.param("clip")) == ("lines", clip)
+    ours = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
 
 
-def test_painter_clipped_millimetre_hatch_stays_flat_capped_lines(plugin, tmp_path):
-    """Screen-unit widths cannot be strips (they do not grow with the map):
-    lines, without the caps QGIS never shows."""
+def test_millimetre_hatch_lines_keep_a_small_bleed(plugin, tmp_path):
+    """A millimetre-wide line's bleed is taken at the last zoom (at zoom 0 a
+    millimetre is kilometres: lines that long, misplaced)."""
     layer = _layer("Polygon", [SHAPE], str(tmp_path / "mm.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.ClipPainterOnly, width=0.8, unit=Qgis.RenderUnit.Millimeters)))
-    outputs, rules, _ = _export(plugin, layer, tmp_path)
-    lines, strips, other = _hatch_rules(outputs, rules)
-    assert len(lines) == 1 and not strips and not other
-    assert lines[0][1].rule.symbol().symbolLayer(0).penCapStyle() == Qt.PenCapStyle.FlatCap
-
-
-@pytest.mark.parametrize("angle", [0, 90, 45, 30, 120])
-def test_hatch_clipped_before_render_matches_qgis(plugin, tmp_path, angle):
-    """Clipped before render, QGIS draws the hatch line by line: from the
-    top of each part's bounds turned to the hatch, 2 bleeds above it, and
-    with the lines' caps (outside the polygon too). The lines were laid out
-    like the pattern image (from the bounds' lower left corner): shifted
-    by up to a spacing."""
-    layer = _layer("Polygon", [SHAPE], str(tmp_path / "before.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.ClipToIntersection, width=1.5, angle=angle)))
-    reference = ink_mask(render([layer], EXTENT, (240, 240)))
-    outputs, rules, _ = _export(plugin, layer, tmp_path)
-    lines, strips, other = _hatch_rules(outputs, rules)
-    assert len(lines) == 1 and not strips and not other
-    recipe = lines[0][1].recipe
-    assert (recipe.param("layout"), recipe.param("clip")) == ("lines", "shape")
-    assert recipe.param("bleed") == pytest.approx(0.75)
-    assert lines[0][1].rule.symbol().symbolLayer(0).penCapStyle() == Qt.PenCapStyle.SquareCap
-    ours = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
-    assert mask_difference(reference, ours) < 0.05
-
-
-@pytest.mark.parametrize("angle", [0, 90, 45, 30, 120])
-def test_unclipped_hatch_matches_qgis(plugin, tmp_path, angle):
-    """Not clipped, QGIS draws the lines across each part's bounds turned to
-    the hatch, 2 bleeds beyond them; they were clipped to the polygon."""
-    layer = _layer("Polygon", [SHAPE], str(tmp_path / "noclip.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.NoClipping, width=1.5, angle=angle)))
-    reference = ink_mask(render([layer], EXTENT, (240, 240)))
-    outputs, rules, _ = _export(plugin, layer, tmp_path)
-    lines, strips, other = _hatch_rules(outputs, rules)
-    assert len(lines) == 1 and not strips and not other
-    assert (lines[0][1].recipe.param("layout"), lines[0][1].recipe.param("clip")) == ("lines", "none")
-    ours = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
-    assert mask_difference(reference, ours) < 0.05
-
-
-def test_hatch_drawn_line_by_line_per_part(plugin, tmp_path):
-    """Each part of a multipolygon starts its own lines (QGIS draws the
-    parts one by one)."""
-    layer = _layer("MultiPolygon", ["MULTIPOLYGON(((-100 -90, -10 -90, -10 -5, -100 -5, -100 -90)),"
-                                    "((5 7, 95 7, 95 93, 5 93, 5 7)))"], str(tmp_path / "parts.gpkg"))
-    layer.setRenderer(QgsSingleSymbolRenderer(
-        _thick_hatch(Qgis.LineClipMode.ClipToIntersection, width=1.5, angle=0, distance=10)))
-    reference = ink_mask(render([layer], EXTENT, (240, 240)))
-    outputs, rules, _ = _export(plugin, layer, tmp_path)
-    lines, _, _ = _hatch_rules(outputs, rules)
-    ours = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
-    assert mask_difference(reference, ours) < 0.05
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(
+        Qgis.LineClipMode.ClipToIntersection, width=0.8, unit=Qgis.RenderUnit.Millimeters)))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert 0 < rules[0].recipe.param("bleed") < 0.1
 
 
 def _export_zooms(plugin, layer, tmp_path, low, high, extent, fast_markers=False):

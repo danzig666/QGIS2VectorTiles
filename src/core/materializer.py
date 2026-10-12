@@ -3433,10 +3433,11 @@ class SymbolMaterializer:
 
     def _hatch_bleed(self, flat_rule: FlattenedRule, sub) -> float:
         """QgsSymbolLayerUtils::estimateMaxSymbolBleed of a hatch's line
-        symbol in project map units: half its width plus its offset, in the
-        rule's first zoom for screen units."""
+        symbol in project map units: half its width plus its offset. Screen
+        units at the rule's last tile zoom, where the hatch is looked at (at
+        its first, zoom 0, a millimetre is kilometres: lines that long)."""
         from qgis.core import QgsMapToPixel, QgsRenderContext, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
-        zoom = flat_rule.evaluation_zoom()
+        zoom = float(self._zoom_range(flat_rule)[1])
         per_px = self._map_units_per_mm(flat_rule, zoom) * 25.4 / 96.0
         context = QgsRenderContext()
         context.setScaleFactor(96.0 / 25.4)
