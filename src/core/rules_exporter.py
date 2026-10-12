@@ -3817,7 +3817,8 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "marker_points":
             return [0, "@geometry"]  # points already materialized
         if recipe is not None and recipe.kind == "hatch_lines":
-            return [1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            # Strips (a width) are the painted lines, polygons.
+            return [2 if recipe.param("width") else 1, mat.hatch_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "color_bands":
             return [2, "@geometry"]  # bands already materialized (_color_bands)
         if recipe is not None and recipe.kind == "interpolated_segments":

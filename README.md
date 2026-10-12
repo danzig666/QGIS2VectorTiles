@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.35.0**. Newest first:
+This README describes QWebMap **4.35.1**. Newest first:
+
+**4.35.1** — hatches stay inside their polygons
+- Line-pattern fills clipped during render (QGIS's default) no longer stick out of the polygon
+  when zoomed in: map-unit hatches are exported as the strips QGIS paints. Hatches clipped
+  before render or not clipped are laid out like QGIS draws them.
 
 **4.35.0** — views that fit, a closed map panel
 - **Map theme views that do not fit** in one row of the web map become a drop-down instead of

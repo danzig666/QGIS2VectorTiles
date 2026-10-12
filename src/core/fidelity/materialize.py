@@ -15,7 +15,11 @@ simplification.
   azimuth at each position in ``ANGLE_FIELD``.
 * ``hatch_lines``  — map-unit line hatches: parallel lines ``n·x = p + k·d``
   built in the project CRS from the QGIS anchor and clipped to the polygon
-  (holes and multiparts preserved by the intersection).
+  (holes and multiparts preserved by the intersection); with a ``width``,
+  the strips the lines paint, clipped to the polygon (QGIS clips the painted
+  hatch to the shape: nothing of it outside, caps never seen). The
+  ``layout`` "lines": laid out as QGIS draws a hatch line by line (clipped
+  before render or not at all, a data-defined line), per polygon part.
 """
 
 import math
@@ -203,10 +207,21 @@ def marker_rotation_expression(base_angle: float) -> str:
 
 
 def hatch_recipe(angle_deg: float, spacing: float, offset: float,
-                 construction_crs: str, anchor: str) -> Recipe:
-    return Recipe("hatch_lines", (), (
-        ("angle", float(angle_deg)), ("spacing", float(spacing)), ("offset", float(offset)),
-        ("crs", construction_crs), ("anchor", anchor)))
+                 construction_crs: str, anchor: str, width: float = 0.0,
+                 layout: str = "", bleed: float = 0.0, clip: str = "shape") -> Recipe:
+    """``width`` > 0: the strips painted by lines that wide (construction CRS
+    units, below ``spacing``) instead of the lines. ``layout`` "lines": the
+    lines QGIS draws one by one (``hatch_lines_expression``), ``bleed`` the
+    line symbol's (QgsSymbolLayerUtils::estimateMaxSymbolBleed, map units),
+    ``clip`` "shape" (clipped to the polygon) or "none"."""
+    params = (("angle", float(angle_deg)), ("spacing", float(spacing)), ("offset", float(offset)),
+              ("crs", construction_crs), ("anchor", anchor))
+    # Only when set: the recipe of a plain hatch (and its cache key) as before.
+    if width > 0:
+        params += (("width", float(width)),)
+    if layout:
+        params += (("layout", layout), ("bleed", float(bleed)), ("clip", clip))
+    return Recipe("hatch_lines", (), params)
 
 
 def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
@@ -228,6 +243,8 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     """
     import math  # pylint: disable=import-outside-toplevel
 
+    if recipe.param("layout") == "lines":
+        return hatch_lines_expression(recipe, export_crs)
     theta = math.radians(recipe.param("angle", 0.0))
     ux, uy = math.cos(theta), math.sin(theta)
     nx, ny = -math.sin(theta), math.cos(theta)
@@ -241,6 +258,28 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     origin_x = "x_min(@q2vt_g)" if feature_anchor else "0"
     origin_y = "y_min(@q2vt_g)" if feature_anchor else "0"
     geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    half = (recipe.param("width", 0.0) or 0.0) / 2.0
+    if half >= d / 2.0:
+        raise ValueError("Hatch strips must be narrower than their spacing")
+
+    def point(along: int, across: float) -> str:
+        """A point of line k = @element: ``along`` -1 / 1 its start / end,
+        ``across`` the distance from it along the normal."""
+        shift = f" + {across!r}" if across else ""
+        return (f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0{shift}) "
+                f"{'+' if along > 0 else '-'} {ux!r} * @q2vt_r, "
+                f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0{shift}) "
+                f"{'+' if along > 0 else '-'} {uy!r} * @q2vt_r)")
+
+    if half > 0:
+        # The rectangle a line of the width paints, its ends far outside the
+        # polygon: clipped, exactly what QGIS's painter clip leaves of it.
+        element = (f"make_polygon(make_line({point(-1, -half)}, {point(1, -half)}, "
+                   f"{point(1, half)}, {point(-1, half)}, {point(-1, -half)}))")
+        kind, empty = "Polygon", "MULTIPOLYGON EMPTY"
+    else:
+        element = f"make_line({point(-1, 0.0)}, {point(1, 0.0)})"
+        kind, empty = "Line", "MULTILINESTRING EMPTY"
     # Few nested calls: QGIS parses deeply nested function calls in
     # exponential time (a second per dataset at 20 levels).
     body = (
@@ -251,24 +290,70 @@ def hatch_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
         f"with_variable('q2vt_k', array(floor((@q2vt_s0 - @q2vt_r - {p!r}) / {d!r}), "
         f"ceil((@q2vt_s0 + @q2vt_r - {p!r}) / {d!r})), "
         f"if(@q2vt_k[1] - @q2vt_k[0] > {MAX_HATCH_LINES}, NULL, "
-        # Only the clipped line work: a line that merely touches the polygon
-        # at a vertex (the k = 0 line through the bounding box corner of a
-        # rectangle at 90-180 or 270-360 degrees) adds a point, and a mixed
-        # collection cannot be written to the line dataset (the whole hatch
-        # was lost). collect_geometries takes its type from the first part,
-        # so an empty multi-line leads (a chunk that is only that point
-        # would make a multi-point, dropping every line after it).
+        # Only the clipped line work (or strips): a line that merely touches
+        # the polygon at a vertex (the k = 0 line through the bounding box
+        # corner of a rectangle at 90-180 or 270-360 degrees) adds a point,
+        # and a mixed collection cannot be written to the line dataset (the
+        # whole hatch was lost). collect_geometries takes its type from the
+        # first part, so an empty multi-geometry leads (a chunk that is only
+        # that point would make a multi-point, dropping every line after it).
         f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_prepend(array_foreach("
         f"generate_series(@q2vt_k[0], @q2vt_k[1], {chunk}), "
         f"intersection(@q2vt_g, collect_geometries(array_foreach("
         f"generate_series(@element, min(@q2vt_k[1], @element + {chunk - 1})), "
-        f"make_line("
-        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) - {uy!r} * @q2vt_r), "
-        f"make_point(x(@q2vt_c) + {nx!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {ux!r} * @q2vt_r, "
-        f"y(@q2vt_c) + {ny!r} * ({p!r} + @element * {d!r} - @q2vt_s0) + {uy!r} * @q2vt_r)))))), "
+        f"{element})))), "
+        f"geom_from_wkt('{empty}')))), "
+        f"geometry_type(@element) = '{kind}' AND NOT is_empty(@element)))))))))"
+    )
+    if crs == export_crs:
+        return body
+    return f"transform({body}, '{crs}', '{export_crs}')"
+
+
+def hatch_lines_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """The hatch lines QGIS draws one by one (QgsLinePatternFillSymbolLayer::
+    renderPolygon when not drawn as a pattern image: clipped before render
+    or not at all, a data-defined line), for each polygon part: turned so
+    that the lines run along x (``rotate`` turns clockwise), the part's
+    bounds give the first line at their top + 2 bleeds (+ the offset,
+    within half a spacing), then one every spacing down to their bottom - 2
+    bleeds, each from their left to their right edge, 2 bleeds beyond.
+    Turned back and clipped to the part ("shape"), or as they are ("none")."""
+    d = recipe.param("spacing")
+    crs = recipe.param("crs")
+    if not d or d <= 0:
+        raise ValueError("Hatch spacing must be positive")
+    angle = recipe.param("angle", 0.0)
+    margin = 2.0 * recipe.param("bleed", 0.0)
+    offset = math.fmod(recipe.param("offset", 0.0), d)
+    if offset > d / 2.0:
+        offset -= d
+    chunk = HATCH_CHUNK_LINES
+    origin = "make_point(0, 0)"
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    clip_open, clip_close = ("intersection(@q2vt_p, ", ")") if recipe.param("clip") == "shape" \
+        else ("", "")
+    y = f"y_max(@q2vt_b) + {margin + offset!r} - @element * {d!r}"
+    part = (
+        f"with_variable('q2vt_b', bounds(rotate(@element, {angle!r}, {origin})), "
+        f"with_variable('q2vt_p', @element, "
+        f"with_variable('q2vt_n', floor((y_max(@q2vt_b) - y_min(@q2vt_b) + {2.0 * margin!r}) / {d!r} + 1e-9), "
+        f"collect_geometries(array_prepend(array_foreach(generate_series(0, @q2vt_n, {chunk}), "
+        f"{clip_open}rotate(collect_geometries(array_foreach("
+        f"generate_series(@element, min(@q2vt_n, @element + {chunk - 1})), "
+        f"make_line(make_point(x_min(@q2vt_b) - {margin!r}, {y}), "
+        f"make_point(x_max(@q2vt_b) + {margin!r}, {y})))), {-angle!r}, {origin}){clip_close}), "
+        f"geom_from_wkt('MULTILINESTRING EMPTY'))))))"
+    )
+    # Only the line work (see hatch_expression); NULL past MAX_HATCH_LINES.
+    body = (
+        f"with_variable('q2vt_g', {geom}, "
+        f"if((sqrt(bounds_width(@q2vt_g)^2 + bounds_height(@q2vt_g)^2) + {2.0 * margin!r}) / {d!r} "
+        f"> {MAX_HATCH_LINES}, NULL, "
+        f"collect_geometries(array_filter(geometries_to_array(collect_geometries(array_prepend("
+        f"array_foreach(geometries_to_array(@q2vt_g), {part}), "
         f"geom_from_wkt('MULTILINESTRING EMPTY')))), "
-        f"geometry_type(@element) = 'Line' AND NOT is_empty(@element)))))))))"
+        f"geometry_type(@element) = 'Line' AND NOT is_empty(@element)))))"
     )
     if crs == export_crs:
         return body

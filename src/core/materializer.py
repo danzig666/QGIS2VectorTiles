@@ -3396,14 +3396,129 @@ class SymbolMaterializer:
         if self._over_budget(flat_rule, diagonals / layer.distance() + 5 * count, "Hatch"):
             return None
         crs = self.project_crs or flat_rule.layer.crs().authid()
-        recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, "feature")
         symbol = sub.clone()
-        # QgsLinePatternFillSymbolLayer: the pattern image takes the fill
-        # symbol's opacity; hatches QGIS draws line by line (clipped other
-        # than at the painter, data-defined line) keep the line's own.
-        by_line = sub.hasDataDefinedProperties() or \
-            layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyLineClipping) or \
-            _enum_value(layer.clipMode()) != _enum_value(Qgis.LineClipMode.ClipPainterOnly)
-        if not by_line:
+        # QgsLinePatternFillSymbolLayer draws a pattern image clipped to the
+        # polygon at the painter, or (mRenderUsingLines) the lines one by
+        # one: clipped before render, not clipped at all, a data-defined
+        # line. The image takes the fill symbol's opacity; lines drawn one by
+        # one keep the line's own, are laid out from each part's bounds
+        # (hatch_lines_expression) and show their caps unless clipped at the
+        # painter.
+        mode = _enum_value(layer.clipMode())
+        clip_by_data = layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyLineClipping)
+        painter = mode == _enum_value(Qgis.LineClipMode.ClipPainterOnly) and not clip_by_data
+        by_line = sub.hasDataDefinedProperties() or not painter
+        if by_line:
+            recipe = mat.hatch_recipe(
+                layer.lineAngle(), layer.distance(), offset, crs, "feature", layout="lines",
+                bleed=self._hatch_bleed(flat_rule, sub),
+                # A data-defined clip mode is read as clipped to the shape.
+                clip="none" if mode == _enum_value(Qgis.LineClipMode.NoClipping) and not clip_by_data
+                else "shape")
+        else:
+            recipe = mat.hatch_recipe(layer.lineAngle(), layer.distance(), offset, crs, "feature")
             inherit_opacity(flat_rule.rule.symbol(), symbol)
-        return [self._with_symbol(flat_rule, symbol, 1, 1, recipe)]
+        if painter:
+            # Clipped at the painter, QGIS paints nothing of the hatch
+            # outside the polygon: no line caps. A line clipped to the
+            # polygon and drawn with its caps stuck out of it, far where it
+            # runs along a narrow polygon.
+            for index in range(symbol.symbolLayerCount()):
+                if hasattr(symbol.symbolLayer(index), "setPenCapStyle"):
+                    symbol.symbolLayer(index).setPenCapStyle(Qt.PenCapStyle.FlatCap)
+        lines = self._with_symbol(flat_rule, symbol, 1, 1, recipe)
+        if by_line:
+            return [lines]
+        return self._hatch_strips(flat_rule, layer, lines, offset, crs) or [lines]
+
+    def _hatch_bleed(self, flat_rule: FlattenedRule, sub) -> float:
+        """QgsSymbolLayerUtils::estimateMaxSymbolBleed of a hatch's line
+        symbol in project map units: half its width plus its offset. Screen
+        units at the rule's last tile zoom, where the hatch is looked at (at
+        its first, zoom 0, a millimetre is kilometres: lines that long)."""
+        from qgis.core import QgsMapToPixel, QgsRenderContext, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
+        zoom = float(self._zoom_range(flat_rule)[1])
+        per_px = self._map_units_per_mm(flat_rule, zoom) * 25.4 / 96.0
+        context = QgsRenderContext()
+        context.setScaleFactor(96.0 / 25.4)
+        context.setMapToPixel(QgsMapToPixel(per_px))
+        context.setRendererScale(ZoomLevels.zoom_to_scale(int(zoom)) or 0.0)
+        return QgsSymbolLayerUtils.estimateMaxSymbolBleed(sub, context) * per_px
+
+    # A painter-clipped hatch line this wide on screen (px) and wider is
+    # exported as the strip it paints; thinner, it stays a line (a narrower
+    # strip is lost in the tile grid, its edges within a pixel of the
+    # line's).
+    HATCH_STRIP_MIN_PX = 2.0
+
+    def _hatch_strips(self, flat_rule: FlattenedRule, layer, lines: FlattenedRule,
+                      offset: float, crs: str) -> Optional[List[FlattenedRule]]:
+        """A painter-clipped map-unit hatch of plain solid lines as what QGIS
+        paints: the strips the lines cover, clipped to the polygon - exact
+        at every zoom, where a flat-capped line still leaves its corners
+        outside an edge it crosses at an angle and misses the side of the
+        line the polygon keeps when the line itself runs outside. Used from
+        the zoom where the strips are HATCH_STRIP_MIN_PX wide (``lines``,
+        flat-capped, below it); lines that cover the polygon fill it. None:
+        the hatch stays ``lines``."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsFillSymbol, QgsSimpleFillSymbolLayer, \
+            QgsUnitTypes  # pylint: disable=import-outside-toplevel
+        sub = layer.subSymbol()
+        if sub.symbolLayerCount() != 1 or sub.hasDataDefinedProperties() or \
+                layer.hasDataDefinedProperties():
+            return None
+        line = sub.symbolLayer(0)
+        effect = line.paintEffect()
+        if not isinstance(line, QgsSimpleLineSymbolLayer) or not line.enabled() or \
+                line.hasDataDefinedProperties() or _enum_value(line.penStyle()) != _enum_value(Qt.PenStyle.SolidLine) or \
+                line.useCustomDashPattern() or abs(line.offset()) > 1e-12 or \
+                line.trimDistanceStart() or line.trimDistanceEnd() or \
+                (effect is not None and effect.enabled()) or _limited(line.widthMapUnitScale()):
+            return None
+        width, unit = line.width(), normalize_unit(line.widthUnit())
+        construction = QgsCoordinateReferenceSystem(crs)
+        if unit == "m" and not construction.isGeographic():
+            width *= QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, construction.mapUnits())
+        elif unit != "map":
+            return None
+        if width <= 0:
+            return None
+        colour = QColor(line.color())
+        fill = QgsFillSymbol([QgsSimpleFillSymbolLayer(colour, Qt.BrushStyle.SolidPattern, colour,
+                                                       Qt.PenStyle.NoPen)])
+        fill.setOpacity(sub.opacity())
+        inherit_opacity(flat_rule.rule.symbol(), fill)
+        if width >= layer.distance():
+            # The lines overlap: QGIS paints the whole polygon.
+            return [self._with_symbol(flat_rule, fill, 2, 1)]
+        strips = self._with_symbol(flat_rule, fill, 2, 1, mat.hatch_recipe(
+            layer.lineAngle(), layer.distance(), offset, crs, "feature", width=width))
+        px_at_zero = width / (self._map_units_per_mm(flat_rule, 0.0) * 25.4 / 96.0)
+        first = math.ceil(math.log2(self.HATCH_STRIP_MIN_PX / px_at_zero) - 1e-9)
+        low, high = self._zoom_range(flat_rule)
+        if low > high:
+            return None
+        visible = flat_rule.visibility or ZoomInterval(float(low), None)
+        start, end = visible.min_zoom, visible.max_zoom
+        if first <= max(start, low):
+            return [strips]
+        if (end is not None and first >= end - 1e-9) or first > self.overzoom_to:
+            return None  # never that wide while shown
+        if first > high:
+            # Past the last tiles: the strips are a dataset of their own in
+            # them, charged to their budget.
+            _, _, count, diagonals = self._layer_totals(flat_rule.layer)
+            if not self._overzoom_take(flat_rule, [diagonals / layer.distance() + 5 * count]):
+                return None
+            strips.set_attr("o", high)
+            strips.set_attr("v", first)
+            strips.scale_zoom = float(first)
+        else:
+            strips.set_attr("o", first)
+        strips.set_attr("i", high)
+        lines.set_attr("i", min(high, first - 1))
+        lines.visibility = visible.intersect(ZoomInterval(start, float(first)))
+        strips.visibility = visible.intersect(ZoomInterval(float(first), end))
+        lines.set_attr("h", 0)
+        strips.set_attr("h", 1)
+        return [lines, strips]

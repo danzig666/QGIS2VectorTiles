@@ -397,6 +397,98 @@ def test_rotated_map_unit_hatch_keeps_angle_and_spacing(plugin, tmp_path):
     assert gaps == {15.0}
 
 
+# A polygon with edges at several angles to a 45-degree hatch (one nearly
+# along it) and a hole.
+SHAPE = "POLYGON((-100 -90, 90 -90, 20 80, -100 80, -100 -90),(-60 -60, -10 -60, -40 40, -60 -60))"
+
+
+def _thick_hatch(mode, width=4.0, unit=Qgis.RenderUnit.MapUnits, angle=45, distance=12):
+    """A hatch of black lines ``width`` wide with square caps (QGIS's
+    default sub-line), clipped by ``mode``."""
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(angle)
+    lp.setDistance(distance)
+    lp.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    lp.setClipMode(mode)
+    line = lp.subSymbol().symbolLayer(0)
+    line.setColor(QColor("black"))
+    line.setWidth(width)
+    line.setWidthUnit(unit)
+    line.setPenCapStyle(Qt.PenCapStyle.SquareCap)
+    return QgsFillSymbol([lp])
+
+
+def _shape_mask(layer):
+    """The pixels of ``layer``'s polygons (filled black, no outline), one
+    pixel wider for antialiased edges."""
+    from qgis.core import QgsSimpleFillSymbolLayer
+    shape = layer.clone()
+    shape.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([QgsSimpleFillSymbolLayer(
+        QColor("black"), Qt.BrushStyle.SolidPattern, QColor("black"), Qt.PenStyle.NoPen)])))
+    mask = ink_mask(render([shape], EXTENT, (240, 240)), threshold=250)
+    return {(x + dx, y + dy) for x, y in mask for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+
+
+def _hatch_rules(outputs, rules):
+    """(lines, strips, other) of an exported hatch: (output, rule) pairs."""
+    lines = [(o, r) for o, r in zip(outputs, rules)
+             if r.recipe is not None and r.recipe.kind == "hatch_lines" and not r.recipe.param("width")]
+    strips = [(o, r) for o, r in zip(outputs, rules)
+              if r.recipe is not None and r.recipe.kind == "hatch_lines" and r.recipe.param("width")]
+    other = [(o, r) for o, r in zip(outputs, rules) if r.recipe is None or r.recipe.kind != "hatch_lines"]
+    return lines, strips, other
+
+
+def test_painter_clipped_hatch_paints_its_strips_inside_the_polygon(plugin, tmp_path):
+    """A hatch clipped during render (QGIS's default) paints nothing outside
+    the polygon. Its lines were clipped to the polygon and drawn with their
+    square caps: they stuck out of every edge they crossed. Zoomed in, the
+    hatch is now the strips QGIS paints; zoomed out (lines under 2 px),
+    flat-capped lines. (QGIS snaps a rotated pattern image to the pixel
+    grid: only the ink is compared.)"""
+    layer = _layer("Polygon", [SHAPE], str(tmp_path / "strips.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(Qgis.LineClipMode.ClipPainterOnly)))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    shape = _shape_mask(layer)
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    lines, strips, other = _hatch_rules(outputs, rules)
+    assert len(lines) == 1 and len(strips) == 1 and not other
+    # 4 m strips are 2 px wide from zoom 15.3: strips from zoom 16.
+    assert lines[0][1].visibility.max_zoom == 16 and strips[0][1].visibility.min_zoom == 16
+    assert lines[0][1].rule.symbol().symbolLayer(0).penCapStyle() == Qt.PenCapStyle.FlatCap
+    ours = ink_mask(render([strips[0][0]], EXTENT, (240, 240)))
+    assert len(ours - shape) < 0.005 * len(ours)
+    assert len(ours) == pytest.approx(len(reference), rel=0.08)
+
+
+@pytest.mark.parametrize("mode,clip", [(Qgis.LineClipMode.ClipToIntersection, "shape"),
+                                       (Qgis.LineClipMode.NoClipping, "none")])
+def test_hatch_drawn_line_by_line_matches_qgis(plugin, tmp_path, mode, clip):
+    """Clipped before render or not at all, QGIS draws the hatch line by
+    line, from the top of each part's bounds turned to the hatch, 2 bleeds
+    beyond, with the lines' caps. The lines were laid out like the pattern
+    image (up to a spacing off) and clipped to the polygon."""
+    layer = _layer("Polygon", [SHAPE], str(tmp_path / "bylines.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(mode, width=1.5, angle=30)))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+    lines, strips, other = _hatch_rules(outputs, rules)
+    assert len(lines) == 1 and not strips and not other
+    assert (lines[0][1].recipe.param("layout"), lines[0][1].recipe.param("clip")) == ("lines", clip)
+    ours = ink_mask(render([lines[0][0]], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.05
+
+
+def test_millimetre_hatch_lines_keep_a_small_bleed(plugin, tmp_path):
+    """A millimetre-wide line's bleed is taken at the last zoom (at zoom 0 a
+    millimetre is kilometres: lines that long, misplaced)."""
+    layer = _layer("Polygon", [SHAPE], str(tmp_path / "mm.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(_thick_hatch(
+        Qgis.LineClipMode.ClipToIntersection, width=0.8, unit=Qgis.RenderUnit.Millimeters)))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    assert 0 < rules[0].recipe.param("bleed") < 0.1
+
+
 def _export_zooms(plugin, layer, tmp_path, low, high, extent, fast_markers=False):
     """Flatten and export ``layer`` for zooms ``low``-``high`` within ``extent``."""
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener
