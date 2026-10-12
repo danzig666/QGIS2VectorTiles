@@ -419,8 +419,9 @@ class PublishDialog(QDialog):
         self.theme_pick = QComboBox()
         self.theme_pick.setToolTip(tr("A QGIS map theme (View → Map Themes)"))
         publish_theme = QPushButton(tr("Publish its layers"))
-        publish_theme.setToolTip(tr("Also publish the layers visible in this map theme (layers "
-                                    "already published stay published, so several themes add up)"))
+        publish_theme.setToolTip(tr("Also publish the layers visible in this map theme and offer it "
+                                    "as a view of the web map (layers already published stay "
+                                    "published, so several themes add up)"))
         publish_theme.clicked.connect(lambda: self._apply_theme(publish=True))
         start_theme = QPushButton(tr("Use as start view"))
         start_theme.setToolTip(tr("Visible at start: the layers visible in this map theme"))
@@ -666,7 +667,13 @@ class PublishDialog(QDialog):
             else:
                 item.setCheckState(COL_VISIBLE, _check(shown))
         if publish:
-            self.status.setText(tr('Layers of map theme "{}" added to the published layers.').format(name))
+            # ... and the theme becomes a view of the web map.
+            for i in range(self.themes_list.count()):
+                item = self.themes_list.item(i)
+                if item.text() == name:
+                    item.setCheckState(CHECKED)
+            self.status.setText(tr('Layers of map theme "{}" added to the published layers, and '
+                                   'the theme to the views of the web map.').format(name))
         else:
             self.status.setText(tr('Map theme "{}" applied to the layer list.').format(name))
 
@@ -1079,6 +1086,7 @@ class PublishDialog(QDialog):
                 ("print", tr("Print")),
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
+                ("panel_closed", tr("Map panel closed at start")),
                 ("street_search", tr("Search street names (OpenStreetMap)")),
                 ("overview_map", tr("Overview map (inset)")), ("three_d", tr("3D view")),
                 ("drawing", tr("Drawing tools")), ("street_view", tr("Street View (Google)"))]):
@@ -1100,6 +1108,9 @@ class PublishDialog(QDialog):
             "your site's address (HTTP referrers) and to these two APIs.")
         self.i_flags["street_view"].setToolTip(street_view_help)
         self.i_google_key.setToolTip(street_view_help)
+        self.i_flags["panel_closed"].setToolTip(tr(
+            "The web map opens with its panel (layers, legend, tools) closed, so more of the map "
+            "is on screen; the menu button opens it."))
         self.i_flags["overview_map"].setToolTip(tr("A small overview map in a corner with the current view marked."))
         self.i_flags["three_d"].setToolTip(tr(
             "A 3D button on the map: tilted view with the terrain relief (Basemap tab) and the polygons "

@@ -99,6 +99,8 @@ def test_basemap_raster_themes_and_locks(site, tmp_path):
                    background: m.getLayoutProperty('background', 'visibility'),
                    accent: getComputedStyle(document.documentElement).getPropertyValue('--q2vt-accent').trim(),
                    chips: [...document.querySelectorAll('#q2vt-themes .q2vt-chip')].map((c) => c.textContent),
+                   select: !document.querySelector('#q2vt-themes .q2vt-theme-select').hidden,
+                   panel: !document.getElementById('q2vt-panel').hidden,
                    locks: document.querySelectorAll('#q2vt-pane-layers .q2vt-lock').length,
                    source: !!m.getSource('q2vt_basemap') };"""},
         {"eval": PRELUDE + "s.set({ basemap: 'dark' }); await new Promise((r) => setTimeout(r, 600));" + ORDER +
@@ -125,6 +127,7 @@ def test_basemap_raster_themes_and_locks(site, tmp_path):
     assert first["raster"] >= first["firstProject"] and first["rasterVisible"]
     assert first["accent"] == "#0f766e" and first["chips"] == ["Terv", "Csak orto"]
     assert first["locks"] == 2                       # locked group + locked layer
+    assert not first["select"] and first["panel"]    # two views fit as buttons; panel open
     assert dark["active"] == "dark" and dark["dark"] > 30 and dark["pressed"] in ("Sötét", "Dark")
     assert none == {"bm": 0, "background": "visible"}
     assert theme["parcels"] is False and theme["ortho"] is True
