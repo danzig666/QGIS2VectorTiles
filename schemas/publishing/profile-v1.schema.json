@@ -135,6 +135,9 @@
         "layersPanel": {
           "type": "boolean"
         },
+        "panelClosed": {
+          "type": "boolean"
+        },
         "streetSearch": {
           "type": "boolean"
         },
