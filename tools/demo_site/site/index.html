@@ -70,6 +70,9 @@ video { display: block; width: 100%; height: auto; border-radius: 12px; border: 
 .codebox { position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: 12px; padding: 16px 18px; padding-right: 96px; overflow-x: auto; }
 .codebox pre { margin: 0; font: 14px/1.55 "JetBrains Mono", ui-monospace, monospace; white-space: pre; }
 .copy { position: absolute; top: 10px; right: 10px; border: 0; border-radius: 8px; padding: 7px 12px; font: 600 13px Inter, system-ui, sans-serif; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+.download { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+.download ol { margin: 0; padding-left: 22px; color: var(--muted); max-width: 70ch; }
+.download li + li { margin-top: 4px; }
 footer { padding-block: 44px 36px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); margin-top: 48px; }
 footer p { margin: 4px 0; max-width: 90ch; }
 @media (max-width: 560px) {
@@ -85,6 +88,7 @@ footer p { margin: 4px 0; max-width: 90ch; }
     <a class="brand" href="https://github.com/danzig666/QGIS2VectorTiles"><img src="img/icon.svg" alt=""><b>QWebMap</b></a>
     <nav>
       <a class="btn" href="#video">Video</a>
+      <a class="btn" href="#project">QGIS project</a>
       <a class="btn" href="#embed">Embed</a>
       <a class="btn primary" href="https://github.com/danzig666/QGIS2VectorTiles/releases/latest">Download the plugin</a>
     </nav>
@@ -132,6 +136,20 @@ footer p { margin: 4px 0; max-width: 90ch; }
     <figure class="figure">
       <img src="img/gallery.jpg" alt="Twelve close-up pairs, QGIS on the left and QWebMap on the right of each pair: SVG icons with labels, road casings with one-way arrows, a shapeburst fill, a lineburst river with flow arrows and a curved label, a cross point-pattern fill, an SVG tree pattern, a cross-hatched fill, a park border with an inner band, a letter-spaced town label, a radial gradient and geometry-generator building shadows" loading="lazy" width="1920" height="1776">
     </figure>
+  </section>
+
+  <section id="project">
+    <h2>Compare it in QGIS</h2>
+    <p class="lead">Download the QGIS project behind this map, open it next to the web map and compare them view by view. The zip holds the project, its data (relative paths, so it opens from any folder) and the Open Sans fonts of its labels; the Publish window settings of the demo are saved in it.</p>
+    <div class="download">
+      <a class="btn primary" href="download/Swellendam_QWebMap_demo.zip" download>Download the QGIS project (zip, 1.7 MB)</a>
+      <ol>
+        <li>Unzip it into one folder.</li>
+        <li>Install the fonts from its <code>fonts</code> folder and restart QGIS (without them the labels use another font).</li>
+        <li>Open <code>Swellendam.qgz</code> in QGIS 3.44 or newer.</li>
+        <li>To publish it yourself: install <a href="https://github.com/danzig666/QGIS2VectorTiles/releases/latest">QWebMap</a>, open <em>Web → QWebMap: Publish Web Map…</em>, choose a folder on the <em>Destination</em> tab and click <em>Export locally</em>.</li>
+      </ol>
+    </div>
   </section>
 
   <section id="embed">

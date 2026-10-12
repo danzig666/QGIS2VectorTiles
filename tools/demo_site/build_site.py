@@ -7,6 +7,7 @@ Writes <work dir>/site:
   media/         the showcase video (docs/media), plus a WebM (VP9) copy for
                  browsers without H.264 when ffmpeg is given or on the PATH
   img/           the icon, the video poster and the close-up gallery (JPEG)
+  download/      the QGIS project zip (from package_project.py)
   .nojekyll      serve the files as they are
 """
 import os
@@ -36,6 +37,12 @@ def main(work, ffmpeg=None):
     for source, name in (("qgis-vs-qwebmap.png", "poster.jpg"), ("symbology-gallery.png", "gallery.jpg")):
         Image.open(os.path.join(REPO, "docs", "images", source)).convert("RGB").save(
             os.path.join(site, "img", name), quality=85, optimize=True, progressive=True)
+
+    package = os.path.join(work, "Swellendam_QWebMap_demo.zip")
+    if not os.path.isfile(package):
+        sys.exit(f"No {package}: run package_project.py first.")
+    os.makedirs(os.path.join(site, "download"))
+    shutil.copy(package, os.path.join(site, "download"))
 
     video = os.path.join(site, "media", "qwebmap-showcase.mp4")
     shutil.copy(os.path.join(REPO, "docs", "media", "qwebmap-showcase.mp4"), video)
