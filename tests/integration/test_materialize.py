@@ -2997,3 +2997,38 @@ def test_map_unit_fill_offset_shift_or_curve(plugin, tmp_path, limits, shifted):
         else:
             assert not rule.shift
             assert rule.translate or rule.rule.symbol().symbolLayer(0).offset() == QPointF(30, 20)
+
+
+def test_polygon_broken_by_reprojection_is_repaired(plugin, tmp_path, monkeypatch):
+    """A valid polygon can cross itself once reprojected to Web Mercator
+    (edges that nearly touch; a road network in EOV): the tile writer
+    clipped the crossing ring into whole tiles filled with its colour. The
+    reprojected polygons are repaired too."""
+    from qgis.core import QgsFeature, QgsVectorFileWriter
+    from q2vt_plugin.src.core import rules_exporter as module
+    layer = _layer("Polygon", ["POLYGON((-80 -80, 80 -80, 80 80, -80 80, -80 -80))"],
+                   str(tmp_path / "bowtie.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "255,255,0"})))
+    run = module.RulesExporter._run_alg_safe
+
+    def reproject_badly(self, algorithm, algorithm_type="native", **params):
+        out = run(self, algorithm, algorithm_type, **params)
+        if algorithm != "reprojectlayer":
+            return out
+        source = QgsVectorLayer(out, "reprojected", "ogr")
+        crossed = str(tmp_path / f"crossed_{len(list(tmp_path.iterdir()))}.gpkg")
+        writer = QgsVectorFileWriter(crossed, "UTF-8", source.fields(), source.wkbType(),
+                                     source.crs(), "GPKG")
+        for feature in source.getFeatures():
+            copy = QgsFeature(feature)
+            copy.setGeometry(QgsGeometry.fromWkt(  # a bow tie: crosses itself
+                "POLYGON((-80 -80, 80 80, 80 -80, -80 80, -80 -80))"))
+            writer.addFeature(copy)
+        del writer
+        return crossed
+
+    monkeypatch.setattr(module.RulesExporter, "_run_alg_safe", reproject_badly)
+    outputs, _, _ = _export(plugin, layer, tmp_path)
+    polygons = [f.geometry() for o in outputs for f in o.getFeatures()]
+    assert polygons and all(g.isGeosValid() for g in polygons)
+    assert sum(g.area() for g in polygons) == pytest.approx(160 * 160 / 2, rel=0.01)
