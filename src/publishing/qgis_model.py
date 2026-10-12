@@ -406,6 +406,7 @@ def theme_presets(project: QgsProject, profile: PublicationProfile, model: dict,
 
 def membership_expression(rules, layer_id: str) -> str:
     """OR of the exported rules' filters of one layer ("" = every feature)."""
+    from ..core.fidelity.qgis_expr import enclosed  # pylint: disable=import-outside-toplevel
     filters = []
     for rule in rules:
         if rule.layer.id() != layer_id:
@@ -413,7 +414,7 @@ def membership_expression(rules, layer_id: str) -> str:
         expression = rule.rule.filterExpression() or ""
         if not expression.strip() or expression.strip().upper() == "ELSE":
             return ""
-        filters.append(f"({expression})")
+        filters.append(enclosed(expression))
     return " OR ".join(sorted(set(filters)))
 
 

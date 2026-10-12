@@ -1,6 +1,7 @@
 """Copy server utilities and launch the local tile server."""
 
 import platform
+import shlex
 import subprocess
 import json
 
@@ -31,6 +32,7 @@ else:
 from ..utils.config import _RESOURCES, _PORT, _EPSG_CRS, _SERVER, _MAPLIBRE_LABELS_FACTOR
 from .fidelity import expressions as ex
 from .fidelity.zoom import fit_zoom
+from .tiles_generator import mbtiles_uri
 
 class ServerInitializer:
     """Copy server utilities and launch the local tile server."""
@@ -48,7 +50,7 @@ command -v xdg-open &>/dev/null && xdg-open "$URL" || command -v open &>/dev/nul
     WINDOWS_ACTIVATOR = r'''
 @echo off
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :18111991 ^| findstr LISTENING') do taskkill /PID %%a /F
-cd /d %~dp0
+cd /d "%~dp0"
 echo Starting MBTiles server...
 start "MBTiles Server" "_Q2VT_PYTHON" "_Q2VT_UTILS" --port 18111991
 timeout /t 2 /nobreak > nul
@@ -94,8 +96,7 @@ Set WshShell = Nothing
         """ Save vector tiles as ocal styled QgsVectorLayer"""
         # Create vector tiles layer
         output = join(self.output_dir, "tiles.mbtiles")
-        uri = f"type=mbtiles&url={output}"
-        layer = QgsVectorTileLayer(uri, "Vector Tiles")
+        layer = QgsVectorTileLayer(mbtiles_uri(output), "Vector Tiles")
         layer = QgsProject.instance().addMapLayer(layer, False)
         QgsProject.instance().layerTreeRoot().insertLayer(0, layer)
 
@@ -224,13 +225,20 @@ Set WshShell = Nothing
             {"18111991": str(self.port)},
         )
         activator_dir = utils_dir if wrapper else output_folder
+        server = join(utils_dir, "tiles_server.py")
+        if wrapper:
+            # Inside the batch file's double quotes only % is special.
+            python_exe, server = python_exe.replace("%", "%%"), server.replace("%", "%%")
+        else:
+            python_exe, server = shlex.quote(python_exe), shlex.quote(server)
         self.replace_in_file(
             join(activator_dir, basename(activator)),
             {
                 "18111991": str(self.port),
-                "_Q2VT_PYTHON": python_exe,
-                "_Q2VT_UTILS": join(utils_dir, "tiles_server.py"),
                 "10031993": str(self.viewer + 1),
+                # Last: the paths are not searched for the other placeholders.
+                "_Q2VT_PYTHON": python_exe,
+                "_Q2VT_UTILS": server,
             },
         )
         self.replace_in_file(

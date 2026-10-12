@@ -188,3 +188,24 @@ def test_split_by_lines_cuts_inside_only():
     faces = split_by_lines(polygon, [line((35, -10), (35, 50)), line((200, 0), (300, 0))])
     assert sorted(round(f.area(), 3) for f in faces) == [1400.0, 2600.0]
     assert split_by_lines(polygon, [])[0].area() == pytest.approx(4000)
+
+
+def test_zone_field_guessed_from_a_label_field_with_a_quote(plugin):
+    """A zone layer labelled by the field zona"cod: its reference did not
+    parse, so the label did not count and no zone field was guessed."""
+    from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+    from publishing.parcel_report import guess_zone_field
+    layer = QgsVectorLayer("Polygon?crs=EPSG:23700", "zones", "memory")
+    layer.dataProvider().addAttributes([QgsField("fid", QVariant.Int), QgsField('zona"cod', QVariant.String),
+                                        QgsField("nome", QVariant.String)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([241, "Gip", "x"])
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0,1 0,1 1,0 0))"))
+    layer.dataProvider().addFeatures([feature])
+    assert guess_zone_field(layer) == ""
+    settings = QgsPalLayerSettings()
+    settings.fieldName = 'zona"cod'
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    assert guess_zone_field(layer) == 'zona"cod'

@@ -14,8 +14,17 @@ import re
 from typing import List, Optional
 
 
+def enclosed(expression: str) -> str:
+    """``expression`` in parentheses, closed on a line of its own: QGIS
+    expressions may end in a ``-- comment``, which would otherwise swallow
+    the closing parenthesis and whatever follows it. Every expression of the
+    user's project put into a longer one goes through this (or ends in a
+    newline some other way)."""
+    return f"({expression}\n)"
+
+
 def with_variable(name: str, value_expression: str, expression: str) -> str:
-    return f"with_variable('{name}', {value_expression}, ({expression}))"
+    return f"with_variable('{name}', {value_expression}, {enclosed(expression)})"
 
 
 # Map-scope variables QGIS derives from the map scale (mapSettingsScope):
@@ -124,13 +133,18 @@ def scale_thresholds(text: str) -> Optional[List[float]]:
     return sorted(set(scales))
 
 
-_TOKEN_RE = re.compile(
-    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|[$@]geometry\b", re.IGNORECASE)
+# What QGIS's lexer reads as one token that is not code: line and block
+# comments, string literals ('' and backslash escapes, 'it\'s') and quoted
+# identifiers ("" escapes only). Matched first, they are passed through, so
+# a variable in them is not rewritten and an apostrophe in a comment does
+# not hide the code after it.
+_LEXEME = r"--[^\n]*|/\*.*?\*/|'(?:[^'\\]|\\.|'')*'|\"(?:[^\"]|\"\")*\""
+_TOKEN_RE = re.compile(_LEXEME + r"|[$@]geometry\b", re.IGNORECASE | re.DOTALL)
 
 
 def substitute_geometry(expression: str, replacement: str) -> str:
-    """Replace ``@geometry`` and ``$geometry`` outside string literals and
-    quoted identifiers by ``(replacement)``.
+    """Replace ``@geometry`` and ``$geometry`` outside string literals,
+    quoted identifiers and comments by ``(replacement)``.
 
     ``with_variable('geometry', ...)`` cannot be used for this: QGIS resolves
     ``@geometry`` from the context feature, not from the variable stack
@@ -147,8 +161,8 @@ def bind_geometry(expression: str, geometry_expression: str) -> str:
     return substitute_geometry(expression, geometry_expression)
 
 
-_MEASURE_RE = re.compile(
-    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\$(area|length|perimeter|x|y)\b", re.IGNORECASE)
+_MEASURE_RE = re.compile(_LEXEME + r"|\$(area|length|perimeter|x|y)\b",
+                         re.IGNORECASE | re.DOTALL)
 
 
 def in_screen_units(expression: str, units_per_screen_unit: float, frame_crs: str = "",
@@ -169,7 +183,7 @@ def in_screen_units(expression: str, units_per_screen_unit: float, frame_crs: st
         geometry = f"transform(@geometry, '{layer_crs}', '{frame_crs}')"
     centre = f"centroid({geometry})"
     scaled = f"scale({geometry}, {1.0 / k!r}, {-1.0 / k!r}, {centre})"
-    result = f"scale({substitute_geometry(expression, scaled)}, {k!r}, {-k!r}, {centre})"
+    result = f"scale({enclosed(substitute_geometry(expression, scaled))}, {k!r}, {-k!r}, {centre})"
     if geometry != "@geometry":
         result = f"transform({result}, '{frame_crs}', '{layer_crs}')"
     return result
@@ -210,9 +224,10 @@ def enabled_condition(expression: str) -> str:
 
     QGIS evaluates these with a default of ``true``: NULL keeps the component.
     """
-    return f"with_variable('q2vt_on', ({expression}), @q2vt_on IS NULL OR if(@q2vt_on, TRUE, FALSE))"
+    return (f"with_variable('q2vt_on', {enclosed(expression)}, "
+            "@q2vt_on IS NULL OR if(@q2vt_on, TRUE, FALSE))")
 
 
 def and_filters(*filters: str) -> str:
-    parts = [f"({f})" for f in filters if f and f.strip()]
+    parts = [enclosed(f) for f in filters if f and f.strip()]
     return " AND ".join(parts)

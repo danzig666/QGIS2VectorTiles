@@ -33,6 +33,7 @@ from qgis.core import (
 
 from ..utils.config import _REMOVE_DUPLICATES_DISTANCE
 from ..utils.flattened_rule import FlattenedRule
+from .tiles_generator import mbtiles_uri
 
 
 def _symbol_type(symbol) -> int:
@@ -110,8 +111,7 @@ class TilesStyler:
     def _create_tiles_layer(self) -> QgsVectorTileLayer:
         """Create a vector tile layer and insert it at the top of the project legend."""
         output = join(self.output_dir, "tiles.mbtiles")
-        tiles_path = f"type=mbtiles&url={output}"
-        layer = QgsVectorTileLayer(tiles_path, "Vector Tiles")
+        layer = QgsVectorTileLayer(mbtiles_uri(output), "Vector Tiles")
         # QgsProject.instance().addMapLayer(layer, True)
         # QgsProject.instance().layerTreeRoot().insertLayer(0, layer)
         return layer

@@ -48,7 +48,7 @@ from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
 from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, LengthConverter
-from .fidelity.qgis_expr import (SCALE_VARIABLES, and_filters, enabled_condition,
+from .fidelity.qgis_expr import (SCALE_VARIABLES, and_filters, enabled_condition, enclosed,
                                  map_scale_reads, scale_thresholds, substitute_geometry,
                                  uses_map_scale, with_map_scale)
 from .fidelity.materialize import coerce_to_symbol_type
@@ -676,9 +676,14 @@ class RulesFlattener:
         expression = QgsExpression(weight)
         if index < 0 and expression.isField():  # a quoted field name
             index = fields.lookupField(next(iter(expression.referencedColumns())))
-        if index >= 0 and fields.at(index).isNumeric():
-            return f"coalesce({QgsExpression.quotedColumnRef(fields.at(index).name())}, 0)"
-        return weight
+        if index < 0:
+            return weight
+        column = QgsExpression.quotedColumnRef(fields.at(index).name())
+        if fields.at(index).isNumeric():
+            return f"coalesce({column}, 0)"
+        # A text field: its value converted as QGIS does (toDouble), 1 when it
+        # is no number.
+        return f"coalesce(try(to_real({column})), 1)"
 
     @classmethod
     def _heatmap_placeholder(cls, heatmap, fields):
@@ -1038,7 +1043,7 @@ class RulesFlattener:
             # A sibling without a filter matches every feature.
             return "FALSE"
         if filters:
-            return f'NOT ({" OR ".join(f"({f})" for f in filters)}) IS 1'
+            return f'NOT ({" OR ".join(enclosed(f) for f in filters)}) IS 1'
         return ""
 
     @staticmethod
@@ -1181,8 +1186,10 @@ class RulesFlattener:
                or uses_map_scale(expression)
                for expression in active.values()):
             def value(key, static):
-                return f"coalesce(to_real({active[key]}), {static!r})" if key in active else repr(static)
-            visible = (f"coalesce(({active[visibility_key]}), {str(settings.scaleVisibility).upper()})"
+                return f"coalesce(to_real({enclosed(active[key])}), {static!r})" if key in active \
+                    else repr(static)
+            visible = (f"coalesce({enclosed(active[visibility_key])}, "
+                       f"{str(settings.scaleVisibility).upper()})"
                        if visibility_key in active else str(settings.scaleVisibility).upper())
             condition = (
                 f"with_variable('q2vt_low', {value(min_key, float(settings.minimumScale))}, "
@@ -1262,7 +1269,7 @@ class RulesFlattener:
         rule_filter = rule.filterExpression()
 
         if parent_filter and rule_filter:
-            combined = f"({parent_filter}) AND ({rule_filter})"
+            combined = f"{enclosed(parent_filter)} AND {enclosed(rule_filter)}"
         else:
             combined = parent_filter or rule_filter or ""
 
@@ -1272,7 +1279,7 @@ class RulesFlattener:
         """Exclude this rule's children's filter conditions (output-only — descendants must
         not see this exclusion or grandchildren would inherit a tautologically-false filter)."""
         child_filters = [
-            f"({child.filterExpression()})"
+            enclosed(child.filterExpression())
             for child in rule.children()
             if child.filterExpression() and child.filterExpression() != "ELSE"
         ]
@@ -1280,7 +1287,8 @@ class RulesFlattener:
             return
         children_expr = " OR ".join(child_filters)
         combined = clone.filterExpression()
-        final = f"({combined}) AND NOT ({children_expr})" if combined else f"NOT ({children_expr})"
+        final = f"{enclosed(combined)} AND NOT ({children_expr})" if combined \
+            else f"NOT ({children_expr})"
         clone.setFilterExpression(final)
 
     def _inherit_symbol_layers(self, clone, rule, inherited_parent):
@@ -1360,8 +1368,8 @@ class RulesFlattener:
                     # painter geometry (y down), scaled back to its units
                     # (QgsGeometryGeneratorSymbolLayer::render /
                     # evaluateGeometryInPainterUnits): mirror, evaluate, mirror.
-                    mirrored = f"scale({received}, 1, -1, make_point(0, 0))"
-                    composed = (f"scale({substitute_geometry(inner.geometryExpression(), mirrored)}"
+                    mirrored = f"scale({enclosed(received)}, 1, -1, make_point(0, 0))"
+                    composed = (f"scale({enclosed(substitute_geometry(inner.geometryExpression(), mirrored))}"
                                 f", 1, -1, make_point(0, 0))")
                     yield from expand(inner, composed)
                 else:
@@ -1628,7 +1636,7 @@ class RulesFlattener:
             # coerces lines to MultiPolygon (each part closed into a ring);
             # points are not drawn.
             g = "@q2vt_generated"
-            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type({g}) = "
+            expression = (f"with_variable('q2vt_generated', {enclosed(expression)}, if(geometry_type({g}) = "
                           f"'Polygon', {g}, if(geometry_type({g}) = 'Line', if(is_multipart({g}), "
                           f"collect_geometries(array_foreach(generate_series(1, num_geometries({g})), "
                           f"make_polygon(geometry_n({g}, @element)))), make_polygon({g})), NULL)))")
@@ -1636,7 +1644,7 @@ class RulesFlattener:
             # A line sub-symbol draws lines: polygons are coerced to their
             # rings (MultiLineString), points are not drawn.
             g = "@q2vt_generated"
-            expression = (f"with_variable('q2vt_generated', {expression}, if(geometry_type({g}) = "
+            expression = (f"with_variable('q2vt_generated', {enclosed(expression)}, if(geometry_type({g}) = "
                           f"'Line', {g}, if(geometry_type({g}) = 'Polygon', boundary({g}), NULL)))")
         rules = []
         clone_layer = None
@@ -1825,7 +1833,7 @@ class RulesFlattener:
         x, y = x_prop.asExpression(), y_prop.asExpression()
         # QGIS takes a position only when both convert to numbers (a text
         # that does not is no position: the label is placed normally).
-        condition = f"try(to_real({x})) IS NOT NULL AND try(to_real({y})) IS NOT NULL"
+        condition = f"try(to_real({enclosed(x)})) IS NOT NULL AND try(to_real({enclosed(y)})) IS NOT NULL"
         base_filter = label_rule.rule.filterExpression()
 
         free = label_rule.derive()
@@ -2219,7 +2227,7 @@ class RulesFlattener:
             return ""
         if len(filters) == 1:
             return filters[0]
-        return " OR ".join(f"({expression})" for expression in filters)
+        return " OR ".join(enclosed(expression) for expression in filters)
 
     def _match_label_to_renderers(self, label_rule: FlattenedRule, active, low: int,
                                   high: int, visibility=None,
@@ -2305,7 +2313,7 @@ class RulesFlattener:
         label_filter = rule_clone.rule.filterExpression()
 
         if label_filter and renderer_filter:
-            combined = f"({renderer_filter}) AND ({label_filter})"
+            combined = f"{enclosed(renderer_filter)} AND {enclosed(label_filter)}"
         else:
             combined = renderer_filter or label_filter or ""
         rule_clone.rule.setFilterExpression(combined)
