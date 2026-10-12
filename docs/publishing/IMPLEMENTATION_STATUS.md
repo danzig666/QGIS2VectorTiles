@@ -376,6 +376,7 @@ the "several items here - choose" list (the parcel of the parcel report).
 | Legend swatches | `symbolPreviewPixmap` without a render context: map-unit widths had no scale. `swatch_context`: the scale of the max tile zoom, map units per pixel of the project CRS, 96 dpi × 32/24 (shown 24 CSS px) |
 | Legend rows | one symbol: one row with the layer name, no heading; label-only rows aligned |
 | Layers tab | `interaction.layersPanel` (dialog checkbox); off: no tab, the viewer opens on the legend |
+| Panel at start | `interaction.panelClosed` (dialog checkbox, default off): the map panel starts closed on wide screens too (4.35) |
 | Hover | no mousemove handler / hover overlay |
 | Click | one feature: `identify.prefer` = the parcel report's layer, else the topmost hit; no chooser |
 
