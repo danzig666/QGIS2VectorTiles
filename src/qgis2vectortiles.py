@@ -559,8 +559,10 @@ class QGIS2VectorTiles:
     # --- pipeline stages --------------------------------------------------
     def _clear_project(self):
         """Remove all map layers not visible in the project legend."""
+        # A legend entry whose layer QGIS could not create (a virtual layer
+        # over a missing source) has no layer.
         legend_ids = {
-            node.layer().id()
+            node.layerId()
             for node in QgsProject.instance().layerTreeRoot().findLayers()
         }
         for layer_id in list(QgsProject.instance().mapLayers()):

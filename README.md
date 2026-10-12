@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.35.1**. Newest first:
+This README describes QWebMap **4.35.2**. Newest first:
+
+**4.35.2** — a legend entry without its layer no longer stops the export
+- A layer QGIS could not create (such as a virtual layer over a missing source) stopped the
+  export with "'NoneType' object has no attribute 'id'"; it is now skipped.
 
 **4.35.1** — hatches stay inside their polygons
 - Line-pattern fills clipped during render (QGIS's default) no longer stick out of the polygon
