@@ -213,9 +213,13 @@ class PublishDialog(QDialog):
                                                   initially_visible=node.isVisible()))
         if self.iface is not None:
             profile.view.extent = self._canvas_extent_3857()
-        base = os.path.dirname(self.project.fileName()) or os.path.expanduser("~")
-        profile.output.local_directory = os.path.join(base, "web_maps")
+        profile.output.local_directory = self._default_local_directory()
         return profile
+
+    def _default_local_directory(self) -> str:
+        """``web_maps`` next to the project file (or in the home folder)."""
+        base = os.path.dirname(self.project.fileName()) or os.path.expanduser("~")
+        return os.path.join(base, "web_maps")
 
     def _load_profile(self) -> PublicationProfile:
         found = store.active_profile(self.project)
@@ -232,6 +236,10 @@ class PublishDialog(QDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if answer == QMessageBox.StandardButton.No:
                 profile = store.as_new_publication(profile)
+        if not profile.output.local_directory:
+            # Saved without a folder (e.g. a shared project): an empty one
+            # would export into QGIS's working folder.
+            profile.output.local_directory = self._default_local_directory()
         known = {c.layer_id for c in profile.layers}
         for node in self.project.layerTreeRoot().findLayers():
             layer = node.layer()
