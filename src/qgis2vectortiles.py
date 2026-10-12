@@ -56,6 +56,7 @@ from .utils.zoom_levels import ZoomLevels
 from .core.fidelity import materialize
 from .core.fidelity import zoom as fidelity_zoom
 from .core.fidelity import map_view
+from .core.fidelity import tile_budget
 from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
 from .core.rules_exporter import RulesExporter
@@ -188,6 +189,7 @@ class QGIS2VectorTiles:
         background_tiles: bool = False,
         fast_markers: bool = False,
         view_max_zoom: int = 22,
+        cap_tiles: bool = False,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
         layers unchanged since an earlier export are reused (None: off, as
@@ -234,6 +236,9 @@ class QGIS2VectorTiles:
         self.background_tiles = background_tiles
         # Screen-size interval marker lines placed by the browser (faster, approximate).
         self.fast_markers = fast_markers
+        # Far too many tiles of coarse data: end them at its detail
+        # (fidelity.tile_budget; only while the web map overzooms).
+        self.cap_tiles = cap_tiles
         self._pending: Optional[_Conversion] = None
         self.dataset_keys: Dict[str, str] = {}
         # Results of the last run (the publishing workflow builds its
@@ -290,6 +295,8 @@ class QGIS2VectorTiles:
             if self.profile.mode == FidelityMode.HYBRID:
                 self.diagnostics.add("Q2VT_HYBRID_NOT_AVAILABLE")
 
+            if self.cap_tiles and self.profile.overzoom == OverzoomPolicy.PERSIST:
+                self._cap_max_zoom()
             self._log(". Flattening rules...")
             self.feedback.setProgress(1)
             rules = self._flatten_rules()
@@ -582,6 +589,49 @@ class QGIS2VectorTiles:
         temp_dir = join(self.output_dir, datetime.now().strftime("%d_%m_%Y_%H_%M_%S_%f"))
         makedirs(temp_dir, exist_ok=True)
         return temp_dir
+
+    def _cap_max_zoom(self) -> None:
+        """End the tiles at the data's detail when the export would make
+        far too many of them (fidelity.tile_budget): the last tile zoom
+        drops, the web map overzooms from it."""
+        from qgis.core import QgsVectorLayer  # pylint: disable=import-outside-toplevel
+        project = QgsProject.instance()
+        layers = []
+        for node in project.layerTreeRoot().findLayers():
+            layer = node.layer()
+            if not isinstance(layer, QgsVectorLayer) or not layer.isSpatial():
+                continue
+            if self.layer_ids is not None and layer.id() not in self.layer_ids:
+                continue
+            if self.layer_ids is None and not node.isVisible():
+                continue
+            layers.append(layer)
+        if not layers:
+            return
+        started = perf_counter()
+        details = []
+        for layer in layers:
+            detail = tile_budget.measure_layer(layer, self.extent, project.transformContext())
+            if detail is None:
+                return  # a layer that cannot be read: keep every zoom
+            details.append(detail)
+        generator = GDALTilesGenerator.__new__(GDALTilesGenerator)
+        generator.extent = self.extent
+        low = max(0, self.min_zoom)
+        cap, tiles = tile_budget.capped_max_zoom(
+            details, low, self.max_zoom, generator._tiles_at)  # pylint: disable=protected-access
+        if cap >= self.max_zoom:
+            return
+        finest = min((d for d in details if d.detail), key=lambda d: d.detail, default=None)
+        message = (f"Tiles end at zoom {cap} instead of {self.max_zoom}: about {tiles:,.0f} tiles "
+                   f"instead of many millions"
+                   + (f"; the finest detail is about {finest.detail:,.0f} m ({finest.name})"
+                      if finest else "")
+                   + f"; the web map zooms in to {self.view_max_zoom} on them.")
+        self._log(f". {message} ({perf_counter() - started:.1f} s)")
+        self.diagnostics.add("Q2VT_TILES_CAPPED", message)
+        self.max_zoom = cap
+        self._expected_zooms = (max(0, self.min_zoom), self.max_zoom)
 
     def _flatten_rules(self) -> List[FlattenedRule]:
         return RulesFlattener(

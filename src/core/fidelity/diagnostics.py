@@ -76,6 +76,12 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_EXPR_INVALID": CodeInfo(
         Severity.ERROR, "Generated MapLibre expression is invalid",
         "Report this as a converter bug with the diagnostic detail."),
+    "Q2VT_TILES_CAPPED": CodeInfo(
+        Severity.INFO, "Tiles end at the data's detail",
+        "The export would have made very many tiles of coarse data (e.g. country borders of a "
+        "continent down to street zooms). The tiles end at the zoom that holds all of its "
+        "detail; the web map zooms in further on them, looking the same. A higher Maximum tile "
+        "zoom only makes the export longer.", fidelity_loss=False),
     "Q2VT_EXPR_MAP_VIEW_STATIC": CodeInfo(
         Severity.WARNING, "Expression evaluated once, for the web map's starting view",
         "QGIS evaluates @map_extent, @map_extent_center, @map_extent_width and "
