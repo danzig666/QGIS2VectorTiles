@@ -124,13 +124,18 @@ def scale_thresholds(text: str) -> Optional[List[float]]:
     return sorted(set(scales))
 
 
-_TOKEN_RE = re.compile(
-    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|[$@]geometry\b", re.IGNORECASE)
+# What QGIS's lexer reads as one token that is not code: line and block
+# comments, string literals ('' and backslash escapes, 'it\'s') and quoted
+# identifiers ("" escapes only). Matched first, they are passed through, so
+# a variable in them is not rewritten and an apostrophe in a comment does
+# not hide the code after it.
+_LEXEME = r"--[^\n]*|/\*.*?\*/|'(?:[^'\\]|\\.|'')*'|\"(?:[^\"]|\"\")*\""
+_TOKEN_RE = re.compile(_LEXEME + r"|[$@]geometry\b", re.IGNORECASE | re.DOTALL)
 
 
 def substitute_geometry(expression: str, replacement: str) -> str:
-    """Replace ``@geometry`` and ``$geometry`` outside string literals and
-    quoted identifiers by ``(replacement)``.
+    """Replace ``@geometry`` and ``$geometry`` outside string literals,
+    quoted identifiers and comments by ``(replacement)``.
 
     ``with_variable('geometry', ...)`` cannot be used for this: QGIS resolves
     ``@geometry`` from the context feature, not from the variable stack
@@ -147,8 +152,8 @@ def bind_geometry(expression: str, geometry_expression: str) -> str:
     return substitute_geometry(expression, geometry_expression)
 
 
-_MEASURE_RE = re.compile(
-    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\$(area|length|perimeter|x|y)\b", re.IGNORECASE)
+_MEASURE_RE = re.compile(_LEXEME + r"|\$(area|length|perimeter|x|y)\b",
+                         re.IGNORECASE | re.DOTALL)
 
 
 def in_screen_units(expression: str, units_per_screen_unit: float, frame_crs: str = "",

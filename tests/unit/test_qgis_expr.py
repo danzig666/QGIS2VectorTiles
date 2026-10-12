@@ -85,3 +85,29 @@ def test_in_screen_units_in_another_layer_crs():
     assert out == (f"transform(scale(translate((scale({frame}, 0.25, -0.25, centroid({frame}))), "
                    f"1, 1), 4.0, -4.0, centroid({frame})), 'EPSG:3857', 'EPSG:4326')")
     assert in_screen_units("$geometry", 1.0, "EPSG:3857", "EPSG:3857").startswith("scale(")
+
+
+GEOMETRY = "transform(@geometry, 'EPSG:3857', 'EPSG:23700')"
+
+
+def in_layer_crs_planar(expression):
+    from fidelity.qgis_expr import in_layer_crs
+    return in_layer_crs(expression, "EPSG:3857", "EPSG:23700", True)
+
+
+def test_geometry_tokens_follow_the_qgis_lexer():
+    """Backslash escapes in literals and comments (with an apostrophe or a
+    variable name in them) do not hide the code after them."""
+    escaped = "'it\\'s ' || round($area) || ' m2'"
+    assert in_layer_crs_planar(escaped) == \
+        f"'it\\'s ' || round(area({GEOMETRY})) || ' m2'"
+    commented = "-- don't edit $geometry\nbuffer($geometry, 10) || 'x'"
+    assert substitute_geometry(commented, "G") == \
+        "-- don't edit $geometry\nbuffer((G), 10) || 'x'"
+    block = "/* it's $area */ $area > 1000 AND \"t\" = 'x'"
+    assert in_layer_crs_planar(block) == \
+        f"/* it's $area */ area({GEOMETRY}) > 1000 AND \"t\" = 'x'"
+    # A quoted identifier ends at "" escapes only (no backslash escape).
+    assert substitute_geometry('"a\\" || $geometry', "G") == '"a\\" || (G)'
+    assert substitute_geometry('"my""$geometry" || $geometry', "G") == '"my""$geometry" || (G)'
+    assert substitute_geometry("'a\\\\' || $geometry", "G") == "'a\\\\' || (G)"
