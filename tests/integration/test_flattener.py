@@ -1252,3 +1252,31 @@ def test_split_fill_outline_keeps_its_map_unit_limits(flattener):
     width = mc.LinePropertyExtractor.get_line_width(line)
     for zoom in (16, 17, 19, 22):
         assert ex.evaluate_zoom_curve(width, zoom) == pytest.approx(0.5 * 96 / 25.4, rel=1e-3)
+
+
+def test_rule_filters_ending_in_a_comment_combine(flattener):
+    """QGIS accepts a rule filter ending in "-- note": the parent's and the
+    child's filter AND-ed, the ELSE rule's NOT of its siblings and the
+    parent's own features without its children's were cut short by it."""
+    from qgis.core import QgsFillSymbol, QgsRuleBasedRenderer
+
+    def fill(color):
+        return QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
+    layer = zoning_layer()
+    root = QgsRuleBasedRenderer.Rule(None)
+    zoned = QgsRuleBasedRenderer.Rule(fill("white"), 0, 0, '"zone" IS NOT NULL -- zoned')
+    zoned.appendChild(QgsRuleBasedRenderer.Rule(fill("red"), 0, 0, "\"zone\" = 'K1' -- note"))
+    other = QgsRuleBasedRenderer.Rule(fill("blue"), 0, 0, "ELSE")
+    other.setIsElse(True)
+    zoned.appendChild(other)
+    root.appendChild(zoned)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    reset_project(layer)
+    rules, _ = flattener(0, 14)
+    matched = {}
+    for rule in rules:
+        expression = QgsExpression(rule.rule.filterExpression())
+        assert not expression.hasParserError(), rule.rule.filterExpression()
+        ids = {f["id"] for f in layer.getFeatures(QgsFeatureRequest(expression))}
+        matched.setdefault(rule.rule.symbol().color().name(), set()).update(ids)
+    assert matched == {"#ffffff": {"A", "B", "D"}, "#ff0000": {"A"}, "#0000ff": {"B", "D"}}

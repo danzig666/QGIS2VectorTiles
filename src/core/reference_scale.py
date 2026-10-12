@@ -19,7 +19,7 @@ from qgis.core import (Qgis, QgsEffectStack, QgsMapUnitScale, QgsPalLayerSetting
                        QgsSymbolLayer)
 from qgis.PyQt.QtCore import QPointF, QSizeF
 
-from .fidelity.qgis_expr import in_screen_units
+from .fidelity.qgis_expr import enclosed, in_screen_units
 from .fidelity.units import MAP, METERS, MM, normalize_unit, physical_factor
 
 # Value getters whose name is not the unit getter's name without "Unit"
@@ -204,7 +204,7 @@ class ReferenceScaleConverter:
         prop = collection.property(key)
         expression = prop.asExpression() if prop is not None else ""
         if expression:
-            collection.setProperty(key, QgsProperty.fromExpression(f"({expression}) * {factor!r}"))
+            collection.setProperty(key, QgsProperty.fromExpression(f"{enclosed(expression)} * {factor!r}"))
 
     # --- symbols --------------------------------------------------------------
     def symbol(self, symbol) -> None:

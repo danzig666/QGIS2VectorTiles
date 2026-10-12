@@ -247,7 +247,7 @@ def test_reference_scale_scales_data_defined_sizes(plugin):
     assert layer.width() == pytest.approx(10.0)  # 1 mm at 1:10000 = 10 m
     assert layer.offset() == pytest.approx(20.0)
     prop = layer.dataDefinedProperties().property(QgsSymbolLayer.Property.PropertyStrokeWidth)
-    assert prop.expressionString() == '("w") * 10.0'
+    assert prop.expressionString() == '("w"\n) * 10.0'
     assert not converter.unhandled
 
 

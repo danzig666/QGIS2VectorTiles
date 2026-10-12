@@ -22,6 +22,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
+from .qgis_expr import enclosed
+
 ANGLE_FIELD = "q2vt_mat_angle"
 ORDINAL_FIELD = "q2vt_mat_ordinal"
 LENGTH_FIELD = "q2vt_mat_length"
@@ -896,10 +898,10 @@ def coerce_to_symbol_type(expression: str, symbol_type: int) -> str:
     polygon are its rings, points drawn by a marker symbol from lines or
     polygons are their vertices."""
     if symbol_type == 1:
-        return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
+        return (f"with_variable('q2vt_coerce', {enclosed(expression)}, if(geometry_type(@q2vt_coerce) = "
                 f"'Polygon', boundary(@q2vt_coerce), @q2vt_coerce))")
     if symbol_type == 0:
-        return (f"with_variable('q2vt_coerce', {expression}, if(geometry_type(@q2vt_coerce) = "
+        return (f"with_variable('q2vt_coerce', {enclosed(expression)}, if(geometry_type(@q2vt_coerce) = "
                 f"'Point', @q2vt_coerce, nodes_to_points(@q2vt_coerce)))")
     return expression
 

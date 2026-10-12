@@ -6,7 +6,7 @@ from fidelity.qgis_expr import bind_geometry, substitute_geometry, with_map_scal
 def test_with_map_scale_does_not_touch_literals():
     expr = "concat('@map_scale is ', @map_scale)"
     out = with_map_scale(expr, 1000)
-    assert out == "with_variable('map_scale', 1000.0, (concat('@map_scale is ', @map_scale)))"
+    assert out == "with_variable('map_scale', 1000.0, (concat('@map_scale is ', @map_scale)\n))"
 
 
 def test_with_map_scale_noop_without_variable():
@@ -42,7 +42,7 @@ def test_in_layer_crs_rebinds_geometry_and_measures():
 
 def test_enabled_condition_and_filters():
     from fidelity.qgis_expr import and_filters, enabled_condition
-    assert and_filters("a", "", None, "b") == "(a) AND (b)"
+    assert and_filters("a", "", None, "b") == "(a\n) AND (b\n)"
     assert "IS NULL" in enabled_condition("x = 1")
 
 
@@ -74,7 +74,7 @@ def test_scale_thresholds_are_the_scales_where_a_comparison_switches():
 def test_in_screen_units_scales_and_mirrors_about_the_centroid():
     from fidelity.qgis_expr import in_screen_units
     out = in_screen_units("buffer($geometry, 5)", 2.0)
-    assert out == ("scale(buffer((scale(@geometry, 0.5, -0.5, centroid(@geometry))), 5), "
+    assert out == ("scale((buffer((scale(@geometry, 0.5, -0.5, centroid(@geometry))), 5)\n), "
                    "2.0, -2.0, centroid(@geometry))")
 
 
@@ -82,9 +82,23 @@ def test_in_screen_units_in_another_layer_crs():
     from fidelity.qgis_expr import in_screen_units
     out = in_screen_units("translate(@geometry, 1, 1)", 4.0, "EPSG:3857", "EPSG:4326")
     frame = "transform(@geometry, 'EPSG:4326', 'EPSG:3857')"
-    assert out == (f"transform(scale(translate((scale({frame}, 0.25, -0.25, centroid({frame}))), "
-                   f"1, 1), 4.0, -4.0, centroid({frame})), 'EPSG:3857', 'EPSG:4326')")
+    assert out == (f"transform(scale((translate((scale({frame}, 0.25, -0.25, centroid({frame}))), "
+                   f"1, 1)\n), 4.0, -4.0, centroid({frame})), 'EPSG:3857', 'EPSG:4326')")
     assert in_screen_units("$geometry", 1.0, "EPSG:3857", "EPSG:3857").startswith("scale(")
+
+
+def test_wrappers_close_after_a_trailing_line_comment():
+    """QGIS accepts an expression ending in "-- note": every wrapper closes
+    its parenthesis on the next line, so the comment cannot swallow it."""
+    from fidelity.qgis_expr import (and_filters, enabled_condition, enclosed, in_screen_units,
+                                    with_variable)
+    commented = '"zone" = \'A\' -- note'
+    assert enclosed(commented) == f"({commented}\n)"
+    for out in (with_variable("map_scale", "1.0", commented), enabled_condition(commented),
+                and_filters(commented, commented), in_screen_units("$geometry -- note", 2.0)):
+        # What QGIS reads: each line up to its comment.
+        code = "\n".join(line.split("--")[0] for line in out.split("\n"))
+        assert code.count("(") == code.count(")"), out
 
 
 GEOMETRY = "transform(@geometry, 'EPSG:3857', 'EPSG:23700')"

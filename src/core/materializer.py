@@ -49,7 +49,7 @@ from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
-from .fidelity.qgis_expr import SCALE_VARIABLES, uses_map_scale
+from .fidelity.qgis_expr import SCALE_VARIABLES, enclosed, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, physical_factor, normalize_unit, MM, PERCENT
@@ -88,7 +88,7 @@ def inherit_opacity(parent, symbol):
         return symbol
     # A data-defined value replaces the symbol's own opacity (a NULL keeps
     # it): one expression for both, the static opacity left at 1.
-    terms = [f"coalesce(({prop.asExpression()}), {round(owner.opacity() * 100.0, 6)!r})"
+    terms = [f"coalesce({enclosed(prop.asExpression())}, {round(owner.opacity() * 100.0, 6)!r})"
              if prop is not None and prop.isActive()
              else repr(round(owner.opacity() * 100.0, 6))
              for prop, owner in zip(props, (parent, symbol))]
@@ -1531,7 +1531,7 @@ class SymbolMaterializer:
             return None
         angle = repr(float(layer.angle()))
         if props.isActive(P.PropertyAngle):
-            angle = f"coalesce(({props.property(P.PropertyAngle).asExpression()}), {angle})"
+            angle = f"coalesce({enclosed(props.property(P.PropertyAngle).asExpression())}, {angle})"
         fill = QgsSimpleFillSymbolLayer(layer.color())
         if layer.strokeWidth() > 0:
             fill.setStrokeColor(layer.strokeColor())
@@ -2224,7 +2224,7 @@ class SymbolMaterializer:
                 rotation = mat.marker_rotation_expression(marker.angle() + extra_angle)
                 if own_text:
                     rotation = (f"{mat.marker_rotation_expression(extra_angle)} + "
-                                f"coalesce(({own_text}), {float(marker.angle())!r})")
+                                f"coalesce({enclosed(own_text)}, {float(marker.angle())!r})")
                 elif own is not None and own.isActive():
                     self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                                  "Data-defined marker angle on a marker line: the static "

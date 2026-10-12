@@ -332,3 +332,20 @@ def test_nothing_drawn_stops_with_the_cause(project, tmp_path, monkeypatch):
     assert error.value.message.startswith("Nothing to publish")
     assert "could not be exported" in error.value.message and "Parser error" in error.value.message
     assert "MBTiles" not in error.value.message
+
+
+def test_membership_of_filters_ending_in_a_comment(plugin):
+    """The features a layer's rules draw, their filters OR-ed: a filter
+    ending in "-- note" swallowed the rest (no records, silently)."""
+    from types import SimpleNamespace
+    from qgis.core import QgsExpression
+    from publishing import qgis_model
+
+    def rule(expression):
+        return SimpleNamespace(layer=SimpleNamespace(id=lambda: "L"),
+                               rule=SimpleNamespace(filterExpression=lambda: expression))
+    membership = qgis_model.membership_expression(
+        [rule("\"tipo\" = 'A' -- regioni"), rule('"tipo" = \'B\'')], "L")
+    expression = QgsExpression(membership)
+    assert not expression.hasParserError(), membership
+    assert expression.referencedColumns() == {"tipo"}

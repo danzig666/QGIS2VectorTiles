@@ -127,8 +127,8 @@ from . import label_lines
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity import feature_order as fo
-from .fidelity.qgis_expr import (bind_geometry, in_layer_crs, substitute_geometry, uses_map_scale,
-                                 with_map_scale)
+from .fidelity.qgis_expr import (bind_geometry, enclosed, in_layer_crs, substitute_geometry,
+                                 uses_map_scale, with_map_scale)
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
 from .fidelity import html_labels
@@ -765,7 +765,7 @@ class RulesExporter:
             per_part = in_layer_crs(substitute_geometry(expr, "collect_geometries(@geometry)"),
                                     f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
             result.append((ftype, "with_variable('geometry_part_num', 1, with_variable("
-                                  f"'geometry_part_count', 1, {per_part}))", name))
+                                  f"'geometry_part_count', 1, {enclosed(per_part)}))", name))
         return result
 
     @staticmethod
@@ -3525,7 +3525,7 @@ class RulesExporter:
         filter_exp = (
             f'"{label_exp}"'
             if not settings.isExpression
-            else f"({label_exp})"
+            else enclosed(label_exp)
         )
         if settings.useSubstitutions:
             filter_exp = self._substituted(filter_exp, settings.substitutions)
@@ -3556,8 +3556,8 @@ class RulesExporter:
         """QGIS draws nothing for a label whose text is NULL or empty, not
         even its background shape; MapLibre would draw the shape (or an
         icon) alone. Such features are left out of the label dataset."""
-        condition = f"coalesce(to_string({text}), '') <> ''"
-        return f"({filter_expression}) AND {condition}" if filter_expression else condition
+        condition = f"coalesce(to_string({enclosed(text)}), '') <> ''"
+        return f"{enclosed(filter_expression)} AND {condition}" if filter_expression else condition
 
     @staticmethod
     def _substituted(expression: str, substitutions) -> str:
@@ -3616,8 +3616,8 @@ class RulesExporter:
         unit offset), measured in the project CRS."""
         export_crs = f"EPSG:{_EPSG_CRS}"
         if self._map_crs == export_crs:
-            return f"translate({expression}, {dx!r}, {dy!r})"
-        return (f"transform(translate(transform({expression}, '{export_crs}', "
+            return f"translate({enclosed(expression)}, {dx!r}, {dy!r})"
+        return (f"transform(translate(transform({enclosed(expression)}, '{export_crs}', "
                 f"'{self._map_crs}'), {dx!r}, {dy!r}), '{self._map_crs}', '{export_crs}')")
 
     def _clip_to_extent(self, expression: str) -> str:
@@ -3627,7 +3627,7 @@ class RulesExporter:
         vertex."""
         extent_wkt = self.extent.asWktPolygon()
         return (
-            f"with_variable('q2vt_t', {expression}, "
+            f"with_variable('q2vt_t', {enclosed(expression)}, "
             f"with_variable('q2vt_ext', geom_from_wkt('{extent_wkt}'), "
             f"with_variable('clip', if(within(@q2vt_t, @q2vt_ext), @q2vt_t, "
             f"intersection(@q2vt_t, @q2vt_ext)), "
@@ -3636,7 +3636,7 @@ class RulesExporter:
 
     @staticmethod
     def _layer_point_expression(x: str, y: str, layer_crs: str) -> str:
-        point = f"make_point(to_real({x}), to_real({y}))"
+        point = f"make_point(to_real({enclosed(x)}), to_real({enclosed(y)}))"
         export_crs = f"EPSG:{_EPSG_CRS}"
         if not layer_crs or layer_crs == export_crs:
             return point
@@ -3893,7 +3893,7 @@ class RulesExporter:
         bound = bind_geometry(
             generator_exp, f"transform(@geometry, 'EPSG:{_EPSG_CRS}', '{layer_crs}')"
         )
-        return f"transform({bound}, '{layer_crs}', 'EPSG:{_EPSG_CRS}')"
+        return f"transform({enclosed(bound)}, '{layer_crs}', 'EPSG:{_EPSG_CRS}')"
 
     # Suffix of the dataset holding a polygon label's polygons.
     VISIBLE_POLYGONS_SUFFIX = "_vp"

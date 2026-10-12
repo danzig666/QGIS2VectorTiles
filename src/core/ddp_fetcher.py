@@ -12,7 +12,7 @@ from qgis.core import (QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSym
                        QgsSymbolLayerUtils)
 
 from ..utils.config import QVariant
-from .fidelity.qgis_expr import with_map_scale
+from .fidelity.qgis_expr import enclosed, with_map_scale
 from .fidelity import map_view
 
 
@@ -22,7 +22,7 @@ def _to_color_hex_expr(inner_expr: str) -> str:
         f"'#' || with_variable('hex', array_cat(generate_series(0,9),"
         f"array('A','B','C','D','E','F')), array_to_string("
         f"array_foreach(array('red','green','blue','alpha'),"
-        f"with_variable('colo', color_part({inner_expr}, @element),"
+        f"with_variable('colo', color_part({enclosed(inner_expr)}, @element),"
         f"@hex[floor(@colo/16)] || @hex[@colo%16])), ''))"
     )
 
@@ -273,7 +273,7 @@ class DataDefinedPropertiesFetcher:
                 f"'#' || substr(@color,8,2) || substr(@color,2,6))"
             )
         if "array" in expression:
-            expression = f"try(array_to_string({expression}), {expression})"
+            expression = f"try(array_to_string({enclosed(expression)}), {enclosed(expression)})"
 
         prop.setExpressionString(field_ref)
         return expression
