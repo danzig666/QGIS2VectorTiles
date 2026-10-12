@@ -130,6 +130,7 @@ from .fidelity import feature_order as fo
 from .fidelity.qgis_expr import (bind_geometry, in_layer_crs, substitute_geometry, uses_map_scale,
                                  with_map_scale)
 from .fidelity import zoom as fidelity_zoom
+from .fidelity import map_view
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .materializer import pattern_anchor_kind
@@ -480,6 +481,9 @@ class RulesExporter:
         # (QGIS 3.44 / Windows: 0xc0000374, QGIS closed without a message).
         self._global_scope = QgsExpressionContextUtils.globalScope()
         self._project_scope = QgsExpressionContextUtils.projectScope(project)
+        # @map_extent & co.: the web map's starting view (fidelity.map_view).
+        self._view_scope = map_view.scope()
+        self._view_reads: Dict[str, tuple] = {}  # layer id -> (name, view vars, render-only vars)
         self._transform_context = project.transformContext()
         self._scope_lock = threading.Lock()
 
@@ -701,6 +705,9 @@ class RulesExporter:
                 # No geometry transformation → cannot be exported.
                 continue
             geom_target, geom_expr = transformation
+            self._report_view_variables(primary, [
+                primary.rule.filterExpression(), geom_expr, primary.pre_generator,
+                *(expr for _, expr, _ in expr_fields)])
 
             rule_groups.append(_RuleGroupSnapshot(
                 output_dataset=primary.output_dataset,
@@ -731,6 +738,7 @@ class RulesExporter:
             elif getattr(primary, "line_label_midpoint", False) and primary.get_attr("t") == 1:
                 rule_groups.append(self._visible_line_group(rule_groups[-1], primary))
 
+        self._flush_view_reports()
         return sources, rule_groups
 
     _GEOMETRY_REFERENCE = re.compile(
@@ -1502,6 +1510,7 @@ class RulesExporter:
             "units": [int(getattr(self._distance_unit, "value", self._distance_unit)),
                       int(getattr(self._area_unit, "value", self._area_unit))],
             "variables": variables,
+            "view": map_view.state(),
             "operations": {f"{k[0]}>{k[1]}" if isinstance(k, tuple) else str(k): str(v)
                            for k, v in dict(operations).items()},
         }
@@ -2007,8 +2016,10 @@ class RulesExporter:
         # Band order: the whole layer's band 0 first, then band 1, ...
         # (also fill-sort-key in the style).
         per_band = [[] for _ in colors]
+        feature_colors = self._feature_band_colors(layer, recipe.param("feature_colors"), len(colors))
         for feature in layer.getFeatures():
             self._check_cancel()
+            own = feature_colors(feature) if feature_colors else colors
             for band, geometry in builder.build(feature.geometry()):
                 if QgsWkbTypes.geometryType(geometry.wkbType()) != QgsWkbTypes.PolygonGeometry:
                     parts = [g for g in geometry.asGeometryCollection()
@@ -2022,7 +2033,7 @@ class RulesExporter:
                     if field.name() not in (mat.BAND_FIELD, mat.COLOR_FIELD):
                         out_feature[field.name()] = feature[field.name()]
                 out_feature[mat.BAND_FIELD] = band
-                out_feature[mat.COLOR_FIELD] = colors[band]
+                out_feature[mat.COLOR_FIELD] = own[band]
                 out_feature.setGeometry(geometry)
                 per_band[band].append(out_feature)
         written = 0
@@ -2032,6 +2043,42 @@ class RulesExporter:
                 written += 1
         del writer
         return out if written else None
+
+    def _feature_band_colors(self, layer, spec, bands: int):
+        """``feature -> [encoded colour per band]`` of a gradient / shapeburst
+        fill with data-defined colours (materialize.color_bands_recipe), or
+        None. A colour that does not evaluate keeps the static one, as QGIS."""
+        if not spec:
+            return None
+        from qgis.core import NULL, QgsGradientColorRamp, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QColor  # pylint: disable=import-outside-toplevel
+        from .materializer import SymbolMaterializer  # pylint: disable=import-outside-toplevel
+        first, second, static1, static2, premultiplied = spec
+        context = self._worker_expression_context()
+        context.appendScope(QgsExpressionContextUtils.layerScope(layer))
+        expressions = []
+        for text in (first, second):
+            expression = QgsExpression(text) if text else None
+            if expression is not None:
+                expression.prepare(context)
+            expressions.append(expression)
+        defaults = (QgsSymbolLayerUtils.decodeColor(static1), QgsSymbolLayerUtils.decodeColor(static2))
+
+        def color_of(expression, default):
+            if expression is None:
+                return default
+            value = expression.evaluate(context)
+            if expression.hasEvalError() or value is None or value == NULL:
+                return default
+            color = value if isinstance(value, QColor) else QgsSymbolLayerUtils.decodeColor(str(value))
+            return color if color.isValid() else default
+
+        def colors(feature):
+            context.setFeature(feature)
+            ramp = QgsGradientColorRamp(*(color_of(e, d) for e, d in zip(expressions, defaults)))
+            blend = SymbolMaterializer._gradient_color(ramp) if premultiplied else ramp.color  # pylint: disable=protected-access
+            return [QgsSymbolLayerUtils.encodeColor(blend((i + 0.5) / bands)) for i in range(bands)]
+        return colors
 
     def _inside_bands(self, source: str, recipe: Recipe) -> Optional[str]:
         """Worker: the band of an outline drawn only inside its polygon, per
@@ -2282,7 +2329,7 @@ class RulesExporter:
         with the colour and width QGIS computes for the middle of the piece
         (COLOR_FIELD, WIDTH_FIELD). The start / end values are evaluated per
         feature, as QGIS does, and interpolated by length along the part."""
-        from qgis.core import (QgsExpression, QgsExpressionContext,  # pylint: disable=import-outside-toplevel
+        from qgis.core import (QgsExpression,  # pylint: disable=import-outside-toplevel
                                QgsExpressionContextUtils, QgsFeature, QgsField, QgsFields,
                                QgsGeometry, QgsInterpolatedLineColor, QgsInterpolatedLineWidth,
                                QgsProject, QgsReadWriteContext, QgsSymbolLayerUtils,
@@ -2300,7 +2347,9 @@ class RulesExporter:
             return item
         color = restore(QgsInterpolatedLineColor, recipe.param("color"))
         width = restore(QgsInterpolatedLineWidth, recipe.param("width"))
-        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        # The main-thread scope copies (no QgsProject from a worker thread).
+        context = self._worker_expression_context()
+        context.appendScope(QgsExpressionContextUtils.layerScope(layer))
 
         def prepared(pair):
             out = []
@@ -3366,12 +3415,44 @@ class RulesExporter:
         self._group_tokens = []
         self._shared_features = 0
 
+    def _report_view_variables(self, flat_rule: FlattenedRule, expressions) -> None:
+        """Note the map view variables (held for the starting view) and the
+        variables set only while QGIS draws (NULL here) that a rule's
+        expressions read; reported once per layer (_flush_view_reports)."""
+        view, render = set(), set()
+        for expression in expressions:
+            if expression:
+                view |= map_view.view_reads(expression)
+                render |= map_view.render_only_reads(expression)
+        if view or render:
+            layer = flat_rule.layer
+            entry = self._view_reads.setdefault(layer.id(), (layer.name() or layer.id(), set(), set()))
+            entry[1].update(view)
+            entry[2].update(render)
+
+    def _flush_view_reports(self) -> None:
+        """Q2VT_EXPR_MAP_VIEW_STATIC / Q2VT_EXPR_RENDER_VARIABLE, one per layer."""
+        for layer_id, (name, view, render) in sorted(self._view_reads.items()):
+            if view:
+                self.diagnostics.add(
+                    "Q2VT_EXPR_MAP_VIEW_STATIC",
+                    f"{name}: {', '.join('@' + v for v in sorted(view))} evaluated once, for the "
+                    f"web map's starting view ({map_view.describe()}).", layer_id=layer_id)
+            if render:
+                self.diagnostics.add(
+                    "Q2VT_EXPR_RENDER_VARIABLE",
+                    f"{name}: {', '.join('@' + v for v in sorted(render))} has no value in the "
+                    "export (NULL).", layer_id=layer_id)
+        self._view_reads = {}
+
     def _worker_expression_context(self) -> QgsExpressionContext:
-        """Global + project scope for a worker: copies of the main-thread
-        snapshots (project variables stay available to expressions)."""
+        """Global + project + map view scope for a worker: copies of the
+        main-thread snapshots (project variables and @map_extent & co. stay
+        available to expressions)."""
         with self._scope_lock:
             scopes = [QgsExpressionContextScope(self._global_scope),
-                      QgsExpressionContextScope(self._project_scope)]
+                      QgsExpressionContextScope(self._project_scope),
+                      QgsExpressionContextScope(self._view_scope)]
         context = QgsExpressionContext()
         for scope in scopes:
             context.appendScope(scope)
@@ -3681,6 +3762,7 @@ class RulesExporter:
             transform_expr = self._generator_in_layer_crs(
                 settings.geometryGenerator, flat_rule)
             settings.geometryGeneratorEnabled = False
+            flat_rule.label_generated = True  # placed on the generated geometry
             flat_rule.set_attr("c", target_geom)
         elif target_geom == 2 and self._labels_along_line(flat_rule):
             # A perimeter label repeated along the outline: the rings, as
@@ -3829,6 +3911,8 @@ class RulesExporter:
         if settings is None or self._pinned_position(settings) is not None \
                 or getattr(flat_rule, "line_label_midpoint", False):
             return False
+        if getattr(flat_rule, "label_generated", False) or settings.geometryGeneratorEnabled:
+            return False  # placed on the generated geometry (exported), not the polygon
         if self.cent_source == 0:
             return False
         if self.cent_source == 1:

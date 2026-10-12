@@ -38,6 +38,7 @@ from qgis.PyQt.QtCore import qVersion
 
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
 from .fidelity import zoom as fidelity_zoom
+from .fidelity import map_view
 from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
@@ -248,7 +249,8 @@ class SymbolImage:
         render map units at an arbitrary fixed scale.) The canvas is sized
         from the symbol's rendered bounds.
         """
-        expression_context = QgsExpressionContext([QgsExpressionContextUtils.globalScope()])
+        expression_context = QgsExpressionContext([QgsExpressionContextUtils.globalScope(),
+                                                   map_view.scope()])
         feature = None
         if self.attributes:
             fields = QgsFields()

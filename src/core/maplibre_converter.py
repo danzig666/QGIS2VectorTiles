@@ -28,9 +28,10 @@ from qgis.core import (
     QgsProject,
     QgsTextBackgroundSettings,
 )
-from qgis.core import NULL, Qgis, QgsExpressionContext, QgsFontUtils, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
+from qgis.core import NULL, Qgis, QgsFontUtils, QgsSymbolLayerUtils, QgsFillSymbol, QgsLineSymbol, QgsUnitTypes
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
+from .fidelity import map_view
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
 from .fidelity import expressions as ex
 from .fidelity import feature_order
@@ -281,7 +282,7 @@ class PropertyExtractor:
                 f"Data-defined property '{expression}' is not available in the web style; "
                 "the static value is used.", detail=expression)
             return value
-        result = qexpr.evaluate()
+        result = qexpr.evaluate(map_view.context())
         if qexpr.hasEvalError():
             cls.context.report("Q2VT_DDP_EVAL_ERROR",
                                f"Could not evaluate '{expression}': {qexpr.evalErrorString()}",
@@ -3390,7 +3391,8 @@ class QgisMapLibreStyleExporter:
                             clone = marker.clone()
                             for layer_index, key, expression in random_ddp:
                                 clone.symbolLayer(layer_index).setDataDefinedProperty(
-                                    key, QgsProperty.fromValue(QgsExpression(expression).evaluate()))
+                                    key, QgsProperty.fromValue(QgsExpression(expression).evaluate(
+                                        map_view.context())))
                             markers.append(self._marker_images(clone))
                         image = markers[index][ratio - 1]
                         index += 1
@@ -4926,7 +4928,7 @@ class QgisMapLibreStyleExporter:
                 expression = QgsExpression(prop.expressionString())
                 if expression.hasParserError() or expression.referencedColumns() or expression.needsGeometry():
                     return None
-                value = expression.evaluate(QgsExpressionContext())
+                value = expression.evaluate(map_view.context())
                 if expression.hasEvalError():
                     return None
             else:

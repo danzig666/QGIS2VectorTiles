@@ -55,6 +55,7 @@ from .utils.flattened_rule import FlattenedRule
 from .utils.zoom_levels import ZoomLevels
 from .core.fidelity import materialize
 from .core.fidelity import zoom as fidelity_zoom
+from .core.fidelity import map_view
 from .core.fidelity.zoom import fit_zoom
 from .core.rules_flattener import RulesFlattener
 from .core.rules_exporter import RulesExporter
@@ -259,6 +260,12 @@ class QGIS2VectorTiles:
         # the metric ground scale QgsScaleCalculator gives a geographic CRS).
         ZoomLevels.configure(self.lengths.map_context.top_scale,
                              self.lengths.map_context.map_units_per_mm_0)
+        # @map_extent & co. for the web map's starting view (the export
+        # extent in the project CRS); the canvas fallback above is in the
+        # canvas CRS, not EPSG:3857: no view then.
+        map_view.configure(extent, QgsProject.instance().crs(),
+                           self.layer_ids if self.layer_ids is not None
+                           else QgsProject.instance().mapLayers().keys())
         self.output_path: Optional[str] = None
         self._expected_zooms: Tuple[int, int] = (max(0, self.min_zoom), self.max_zoom)
         self.report: dict = {}
@@ -366,8 +373,12 @@ class QGIS2VectorTiles:
         self._write_report(temp_dir, style, archive, self.rules)
         self._enforce_strict(temp_dir)
         self.feedback.setProgress(100)
-        self._log(f". Process completed successfully "
-                  f"({self._elapsed_minutes(state.start_time)} minutes).")
+        if state.has_features:
+            self._log(f". Process completed successfully "
+                      f"({self._elapsed_minutes(state.start_time)} minutes).")
+        else:
+            self._log(f". Process completed: nothing was exported (Q2VT_EXPORT_EMPTY, see "
+                      f"fidelity_report.html) ({self._elapsed_minutes(state.start_time)} minutes).")
         self._clear_project()
         self.output_path = temp_dir
         if self.archive_format == "pmtiles" and self.pmtiles is not None:

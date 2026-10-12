@@ -76,6 +76,17 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_EXPR_INVALID": CodeInfo(
         Severity.ERROR, "Generated MapLibre expression is invalid",
         "Report this as a converter bug with the diagnostic detail."),
+    "Q2VT_EXPR_MAP_VIEW_STATIC": CodeInfo(
+        Severity.WARNING, "Expression evaluated once, for the web map's starting view",
+        "QGIS evaluates @map_extent, @map_extent_center, @map_extent_width and "
+        "@map_extent_height again whenever the map is panned or zoomed. The web map takes "
+        "their values for the export extent (where it opens, in the project CRS) and keeps "
+        "them: what follows the view in QGIS stays where it was for that extent. Use fixed "
+        "coordinates or a field if this is not what you want."),
+    "Q2VT_EXPR_RENDER_VARIABLE": CodeInfo(
+        Severity.WARNING, "Expression reads a variable QGIS sets only while drawing",
+        "Variables such as @canvas_cursor_point or the animation and time frame variables "
+        "have no value in the export (NULL): the result may differ from QGIS."),
     # --- Symbols / sprites ------------------------------------------------
     "Q2VT_SPRITE_RENDER_FAILED": CodeInfo(
         Severity.ERROR, "Symbol could not be rendered to a sprite image",
@@ -165,7 +176,9 @@ CODES: Dict[str, CodeInfo] = {
         "share a dataset. Please report it."),
     "Q2VT_RULE_EXPORT_FAILED": CodeInfo(
         Severity.ERROR, "A rule could not be exported",
-        "It is missing from the map. Report this as a converter bug with the diagnostic detail."),
+        "It is missing from the map. Check the rule's expressions (filter, data-defined "
+        "properties, geometry generator) in QGIS; if they work there, report it as a converter "
+        "bug with the diagnostic detail."),
     "Q2VT_EXPORT_EMPTY": CodeInfo(
         Severity.ERROR, "No visible features in the export extent",
         "Check the extent, layer visibility and scale ranges."),

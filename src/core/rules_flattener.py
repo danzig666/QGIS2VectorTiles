@@ -46,6 +46,7 @@ from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import OverzoomPolicy, ZoomInterval
 from .fidelity import expressions as ex
 from .fidelity import zoom as fidelity_zoom
+from .fidelity import map_view
 from .fidelity.units import MERCATOR_UNITS_PER_DEGREE, LengthConverter
 from .fidelity.qgis_expr import (SCALE_VARIABLES, and_filters, enabled_condition,
                                  map_scale_reads, scale_thresholds, substitute_geometry,
@@ -716,7 +717,8 @@ class RulesFlattener:
             center = QgsCoordinateTransform(web, QgsCoordinateReferenceSystem("EPSG:4326"),
                                             project.transformContext()).transform(self.extent.center())
             latitude = center.y()
-        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)
+                                       + [map_view.scope()])
         expression = self._heatmap_weight(renderer, layer.fields())
         weight = QgsExpression(expression) if expression else None
         if weight is not None:
@@ -1190,7 +1192,8 @@ class RulesFlattener:
                 " AND (@q2vt_low = 0 OR @map_scale <= if(@q2vt_low < 0, 1 / abs(@q2vt_low), @q2vt_low)))))")
             rule.setFilterExpression(and_filters(rule.filterExpression(), condition))
         else:
-            context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+            context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)
+                                           + [map_view.scope()])
             use, low, high = settings.scaleVisibility, settings.minimumScale, settings.maximumScale
             if visibility_key in active:
                 use = props.valueAsBool(visibility_key, context, use)[0]
@@ -2417,7 +2420,7 @@ class RulesFlattener:
         # A variable set only while rendering (@symbol_color, @map_rotation)
         # is NULL here: every zoom would look alike and merge into one piece.
         from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
-        known = set(SCALE_VARIABLES) | set(QgsExpressionContext(
+        known = set(SCALE_VARIABLES) | set(map_view.VIEW_VARIABLES) | set(QgsExpressionContext(
             QgsExpressionContextUtils.globalProjectLayerScopes(flat_rule.layer)).variableNames())
         if any(set(QgsExpression(expression).referencedVariables()) - known
                for expression in found):
@@ -2431,7 +2434,8 @@ class RulesFlattener:
         if expressions is None:
             return None
         from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
-        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)
+                                       + [map_view.scope()])
         values = []
         for text in expressions:
             expression = QgsExpression(with_map_scale(text, fidelity_zoom.zoom_to_scale(zoom)))
@@ -2463,7 +2467,7 @@ class RulesFlattener:
             if self._is_feature_dependent(vis_prop.expressionString()):
                 return True  # feature dependent: folded into the rule filter
             expression = QgsExpression(with_map_scale(vis_prop.expressionString(), scale))
-            evaluation = expression.evaluate()
+            evaluation = expression.evaluate(map_view.context())
             if not expression.hasEvalError() and evaluation is not None and not evaluation:
                 return False
         return True
@@ -2539,6 +2543,6 @@ class RulesFlattener:
             return False
         from qgis.core import QgsExpressionContext, QgsExpressionContextUtils  # pylint: disable=import-outside-toplevel
         expression = QgsExpression(bound)
-        value = expression.evaluate(
-            QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)))
+        value = expression.evaluate(QgsExpressionContext(
+            QgsExpressionContextUtils.globalProjectLayerScopes(layer) + [map_view.scope()]))
         return not expression.hasEvalError() and isinstance(value, (bool, int, float)) and not value

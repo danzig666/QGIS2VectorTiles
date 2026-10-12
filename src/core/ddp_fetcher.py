@@ -13,6 +13,7 @@ from qgis.core import (QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSym
 
 from ..utils.config import QVariant
 from .fidelity.qgis_expr import with_map_scale
+from .fidelity import map_view
 
 
 def _to_color_hex_expr(inner_expr: str) -> str:
@@ -261,7 +262,7 @@ class DataDefinedPropertiesFetcher:
             # property and create no field. The legacy code tested
             # truthiness, so 0/False/'' became per-feature fields, and stored
             # the value as a quoted string (turning 3 into '3').
-            value = QgsExpression(raw).evaluate()
+            value = QgsExpression(raw).evaluate(map_view.context())
             props_collection.setProperty(key, QgsProperty.fromValue(value))
             return None
 
@@ -287,8 +288,10 @@ class DataDefinedPropertiesFetcher:
     })
     FEATURE_VARIABLES = frozenset({
         "feature", "id", "geometry", "geometry_part_num", "geometry_part_count",
-        "geometry_point_num", "geometry_point_count", "map_extent", "map_extent_center",
-        "map_rotation", "canvas_cursor_point", "symbol_color", "symbol_angle",
+        "geometry_point_num", "geometry_point_count",
+        # @map_extent & co. hold the web map's starting view (fidelity.map_view):
+        # constants here.
+        "canvas_cursor_point", "symbol_color", "symbol_angle",
     })
 
     @classmethod
@@ -310,5 +313,5 @@ class DataDefinedPropertiesFetcher:
             return False
         if set(dependencies.referencedVariables()) & cls.FEATURE_VARIABLES:
             return False
-        qexpr.evaluate()
+        qexpr.evaluate(map_view.context())
         return not qexpr.hasEvalError()

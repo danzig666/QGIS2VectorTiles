@@ -1195,7 +1195,7 @@ def test_layer_names_with_quotes_export(export, tmp_path):
     literal unescaped, the expression did not parse and the layer's rules
     were not exported (nothing to publish)."""
     layer = zoning_layer(path=str(tmp_path / "quoted.gpkg"))
-    layer.setName('Regioni d\'Italia "nord"')
+    layer.setName('Regioni d\'Italia "nord" \\ sud\\\'s')
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "red"})))
     exporter, result = export(layer)
     assert result
