@@ -980,6 +980,60 @@ def test_thin_map_unit_hatch_strokes_stay_sharp_in_overzoom(tmp_path, monkeypatc
     assert darkest[1] < 128, darkest  # an opaque red stroke (L 76) somewhere
 
 
+@pytest.mark.parametrize("zoom", [18.5, 20.5])
+def test_painter_clipped_hatch_stays_inside_a_narrow_polygon(tmp_path, monkeypatch, zoom):
+    """A 2 m strip hatched at 45 degrees, 0.6 m lines 3 m apart in map units
+    (a shore strip, exported 0-16, viewed zoomed in): QGIS clips the painted
+    hatch to the polygon. The lines were clipped to it and drawn with their
+    square caps, sticking out of both edges (most where a line runs along
+    the strip); the hatch is now the strips QGIS paints."""
+    import math
+    from PIL import Image, ImageFilter
+    from qgis.core import QgsLinePatternFillSymbolLayer, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtCore import Qt
+    from q2vt_fixtures import to_geopackage as save
+    monkeypatch.setattr(sys.modules[__name__], "ZOOM", zoom)
+    # Along 52 degrees, 7 degrees off the hatch, 2 m wide, 60 m long.
+    ux, uy = math.cos(math.radians(52)), math.sin(math.radians(52))
+    ring = [(-30 * ux - uy, -30 * uy + ux), (30 * ux - uy, 30 * uy + ux),
+            (30 * ux + uy, 30 * uy - ux), (-30 * ux + uy, -30 * uy - ux)]
+    memory = QgsVectorLayer("Polygon?crs=EPSG:3857", "strip", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((" + ", ".join(
+        f"{CENTER[0] + x} {CENTER[1] + y}" for x, y in ring + ring[:1]) + "))"))
+    memory.dataProvider().addFeature(feature)
+    layer = save(memory, str(tmp_path / "strip.gpkg"))
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setLineAngle(45)
+    hatch.setDistance(3)
+    hatch.setDistanceUnit(Qgis.RenderUnit.MapUnits)
+    hatch.setClipMode(Qgis.LineClipMode.ClipPainterOnly)
+    line = hatch.subSymbol().symbolLayer(0)
+    line.setColor(QColor("black"))
+    line.setWidth(0.6)
+    line.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    line.setPenCapStyle(Qt.PenCapStyle.SquareCap)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([hatch])))
+    _compare(tmp_path, layer, zooms=(0, 16))
+    shape = layer.clone()
+    shape.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([QgsSimpleFillSymbolLayer(
+        QColor("black"), Qt.BrushStyle.SolidPattern, QColor("black"), Qt.PenStyle.NoPen)])))
+    gallery.qgis_render(shape, CENTER, zoom, SIZE, str(tmp_path / "shape.png"))
+    # The polygon, 2 px wider (antialiasing, the tile grid).
+    inside = Image.open(str(tmp_path / "shape.png")).convert("L").point(
+        lambda v: 255 if v < 250 else 0).filter(ImageFilter.MaxFilter(5))
+    outside = {}
+    for name in ("qgis", "browser"):
+        ink = Image.open(str(tmp_path / f"v_{name}.png")).convert("L").point(
+            lambda v: 255 if v < 160 else 0)
+        total = sum(1 for v in ink.getdata() if v)
+        stray = sum(1 for v, keep in zip(ink.getdata(), inside.getdata()) if v and not keep)
+        outside[name] = (stray, total)
+    assert outside["qgis"][0] < 0.005 * outside["qgis"][1], outside
+    assert outside["browser"][0] < 0.005 * outside["browser"][1], outside
+    assert outside["browser"][1] == pytest.approx(outside["qgis"][1], rel=0.12), outside
+
+
 @pytest.mark.parametrize("zoom", [20.5, 21.5])
 def test_millimetre_hatch_lines_keep_their_width_above_tile_zoom_3(tmp_path, monkeypatch, zoom):
     """A viewport hatch 3 m apart with 0.4 mm lines, exported 0-16: scaled
