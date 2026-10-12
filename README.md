@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.33.0**. Newest first:
+This README describes QWebMap **4.33.1**. Newest first:
+
+**4.33.1** — curved line labels follow the road
+- **Curved line labels** are laid along the line letter by letter, as in QGIS, round bends within
+  QGIS's curved angle limit, at every zoom (they were straight labels turned to the line).
+- **Word spacing** from QGIS is kept, and line labels **above or below** their line stay on their side.
 
 **4.33.0** — conversion audit: zooms past the last tiles, mixed units, QGIS rule semantics
 - **Zooming in past the last tile zoom (17–22):** symbols in millimetres keep their size (arrows,
@@ -222,7 +227,7 @@ What carries over:
   on high-resolution screens); font markers as browser text in your font (static map-unit
   characters as their exact glyph outlines); vector field markers as lines.
 - **Labels:** your installed fonts (glyphs are generated from them, bold, italic and weights such
-  as DemiBold, Medium and Light included), buffers, background shapes, letter spacing, curved,
+  as DemiBold, Medium and Light included), buffers, background shapes, letter and word spacing, curved,
   parallel, Free (angled) and around-point placement, scale-based visibility, data-defined
   positions (their callouts as straight leaders to the label's anchor, reported), and an option
   to label every feature.
