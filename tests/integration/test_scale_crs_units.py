@@ -214,16 +214,21 @@ def test_reference_scale_sizes_follow_the_map(plugin, tmp_path):
     reset_project(line, point, plain)
     exporter, style = _export(tmp_path)
     at_reference = math.log2(_scale_of(0) / reference)
-    widths = [l["paint"]["line-width"] for l in _data_layers(style, "line")]
+    # (Outlines of large map-unit markers drawn as their shape are "m04".)
+    widths = [l["paint"]["line-width"] for l in _data_layers(style, "line") if "m04" not in l["id"]]
     scaled = [w for w in widths if not ex.is_number(w)]
     assert len(scaled) == 1
     assert [w for w in widths if ex.is_number(w)] == [pytest.approx(96 / 25.4, rel=1e-3)]  # plain
     for zoom in (at_reference, 12, 16, 18, 21):
         factor = reference / _scale_of(zoom)
         assert _curve_at(scaled[0], zoom) == pytest.approx(96 / 25.4 * factor, rel=0.01)
-        radius = _curve_at(_data_layers(style, "circle")[0]["paint"]["circle-radius"], zoom)
-        # Less half the 1 px hairline stroke MapLibre draws outside the radius.
-        assert radius + 0.5 == pytest.approx(1.5 * 96 / 25.4 * factor, rel=0.01)
+        circle = _data_layers(style, "circle")[0]
+        if zoom < circle.get("maxzoom", 24):
+            radius = _curve_at(circle["paint"]["circle-radius"], zoom)
+            # Less half the 1 px hairline stroke MapLibre draws outside the radius.
+            assert radius + 0.5 == pytest.approx(1.5 * 96 / 25.4 * factor, rel=0.01)
+        else:  # 3 mm at 1:20000 is 60 m: past 128 px the marker is its shape
+            assert any(l["minzoom"] <= zoom for l in _data_layers(style, "line") if "m04" in l["id"])
         size = _curve_at(_data_layers(style, "symbol")[0]["layout"]["text-size"], zoom)
         assert size == pytest.approx(10 * 96 / 72 * factor, rel=0.01)
     # The project's own symbols are untouched.

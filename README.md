@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.6**. Newest first:
+This README describes QWebMap **4.36.7**. Newest first:
+
+**4.36.7** — large map-unit markers stay right when zoomed in
+- A simple marker sized in map units (e.g. a 920 m dashed circle on a polygon's centroid for a
+  protection distance) is drawn as its real shape from the zoom where it is 128 px wide: it no
+  longer disappears when its centre is off screen, and its outline stays sharp and dashed.
 
 **4.36.6** — no false "map style is invalid"
 - 4.36.5 showed "The map style is invalid" for a map with a layer that is empty in the export
