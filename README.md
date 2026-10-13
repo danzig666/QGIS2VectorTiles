@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.5**. Newest first:
+This README describes QWebMap **4.36.6**. Newest first:
+
+**4.36.6** — no false "map style is invalid"
+- 4.36.5 showed "The map style is invalid" for a map with a layer that is empty in the export
+  extent (MapLibre reports its missing source layer, but draws the map). Only a style MapLibre
+  rejects stops the map now.
 
 **4.36.5** — web maps that would not load
 - 4.36.4 could publish a style layer that starts past zoom 24 (a scale-limited point pattern);

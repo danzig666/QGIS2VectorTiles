@@ -241,17 +241,17 @@ async function start() {
       diagnostics.warnings.push({ key: "map", detail: message.slice(0, 500) });
       if (/sprite/i.test(message)) warn("error.sprite", message);
     });
-    // An invalid style fires "error" and never "load": show it instead of
-    // loading for ever. Tile, sprite and glyph errors do not stop the map.
+    // A style MapLibre rejects fires "error" and never "style.load": shown
+    // instead of loading for ever. Errors after the style was accepted (a
+    // source layer with no tiles, a missing tile or image) do not stop it.
     await new Promise((resolve, reject) => {
       const failed = (event) => {
-        const message = String(event && event.error && event.error.message || event);
-        if (map.loaded() || (event && (event.sourceId || event.tile)) ||
-            /sprite|glyph|image/i.test(message)) return;
         map.off("error", failed);
+        const message = String(event && event.error && event.error.message || event);
         reject(new ViewerError("Q2VT_PUB_STYLE", "the map style was rejected", message));
       };
       map.on("error", failed);
+      map.once("style.load", () => map.off("error", failed));
       map.once("load", () => { map.off("error", failed); resolve(); });
     });
     document.body.classList.add("q2vt-loaded");
