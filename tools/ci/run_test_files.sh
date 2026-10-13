@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Runs each test file given in its own pytest process (used by
 # .github/workflows/tests.yml): a crash of QGIS in one file fails that file
-# only, the others still run. JUnit reports go to test-reports/, a summary to
+# only, the others still run. JUnit reports go to test-reports/<title>/, a summary to
 # the job summary. Exit 1 if any file failed.
 set -u
 title="$1"
 shift
-mkdir -p test-reports
+reports="test-reports/$(echo "${title}" | tr -c 'A-Za-z0-9\n' '-' | tr 'A-Z' 'a-z')"
+mkdir -p "${reports}"
 failed=()
 passed=0
 for file in "$@"; do
   name="$(echo "${file%.py}" | tr '/' '_')"
   echo "::group::${file}"
   start=$SECONDS
-  python3 -m pytest -q -rfE -p no:cacheprovider --junitxml="test-reports/${name}.xml" "${file}"
+  python3 -m pytest -q -rfE -p no:cacheprovider --junitxml="${reports}/${name}.xml" "${file}"
   code=$?
   echo "::endgroup::"
   echo "${file}: exit ${code} in $((SECONDS - start)) s"
@@ -26,11 +27,11 @@ for file in "$@"; do
 done
 # One annotation with every failed test and its first error line (the
 # annotations stay readable through the API; the log is long).
-report="$(python3 - "$@" <<'PY'
-import glob, sys
+report="$(REPORTS="${reports}" python3 - <<'PY'
+import glob, os
 import xml.etree.ElementTree as ET
 lines = []
-for path in sorted(glob.glob("test-reports/*.xml")):
+for path in sorted(glob.glob(os.environ["REPORTS"] + "/*.xml")):
     for case in ET.parse(path).getroot().iter("testcase"):
         for kind in ("failure", "error"):
             node = case.find(kind)
@@ -40,11 +41,11 @@ for path in sorted(glob.glob("test-reports/*.xml")):
 print("\n".join(lines))
 PY
 )"
-counts="$(python3 - <<'PY'
-import glob
+counts="$(REPORTS="${reports}" python3 - <<'PY'
+import glob, os
 import xml.etree.ElementTree as ET
 total = {"tests": 0, "skipped": 0, "failures": 0, "errors": 0}
-for path in glob.glob("test-reports/*.xml"):
+for path in glob.glob(os.environ["REPORTS"] + "/*.xml"):
     for suite in ET.parse(path).getroot().iter("testsuite"):
         for key in total:
             total[key] += int(suite.get(key, 0))
