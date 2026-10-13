@@ -484,3 +484,19 @@ def test_dashes_in_the_line_width_unit_stay_one_array(mc, unit):
     line = _dashed_line(1.0, unit, [3.0, 2.0], unit)
     width = mc.LinePropertyExtractor.get_line_width(line)
     assert mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 24) == [3.0, 2.0]
+
+
+def test_scale_limited_map_unit_dashes_keep_their_ratio_zoomed_out(mc):
+    """A 2 m line with 20/7 m dashes, both limited to 1:4000 (QgsMapUnitScale
+    minScale): zoomed out beyond it QGIS draws both at their 1:4000 size. The
+    width was held there but the dashes shrank with the map: a solid line."""
+    from qgis.core import QgsMapUnitScale
+    line = _dashed_line(2.0, Qgis.RenderUnit.MapUnits, [20.0, 7.0], Qgis.RenderUnit.MapUnits)
+    limit = QgsMapUnitScale(4000, 0)
+    line.setWidthMapUnitScale(limit)
+    line.setCustomDashPatternMapUnitScale(limit)
+    width = mc.LinePropertyExtractor.get_line_width(line)
+    dasharray = mc.LinePropertyExtractor.get_line_dasharray(line, width, 0, 13)
+    for zoom in (8.0, 10.0, 12.5):
+        dash, gap = _dash_at(dasharray, zoom) if not ex.is_number(dasharray[0]) else dasharray[:2]
+        assert (dash, gap) == pytest.approx((10.0, 3.5), rel=0.01)

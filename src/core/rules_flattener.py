@@ -33,7 +33,8 @@ from qgis.core import (
     QgsSymbolLayer,
     QgsSimpleFillSymbolLayer,
     QgsProperty,
-    QgsFontUtils
+    QgsFontUtils,
+    QgsUnitTypes
     )
 from qgis.PyQt.QtCore import QPointF
 from qgis.PyQt.QtGui import QFont
@@ -95,10 +96,13 @@ class RulesFlattener:
                  scale_limits=None, extent=None, fast_markers: bool = False,
                  lengths: Optional[LengthConverter] = None,
                  overzoom: OverzoomPolicy = OverzoomPolicy.PERSIST,
-                 overzoom_to: Optional[int] = None):
+                 overzoom_to: Optional[int] = None, min_label_px: float = 0.0):
         """``overzoom_to``: the last zoom the map is viewed at (the browser
-        overzooms the max_zoom tiles up to it; None: MapLibre's 22)."""
+        overzooms the max_zoom tiles up to it; None: MapLibre's 22).
+        ``min_label_px``: labels sized in map units are hidden where their
+        text is smaller than this on screen (0: off)."""
         self.min_zoom = min_zoom
+        self.min_label_px = float(min_label_px or 0.0)
         # Beyond the archive's last zoom the browser keeps drawing its tiles
         # (PERSIST, the viewer zooms in to 22 by default): rules that start
         # there are drawn from them, and values that depend on the scale are
@@ -1176,6 +1180,43 @@ class RulesFlattener:
                              QgsPalLayerSettings.Property.MinimumScale,
                              QgsPalLayerSettings.Property.MaximumScale)
 
+    def _apply_label_pixel_limits(self, rule, layer, settings) -> None:
+        """Hide labels sized in map units where their text is too small (or,
+        with QGIS's "Pixel size-based visibility", too large) on screen.
+
+        Only a static size: data-defined sizes and sizes with their own
+        scale limits are left alone."""
+        text = settings.format()
+        unit = int(getattr(text.sizeUnit(), "value", text.sizeUnit()))
+        map_units = int(getattr(Qgis.RenderUnit.MapUnits, "value", Qgis.RenderUnit.MapUnits))
+        metres_unit = int(getattr(Qgis.RenderUnit.MetersInMapUnits, "value",
+                                  Qgis.RenderUnit.MetersInMapUnits))
+        if unit not in (map_units, metres_unit) or text.size() <= 0:
+            return
+        size_prop = settings.dataDefinedProperties().property(QgsPalLayerSettings.Property.Size)
+        limits = text.sizeMapUnitScale()
+        if (size_prop is not None and size_prop.isActive()) or limits.minScale or limits.maxScale:
+            return
+        if unit == metres_unit:
+            metres = text.size()
+        else:
+            project_crs = QgsProject.instance().crs()
+            crs = project_crs if project_crs.isValid() else layer.crs()
+            if not crs.isValid() or crs.isGeographic():
+                return
+            metres = text.size() * QgsUnitTypes.fromUnitToUnitFactor(
+                crs.mapUnits(), Qgis.DistanceUnit.Meters)
+        smallest, largest = self.min_label_px, 0.0
+        if settings.fontLimitPixelSize:
+            smallest = max(smallest, float(settings.fontMinPixelSize))
+            largest = float(settings.fontMaxPixelSize)
+        # On-screen px of the text at 1:scale (96 dpi): metres * 96 / 0.0254 / scale.
+        per_px = metres * 96.0 / 0.0254
+        low = per_px / smallest if smallest > 0 else 0.0
+        high = per_px / largest if largest > 0 else 0.0
+        if low or high:
+            self._intersect_scale_range(rule, low, high)
+
     def _apply_label_scale_visibility(self, rule, layer) -> None:
         """Apply the label settings' scale visibility (Rendering tab) to the rule.
 
@@ -1217,6 +1258,7 @@ class RulesFlattener:
                 high = props.valueAsDouble(max_key, context, high)[0]
             if use:
                 self._intersect_scale_range(rule, low, high)
+        self._apply_label_pixel_limits(rule, layer, settings)
         settings.scaleVisibility = False
         for key in active:
             prop = props.property(key)
