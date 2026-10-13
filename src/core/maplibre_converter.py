@@ -495,7 +495,15 @@ class LinePropertyExtractor:
         square = _enum_int(symbol_layer.penCapStyle()) == 0x10  # Qt::SquareCap
         if custom_dash_enabled and dash_vector:
             unit = symbol_layer.customDashPatternUnit()
-            dashes = [PropertyExtractor.length(d, unit) for d in dash_vector]
+            # A map-unit pattern limited by scale (QgsMapUnitScale) stays its
+            # limit's size beyond it, as the width does: without the limit a
+            # zoomed-out pattern shrank to a solid line under a fixed width.
+            try:
+                dash_scale = symbol_layer.customDashPatternMapUnitScale()
+            except (RuntimeError, AttributeError):
+                dash_scale = None
+            dashes = [PropertyExtractor.length(d, unit, map_unit_scale=dash_scale)
+                      for d in dash_vector]
             if not ex.is_number(width_px) and not ex.is_zoom_curve(width_px):
                 width_px = 1.0
             if all(ex.is_number(v) for v in dashes + [width_px]):
