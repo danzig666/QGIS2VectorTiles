@@ -9,7 +9,7 @@ import * as maplibregl from "./maplibre-gl.mjs";
 import { enableVisibleLabels } from "./visible_labels.mjs";
 import { RASTER_TILE_TYPES, ViewerError, bindStyle, checkRelative, openArchives, resolveUrl } from "./transport.mjs";
 import { loadLocale, t } from "./i18n.mjs";
-import { fetchChecked, showError, state as diagnostics, warn } from "./diagnostics.mjs";
+import { fetchChecked, notice, showError, state as diagnostics, warn } from "./diagnostics.mjs";
 
 export const EXPECTED_MAPLIBRE = "6.11.2";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
@@ -232,9 +232,8 @@ async function start() {
     if (stay) stay.attach(map);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.FullscreenControl(), "top-right");
-    if (window.isSecureContext && navigator.geolocation) {
-      map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true },
-        trackUserLocation: false, showAccuracyCircle: true }), "top-right");
+    if (manifest.interaction?.geolocation === true && window.isSecureContext && navigator.geolocation) {
+      map.addControl(locateControl(map, maplibregl, view.bounds), "top-right");
     }
     map.on("error", (event) => {
       const message = String(event && event.error && event.error.message || event);
@@ -288,6 +287,52 @@ start();
 // "Keep the web map on the extent": the map's centre cannot leave the
 // publication extent, and it zooms out at most one level beyond the zoom
 // that shows the whole extent (recomputed when the window is resized).
+// "My location" (an option of the map): one position, then the view goes
+// there with a dot. A position outside the map's extent only says so; the
+// map stays (an empty map far away helps no one).
+function locateControl(map, maplibregl, bounds) {
+  let marker = null;
+  return {
+    onAdd() {
+      const box = document.createElement("div");
+      box.className = "maplibregl-ctrl maplibregl-ctrl-group";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "maplibregl-ctrl-geolocate";
+      button.title = t("app.locate");
+      button.setAttribute("aria-label", t("app.locate"));
+      const icon = document.createElement("span");
+      icon.className = "maplibregl-ctrl-icon";
+      icon.setAttribute("aria-hidden", "true");
+      button.append(icon);
+      box.append(button);
+      button.addEventListener("click", () => {
+        navigator.geolocation.getCurrentPosition((position) => {
+          const { longitude, latitude } = position.coords;
+          const [west, south, east, north] = bounds || [];
+          if ([west, south, east, north].every(Number.isFinite) &&
+              (longitude < west || longitude > east || latitude < south || latitude > north)) {
+            notice("app.locateOutside");
+            return;
+          }
+          if (!marker) {
+            const dot = document.createElement("div");
+            dot.className = "maplibregl-user-location-dot";
+            marker = new maplibregl.Marker({ element: dot });
+          }
+          marker.setLngLat([longitude, latitude]).addTo(map);
+          map.flyTo({ center: [longitude, latitude],
+            zoom: Math.max(map.getZoom(), Math.min(17, map.getMaxZoom())) });
+        }, () => notice("app.locateFailed"), { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+      });
+      return box;
+    },
+    onRemove() {
+      if (marker) marker.remove();
+    },
+  };
+}
+
 export function extentLimit(view, maplibregl) {
   const [west, south, east, north] = view.bounds || [];
   if (![west, south, east, north].every(Number.isFinite) || west >= east || south >= north) return null;

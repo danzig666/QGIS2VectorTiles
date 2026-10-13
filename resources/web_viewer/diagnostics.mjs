@@ -51,6 +51,20 @@ export function warn(key, detail = "") {
   bar.hidden = false;
 }
 
+// A short message in the warning bar that goes away by itself.
+export function notice(key, ms = 5000) {
+  const bar = document.getElementById("q2vt-warning");
+  if (!bar) return;
+  const item = document.createElement("div");
+  item.textContent = t(key);
+  bar.append(item);
+  bar.hidden = false;
+  setTimeout(() => {
+    item.remove();
+    if (!bar.childElementCount) bar.hidden = true;
+  }, ms);
+}
+
 // A fetch() that classifies failures (HTTP status vs. network/CORS).
 export async function fetchChecked(url, kind = "json") {
   let response;

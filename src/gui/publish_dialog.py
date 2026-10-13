@@ -1105,6 +1105,7 @@ class PublishDialog(QDialog):
                 ("legend_visible_only", tr("Legend: only what is visible in the current view")),
                 ("layers_panel", tr("Layers tab (off: the legend only)")),
                 ("panel_closed", tr("Map panel closed at start")),
+                ("geolocation", tr("My location button")),
                 ("street_search", tr("Search street names (OpenStreetMap)")),
                 ("overview_map", tr("Overview map (inset)")), ("three_d", tr("3D view")),
                 ("drawing", tr("Drawing tools")), ("street_view", tr("Street View (Google)"))]):
@@ -1129,6 +1130,10 @@ class PublishDialog(QDialog):
         self.i_flags["panel_closed"].setToolTip(tr(
             "The web map opens with its panel (layers, legend, tools) closed, so more of the map "
             "is on screen; the menu button opens it."))
+        self.i_flags["geolocation"].setToolTip(tr(
+            "A button on the map that shows the visitor's location (the browser asks for "
+            "permission; needs https). Outside the map's extent it only says so and does not move "
+            "the map."))
         self.i_flags["overview_map"].setToolTip(tr("A small overview map in a corner with the current view marked."))
         self.i_flags["three_d"].setToolTip(tr(
             "A 3D button on the map: tilted view with the terrain relief (Basemap tab) and the polygons "

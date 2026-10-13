@@ -166,5 +166,8 @@
   "print.paper.a4-portrait": "A4 álló",
   "print.paper.a3-landscape": "A3 fekvő",
   "print.paper.a3-portrait": "A3 álló",
-  "error.addon": "A térkép egyik kiegészítője nem tölthető be."
+  "error.addon": "A térkép egyik kiegészítője nem tölthető be.",
+  "app.locate": "Saját helyzetem",
+  "app.locateOutside": "A tartózkodási helye kívül esik a térkép területén.",
+  "app.locateFailed": "A tartózkodási helye nem állapítható meg."
 }

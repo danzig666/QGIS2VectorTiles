@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.7**. Newest first:
+This README describes QWebMap **4.37.0**. Newest first:
+
+**4.37.0** — "My location" is an option, off by default
+- The web map's location button is now an option (Publish window, Viewer: "My location button"),
+  off by default. When on, a location outside the map's area only shows a message; the map no
+  longer flies off to an empty place.
 
 **4.36.7** — large map-unit markers stay right when zoomed in
 - A simple marker sized in map units (e.g. a 920 m dashed circle on a polygon's centroid for a

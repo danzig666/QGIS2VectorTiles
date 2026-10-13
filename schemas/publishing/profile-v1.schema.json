@@ -141,6 +141,9 @@
         "streetSearch": {
           "type": "boolean"
         },
+        "geolocation": {
+          "type": "boolean"
+        },
         "streetView": {
           "type": "boolean"
         },
