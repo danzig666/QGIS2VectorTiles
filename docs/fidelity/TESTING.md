@@ -36,6 +36,17 @@ QT_QPA_PLATFORM=offscreen python3.12 -m pytest
 The profile directory is the one `QgsApplication.qgisSettingsDirPath()` reports for a
 headless application (in the recorded container it was `~/.local/share/profiles/default/`).
 
+### On GitHub (nightly)
+
+`.github/workflows/tests.yml` runs everything in the official `qgis/qgis:final-3_34_4` image
+(QGIS 3.34.4, Python 3.10, pytest 7.4.4): unit + integration tests in one job, browser tests
+in another, each test file in its own process (`tools/ci/run_test_files.sh`), so a QGIS crash
+fails only that file. Nightly at 3:00 Budapest time on `main`, which also starts the run of
+`hu-hesz`; a nightly run is skipped when nothing under `src/`, `tests/`, `schemas/`,
+`resources/`, `tools/`, `metadata.txt`, `pytest.ini` or the workflow changed since the
+branch's last successful run (on `hu-hesz` only its own files count). *Run workflow* in the
+Actions tab always runs everything. JUnit reports are attached to each run.
+
 ### QGIS 3.44 / 4.x (required before advertising those versions)
 
 Use the official QGIS images, e.g.:

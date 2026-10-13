@@ -1,0 +1,141 @@
+# Runs the full test suite in the official QGIS image of the version the
+# plugin is developed against (3.34.4): unit + PyQGIS integration tests in one
+# job, browser tests (QGIS export + Chromium) in another.
+#
+# Nightly at 3:00 Budapest time on main, which also starts the run of each
+# variant branch (hu-hesz). A nightly run stops within seconds when no commit
+# since the branch's last successful run changed code or tests (src/, tests/,
+# schemas/, resources/, tools/, metadata.txt, pytest.ini or this file); docs,
+# README, changelog, release notes and zips do not count. On a variant branch
+# only its own files count (those that differ from main, see
+# docs/BRANCHES.md): main's changes are tested on main.
+#
+# "Run workflow" in the Actions tab always runs everything, on the branch
+# chosen there (tick "nightly" to get the nightly check instead).
+name: Tests
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+      timezone: Europe/Budapest
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: "Nightly mode: skip if no code or tests changed since the last successful run"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write  # the nightly run on main starts the variant branches' runs
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Start the nightly runs of the variant branches
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for branch in hu-hesz; do
+            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null; then
+              gh workflow run tests.yml --ref "${branch}" -f nightly=true
+              echo "Started the nightly run of ${branch}."
+            fi
+          done
+      - name: Decide whether to run the tests
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY: ${{ github.event_name == 'schedule' || inputs.nightly == true }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          run() { echo "run=$1" >> "${GITHUB_OUTPUT}"; echo "$2"; echo "$2" >> "${GITHUB_STEP_SUMMARY}"; exit 0; }
+          [ "${NIGHTLY}" = "true" ] || run true "Manual run: all tests."
+          last="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
+                  --jq '.workflow_runs[0].head_sha // ""')"
+          [ -n "${last}" ] || run true "No earlier successful run on ${BRANCH}: all tests."
+          git cat-file -e "${last}^{commit}" 2>/dev/null \
+            || run true "The last tested commit ${last} is gone (history rewritten): all tests."
+          paths=(src tests schemas resources tools metadata.txt pytest.ini .github/workflows/tests.yml)
+          changed="$(git diff --name-only "${last}" HEAD -- "${paths[@]}")"
+          if [ -f variant.json ]; then
+            # A variant branch: only the files it adds or changes against main.
+            own="$(git diff --name-only origin/main...HEAD -- "${paths[@]}" variant.json)"
+            changed="$(git diff --name-only "${last}" HEAD -- "${paths[@]}" variant.json | grep -Fxf <(echo "${own}") || true)"
+          fi
+          [ -n "${changed}" ] || run false "Nothing to test on ${BRANCH} since ${last:0:7}: skipped."
+          run true "Changed since ${last:0:7}: $(echo "${changed}" | wc -l) files, e.g. $(echo "${changed}" | head -5 | paste -sd ' ')"
+
+  qgis-tests:
+    name: Unit + QGIS integration tests
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    container:
+      image: qgis/qgis:final-3_34_4
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        run: tools/ci/prepare_qgis_container.sh
+      - name: Unit tests
+        if: success() || failure()
+        run: tools/ci/run_test_files.sh "Unit tests" $(ls tests/unit/test_*.py | sort)
+      - name: QGIS integration tests
+        if: success() || failure()
+        run: tools/ci/run_test_files.sh "QGIS integration tests" $(ls tests/integration/test_*.py | sort)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-qgis-${{ github.ref_name }}
+          path: test-reports/
+          if-no-files-found: ignore
+
+  browser-tests:
+    name: Browser tests
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: qgis/qgis:final-3_34_4
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        run: tools/ci/prepare_qgis_container.sh
+      - name: Node packages and Chromium
+        working-directory: tests/browser
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install chromium  # its libraries are already in the QGIS image
+          chromium="$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")"
+          test -x "${chromium}"
+          echo "Q2VT_CHROMIUM=${chromium}" >> "${GITHUB_ENV}"
+      - name: Browser tests
+        run: tools/ci/run_test_files.sh "Browser tests" $(ls tests/browser/test_*.py | sort)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-browser-${{ github.ref_name }}
+          path: |
+            test-reports/
+            tests/browser/artifacts/
+          if-no-files-found: ignore
