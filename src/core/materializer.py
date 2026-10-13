@@ -269,6 +269,10 @@ class SymbolMaterializer:
                                     layer.setOffsetAlongLine)
         if kind == "SVGFill":
             return self._svg_fill(flat_rule, layer)
+        if kind in ("SimpleMarker", "CentroidFill"):
+            large = self._large_marker(flat_rule, layer)
+            if large is not None:
+                return large
         if kind == "FontMarker":
             return self._glyph_marker(flat_rule, layer)
         if kind == "SimpleLine":
@@ -1559,6 +1563,103 @@ class SymbolMaterializer:
         symbol.setOpacity(flat_rule.rule.symbol().opacity())
         recipe = mat.glyph_recipe(wkt, angle, self.project_crs or flat_rule.layer.crs().authid())
         return [self._with_symbol(flat_rule, symbol, 2, 3, recipe)]
+
+    # A simple marker sized in map units is drawn as its shape (geometry)
+    # from the zoom where it is this many CSS px wide: an icon is drawn only
+    # from the tile of its point (a large ring vanished once its centre was
+    # off screen) and is a picture scaled up past its last sprite zoom.
+    LARGE_MARKER_PX = 128.0
+
+    def _large_marker(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """A large closed simple marker in map units (on a point layer, or a
+        centroid fill's marker) as its shape around the point, from the zoom
+        where it reaches LARGE_MARKER_PX; a sprite below that zoom."""
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        anchor, all_parts, opacity = "", True, flat_rule.rule.symbol().opacity()
+        marker_layer = layer
+        if layer.layerType() == "CentroidFill":
+            marker = layer.subSymbol()
+            if flat_rule.get_attr("g") != 2 or marker is None or marker.symbolLayerCount() != 1 or \
+                    layer.clipPoints() or layer.clipOnCurrentPartOnly() or \
+                    any(layer.dataDefinedProperties().isActive(k)
+                        for k in layer.dataDefinedProperties().propertyKeys()):
+                return None
+            marker_layer = marker.symbolLayer(0)
+            anchor = "surface" if layer.pointOnSurface() else "centroid"
+            all_parts = bool(layer.pointOnAllParts())
+            opacity *= marker.opacity()
+        elif flat_rule.get_attr("g") != 0:
+            return None
+        if marker_layer.layerType() != "SimpleMarker" or \
+                normalize_unit(marker_layer.sizeUnit()) != "map" or \
+                _limited(marker_layer.sizeMapUnitScale()) or \
+                marker_layer.offset().x() or marker_layer.offset().y():
+            return None
+        effect = marker_layer.paintEffect()
+        if effect is not None and effect.enabled() and \
+                type(effect).__name__ not in ("QgsEffectStack", "QgsDefaultPaintEffect"):
+            return None
+        props = marker_layer.dataDefinedProperties()
+        if any(props.isActive(k) for k in props.propertyKeys()):
+            return None
+        name = getattr(marker_layer.shape(), "name", None) or \
+            QgsSimpleMarkerSymbolLayerBase.encodeShape(marker_layer.shape())
+        if name not in mat.MARKER_SHAPE_POLYGONS:
+            return None
+        low, high = self._zoom_range(flat_rule)
+        visible = (flat_rule.visibility or ZoomInterval(float(low), None)).intersect(
+            ZoomInterval(float(low), None))
+        px_per_unit0 = 1.0 / (self._map_units_per_mm(flat_rule, 0.0) * 25.4 / 96.0)
+        size = float(marker_layer.size())
+        if size <= 0:
+            return None
+        start = math.log2(self.LARGE_MARKER_PX / (size * px_per_unit0))
+        end = visible.max_zoom if visible.max_zoom is not None else MAX_STYLE_ZOOM
+        if start >= end:
+            return None  # small enough at every zoom shown: the sprite
+        start = max(float(math.floor(start)), visible.min_zoom)
+        # The shape (a circle with enough vertices to stay round on screen).
+        unit = mat.MARKER_SHAPE_POLYGONS[name] if name != "Circle" else tuple(
+            (math.cos(2 * math.pi * k / 256), math.sin(2 * math.pi * k / 256)) for k in range(257))
+        (ring,) = mat.marker_paths((unit,), size)
+        coords = ", ".join(f"{ring[i]!r} {ring[i + 1]!r}" for i in range(0, len(ring), 2))
+        wkt = f"POLYGON(({coords}))"
+        recipe = mat.glyph_recipe(wkt, repr(float(marker_layer.angle())),
+                                  self.project_crs or flat_rule.layer.crs().authid(),
+                                  anchor, all_parts)
+        # The fill and, as its own line (polygon outlines are lines in the
+        # style), the outline with its width and pen style (dashes).
+        shapes = []
+        fill = QgsSimpleFillSymbolLayer(marker_layer.color())
+        fill.setStrokeColor(marker_layer.strokeColor())
+        fill.setStrokeWidth(marker_layer.strokeWidth())
+        fill.setStrokeWidthUnit(marker_layer.strokeWidthUnit())
+        fill.setStrokeWidthMapUnitScale(marker_layer.strokeWidthMapUnitScale())
+        fill.setStrokeStyle(marker_layer.strokeStyle())
+        fill.setPenJoinStyle(marker_layer.penJoinStyle())
+        if marker_layer.color().alpha() > 0:
+            area = QgsSimpleFillSymbolLayer(marker_layer.color())
+            area.setStrokeStyle(Qt.PenStyle.NoPen)
+            symbol = QgsFillSymbol([area])
+            symbol.setOpacity(opacity)
+            shapes.append(self._with_symbol(flat_rule, symbol, 2, 3, recipe))
+        if marker_layer.strokeStyle() != Qt.PenStyle.NoPen and marker_layer.strokeColor().alpha() > 0:
+            symbol = QgsLineSymbol([self._fill_stroke_as_line(fill)])
+            symbol.setOpacity(opacity)
+            shapes.append(self._with_symbol(flat_rule, symbol, 1, 4, recipe))
+        if not shapes:
+            return None
+        first = min(max(low, int(start)), high)
+        for shape in shapes:
+            shape.set_attr("o", first)
+            shape.visibility = visible.intersect(ZoomInterval(start, None))
+        if start <= visible.min_zoom + 1e-9:
+            return shapes
+        sprite = flat_rule.derive()
+        sprite.set_attr("i", max(low, min(high, first - 1)))
+        sprite.visibility = visible.intersect(ZoomInterval(visible.min_zoom, start))
+        sprite._limits_split = True  # pylint: disable=protected-access
+        return [sprite] + shapes
 
     # Map-unit dashes become line features from the zoom where the pattern
     # period reaches this many CSS px (below that MapLibre dashes are used).

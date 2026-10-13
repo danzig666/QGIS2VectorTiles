@@ -750,18 +750,39 @@ def grid_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
     return f"transform({body}, '{crs}', '{export_crs}')"
 
 
-def glyph_recipe(wkt: str, angle: str, construction_crs: str) -> Recipe:
-    """A font marker's glyph outlines (map units around its point)."""
-    return Recipe("glyph", (), (("wkt", wkt), ("angle", angle), ("crs", construction_crs)))
+def glyph_recipe(wkt: str, angle: str, construction_crs: str, anchor: str = "",
+                 all_parts: bool = True) -> Recipe:
+    """A marker's shape in map units around its point: a font marker's glyph
+    outlines, or a large simple marker's shape. ``anchor``: "" (the feature
+    is the point), "centroid" or "surface" (a centroid fill's marker on a
+    polygon: on every part, or on the largest one)."""
+    params = (("wkt", wkt), ("angle", angle), ("crs", construction_crs))
+    if anchor:
+        params += (("anchor", anchor), ("all_parts", bool(all_parts)))
+    return Recipe("glyph", (), params)
 
 
 def glyph_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
-    """The glyph outlines rotated clockwise by the marker angle about the
-    point and moved to it (``QgsFontMarkerSymbolLayer::renderPoint``)."""
+    """The shape rotated clockwise by the marker angle about the point and
+    moved to it (``QgsFontMarkerSymbolLayer::renderPoint``); on a polygon,
+    at the centroid fill's marker position of each part (or of the largest)."""
     crs = recipe.param("crs") or export_crs
-    point = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
-    body = (f"with_variable('q2vt_p', {point}, translate(rotate(geom_from_wkt('{recipe.param('wkt')}'), "
-            f"{recipe.param('angle')}, make_point(0, 0)), x(@q2vt_p), y(@q2vt_p)))")
+    geometry = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    shape = (f"translate(rotate(geom_from_wkt('{recipe.param('wkt')}'), "
+             f"{recipe.param('angle')}, make_point(0, 0)), x(@q2vt_p), y(@q2vt_p))")
+    anchor = recipe.param("anchor")
+    if not anchor:
+        body = f"with_variable('q2vt_p', {geometry}, {shape})"
+    else:
+        point = centroid_fill_expression(anchor == "surface", "@q2vt_part")
+        parts = ("array_foreach(generate_series(1, num_geometries(@q2vt_g)), "
+                 "geometry_n(@q2vt_g, @element))")
+        if not recipe.param("all_parts"):
+            parts = (f"with_variable('q2vt_all', {parts}, array(array_first(array_filter(@q2vt_all, "
+                     "area(@element) = array_max(array_foreach(@q2vt_all, area(@element)))))))")
+        body = (f"with_variable('q2vt_g', if(is_multipart({geometry}), {geometry}, "
+                f"collect_geometries({geometry})), collect_geometries(array_foreach({parts}, "
+                f"with_variable('q2vt_part', @element, with_variable('q2vt_p', {point}, {shape})))))")
     return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
 
 
