@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.1**. Newest first:
+This README describes QWebMap **4.36.2**. Newest first:
+
+**4.36.2** — zoomed-out load windows keep their size
+- Long layer names are shortened with "…" in the progress window and the table (the whole name
+  in the tooltip), so the windows stay centred; the tick boxes explain themselves.
 
 **4.36.1** — labels weigh more in the zoomed-out load, with progress
 - Many labels in a tile now count as heavy on their own (every label is laid out, even the hidden

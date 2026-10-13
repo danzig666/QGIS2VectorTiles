@@ -32,6 +32,13 @@ def size_text(nbytes: float) -> str:
     return f"{max(1, round(nbytes / 1024))} KB"
 
 
+NAME_CHARS = 60  # a longer layer name is cut ("…"), the whole in its tooltip
+
+
+def short_name(name: str, limit: int = NAME_CHARS) -> str:
+    return name if len(name) <= limit else name[:limit - 1].rstrip() + "…"
+
+
 def count_text(value: float) -> str:
     return f"{int(round(value)):,}".replace(",", " ")
 
@@ -48,6 +55,9 @@ class _ZoomPick(QWidget):
         layout.setContentsMargins(4, 0, 4, 0)
         self.check = QCheckBox()
         self.check.setChecked(checked)
+        self.check.setToolTip(tr("Ticked: this zoom is applied (Scales column) with the button below. "
+                                 "Ticked by itself where a change is suggested; unticked, the zoom "
+                                 "shown is the current one and stays"))
         self.spin = QSpinBox()
         self.spin.setRange(low, high)
         self.spin.setPrefix("z")
@@ -182,6 +192,10 @@ class ZoomLoadDialog(QDialog):
         if screen is not None:
             width = min(width, screen.availableGeometry().width() - 40)
         self.resize(max(self.width(), width), self.height())
+        owner = self.parentWidget()
+        if owner is not None:  # centred over the Publish window
+            centre = owner.frameGeometry().center()
+            self.move(centre.x() - self.width() // 2, centre.y() - self.height() // 2)
 
     def _show_speed_name(self) -> None:
         self.speed_name.setText(speed_names()[self.speed.value()])
@@ -201,7 +215,8 @@ class ZoomLoadDialog(QDialog):
     def _filter_rows(self, text: str) -> None:
         for row in range(self.table.rowCount()):
             item = self.table.item(row, COL_LAYER)
-            self.table.setRowHidden(row, bool(text) and not matches(item.text() if item else "", text))
+            name = (item.data(Qt.ItemDataRole.UserRole) or item.text()) if item else ""
+            self.table.setRowHidden(row, bool(text) and not matches(name, text))
 
     # ------------------------------------------------------------------ rows
     def _item(self, row: int, column: int, text: str, tip: str = "") -> QTableWidgetItem:
@@ -215,7 +230,8 @@ class ZoomLoadDialog(QDialog):
 
     def _fill_row(self, row: int, load) -> None:
         high = self.zooms[1]
-        self._item(row, COL_LAYER, load.name)
+        item = self._item(row, COL_LAYER, short_name(load.name), load.name)
+        item.setData(Qt.ItemDataRole.UserRole, load.name)  # the whole name, for the search
         self._item(row, COL_COUNT, count_text(load.features))
         start = load.shown_from
         feature_bytes = load.tile_bytes.get(start, 0)
