@@ -21,13 +21,36 @@ for file in "$@"; do
     0|5) passed=$((passed + 1)) ;;  # 5: no tests collected (all skipped by conftest)
     *)
       failed+=("${file} (exit ${code}$([ "${code}" -ge 128 ] && echo ", crashed: signal $((code - 128))"))")
-      echo "::error title=${title}::${file} failed (exit ${code})"
       ;;
   esac
 done
+# One annotation with every failed test and its first error line (the
+# annotations stay readable through the API; the log is long).
+report="$(python3 - "$@" <<'PY'
+import glob, sys
+import xml.etree.ElementTree as ET
+lines = []
+for path in sorted(glob.glob("test-reports/*.xml")):
+    for case in ET.parse(path).getroot().iter("testcase"):
+        for kind in ("failure", "error"):
+            node = case.find(kind)
+            if node is not None:
+                first = (node.get("message") or node.text or "").strip().splitlines()
+                lines.append(f"{case.get('classname')}::{case.get('name')}: {first[0][:160] if first else kind}")
+print("\n".join(lines))
+PY
+)"
 {
   echo "### ${title}"
   echo "${passed} of $# test files passed."
   for item in "${failed[@]}"; do echo "- ❌ ${item}"; done
+  [ -z "${report}" ] || { echo '```'; echo "${report}"; echo '```'; }
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+if [ ${#failed[@]} -gt 0 ]; then
+  message="$(printf '%s\n' "${failed[@]}"; [ -z "${report}" ] || printf 'Failed tests:\n%s\n' "${report}")"
+  message="${message:0:60000}"
+  message="${message//'%'/'%25'}"
+  message="${message//$'\n'/'%0A'}"
+  echo "::error title=${title}: ${#failed[@]} of $# test files failed::${message}"
+fi
 [ ${#failed[@]} -eq 0 ]
