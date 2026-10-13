@@ -40,9 +40,22 @@ for path in sorted(glob.glob("test-reports/*.xml")):
 print("\n".join(lines))
 PY
 )"
+counts="$(python3 - <<'PY'
+import glob
+import xml.etree.ElementTree as ET
+total = {"tests": 0, "skipped": 0, "failures": 0, "errors": 0}
+for path in glob.glob("test-reports/*.xml"):
+    for suite in ET.parse(path).getroot().iter("testsuite"):
+        for key in total:
+            total[key] += int(suite.get(key, 0))
+passed = total["tests"] - total["skipped"] - total["failures"] - total["errors"]
+print(f"{passed} passed, {total['skipped']} skipped, {total['failures'] + total['errors']} failed")
+PY
+)"
+echo "::notice title=${title}::${counts} (${passed} of $# files passed)"
 {
   echo "### ${title}"
-  echo "${passed} of $# test files passed."
+  echo "${passed} of $# test files passed: ${counts}."
   for item in "${failed[@]}"; do echo "- ❌ ${item}"; done
   [ -z "${report}" ] || { echo '```'; echo "${report}"; echo '```'; }
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
