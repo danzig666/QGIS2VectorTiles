@@ -166,5 +166,8 @@
   "print.paper.a4-portrait": "A4 portrait",
   "print.paper.a3-landscape": "A3 landscape",
   "print.paper.a3-portrait": "A3 portrait",
-  "error.addon": "An add-on of this map could not be loaded."
+  "error.addon": "An add-on of this map could not be loaded.",
+  "app.locate": "Show my location",
+  "app.locateOutside": "Your location is outside this map's area.",
+  "app.locateFailed": "Your location could not be determined."
 }
