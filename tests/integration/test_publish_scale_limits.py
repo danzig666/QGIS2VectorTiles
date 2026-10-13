@@ -201,6 +201,29 @@ def test_zoomed_out_load_suggests_feature_and_label_zooms(plugin, tmp_path):
     profile.layers[0].labels_min_scale = zoom_load.scale_for_zoom(factor, 17)
     again = {l.layer_id: l for l in zoom_load.analyse(project, profile, EXTENT)[0]}[dense.id()]
     assert again.labels_from == 17 and again.shown_from == 8
+    # The speed slider: faster hides the specks and the crowded labels from
+    # closer zooms, slower shows more zoomed out; balanced is as above.
+    suggested = []
+    for speed in range(len(zoom_load.SPEEDS)):
+        zoom_load.resuggest(loads, 18, speed)
+        suggested.append((by_id[dense.id()].suggested_from, by_id[dense.id()].suggested_labels_from))
+    features = [f or 8 for f, _ in suggested]
+    assert features == sorted(features) and features[0] < features[-1], suggested
+    zoom_load.resuggest(loads, 18, zoom_load.BALANCED)
+    assert (by_id[dense.id()].suggested_from, by_id[dense.id()].suggested_labels_from) == \
+        suggested[zoom_load.BALANCED]
+    # In the window: the slider suggests again (and is remembered).
+    from qgis.core import QgsSettings
+    from q2vt_plugin.src.gui.zoom_load_dialog import SPEED_KEY, ZoomLoadDialog  # pylint: disable=import-error
+    QgsSettings().remove(SPEED_KEY)
+    try:
+        window = ZoomLoadDialog(None, loads, factor, (8, 18))
+        assert window.speed.value() == zoom_load.BALANCED
+        window.speed.setValue(len(zoom_load.SPEEDS) - 1)
+        assert window.picks[dense.id()]["features"].spin.value() == suggested[-1][0]
+        assert int(QgsSettings().value(SPEED_KEY)) == len(zoom_load.SPEEDS) - 1
+    finally:
+        QgsSettings().remove(SPEED_KEY)
 
 
 def test_zoomed_out_load_dialog_applies_the_checked_limits(plugin, monkeypatch, tmp_path):

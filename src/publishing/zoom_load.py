@@ -22,6 +22,11 @@ and bytes) and how many labels could show in it. Suggestions:
   tile can be placed (polygon labels also: where the typical polygon is about
   as wide as its label), when fewer than half of them fit where they start
   now.
+
+These are the "balanced" thresholds; a speed (``SPEEDS``, the window's
+slider) from "very slow" to "very fast" scales them: faster hides small
+features and crowded labels from closer zooms. Only where a layer starts
+changes: zoomed in, everything is shown.
 """
 
 import math
@@ -43,6 +48,31 @@ VISIBLE_PX = 2.0                   # a feature narrower than this is a speck
 HEAVY_BYTES = 400 * 1024           # a layer's part of one tile that slows the map down
 HEAVY_FEATURES = 15000             # features of one layer in one tile
 POINT_CELL_PX = 6                  # points denser than one per 6×6 px are a solid mass
+
+
+@dataclass(frozen=True)
+class Speed:
+    """How eager the suggestions are: ``visible_px`` the size a feature
+    needs, ``heavy`` the factor on HEAVY_BYTES / HEAVY_FEATURES, ``label_fit``
+    the share of labels that must fit, ``label_room`` how wide a polygon must
+    be for its label (× the label), ``point_cell_px`` the point spacing."""
+
+    name: str
+    visible_px: float
+    heavy: float
+    label_fit: float
+    label_room: float
+    point_cell_px: float
+
+
+SPEEDS = (
+    Speed("very slow", 0.5, 4.0, 0.2, 0.3, 3),
+    Speed("slow", 1.0, 2.0, 0.35, 0.45, 4),
+    Speed("balanced", VISIBLE_PX, 1.0, 0.5, 0.6, POINT_CELL_PX),
+    Speed("fast", 4.0, 0.5, 0.7, 0.9, 10),
+    Speed("very fast", 8.0, 0.2, 0.9, 1.3, 16),
+)
+BALANCED = 2  # index into SPEEDS
 
 
 @dataclass
@@ -67,8 +97,9 @@ class LayerLoad:
     label_width_px: float = 0.0     # a typical label's width
     suggested_labels_from: Optional[int] = None
 
-    def heavy(self, zoom: int) -> bool:
-        return self.tile_bytes.get(zoom, 0) >= HEAVY_BYTES or self.tile_features.get(zoom, 0) >= HEAVY_FEATURES
+    def heavy(self, zoom: int, factor: float = 1.0) -> bool:
+        return self.tile_bytes.get(zoom, 0) >= HEAVY_BYTES * factor or \
+            self.tile_features.get(zoom, 0) >= HEAVY_FEATURES * factor
 
     def labels_shown(self, zoom: int) -> float:
         """Share of the busiest tile's labels that can be placed."""
@@ -237,39 +268,46 @@ def analyse_layer(layer: QgsVectorLayer, config, extent_3857: QgsRectangle, zoom
     return load
 
 
-def _feature_visible(load: LayerLoad, zoom: int) -> bool:
+def _feature_visible(load: LayerLoad, zoom: int, speed: Speed = SPEEDS[BALANCED]) -> bool:
     if load.kind == "point":
-        cells = (TILE_PX / POINT_CELL_PX) ** 2
+        cells = (TILE_PX / speed.point_cell_px) ** 2
         return load.tile_features.get(zoom, 0) <= cells
-    return load.feature_px * 2 ** zoom >= VISIBLE_PX
+    return load.feature_px * 2 ** zoom >= speed.visible_px
 
 
-def _suggest(load: LayerLoad, max_zoom: int) -> None:
+def _suggest(load: LayerLoad, max_zoom: int, speed: Speed = SPEEDS[BALANCED]) -> None:
     """Fill the suggestions (None: leave as it is)."""
+    load.suggested_from = load.suggested_labels_from = None
     start = load.shown_from
-    if load.draws_features and load.heavy(start) and not _feature_visible(load, start):
+    if load.draws_features and load.heavy(start, speed.heavy) and not _feature_visible(load, start, speed):
         for zoom in range(start + 1, max_zoom + 1):
-            if _feature_visible(load, zoom):
+            if _feature_visible(load, zoom, speed):
                 load.suggested_from = zoom
                 break
     if not load.labels:
         return
     begin = max(load.labels_from, load.suggested_from or start)
-    if load.labels_shown(begin) >= 0.5:
+    if load.labels_shown(begin) >= speed.label_fit:
         return  # most of them fit: a few labels are no load, whatever their size
     width = load.label_width_px
 
     def placeable(zoom: int) -> bool:
-        if load.labels_shown(zoom) < 0.5:
+        if load.labels_shown(zoom) < speed.label_fit:
             return False
         # A polygon's label inside it: the polygon about as wide as the label.
-        return load.kind != "polygon" or load.feature_px * 2 ** zoom >= 0.6 * width
+        return load.kind != "polygon" or load.feature_px * 2 ** zoom >= speed.label_room * width
     if placeable(begin):
         return
     for zoom in range(begin + 1, max_zoom + 1):
         if placeable(zoom):
             load.suggested_labels_from = zoom
             return
+
+
+def resuggest(loads: List[LayerLoad], max_zoom: int, speed: int) -> None:
+    """The suggestions again at another speed (index into SPEEDS)."""
+    for load in loads:
+        _suggest(load, max_zoom, SPEEDS[max(0, min(len(SPEEDS) - 1, speed))])
 
 
 def analyse(project, profile, extent_3857: QgsRectangle) -> Tuple[List[LayerLoad], float]:
