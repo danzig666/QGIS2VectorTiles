@@ -5,7 +5,7 @@
 set -euo pipefail
 git config --global --add safe.directory "*"
 python3 -c "import qgis.core, osgeo.gdal" # fail early: without QGIS the tests are skipped silently
-pip3 install --quiet "pytest==7.4.4"  # the version used locally (Ubuntu 24.04); pytest 9 aborts in this image
+pip3 install --quiet --break-system-packages "pytest==7.4.4"  # the version used locally (Ubuntu 24.04)
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null
 profile="$(python3 -c "from qgis.core import QgsApplication; app = QgsApplication([], False); app.initQgis(); print(app.qgisSettingsDirPath())" 2>/dev/null | tail -1)"

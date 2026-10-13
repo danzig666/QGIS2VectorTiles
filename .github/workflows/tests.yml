@@ -1,6 +1,9 @@
-# Runs the full test suite in the official QGIS image of the version the
-# plugin is developed against (3.34.4): unit + PyQGIS integration tests in one
-# job, browser tests (QGIS export + Chromium) in another.
+# Runs the full test suite in the official QGIS image of the LTR the plugin
+# is developed against (3.34, Ubuntu 24.04 like the development machine):
+# unit + PyQGIS integration tests in one job, browser tests (QGIS export +
+# Chromium) in another. (The image of exactly 3.34.4, qgis/qgis:final-3_34_4,
+# is Ubuntu 22.04 with sip 6.5, whose bindings crash on plain PyQGIS such as
+# QgsLineSymbol([QgsSimpleLineSymbolLayer()]); it cannot run the tests.)
 #
 # Nightly at 3:00 Budapest time on main, which also starts the run of each
 # variant branch (hu-hesz). A nightly run stops within seconds when no commit
@@ -40,7 +43,7 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Start the nightly runs of the variant branches
@@ -85,12 +88,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     container:
-      image: qgis/qgis:final-3_34_4
+      image: qgis/qgis:3.34.15-noble
     env:
       QT_QPA_PLATFORM: offscreen
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Prepare
         run: tools/ci/prepare_qgis_container.sh
       - name: Unit tests
@@ -99,7 +102,7 @@ jobs:
       - name: QGIS integration tests
         if: success() || failure()
         run: tools/ci/run_test_files.sh "QGIS integration tests" $(ls tests/integration/test_*.py | sort)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: reports-qgis-${{ github.ref_name }}
@@ -113,25 +116,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     container:
-      image: qgis/qgis:final-3_34_4
+      image: qgis/qgis:3.34.15-noble
     env:
       QT_QPA_PLATFORM: offscreen
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Prepare
         run: tools/ci/prepare_qgis_container.sh
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
       - name: Node packages and Chromium
         working-directory: tests/browser
         run: |
           npm ci --no-audit --no-fund
-          npx playwright-core install chromium  # its libraries are already in the QGIS image
+          npx playwright-core install --with-deps chromium
           chromium="$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")"
           test -x "${chromium}"
           echo "Q2VT_CHROMIUM=${chromium}" >> "${GITHUB_ENV}"
       - name: Browser tests
         run: tools/ci/run_test_files.sh "Browser tests" $(ls tests/browser/test_*.py | sort)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: reports-browser-${{ github.ref_name }}

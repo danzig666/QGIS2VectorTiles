@@ -38,8 +38,9 @@ headless application (in the recorded container it was `~/.local/share/profiles/
 
 ### On GitHub (nightly)
 
-`.github/workflows/tests.yml` runs everything in the official `qgis/qgis:final-3_34_4` image
-(QGIS 3.34.4, Python 3.10, pytest 7.4.4): unit + integration tests in one job, browser tests
+`.github/workflows/tests.yml` runs everything in the official `qgis/qgis:3.34.15-noble` image
+(QGIS 3.34 LTR on Ubuntu 24.04, Python 3.12, pytest 7.4.4; the image of exactly 3.34.4 has
+broken Python bindings): unit + integration tests in one job, browser tests
 in another, each test file in its own process (`tools/ci/run_test_files.sh`), so a QGIS crash
 fails only that file. Nightly at 3:00 Budapest time on `main`, which also starts the run of
 `hu-hesz`; a nightly run is skipped when nothing under `src/`, `tests/`, `schemas/`,
