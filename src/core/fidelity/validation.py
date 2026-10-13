@@ -9,6 +9,7 @@ the produced MBTiles archive.
 import contextlib
 import gzip
 import json
+import math
 import os
 import sqlite3
 from typing import Dict, Iterable, Optional, Set
@@ -16,6 +17,7 @@ from typing import Dict, Iterable, Optional, Set
 from . import expressions as ex
 from .dependencies import layer_field_dependencies
 from .diagnostics import DiagnosticCollector
+from .model import MAX_STYLE_ZOOM
 
 _IMAGE_PROPERTIES = (("layout", "icon-image"), ("paint", "fill-pattern"),
                      ("paint", "line-pattern"))
@@ -34,6 +36,43 @@ def _constant_images(value) -> Set[str]:
             if isinstance(item, str) and not item.startswith("q2vt_"):
                 names.add(item)
     return names
+
+
+def _finite(value) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_finite(v) for v in value)
+    return True
+
+
+def drop_unloadable_layers(style: dict, collector: DiagnosticCollector) -> int:
+    """Remove style layers MapLibre would reject together with the whole
+    style (the map never loads): a zoom outside 0..24, a minzoom at or past
+    the maxzoom, a number that is not finite (NaN is not even JSON). Each is
+    reported; returns how many were removed."""
+    kept, dropped = [], 0
+    for layer in style.get("layers", []):
+        layer_id = layer.get("id", "")
+        minzoom, maxzoom = layer.get("minzoom", 0), layer.get("maxzoom", MAX_STYLE_ZOOM)
+        problem = ""
+        if not all(isinstance(z, (int, float)) and math.isfinite(z) and 0 <= z <= MAX_STYLE_ZOOM
+                   for z in (minzoom, maxzoom)):
+            problem = f"zoom range {minzoom}..{maxzoom} is outside 0..{MAX_STYLE_ZOOM:g}"
+        elif minzoom >= maxzoom:
+            problem = f"minzoom {minzoom} is not below maxzoom {maxzoom}"
+        elif not _finite(layer):
+            problem = "a value is not a finite number"
+        if problem:
+            dropped += 1
+            collector.add("Q2VT_STYLE_LAYER_DROPPED", f"Style layer '{layer_id}' omitted: {problem}",
+                          component=layer_id, layer_id=layer.get("source-layer", ""))
+            continue
+        kept.append(layer)
+    style["layers"] = kept
+    return dropped
 
 
 def validate_style(style: dict, collector: DiagnosticCollector,

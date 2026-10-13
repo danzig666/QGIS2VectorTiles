@@ -91,3 +91,17 @@ def test_truncated_metadata_is_completed_from_tiles(tmp_path):
     fields = tile_layer_fields(archive)
     assert fields["l150"] == {"k"} and "l151" not in fields
     assert archive["complete"]
+
+
+def test_layers_maplibre_would_reject_are_dropped_before_writing():
+    """A minzoom past 24 (a split piece starting at z27.6) made MapLibre
+    reject the whole style: the map never loaded. Such layers are left out."""
+    from fidelity.validation import drop_unloadable_layers
+    collector = DiagnosticCollector()
+    style = {"layers": [{"id": "far", "minzoom": 27.58, "maxzoom": 24},
+                        {"id": "empty", "minzoom": 12, "maxzoom": 12},
+                        {"id": "nan", "paint": {"fill-opacity": float("nan")}},
+                        {"id": "ok", "minzoom": 3, "maxzoom": 24}, {"id": "background"}]}
+    assert drop_unloadable_layers(style, collector) == 3
+    assert [layer["id"] for layer in style["layers"]] == ["ok", "background"]
+    assert len(collector.by_code("Q2VT_STYLE_LAYER_DROPPED")) == 3

@@ -241,7 +241,19 @@ async function start() {
       diagnostics.warnings.push({ key: "map", detail: message.slice(0, 500) });
       if (/sprite/i.test(message)) warn("error.sprite", message);
     });
-    await new Promise((resolve) => map.once("load", resolve));
+    // An invalid style fires "error" and never "load": show it instead of
+    // loading for ever. Tile, sprite and glyph errors do not stop the map.
+    await new Promise((resolve, reject) => {
+      const failed = (event) => {
+        const message = String(event && event.error && event.error.message || event);
+        if (map.loaded() || (event && (event.sourceId || event.tile)) ||
+            /sprite|glyph|image/i.test(message)) return;
+        map.off("error", failed);
+        reject(new ViewerError("Q2VT_PUB_STYLE", "the map style was rejected", message));
+      };
+      map.on("error", failed);
+      map.once("load", () => { map.off("error", failed); resolve(); });
+    });
     document.body.classList.add("q2vt-loaded");
     const sourceId = manifest.sources[0].id;
     // Layers whose every feature keeps its label (shrunk where it does not fit).

@@ -176,6 +176,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_RULE_OUTPUT_EMPTY": CodeInfo(
         Severity.WARNING, "A rule matched features but its geometry step produced none",
         "Check the geometry generator / conversion of this rule; it is missing from the map."),
+    "Q2VT_STYLE_LAYER_DROPPED": CodeInfo(
+        Severity.WARNING, "A style layer the browser would reject was left out",
+        "MapLibre refuses a whole style with an invalid layer (the map never loads): the layer "
+        "is omitted instead. An export bug: please report it with the detail."),
     "Q2VT_STYLE_DUPLICATE_ID": CodeInfo(
         Severity.ERROR, "Two style layers had the same id",
         "An export bug: the repeat was renamed so the map still loads, but the two rules may "

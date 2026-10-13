@@ -41,6 +41,7 @@ from .fidelity import zoom as fidelity_zoom
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
+from .fidelity.validation import drop_unloadable_layers
 from .materializer import pattern_anchor_kind, pattern_in_viewport
 from .fidelity.patterns import (LinePatternSpec, qgis_image_hatch, render_line_pattern,
                                  solve_periodic_cell)
@@ -2271,6 +2272,10 @@ class QgisMapLibreStyleExporter:
             return None
         self.context.reference_zoom = interval.min_zoom
         bounds = interval.style_bounds(self.maxzoom, self.profile.overzoom)
+        if bounds[1] is not None and bounds[0] >= bounds[1]:
+            # Starts past the style's last zoom (24): never drawn, and a
+            # minzoom over 24 made MapLibre reject the whole style.
+            return None
         self.context.reference_zoom_span = min(bounds[1], self.maxzoom + 1) - interval.min_zoom
         return bounds
 
@@ -5778,6 +5783,8 @@ class QgisMapLibreStyleExporter:
             del self.style["glyphs"]
         self._unique_layer_ids()
         rounded_style = self.round_numeric_values(self.style)
+        # A layer MapLibre rejects takes the whole map with it: left out.
+        drop_unloadable_layers(rounded_style, self.diagnostics)
         self.style = rounded_style
         filepath = os.path.join(style_dir, filename)
         with open(filepath, "w", encoding="utf8") as f:

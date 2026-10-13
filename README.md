@@ -42,7 +42,13 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.4**. Newest first:
+This README describes QWebMap **4.36.5**. Newest first:
+
+**4.36.5** — web maps that would not load
+- 4.36.4 could publish a style layer that starts past zoom 24 (a scale-limited point pattern);
+  the browser rejected the whole style and the map stayed on "Loading…". Fixed, and every export
+  now leaves out any layer the browser would reject, with a warning in the export report.
+- If a map style still fails to load, the viewer shows an error instead of loading for ever.
 
 **4.36.4** — export crash and cut-off markers fixed
 - Exports no longer stop with a RecursionError on a point pattern fill whose map-unit row
