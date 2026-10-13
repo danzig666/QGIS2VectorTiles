@@ -212,6 +212,22 @@ def test_zoomed_out_load_suggests_feature_and_label_zooms(plugin, tmp_path):
     zoom_load.resuggest(loads, 18, zoom_load.BALANCED)
     assert (by_id[dense.id()].suggested_from, by_id[dense.id()].suggested_labels_from) == \
         suggested[zoom_load.BALANCED]
+    # Many labels are slow to draw even when they would fit: past
+    # HEAVY_LABELS in a tile, the labels start later.
+    crowded = zoom_load.LayerLoad("c", "Feliratok", "point", 50000, 10,
+                                  tile_features={z: 50000 // 4 ** (z - 10) for z in range(10, 19)},
+                                  labels=True, labels_from=10, label_capacity=1e9)
+    zoom_load.resuggest([crowded], 18, zoom_load.BALANCED)
+    assert crowded.labels_shown(10) == 1.0 and crowded.labels_heavy(10)
+    assert crowded.suggested_labels_from == 13  # 50000 / 4**3 = 781 labels ≤ 1500
+    zoom_load.resuggest([crowded], 18, len(zoom_load.SPEEDS) - 1)
+    assert crowded.suggested_labels_from == 14  # very fast: at most 300 labels
+    # Progress per layer; cancelling returns None.
+    seen = []
+    assert zoom_load.analyse(project, profile, EXTENT,
+                             lambda done, total, name: seen.append((done, total, name))) is not None
+    assert [(d, t) for d, t, _ in seen] == [(0, 2), (1, 2)] and seen[0][2] == "Sűrű"
+    assert zoom_load.analyse(project, profile, EXTENT, lambda *_: False) is None
     # In the window: the slider suggests again (and is remembered).
     from qgis.core import QgsSettings
     from q2vt_plugin.src.gui.zoom_load_dialog import SPEED_KEY, ZoomLoadDialog  # pylint: disable=import-error

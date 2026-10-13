@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.0**. Newest first:
+This README describes QWebMap **4.36.1**. Newest first:
+
+**4.36.1** — labels weigh more in the zoomed-out load, with progress
+- Many labels in a tile now count as heavy on their own (every label is laid out, even the hidden
+  ones), so their suggested zoom moves in even when they would fit; the speed slider scales it.
+- The estimate shows its progress layer by layer, and can be cancelled.
 
 **4.36.0** — a speed slider for the zoomed-out load
 - *Zoomed-out load…* has a slider from **very slow** to **very fast**: faster hides small features
