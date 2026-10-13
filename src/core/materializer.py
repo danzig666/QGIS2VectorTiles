@@ -564,8 +564,9 @@ class SymbolMaterializer:
             for px in (min_px, max_px):
                 if px and value > 0:
                     cuts.add(math.log2(px / (value * px_per_unit0)))
+        # Cuts past the last style zoom would make pieces never drawn.
         cuts = sorted(z for z in cuts if math.isfinite(z) and z >= start - 1e-9
-                      and (end is None or z < end - 1e-9))
+                      and (end is None or z < end - 1e-9) and z < MAX_STYLE_ZOOM)
         pieces = []
         for index, zoom in enumerate(cuts):
             stop = cuts[index + 1] if index + 1 < len(cuts) else end

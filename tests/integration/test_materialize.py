@@ -3042,15 +3042,21 @@ def test_point_pattern_rows_limited_by_a_zero_displacement_split_once(plugin, tm
     from q2vt_plugin.src.core.rules_flattener import RulesFlattener
     from fidelity.diagnostics import DiagnosticCollector
     from q2vt_fixtures import zoning_layer
+    from qgis.core import QgsMapUnitScale
+    limits = QgsMapUnitScale()  # 1 mm .. 10 m: the 20 m rows reach 10 m past zoom 24
+    limits.minSizeMMEnabled, limits.minSizeMM = True, 1.0
+    limits.maxSizeMMEnabled, limits.maxSizeMM = True, 10000.0
     pp = QgsPointPatternFillSymbolLayer()
     pp.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 1))
     for name, value in (("DistanceX", 20), ("DistanceY", 20), ("DisplacementY", 0)):
         getattr(pp, f"set{name}")(value)
         getattr(pp, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
-        getattr(pp, f"set{name}MapUnitScale")(_limits("mm"))
+        getattr(pp, f"set{name}MapUnitScale")(limits)
     layer = zoning_layer()
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([pp])))
     reset_project(layer)
     rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(),
                            DiagnosticCollector()).flatten_all_rules()
     assert rules and len(rules) < 20
+    # No piece starts past the last style zoom (MapLibre rejected the style).
+    assert all(r.visibility is None or r.visibility.min_zoom < 24 for r in rules)
