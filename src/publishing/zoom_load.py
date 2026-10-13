@@ -20,8 +20,11 @@ and bytes) and how many labels could show in it. Suggestions:
   as a solid mass), when the layer's busiest tile is heavy below it;
 * labels from the first zoom where at least half the labels of the busiest
   tile can be placed (polygon labels also: where the typical polygon is about
-  as wide as its label), when fewer than half of them fit where they start
-  now.
+  as wide as its label) and the tile has at most ``HEAVY_LABELS`` of them,
+  when fewer than half of them fit, or more than that many are laid out,
+  where they start now. Labels are the slowest part of the map to draw:
+  every label of a tile is shaped and tested for collisions on every frame,
+  even those that end up hidden.
 
 These are the "balanced" thresholds; a speed (``SPEEDS``, the window's
 slider) from "very slow" to "very fast" scales them: faster hides small
@@ -48,6 +51,7 @@ VISIBLE_PX = 2.0                   # a feature narrower than this is a speck
 HEAVY_BYTES = 400 * 1024           # a layer's part of one tile that slows the map down
 HEAVY_FEATURES = 15000             # features of one layer in one tile
 POINT_CELL_PX = 6                  # points denser than one per 6×6 px are a solid mass
+HEAVY_LABELS = 1500                # labels of one layer laid out in one tile
 
 
 @dataclass(frozen=True)
@@ -101,9 +105,17 @@ class LayerLoad:
         return self.tile_bytes.get(zoom, 0) >= HEAVY_BYTES * factor or \
             self.tile_features.get(zoom, 0) >= HEAVY_FEATURES * factor
 
+    def label_count(self, zoom: int) -> float:
+        """Labels of the busiest tile (features with a label text)."""
+        return self.tile_features.get(zoom, 0) * self.label_share
+
+    def labels_heavy(self, zoom: int, factor: float = 1.0) -> bool:
+        """So many labels in the busiest tile that laying them out is slow."""
+        return self.label_count(zoom) > HEAVY_LABELS * factor
+
     def labels_shown(self, zoom: int) -> float:
         """Share of the busiest tile's labels that can be placed."""
-        count = self.tile_features.get(zoom, 0) * self.label_share
+        count = self.label_count(zoom)
         return 1.0 if count <= 0 else min(1.0, self.label_capacity / count)
 
 
@@ -287,12 +299,12 @@ def _suggest(load: LayerLoad, max_zoom: int, speed: Speed = SPEEDS[BALANCED]) ->
     if not load.labels:
         return
     begin = max(load.labels_from, load.suggested_from or start)
-    if load.labels_shown(begin) >= speed.label_fit:
-        return  # most of them fit: a few labels are no load, whatever their size
+    if load.labels_shown(begin) >= speed.label_fit and not load.labels_heavy(begin, speed.heavy):
+        return  # most of them fit, and not too many to lay out: no load
     width = load.label_width_px
 
     def placeable(zoom: int) -> bool:
-        if load.labels_shown(zoom) < speed.label_fit:
+        if load.labels_shown(zoom) < speed.label_fit or load.labels_heavy(zoom, speed.heavy):
             return False
         # A polygon's label inside it: the polygon about as wide as the label.
         return load.kind != "polygon" or load.feature_px * 2 ** zoom >= speed.label_room * width
@@ -310,16 +322,22 @@ def resuggest(loads: List[LayerLoad], max_zoom: int, speed: int) -> None:
         _suggest(load, max_zoom, SPEEDS[max(0, min(len(SPEEDS) - 1, speed))])
 
 
-def analyse(project, profile, extent_3857: QgsRectangle) -> Tuple[List[LayerLoad], float]:
+def analyse(project, profile, extent_3857: QgsRectangle,
+            progress=None) -> Optional[Tuple[List[LayerLoad], float]]:
     """(loads of the published vector layers, busiest first; the zoom-0
-    scale factor of this project)."""
+    scale factor of this project). ``progress(done, total, layer name)``
+    before each layer; returning False cancels (None is returned)."""
     factor = zoom_scale_factor(project, extent_3857)
     zooms = (int(profile.view.min_zoom), int(profile.view.max_zoom))
     loads = []
+    layers = []
     for config in profile.layers:
         layer = project.mapLayer(config.layer_id)
-        if not config.included or not isinstance(layer, QgsVectorLayer) or not layer.isSpatial():
-            continue
+        if config.included and isinstance(layer, QgsVectorLayer) and layer.isSpatial():
+            layers.append((config, layer))
+    for done, (config, layer) in enumerate(layers):
+        if progress is not None and progress(done, len(layers), layer.name()) is False:
+            return None
         load = analyse_layer(layer, config, extent_3857, zooms, factor, project)
         if load is not None:
             loads.append(load)

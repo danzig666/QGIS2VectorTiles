@@ -248,7 +248,9 @@ class ZoomLoadDialog(QDialog):
             placed = load.labels_shown(begin)
             self._item(row, COL_LABELS_NOW, tr("z{}: {} labels, ~{}% fit").format(
                 begin, count_text(labels), max(1, int(round(placed * 100))) if labels else 0),
-                tr("Shown now from zoom {} on").format(begin))
+                tr("Shown now from zoom {} on").format(begin)
+                + (tr("\nMany labels: slow to draw (each is laid out, even the hidden ones)")
+                   if load.labels_heavy(begin) else ""))
             suggested = load.suggested_labels_from is not None
             picks["labels"] = _ZoomPick(load.suggested_labels_from if suggested else begin, low, high,
                                         self.factor, suggested, self._update_summary)

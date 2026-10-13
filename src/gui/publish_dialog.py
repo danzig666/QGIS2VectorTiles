@@ -578,11 +578,27 @@ class PublishDialog(QDialog):
             return False
         profile = self.collect()
         self.status.setText(tr("Estimating the zoomed-out load…"))
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        from qgis.PyQt.QtWidgets import QProgressDialog  # pylint: disable=import-outside-toplevel
+        waiting = QProgressDialog(tr("Estimating the zoomed-out load…"), tr("Cancel"), 0, 1, self)
+        waiting.setWindowTitle(tr("Zoomed-out load"))
+        waiting.setWindowModality(Qt.WindowModality.WindowModal)
+        waiting.setMinimumDuration(400)  # shown only when it takes a while
+
+        def progress(done, total, name):
+            waiting.setMaximum(max(1, total))
+            waiting.setValue(done)
+            waiting.setLabelText(tr("Estimating the zoomed-out load…\nLayer {} of {}: {}").format(
+                done + 1, total, name))
+            QApplication.processEvents()
+            return not waiting.wasCanceled()
         try:
-            loads, factor = zoom_load.analyse(self.project, profile, extent)
+            result = zoom_load.analyse(self.project, profile, extent, progress)
         finally:
-            QApplication.restoreOverrideCursor()
+            waiting.close()
+        if result is None:
+            self.status.setText(tr("Zoomed-out load: cancelled."))
+            return False
+        loads, factor = result
         if not loads:
             self.status.setText(tr("No published vector layer has features in the extent."))
             return False
