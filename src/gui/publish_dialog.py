@@ -583,12 +583,14 @@ class PublishDialog(QDialog):
         waiting.setWindowTitle(tr("Zoomed-out load"))
         waiting.setWindowModality(Qt.WindowModality.WindowModal)
         waiting.setMinimumDuration(400)  # shown only when it takes a while
+        waiting.setFixedWidth(460)  # a long layer name does not widen (and shift) it
+        from .zoom_load_dialog import short_name  # pylint: disable=import-outside-toplevel
 
         def progress(done, total, name):
             waiting.setMaximum(max(1, total))
             waiting.setValue(done)
             waiting.setLabelText(tr("Estimating the zoomed-out load…\nLayer {} of {}: {}").format(
-                done + 1, total, name))
+                done + 1, total, short_name(name, 48)))
             QApplication.processEvents()
             return not waiting.wasCanceled()
         try:
