@@ -306,6 +306,9 @@ class OutputConfig:
     # Screen-size interval marker lines placed by the browser instead of at
     # QGIS's positions per zoom: a faster export, approximate markers.
     fast_markers: bool = False
+    # Labels with a size in map units are hidden where they are smaller than
+    # this on screen (CSS px; 0: shown at every size).
+    min_label_px: float = 6.0
 
 
 @dataclass

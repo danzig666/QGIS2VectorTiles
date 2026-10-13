@@ -1329,3 +1329,35 @@ def test_features_of_an_invisible_else_rule_are_labelled(flattener):
     assert labels and all(sorted(_matching_ids(layer, r.rule.filterExpression())) == everyone
                           for r in labels)
     assert not any(r.get_attr("t") == 0 and r.get_attr("r") == 1 for r in rules)  # nothing drawn
+
+
+def test_map_unit_labels_hidden_where_too_small_or_too_large_on_screen(flattener):
+    """10 m text is 6 px at 1:6299 and 40 px at 1:945 (96 dpi): hidden
+    beyond those with min_label_px=6 and QGIS's pixel size limits up to 40."""
+    from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsMarkerSymbol, QgsPalLayerSettings,
+                           QgsProject, QgsSingleSymbolRenderer, QgsVectorLayerSimpleLabeling)
+    layer = _points()
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "id"
+    text = settings.format()
+    text.setSize(10)
+    text.setSizeUnit(Qgis.RenderUnit.MetersInMapUnits)
+    settings.setFormat(text)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    per_px = 10 * 96 / 0.0254
+
+    def label_range(**options):
+        rules, _ = flattener(0, 20, **options)
+        return next(r.visibility for r in rules if r.get_attr("t") == 1)
+    assert label_range().min_zoom == 0
+    shown = label_range(min_label_px=6)
+    assert shown.min_zoom == pytest.approx(zm.scale_to_zoom(per_px / 6)) and shown.max_zoom is None
+    settings.fontLimitPixelSize, settings.fontMinPixelSize, settings.fontMaxPixelSize = True, 8, 40
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    shown = label_range(min_label_px=6)
+    assert shown.min_zoom == pytest.approx(zm.scale_to_zoom(per_px / 8))
+    assert shown.max_zoom == pytest.approx(zm.scale_to_zoom(per_px / 40))

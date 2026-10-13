@@ -1998,6 +1998,23 @@ class PublishDialog(QDialog):
             "most of a big export. With this option the browser places them along the lines instead: a "
             "much faster export, but the markers are not at QGIS's positions (spacing within about 0.7-1.4x, "
             "markers may be missing at tile edges). Off: exact positions."))
+        small_row = QHBoxLayout()
+        self.o_small_labels = QCheckBox(tr("Hide labels smaller than"))
+        self.o_small_labels.setToolTip(tr(
+            "Labels whose text size is set in map units (metres) shrink as the map zooms out. Hide them "
+            "where their text is smaller than this on screen, too small to read. Labels sized in points, "
+            "millimetres or pixels and data-defined sizes are not affected. QGIS's own pixel size-based "
+            "visibility of a label (Rendering tab) is always honoured."))
+        self.o_small_label_px = QDoubleSpinBox()
+        self.o_small_label_px.setRange(1.0, 48.0)
+        self.o_small_label_px.setDecimals(1)
+        self.o_small_label_px.setValue(6.0)
+        self.o_small_label_px.setSuffix(" px")
+        self.o_small_labels.toggled.connect(self.o_small_label_px.setEnabled)
+        small_row.addWidget(self.o_small_labels)
+        small_row.addWidget(self.o_small_label_px)
+        small_row.addWidget(QLabel(tr("(text sized in map units)")))
+        small_row.addStretch(1)
         cache_row = QHBoxLayout()
         self.o_reuse = QCheckBox(tr("Reuse unchanged layers from earlier exports (faster)"))
         self.o_reuse.setToolTip(tr("Layers whose data files, style and export settings did not change "
@@ -2017,6 +2034,7 @@ class PublishDialog(QDialog):
         form.addRow(tr("Polygon labels"), self.o_labels)
         form.addRow("", self.o_all_fields)
         form.addRow("", self.o_fast_markers)
+        form.addRow("", small_row)
         form.addRow("", cache_row)
         form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
                                   "PMTiles archive, never as images. Only QGIS raster layers become image "
@@ -2314,6 +2332,10 @@ class PublishDialog(QDialog):
         self.o_labels.setCurrentIndex(max(0, self.o_labels.findData(profile.output.polygon_labels_base)))
         self.o_all_fields.setChecked(profile.output.include_all_fields)
         self.o_fast_markers.setChecked(profile.output.fast_markers)
+        self.o_small_labels.setChecked(profile.output.min_label_px > 0)
+        self.o_small_label_px.setEnabled(profile.output.min_label_px > 0)
+        if profile.output.min_label_px > 0:
+            self.o_small_label_px.setValue(profile.output.min_label_px)
         self.o_reuse.setChecked(profile.output.reuse_unchanged)
         dest = profile.destination
         self._dest_family, self._dest_other = None, {}  # the profile's own values, no swap
@@ -2596,6 +2618,7 @@ class PublishDialog(QDialog):
         out.polygon_labels_base = self.o_labels.currentData()
         out.include_all_fields = self.o_all_fields.isChecked()
         out.fast_markers = self.o_fast_markers.isChecked()
+        out.min_label_px = self.o_small_label_px.value() if self.o_small_labels.isChecked() else 0.0
         out.reuse_unchanged = self.o_reuse.isChecked()
         dest = profile.destination
         dest.kind = self.d_kind.currentData()

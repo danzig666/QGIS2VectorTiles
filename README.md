@@ -42,7 +42,14 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.2**. Newest first:
+This README describes QWebMap **4.36.3**. Newest first:
+
+**4.36.3** — tiny map-unit labels hidden, dashes kept zoomed out
+- Labels whose text size is in map units are hidden where they are smaller than 6 px on screen
+  (Publish window, Output: "Hide labels smaller than", on by default); QGIS's pixel size-based
+  label visibility is now honoured too.
+- Map-unit dash patterns with a scale range ("Min/max size") no longer turn into a solid line
+  zoomed out.
 
 **4.36.2** — zoomed-out load windows keep their size
 - Long layer names are shortened with "…" in the progress window and the table (the whole name

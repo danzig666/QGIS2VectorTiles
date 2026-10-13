@@ -189,6 +189,7 @@ class QGIS2VectorTiles:
         background_tiles: bool = False,
         fast_markers: bool = False,
         view_max_zoom: int = 22,
+        min_label_px: float = 0.0,
         cap_tiles: bool = False,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
@@ -236,6 +237,8 @@ class QGIS2VectorTiles:
         self.background_tiles = background_tiles
         # Screen-size interval marker lines placed by the browser (faster, approximate).
         self.fast_markers = fast_markers
+        # Map-unit labels smaller than this on screen are hidden (0: off).
+        self.min_label_px = min_label_px
         # Far too many tiles of coarse data: end them at its detail
         # (fidelity.tile_budget; only while the web map overzooms).
         self.cap_tiles = cap_tiles
@@ -640,7 +643,7 @@ class QGIS2VectorTiles:
             self.min_zoom, self.max_zoom, self.utils_dir, self.feedback, self.diagnostics,
             layer_ids=self.layer_ids, scale_limits=self.scale_limits, extent=self.extent,
             fast_markers=self.fast_markers, lengths=self.lengths, overzoom=self.profile.overzoom,
-            overzoom_to=self.view_max_zoom,
+            overzoom_to=self.view_max_zoom, min_label_px=self.min_label_px,
         ).flatten_all_rules()
 
     # Largest symbol reach considered for the extent buffer (CSS px).

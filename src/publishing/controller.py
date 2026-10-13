@@ -353,6 +353,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
                       if c.included and (c.min_scale or c.max_scale or c.labels_min_scale)},
         background_tiles=os.environ.get("Q2VT_FOREGROUND_TILES") != "1",
         fast_markers=profile.output.fast_markers, view_max_zoom=profile.view.max_view_zoom,
+        min_label_px=profile.output.min_label_px,
         cap_tiles=True)
     progress.check()
     # The tiles are made in the background (ogr2ogr processes) while the
