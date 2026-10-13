@@ -253,7 +253,9 @@ class SymbolMaterializer:
         """Return replacement rules for ``flat_rule`` (whose symbol holds only
         ``layer``), or None when the component needs no rewrite."""
         kind = layer.layerType()
-        limited = self._split_map_unit_limits(flat_rule, layer)
+        # A piece of a split has no limited length left: it is not split again.
+        limited = None if getattr(flat_rule, "_limits_split", False) else \
+            self._split_map_unit_limits(flat_rule, layer)
         if limited is not None:
             return limited
         if kind in ("MarkerLine", "HashLine"):
@@ -505,6 +507,7 @@ class SymbolMaterializer:
         from qgis.core import QgsMapUnitScale  # pylint: disable=import-outside-toplevel
         props = layer.dataDefinedProperties()
         limits = {}
+        borrowed = set()
         for name, key in self._LIMITED_LENGTHS.get(layer.layerType(), ()):
             try:
                 value = float(getattr(layer, name)())
@@ -514,6 +517,7 @@ class SymbolMaterializer:
                     # QgsPointPatternFillSymbolLayer::applyPattern converts
                     # the row distance with the Y displacement's scale.
                     scale = layer.displacementYMapUnitScale()
+                    borrowed.add(name)
             except (AttributeError, TypeError):
                 continue
             if abs(value) <= 1e-12 or normalize_unit(unit) != "map" or not _limited(scale) or \
@@ -585,9 +589,15 @@ class SymbolMaterializer:
             for name, kind in zip(limits, state):
                 setter = f"set{name[:1].upper()}{name[1:]}"
                 getattr(clone, f"{setter}MapUnitScale")(QgsMapUnitScale())
+                if name in borrowed:
+                    # The row distance read the Y displacement's limits (a 0
+                    # displacement keeps them): cleared too, else every piece
+                    # was limited again and split without end.
+                    clone.setDisplacementYMapUnitScale(QgsMapUnitScale())
                 if kind[0] == "mm":
                     getattr(clone, setter)(kind[1])
                     getattr(clone, f"{setter}Unit")(Qgis.RenderUnit.Millimeters)
+            rule._limits_split = True  # pylint: disable=protected-access
             result = self.materialize(rule, clone)
             parts.extend(result if result is not None else [rule])
         return parts

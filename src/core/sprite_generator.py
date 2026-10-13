@@ -264,19 +264,27 @@ class SymbolImage:
             scope.setFields(fields)
             expression_context.appendScope(scope)
         canvas = self._marker_canvas(symbol, self._context, feature, expression_context)
-        image = QImage(canvas, canvas, _ARGB)
-        image.fill(0)
-        painter = QPainter(image)
-        painter.setRenderHint(_ANTIALIAS)
-        context = self._context(painter)
-        context.setExpressionContext(expression_context)
-        try:
-            symbol.startRender(context, feature.fields() if feature else QgsFields())
-            symbol.renderPoint(QPointF(canvas / 2.0, canvas / 2.0), feature, context)
-            symbol.stopRender(context)
-        finally:
-            painter.end()
-        return image
+        while True:
+            image = QImage(canvas, canvas, _ARGB)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.setRenderHint(_ANTIALIAS)
+            context = self._context(painter)
+            context.setExpressionContext(QgsExpressionContext(expression_context))
+            try:
+                symbol.startRender(context, feature.fields() if feature else QgsFields())
+                symbol.renderPoint(QPointF(canvas / 2.0, canvas / 2.0), feature, context)
+                symbol.stopRender(context)
+            finally:
+                painter.end()
+            # The bounds leave out some ink (the outline of a filled marker's
+            # fill: a thick map-unit ring was cut off zoomed in): ink at the
+            # edge of the canvas, draw again on a larger one.
+            bbox = self._qt_to_pil(image).getbbox()
+            if bbox is None or canvas >= _MAX_CANVAS_PX or (
+                    bbox[0] > 0 and bbox[1] > 0 and bbox[2] < canvas and bbox[3] < canvas):
+                return image
+            canvas = min(_MAX_CANVAS_PX, canvas * 2)
 
     @staticmethod
     def _independent_copy(symbol: QgsSymbol) -> QgsSymbol:
