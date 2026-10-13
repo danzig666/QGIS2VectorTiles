@@ -295,3 +295,19 @@ def test_percentage_pattern_offsets_match_the_absolute_texture(plugin, monkeypat
     assert cells[0].size == cells[1].size
     assert ImageChops.difference(cells[0], cells[1]).getbbox() is None
     assert not exporter.context.diagnostics.by_code("Q2VT_UNIT_PERCENTAGE")
+
+
+def test_filled_marker_outline_is_not_cut_off(sg):
+    """A 5 m filled circle with a 0.8 m outline at 0.04 m/px is 145 px wide:
+    its bounds leave the outline out, and the ring was cut to the canvas."""
+    from qgis.core import QgsFilledMarkerSymbolLayer, QgsSimpleFillSymbolLayer
+    fill = QgsSimpleFillSymbolLayer(QColor(0, 0, 0, 0), Qt.SolidPattern, QColor("green"))
+    fill.setStrokeWidth(0.8)
+    fill.setStrokeWidthUnit(Qgis.RenderUnit.MapUnits)
+    ring = QgsFilledMarkerSymbolLayer()
+    ring.setSize(5)
+    ring.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    ring.setSubSymbol(QgsFillSymbol([fill]))
+    img = sg.SymbolImage(QgsMarkerSymbol([ring]), "m", 1, True, 0.04).img
+    left, top, right, bottom = img.getbbox()
+    assert right - left == pytest.approx(145, abs=3) and bottom - top == pytest.approx(145, abs=3)

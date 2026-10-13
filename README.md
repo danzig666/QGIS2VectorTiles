@@ -42,7 +42,13 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.36.3**. Newest first:
+This README describes QWebMap **4.36.4**. Newest first:
+
+**4.36.4** — export crash and cut-off markers fixed
+- Exports no longer stop with a RecursionError on a point pattern fill whose map-unit row
+  distance has a scale range ("Min/max size") and whose Y displacement is 0.
+- Large map-unit markers drawn with a filled outline (e.g. a 5 m ring) are no longer cut off at
+  the highest zooms.
 
 **4.36.3** — tiny map-unit labels hidden, dashes kept zoomed out
 - Labels whose text size is in map units are hidden where they are smaller than 6 px on screen
