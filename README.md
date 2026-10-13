@@ -42,7 +42,12 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.35.4**. Newest first:
+This README describes QWebMap **4.36.0**. Newest first:
+
+**4.36.0** — a speed slider for the zoomed-out load
+- *Zoomed-out load…* has a slider from **very slow** to **very fast**: faster hides small features
+  and crowded labels from closer zooms on (less to load zoomed out), slower shows more zoomed out.
+  Zoomed in, everything is shown either way. The setting is remembered.
 
 **4.35.4** — no more tiles flooded with a polygon's colour
 - A polygon that is valid in the project CRS can cross itself once reprojected to Web Mercator

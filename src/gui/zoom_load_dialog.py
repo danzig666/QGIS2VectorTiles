@@ -3,14 +3,17 @@ Zoomed-out load of the published layers (Publish window, Map tab:
 *Zoomed-out load…*): which layers make the web map slow when zoomed out,
 about how much, and from which zoom their features, or only their labels,
 are worth drawing. The checked suggestions become the layers' web-only
-visible scales (the Scales column) with one click.
+visible scales (the Scales column) with one click. A slider sets how eager
+the suggestions are, from "very slow" (show as much as possible zoomed out)
+to "very fast" (hide small features and crowded labels early).
 """
 
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QGuiApplication
+from qgis.core import QgsSettings
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
-                                 QHBoxLayout, QHeaderView, QLabel, QLineEdit, QSpinBox, QTableWidget,
-                                 QTableWidgetItem, QVBoxLayout, QWidget)
+                                 QHBoxLayout, QHeaderView, QLabel, QLineEdit, QSlider, QSpinBox,
+                                 QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..publishing import zoom_load
 from .layer_search import matches
@@ -74,6 +77,13 @@ class _ZoomPick(QWidget):
         return self.spin.value() if self.check.isChecked() else None
 
 
+SPEED_KEY = "QWebMap/zoomLoadSpeed"
+
+
+def speed_names():
+    return [tr("Very slow"), tr("Slow"), tr("Balanced"), tr("Fast"), tr("Very fast")]
+
+
 class ZoomLoadDialog(QDialog):
     """The analysis result; ``chosen()`` after accept: {layer id:
     (min scale or None, labels min scale or None)} of the checked rows."""
@@ -81,6 +91,13 @@ class ZoomLoadDialog(QDialog):
     def __init__(self, parent, loads, factor: float, zooms):
         super().__init__(parent)
         self.loads, self.factor, self.zooms = list(loads), factor, (int(zooms[0]), int(zooms[1]))
+        try:
+            speed = int(QgsSettings().value(SPEED_KEY, zoom_load.BALANCED))
+        except (TypeError, ValueError):
+            speed = zoom_load.BALANCED
+        speed = max(0, min(len(zoom_load.SPEEDS) - 1, speed))
+        if speed != zoom_load.BALANCED:
+            zoom_load.resuggest(self.loads, self.zooms[1], speed)
         self.setWindowTitle(tr("Zoomed-out load of the web map"))
         self.resize(1000, 540)
         layout = QVBoxLayout(self)
@@ -100,6 +117,24 @@ class ZoomLoadDialog(QDialog):
                                 "accents not needed); hidden rows keep their ticks"))
         self.find.textChanged.connect(self._filter_rows)
         layout.addWidget(self.find)
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel(tr("Zoomed out, the web map should be:")))
+        speed_row.addWidget(QLabel(tr("slow, showing much")))
+        self.speed = QSlider(Qt.Orientation.Horizontal)
+        self.speed.setRange(0, len(zoom_load.SPEEDS) - 1)
+        self.speed.setPageStep(1)
+        self.speed.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.speed.setValue(speed)
+        self.speed.setToolTip(tr(
+            "Faster: small features and crowded labels are hidden from closer zooms on (less to load "
+            "and draw zoomed out). Slower: more is shown zoomed out. Zoomed in, everything is shown "
+            "either way. Moving it suggests the zooms again (hand-set zooms are replaced)."))
+        speed_row.addWidget(self.speed, 1)
+        speed_row.addWidget(QLabel(tr("fast, showing little")))
+        self.speed_name = QLabel()
+        self.speed_name.setMinimumWidth(80)
+        speed_row.addWidget(self.speed_name)
+        layout.addLayout(speed_row)
         self.table = QTableWidget(len(self.loads), 6)
         self.table.setHorizontalHeaderLabels([
             tr("Layer"), tr("Features"), tr("Busiest tile, zoomed out"), tr("Features from"),
@@ -123,6 +158,7 @@ class ZoomLoadDialog(QDialog):
         self.picks = {}
         for row, load in enumerate(self.loads):
             self._fill_row(row, load)
+        self._show_speed_name()
         for column, kind in ((COL_FROM, "features"), (COL_LABELS_FROM, "labels")):
             # Resizing to contents does not see the cell widgets.
             widths = [picks[kind].sizeHint().width() + 8 for picks in self.picks.values() if kind in picks]
@@ -140,11 +176,27 @@ class ZoomLoadDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._update_summary()
+        self.speed.valueChanged.connect(self._speed_changed)
         width = sum(header.sectionSize(c) for c in range(6)) + 60   # the whole table, no scrolling
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             width = min(width, screen.availableGeometry().width() - 40)
         self.resize(max(self.width(), width), self.height())
+
+    def _show_speed_name(self) -> None:
+        self.speed_name.setText(speed_names()[self.speed.value()])
+
+    def _speed_changed(self, value: int) -> None:
+        """Suggest the zooms again at this speed (remembered for next time)."""
+        QgsSettings().setValue(SPEED_KEY, int(value))
+        zoom_load.resuggest(self.loads, self.zooms[1], value)
+        for row, load in enumerate(self.loads):
+            for column in (COL_FROM, COL_LABELS_FROM):
+                self.table.removeCellWidget(row, column)
+            self._fill_row(row, load)
+        self._filter_rows(self.find.text())
+        self._show_speed_name()
+        self._update_summary()
 
     def _filter_rows(self, text: str) -> None:
         for row in range(self.table.rowCount()):
