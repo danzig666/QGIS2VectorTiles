@@ -3839,7 +3839,10 @@ class RulesExporter:
                                     recipe.params + (("anchor_fields", True),))
             return [kind, mat.grid_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "glyph":
-            return [2, mat.glyph_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+            shape = mat.glyph_expression(recipe, f"EPSG:{_EPSG_CRS}")
+            if flat_rule.get_attr("c") == 1:
+                return [1, f"boundary({shape})"]  # the shape's outline (a large marker's)
+            return [2, shape]
         if recipe is not None and recipe.kind == "dash_segments":
             crs = f"EPSG:{_EPSG_CRS}"
             if flat_rule.get_attr("g") == 2:

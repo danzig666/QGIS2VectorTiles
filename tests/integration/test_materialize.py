@@ -3060,3 +3060,38 @@ def test_point_pattern_rows_limited_by_a_zero_displacement_split_once(plugin, tm
     assert rules and len(rules) < 20
     # No piece starts past the last style zoom (MapLibre rejected the style).
     assert all(r.visibility is None or r.visibility.min_zoom < 24 for r in rules)
+
+
+def test_a_large_map_unit_marker_is_drawn_as_its_shape(plugin, tmp_path):
+    """A 920 m dashed circle on the centroid of a polygon (a protection
+    distance): an icon is drawn only from the tile of its centre and is a
+    picture scaled up, so zoomed in it vanished or blurred. From the zoom
+    where it is LARGE_MARKER_PX wide it is a ring of real geometry around the
+    centroid, its outline a dashed line; a sprite below that zoom."""
+    from qgis.core import QgsCentroidFillSymbolLayer, QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer
+    from fidelity.diagnostics import DiagnosticCollector
+    from q2vt_fixtures import zoning_layer
+    ring = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 920)
+    ring.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    ring.setColor(QColor(255, 0, 0, 0))
+    ring.setStrokeColor(QColor("red"))
+    ring.setStrokeWidth(0)
+    ring.setStrokeStyle(Qt.PenStyle.DashLine)
+    centroid = QgsCentroidFillSymbolLayer()
+    centroid.setSubSymbol(QgsMarkerSymbol([ring]))
+    layer = zoning_layer()
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([centroid])))
+    reset_project(layer)
+    rules = RulesFlattener(0, 18, str(tmp_path), QgsProcessingFeedback(),
+                           DiagnosticCollector()).flatten_all_rules()
+    shapes = [r for r in rules if r.recipe is not None and r.recipe.kind == "glyph"]
+    sprites = [r for r in rules if r.recipe is None]
+    # 920 m is 128 px between zoom 12 and 13 (Web Mercator): geometry from 12.
+    start = math.floor(math.log2(SymbolMaterializer.LARGE_MARKER_PX
+                                 / (920 * 512 / 40075016.68557849)))
+    assert [r.get_attr("c") for r in shapes] == [1]  # transparent fill: the outline only
+    assert shapes[0].visibility.min_zoom == start and shapes[0].recipe.param("anchor") == "centroid"
+    assert shapes[0].rule.symbol().symbolLayer(0).penStyle() == Qt.PenStyle.DashLine
+    assert sprites and all(r.visibility.max_zoom == start for r in sprites)
