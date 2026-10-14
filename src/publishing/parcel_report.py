@@ -38,6 +38,7 @@ from .feature_index import shard_key
 from .identifiers import key_expression
 from .models import ParcelInfoConfig, PublicationProfile
 from .progress import Progress
+from .qgis_model import swatch_context
 from .provenance import layer_logical_id
 from .shard_pack import ShardPack
 
@@ -67,6 +68,10 @@ def working_crs(layer) -> QgsCoordinateReferenceSystem:
     return QgsCoordinateReferenceSystem(f"EPSG:{32600 + zone if center.y() >= 0 else 32700 + zone}")
 
 
+# CSS px the report shows a legend graphic at (.q2vt-pr-swatch).
+SWATCH_SHOWN_PX = 28.0
+
+
 class _Legend:
     """The legend graphic of each feature: its symbols as QGIS draws them
     (rule, category and data-defined colours included), rendered to a small
@@ -77,8 +82,12 @@ class _Legend:
     SCALES = (0, 1000, 5000, 25000, 100000, 500000)
     SIZE = 32
 
-    def __init__(self, layer, out_dir: str, title: str = ""):
+    def __init__(self, layer, out_dir: str, title: str = "", swatch=None):
         self.layer = layer
+        # Render context of the graphic: the legend swatches' (map scale of the
+        # most detailed tiles, sizes as on screen). Without one, lines sized in
+        # map units came out far too thick.
+        self.swatch = swatch
         self.out_dir = out_dir
         self.title = title or layer.name()
         self.items = {}
@@ -135,19 +144,18 @@ class _Legend:
                 break
         if not symbols:
             return None
-        image = QImage(self.SIZE * 2, self.SIZE * 2, QImage.Format.Format_ARGB32_Premultiplied)
+        image = QImage(self.SIZE, self.SIZE, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        render = QgsRenderContext.fromQPainter(painter)
-        render.setExpressionContext(context_used.expressionContext())
+        expressions = QgsExpressionContext(context_used.expressionContext())
         for symbol in symbols:
-            symbol.drawPreviewIcon(painter, image.size(), render, False, context_used.expressionContext())
+            painter.drawPixmap(0, 0, QgsSymbolLayerUtils.symbolPreviewPixmap(
+                symbol, QSize(self.SIZE, self.SIZE), 2, self.swatch, False, expressions))
         painter.end()
         data = QByteArray()
         buffer = QBuffer(data)
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        image.scaled(self.SIZE, self.SIZE).save(buffer, "PNG")
+        image.save(buffer, "PNG")
         digest = hashlib.sha1(bytes(data)).hexdigest()[:14]
         if digest not in self.files:
             name = f"pr-{digest}.png"
@@ -342,7 +350,8 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
     area = QgsCoordinateTransform(web, crs, project.transformContext()).transformBoundingBox(extent_3857)
     to_wgs = QgsCoordinateTransform(crs, wgs, project.transformContext())
 
-    zone_legend = _Legend(zoning, legend_dir)
+    swatch = swatch_context(project, profile, _Legend.SIZE, SWATCH_SHOWN_PX)
+    zone_legend = _Legend(zoning, legend_dir, swatch=swatch)
     zones = _Index(project, zoning, crs, [code_field] + [f.field for f in info.zoning_fields],
                    zone_legend, area=area)
     cuts = []
@@ -359,7 +368,7 @@ def build_parcel_report(project, profile: PublicationProfile, extent_3857: QgsRe
             warnings.append(f"Parcel report: restriction layer {config.layer_id} is missing.")
             continue
         kind = _geometry_kind(layer)
-        legend = _Legend(layer, legend_dir, config.title)
+        legend = _Legend(layer, legend_dir, config.title, swatch)
         grow = area.buffered(config.buffer_m + 1)
         data = _Index(project, layer, crs, [config.name_field] if config.name_field else [], legend,
                       buffer_m=config.buffer_m if kind in (0, 1) else 0.0, area=grow)
@@ -657,7 +666,8 @@ def _report_key(project, profile: PublicationProfile, extent_3857: QgsRectangle)
     return export_cache.make_key(
         "parcels", code.hexdigest(), profile.to_dict()["parcelInfo"], profile.locale,
         [extent_3857.xMinimum(), extent_3857.yMinimum(), extent_3857.xMaximum(), extent_3857.yMaximum()],
-        states, project.ellipsoid(), project.crs().toWkt())
+        states, project.ellipsoid(), project.crs().toWkt(),
+        profile.view.max_zoom)  # the legend graphics' map scale
 
 
 def cached_parcel_report(cache, project, profile: PublicationProfile, extent_3857: QgsRectangle,

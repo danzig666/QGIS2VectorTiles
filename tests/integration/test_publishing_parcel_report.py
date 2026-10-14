@@ -209,3 +209,31 @@ def test_zone_field_guessed_from_a_label_field_with_a_quote(plugin):
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
     assert guess_zone_field(layer) == 'zona"cod'
+
+
+def test_legend_graphic_draws_map_unit_lines_at_map_scale(plugin):
+    """Lines sized in map units: as thin as in the legend (the map scale of
+    the most detailed tiles), not metres read as pixels; inside the image."""
+    import tempfile  # pylint: disable=import-outside-toplevel
+    from qgis.core import Qgis, QgsLineSymbol, QgsSingleSymbolRenderer, QgsVectorLayer
+    from qgis.PyQt.QtGui import QColor, QImage
+    from publishing.parcel_report import SWATCH_SHOWN_PX, _Legend
+    from publishing.qgis_model import swatch_context
+    layer = QgsVectorLayer("LineString?crs=EPSG:23700", "védősáv", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 0, 100 0)"))
+    layer.dataProvider().addFeatures([feature])
+    symbol = QgsLineSymbol.createSimple({"color": "200,0,0"})
+    symbol.setWidth(2.0)
+    symbol.setWidthUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    profile = PublicationProfile(title="t", slug="t")
+    with tempfile.TemporaryDirectory() as out:
+        legend = _Legend(layer, out, swatch=swatch_context(QgsProject.instance(), profile, _Legend.SIZE,
+                                                            SWATCH_SHOWN_PX))
+        _, path = legend.describe(next(layer.getFeatures()))
+        image = QImage(os.path.join(out, os.path.basename(path)))
+    inked = [[QColor.fromRgba(image.pixel(x, y)).alpha() > 60 for y in range(image.height())]
+             for x in range(image.width())]
+    assert max(sum(column) for column in inked) <= 3
+    assert not any(inked[0]) and not any(inked[-1])  # padded, not cut at the edge
