@@ -42,7 +42,9 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.3**. Newest first:
+This README describes QWebMap **4.38.4**. Newest first:
+
+**4.38.4** — no change in the generic plugin (a Hungarian-edition release).
 
 **4.38.3** — search as a magnifier on phones
 - On phones the search field is a magnifier button in the title bar; tapping it opens the field
