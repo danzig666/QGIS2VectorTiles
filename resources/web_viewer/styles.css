@@ -460,7 +460,7 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
    at its printed size on the left, title + legend (or the parcel report) on
    the right (print.mjs). The same sizes on screen while printing, so the map
    is drawn at its paper size before the browser prints it. */
-#q2vt-print-sheet { display: none; }
+#q2vt-print-sheet, #q2vt-print-flow { display: none; }
 body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2vt-pmap-w, 186mm);
   height: var(--q2vt-pmap-h, 190mm); }
 .q2vt-print-north { position: absolute; top: 3mm; right: 3mm; width: 9mm; height: 13mm; z-index: 5;
@@ -481,7 +481,7 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2
   .q2vt-print-info { display: grid; grid-template-columns: auto 1fr; gap: 0.3mm 2mm; margin: 0 0 2mm; font-size: 7.5pt; }
   .q2vt-print-info dt { color: #555; }
   .q2vt-print-info dd { margin: 0; }
-  body.q2vt-printing #q2vt-app > *:not(#q2vt-map):not(#q2vt-print-sheet) { display: none !important; }
+  body.q2vt-printing #q2vt-app > *:not(#q2vt-map):not(#q2vt-print-sheet):not(#q2vt-print-flow) { display: none !important; }
   body.q2vt-printing #q2vt-map { position: relative; width: var(--q2vt-pmap-w, 186mm); height: var(--q2vt-pmap-h, 190mm);
     border: 0.3mm solid #000;
     break-inside: avoid; }
@@ -501,6 +501,27 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2
   #q2vt-print-sheet .q2vt-pr-part, #q2vt-print-sheet .q2vt-pr-restriction { padding: 1.5mm 2mm; border-radius: 2mm;
     border: 0.2mm solid #bbb; background: none; break-inside: avoid; }
   #q2vt-print-sheet .q2vt-pr-head h2 { font-size: 13pt; }
+  /* After the first page, across the whole width: the restrictions, then each
+     opened full regulation text from a new page, in two columns; headings
+     stay with what follows, cards and list items are not split. */
+  body.q2vt-printing #q2vt-print-flow { display: block; grid-column: 1 / -1; font-size: 8.5pt; line-height: 1.3;
+    color: #000; }
+  body.q2vt-printing #q2vt-print-flow:empty { display: none; }
+  #q2vt-print-flow > * { break-before: page; margin: 0; }
+  #q2vt-print-flow .q2vt-pr-restrictions { display: block; columns: 2; column-gap: 8mm; }
+  #q2vt-print-flow .q2vt-pr-restrictions h3 { column-span: all; font-size: 11pt; margin: 0 0 3mm; }
+  #q2vt-print-flow .q2vt-pr-restriction { padding: 1.5mm 2mm; margin: 0 0 2mm; border-radius: 2mm;
+    border: 0.2mm solid #bbb; background: none; break-inside: avoid; }
+  #q2vt-print-flow details.q2vt-rich-block > summary { display: block; list-style: none; font-size: 11pt; font-weight: 700;
+    margin: 0 0 3mm; padding: 0 0 1.5mm; border-bottom: 0.3mm solid #000; color: #000; }
+  #q2vt-print-flow details.q2vt-rich-block > summary::-webkit-details-marker { display: none; }
+  #q2vt-print-flow details.q2vt-rich-block > summary::marker { content: ""; }
+  #q2vt-print-flow .q2vt-rich { columns: 2; column-gap: 8mm; column-rule: 0.2mm solid #ddd; font-size: 8.5pt;
+    orphans: 3; widows: 3; max-height: none; overflow: visible; }
+  #q2vt-print-flow .q2vt-rich :is(h1, h2, h3, h4, h5, h6, p:has(> strong:only-child), p:has(> b:only-child)) {
+    break-after: avoid; break-inside: avoid; }
+  #q2vt-print-flow .q2vt-rich :is(li, tr, img) { break-inside: avoid; }
+  #q2vt-print-flow .q2vt-rich hr { border: 0; border-top: 0.3mm solid #888; margin: 3mm 0; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 

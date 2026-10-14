@@ -3,7 +3,7 @@
 // actions: [{"eval": "<async JS expression>"} | {"click": [x, y]} |
 //           {"clickLngLat": [lng, lat]} | {"type": ["#selector", "text"]} |
 //           {"press": "Enter"} | {"wait": ms} | {"idle": true} |
-//           {"screenshot": "path.png"} | {"goto": "url"} | {"media": "print" | "screen"} |
+//           {"screenshot": "path.png"} | {"goto": "url"} | {"media": "print" | "screen"} | {"pdf": "out.pdf"} |
 //           {"viewport": [width, height]}]
 // Every "eval" result is collected in order. Prints JSON {results, pageErrors, console}.
 import { chromium } from "playwright-core";
@@ -65,6 +65,7 @@ for (const action of actions) {
   else if (action.screenshot) await page.screenshot({ path: action.screenshot });
   else if (action.goto) { await page.goto(action.goto); await waitReady(); }
   else if (action.media) await page.emulateMedia({ media: action.media });
+  else if (action.pdf) await page.pdf({ path: action.pdf, preferCSSPageSize: true, printBackground: true });
   else if (action.viewport) await page.setViewportSize({ width: action.viewport[0], height: action.viewport[1] });
 }
 await browser.close();

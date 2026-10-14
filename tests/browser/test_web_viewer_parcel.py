@@ -219,3 +219,63 @@ def test_without_the_layers_tab_the_legend_switches_layers(legend_only_site, tmp
     parcels = next(r for r in after if r["title"] == "Földrészletek")
     assert parcels["on"] is False and parcels["off"]
     assert len(after) == len(before)
+
+
+# An opened full regulation text, as the report shows it (the test site has none).
+LONG_TEXT = """const card = document.querySelector('#q2vt-pane-parcel article.q2vt-pr');
+  const texts = document.createElement('section');
+  texts.className = 'q2vt-pr-section q2vt-pr-texts';
+  for (const code of ['Lke-1', 'Gksz']) {
+    const block = document.createElement('details');
+    block.className = 'q2vt-rich-block'; block.open = true;
+    const summary = document.createElement('summary'); summary.textContent = `A(z) ${code} övezet teljes előírásai`;
+    const rich = document.createElement('div'); rich.className = 'q2vt-rich';
+    for (let s = 1; s <= 40; s++) {
+      const head = document.createElement('p'); const strong = document.createElement('strong');
+      strong.textContent = `${s}. §`; head.append(strong); rich.append(head);
+      for (let k = 1; k <= 3; k++) {
+        const para = document.createElement('p');
+        para.textContent = `(${k}) ${code}: az építési övezetben elhelyezhető épületek rendeltetése, a beépítés módja és mértéke a szabályozási terv szerint, a telek legalább ${s * 10} %-át zöldfelületként kell kialakítani.`;
+        rich.append(para);
+      }
+    }
+    block.append(summary, rich); texts.append(block);
+  }
+  const closed = document.createElement('details'); closed.className = 'q2vt-rich-block';
+  closed.append(Object.assign(document.createElement('summary'), { textContent: 'A(z) Köu övezet teljes előírásai' }));
+  texts.append(closed);
+  card.querySelector('.q2vt-pr-section:last-of-type').before(texts);
+  return 1;"""
+
+FLOW_STATE = """const flow = document.getElementById('q2vt-print-flow'), sheet = document.getElementById('q2vt-print-sheet');
+  const box = (node) => node.getBoundingClientRect();
+  return { flow: [...flow.children].map((c) => c.matches('details') ? c.querySelector('summary').textContent : c.querySelector('h3').textContent),
+    sheetRestrictions: sheet.querySelectorAll('.q2vt-pr-restriction').length,
+    sheetTexts: sheet.querySelectorAll('.q2vt-rich').length,
+    wide: box(flow).width > box(document.getElementById('q2vt-map')).width * 1.3,
+    columns: getComputedStyle(flow.querySelector('.q2vt-rich')).columnCount,
+    breaks: [...flow.children].map((c) => getComputedStyle(c).breakBefore) };"""
+
+
+def test_print_flows_restrictions_and_texts_across_the_page(site, tmp_path):
+    """The narrow sheet beside the map has the parcel and its parts; the
+    restrictions and each opened full text follow across the whole width,
+    each from a new page, in two columns (closed texts are left out)."""
+    anchor = site["records"]["100/1"]["p"][0]["x"]
+    pdf = tmp_path / "parcel.pdf"
+    results = _run(site["url"], [
+        {"eval": "window.print = () => {}; q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;" % json.dumps(anchor)},
+        {"idle": True},
+        {"clickLngLat": anchor}, {"wait": 800},
+        {"eval": LONG_TEXT},
+        {"eval": "document.querySelector('#q2vt-pane-parcel .q2vt-chips button:last-child').click(); await new Promise((r) => setTimeout(r, 3000)); return 1;"},
+        {"media": "print"},
+        {"eval": FLOW_STATE},
+        {"pdf": str(pdf)},
+    ], tmp_path)
+    state = results[3]
+    assert state["flow"] == ["Korlátozások (2)", "A(z) Lke-1 övezet teljes előírásai",
+                             "A(z) Gksz övezet teljes előírásai"], state
+    assert state["sheetRestrictions"] == 0 and state["sheetTexts"] == 0
+    assert state["wide"] and state["columns"] == "2" and state["breaks"] == ["page"] * 3
+    assert pdf.stat().st_size > 10000

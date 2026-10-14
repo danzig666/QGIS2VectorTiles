@@ -42,7 +42,10 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.6**. Newest first:
+This README describes QWebMap **4.38.7**. Newest first:
+
+**4.38.7** — parcel report print laid out across the page
+- The first page has the map with the parcel and its parts beside it; the restrictions follow on the next page, then each opened full regulation text from a new page, all across the whole width in two columns. Headings stay with their text and cards are not split.
 
 **4.38.6** — parcel report legend graphics as thin as the legend's
 - The parcel report's zone and restriction graphics are drawn like the legend: lines sized in map units at the map scale of the most detailed tiles (they came out far too thick), with a margin so outlines aren't cut off at the edge.
