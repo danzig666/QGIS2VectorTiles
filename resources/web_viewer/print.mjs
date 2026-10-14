@@ -12,9 +12,9 @@ import { el } from "./icons.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 
 const SHEET = "q2vt-print-sheet";
-// What follows the first page across the whole width (the sheet beside the
-// map is a narrow column): the parcel report's restrictions, then each
-// opened full regulation text from a new page, in two columns.
+// What follows the first page across the whole width, in columns (the sheet
+// beside the map is a narrow column): the parcel report's opened full
+// regulation texts.
 const FLOW = "q2vt-print-flow";
 const PAGE_STYLE = "q2vt-print-page";
 // Paper layouts: the page, the map's printed size (mm) inside 8 mm margins

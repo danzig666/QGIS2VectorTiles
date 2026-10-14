@@ -102,6 +102,7 @@
   "parcel.fullText": "A(z) {code} övezet teljes előírásai",
   "parcel.textLoading": "Betöltés…",
   "parcel.textMissing": "A szöveg nem tölthető be.",
+  "parcel.sameText": "{title} – azonos a(z) {code} övezetnél fent nyomtatottal.",
   "parcel.disclaimer": "Tájékoztató jellegű adat, nem hatósági bizonyítvány. Az érvényes előírásokat a hatályos rendelet tartalmazza.",
   "print.scale": "M 1:{scale}",
   "print.scaleLabel": "Méretarány",
