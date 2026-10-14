@@ -102,6 +102,7 @@
   "parcel.fullText": "Full regulations of zone {code}",
   "parcel.textLoading": "Loading…",
   "parcel.textMissing": "The text could not be loaded.",
+  "parcel.sameText": "{title} — as printed above at zone {code}.",
   "parcel.disclaimer": "Information only, not an official certificate. The regulations in force are those of the adopted decree.",
   "print.scale": "Scale 1:{scale}",
   "print.scaleLabel": "Scale",

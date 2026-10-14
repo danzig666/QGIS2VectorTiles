@@ -42,7 +42,10 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.7**. Newest first:
+This README describes QWebMap **4.38.8**. Newest first:
+
+**4.38.8** — parcel report print: shared texts once, no blank space
+- The opened full regulation texts run one after the other in three columns (two on portrait paper) without page breaks between them; a section shared by several zones (the general rules) is printed once, with a line pointing to it at the other zones. The parts and restrictions beside the map are compact rows.
 
 **4.38.7** — parcel report print laid out across the page
 - The first page has the map with the parcel and its parts beside it; the restrictions follow on the next page, then each opened full regulation text from a new page, all across the whole width in two columns. Headings stay with their text and cards are not split.

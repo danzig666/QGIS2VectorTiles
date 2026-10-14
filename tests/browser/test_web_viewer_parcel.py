@@ -221,24 +221,28 @@ def test_without_the_layers_tab_the_legend_switches_layers(legend_only_site, tmp
     assert len(after) == len(before)
 
 
-# An opened full regulation text, as the report shows it (the test site has none).
+# Opened full regulation texts, as the report shows them (the test site has
+# none): a zone's own section, then the general rules shared by both zones.
 LONG_TEXT = """const card = document.querySelector('#q2vt-pane-parcel article.q2vt-pr');
   const texts = document.createElement('section');
   texts.className = 'q2vt-pr-section q2vt-pr-texts';
+  const section = (rich, title, code, n) => {
+    const head = document.createElement('p'); const strong = document.createElement('strong');
+    strong.textContent = title; head.append(strong); rich.append(head);
+    for (let s = 1; s <= n; s++) {
+      const para = document.createElement('p');
+      para.textContent = `(${s}) ${code}: az építési övezetben elhelyezhető épületek rendeltetése, a beépítés módja és mértéke a szabályozási terv szerint, a telek legalább ${s * 10} %-át zöldfelületként kell kialakítani.`;
+      rich.append(para);
+    }
+  };
   for (const code of ['Lke-1', 'Gksz']) {
     const block = document.createElement('details');
-    block.className = 'q2vt-rich-block'; block.open = true;
+    block.className = 'q2vt-rich-block'; block.open = true; block.dataset.zone = code;
     const summary = document.createElement('summary'); summary.textContent = `A(z) ${code} övezet teljes előírásai`;
     const rich = document.createElement('div'); rich.className = 'q2vt-rich';
-    for (let s = 1; s <= 40; s++) {
-      const head = document.createElement('p'); const strong = document.createElement('strong');
-      strong.textContent = `${s}. §`; head.append(strong); rich.append(head);
-      for (let k = 1; k <= 3; k++) {
-        const para = document.createElement('p');
-        para.textContent = `(${k}) ${code}: az építési övezetben elhelyezhető épületek rendeltetése, a beépítés módja és mértéke a szabályozási terv szerint, a telek legalább ${s * 10} %-át zöldfelületként kell kialakítani.`;
-        rich.append(para);
-      }
-    }
+    section(rich, `${code} övezet`, code, 40);
+    rich.append(document.createElement('hr'));
+    section(rich, '10. Építés általános szabályai', 'Általános', 60);
     block.append(summary, rich); texts.append(block);
   }
   const closed = document.createElement('details'); closed.className = 'q2vt-rich-block';
@@ -249,18 +253,21 @@ LONG_TEXT = """const card = document.querySelector('#q2vt-pane-parcel article.q2
 
 FLOW_STATE = """const flow = document.getElementById('q2vt-print-flow'), sheet = document.getElementById('q2vt-print-sheet');
   const box = (node) => node.getBoundingClientRect();
-  return { flow: [...flow.children].map((c) => c.matches('details') ? c.querySelector('summary').textContent : c.querySelector('h3').textContent),
+  return { flow: [...flow.children].map((c) => c.querySelector('summary').textContent),
     sheetRestrictions: sheet.querySelectorAll('.q2vt-pr-restriction').length,
     sheetTexts: sheet.querySelectorAll('.q2vt-rich').length,
+    general: [...flow.querySelectorAll('.q2vt-rich strong')].filter((s) => s.textContent.startsWith('10.')).length,
+    same: [...flow.querySelectorAll('.q2vt-print-same')].map((p) => p.textContent),
     wide: box(flow).width > box(document.getElementById('q2vt-map')).width * 1.3,
-    columns: getComputedStyle(flow.querySelector('.q2vt-rich')).columnCount,
+    columns: getComputedStyle(flow).columnCount,
     breaks: [...flow.children].map((c) => getComputedStyle(c).breakBefore) };"""
 
 
-def test_print_flows_restrictions_and_texts_across_the_page(site, tmp_path):
-    """The narrow sheet beside the map has the parcel and its parts; the
-    restrictions and each opened full text follow across the whole width,
-    each from a new page, in two columns (closed texts are left out)."""
+def test_print_lays_texts_out_across_the_page_once(site, tmp_path):
+    """Beside the map: the parcel, its parts and its restrictions. After it,
+    across the whole width in columns without page breaks: the opened full
+    texts (closed ones left out), the general rules shared by two zones
+    printed once, with a line pointing to them at the second zone."""
     anchor = site["records"]["100/1"]["p"][0]["x"]
     pdf = tmp_path / "parcel.pdf"
     results = _run(site["url"], [
@@ -274,8 +281,8 @@ def test_print_flows_restrictions_and_texts_across_the_page(site, tmp_path):
         {"pdf": str(pdf)},
     ], tmp_path)
     state = results[3]
-    assert state["flow"] == ["Korlátozások (2)", "A(z) Lke-1 övezet teljes előírásai",
-                             "A(z) Gksz övezet teljes előírásai"], state
-    assert state["sheetRestrictions"] == 0 and state["sheetTexts"] == 0
-    assert state["wide"] and state["columns"] == "2" and state["breaks"] == ["page"] * 3
+    assert state["flow"] == ["A(z) Lke-1 övezet teljes előírásai", "A(z) Gksz övezet teljes előírásai"], state
+    assert state["sheetRestrictions"] == 2 and state["sheetTexts"] == 0
+    assert state["general"] == 1 and len(state["same"]) == 1 and "Lke-1" in state["same"][0], state
+    assert state["wide"] and state["columns"] == "3" and set(state["breaks"]) == {"auto"}
     assert pdf.stat().st_size > 10000

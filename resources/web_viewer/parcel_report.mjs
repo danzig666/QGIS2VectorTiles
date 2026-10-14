@@ -60,26 +60,46 @@ export class ParcelReport {
   // [west, south, east, north] of the shown parcel (the print zooms on it).
   bounds() { return (this.record && this.record.bb) || null; }
 
-  // The shown report for the print sheet (without its buttons). The
-  // restrictions and the opened full regulations are marked to flow after
-  // the first page across the whole width (see Printer.fill), the
-  // restrictions first; closed regulations are left out.
+  // The shown report for the print sheet (without its buttons): the parcel,
+  // its parts and restrictions beside the map. The opened full regulations
+  // are marked to flow after the first page across the whole width (see
+  // Printer.fill); closed ones are left out, and a section shared by several
+  // zones (between <hr>s: the general rules) is printed once, with a line
+  // pointing to it at the others.
   printCard() {
     const card = this.container && this.container.querySelector("article.q2vt-pr");
     if (!card) return null;
     const copy = card.cloneNode(true);
     for (const node of copy.querySelectorAll(".q2vt-chips, button")) node.remove();
     const texts = copy.querySelector(".q2vt-pr-texts");
-    const restrictions = [...copy.querySelectorAll(".q2vt-pr-section")].pop();
-    if (restrictions && restrictions !== texts && restrictions.querySelector("h3")) {
-      restrictions.dataset.printFlow = "";
-      restrictions.classList.add("q2vt-pr-restrictions");
-    }
-    if (texts) {
-      if (restrictions && restrictions.dataset.printFlow !== undefined) texts.before(restrictions);
-      for (const block of texts.querySelectorAll("details.q2vt-rich-block")) {
-        if (block.open && block.querySelector(".q2vt-rich")) block.dataset.printFlow = "";
-        else block.remove();
+    if (!texts) return copy;
+    const printed = new Map();  // section text -> the zone it was printed at
+    for (const block of texts.querySelectorAll("details.q2vt-rich-block")) {
+      const rich = block.open && block.querySelector(".q2vt-rich");
+      if (!rich) {
+        block.remove();
+        continue;
+      }
+      block.dataset.printFlow = "";
+      const sections = [[]];
+      for (const node of [...rich.childNodes]) {
+        if (node.nodeName === "HR") sections.push([node]);
+        else sections[sections.length - 1].push(node);
+      }
+      for (const nodes of sections) {
+        const content = nodes.filter((node) => node.nodeName !== "HR");
+        const key = content.map((node) => node.textContent).join(" ").replace(/\s+/g, " ").trim();
+        if (!key) continue;
+        if (!printed.has(key)) {
+          printed.set(key, block.dataset.zone || "");
+          continue;
+        }
+        const first = content.find((node) => (node.textContent || "").trim());
+        const title = first.textContent.replace(/\s+/g, " ").trim().slice(0, 90);
+        const note = el("p", "q2vt-print-same", t("parcel.sameText", { title, code: printed.get(key) }));
+        nodes[0].before(note);
+        if (nodes[0].nodeName === "HR") note.before(nodes[0].cloneNode());
+        for (const node of nodes) node.remove();
       }
     }
     return copy;
@@ -119,6 +139,7 @@ export class ParcelReport {
   regulationBlock(code) {
     if (!((this.catalog && this.catalog.texts) || {})[zoneKey(code)]) return null;
     const block = el("details", "q2vt-rich-block");
+    block.dataset.zone = zoneKey(code);
     block.append(el("summary", "", t("parcel.fullText", { code: zoneKey(code) })));
     let loaded = false;
     block.addEventListener("toggle", async () => {

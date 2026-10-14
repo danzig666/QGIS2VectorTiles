@@ -501,27 +501,51 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2
   #q2vt-print-sheet .q2vt-pr-part, #q2vt-print-sheet .q2vt-pr-restriction { padding: 1.5mm 2mm; border-radius: 2mm;
     border: 0.2mm solid #bbb; background: none; break-inside: avoid; }
   #q2vt-print-sheet .q2vt-pr-head h2 { font-size: 13pt; }
-  /* After the first page, across the whole width: the restrictions, then each
-     opened full regulation text from a new page, in two columns; headings
-     stay with what follows, cards and list items are not split. */
-  body.q2vt-printing #q2vt-print-flow { display: block; grid-column: 1 / -1; font-size: 8.5pt; line-height: 1.3;
-    color: #000; }
+  /* Parts beside the map: compact (no share bars, small notes). */
+  #q2vt-print-sheet .q2vt-pr-part { padding: 1mm 1.5mm; gap: 0.5mm; }
+  #q2vt-print-sheet .q2vt-pr-part .q2vt-pr-bar { display: none; }
+  #q2vt-print-sheet .q2vt-pr-part .q2vt-pr-row { gap: 1.5mm; }
+  #q2vt-print-sheet .q2vt-pr-part .q2vt-pr-swatch { width: 5mm; height: 5mm; border-radius: 1mm; }
+  #q2vt-print-sheet .q2vt-pr-num { width: 4mm; height: 4mm; font-size: 6.5pt; }
+  #q2vt-print-sheet .q2vt-pr-name { line-height: 1.15; }
+  #q2vt-print-sheet .q2vt-pr-name strong { font-size: 9pt; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-name strong { font-size: 8pt; }
+  #q2vt-print-sheet .q2vt-pr-chips { gap: 0 2mm; }
+  #q2vt-print-sheet .q2vt-pr-chip { font-size: 6.5pt; padding: 0; gap: 0.5mm; }
+  #q2vt-print-sheet .q2vt-pr-chip svg { width: 2.5mm; height: 2.5mm; }
+  #q2vt-print-sheet .q2vt-pr-zone { font-size: 7pt; gap: 0 2mm; }
+  #q2vt-print-sheet .q2vt-pr-section { gap: 1mm; }
+  #q2vt-print-sheet .q2vt-pr-section h3 { font-size: 8.5pt; margin: 1mm 0 0.5mm; }
+  /* Restrictions beside the map: compact rows (no share bars, no cards). */
+  #q2vt-print-sheet .q2vt-pr-restriction { padding: 0.8mm 0; border: 0; border-bottom: 0.2mm solid #ddd;
+    border-radius: 0; gap: 0.3mm; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-row { gap: 1.5mm; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-swatch { width: 4.5mm; height: 4.5mm; border-radius: 1mm; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-swatches { gap: 0.5mm; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-name { font-size: 7.5pt; line-height: 1.2; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-size { font-size: 7pt; }
+  #q2vt-print-sheet .q2vt-pr-restriction .q2vt-pr-bar { display: none; }
+  #q2vt-print-sheet .q2vt-pr-restriction :is(.q2vt-pr-note, .q2vt-pr-ref) { margin: 0 0 0 6mm; font-size: 6.5pt;
+    line-height: 1.2; }
+  /* The opened full regulation texts, after the first page across the whole
+     width: one after the other in columns, without blank space; headings
+     stay with what follows, list items are not split. */
+  body.q2vt-printing #q2vt-print-flow { display: block; grid-column: 1 / -1; font-size: 8pt; line-height: 1.28;
+    color: #000; columns: 3; column-gap: 6mm; column-rule: 0.2mm solid #ddd; orphans: 3; widows: 3; }
+  body.q2vt-printing.q2vt-print-portrait #q2vt-print-flow { columns: 2; }
   body.q2vt-printing #q2vt-print-flow:empty { display: none; }
-  #q2vt-print-flow > * { break-before: page; margin: 0; }
-  #q2vt-print-flow .q2vt-pr-restrictions { display: block; columns: 2; column-gap: 8mm; }
-  #q2vt-print-flow .q2vt-pr-restrictions h3 { column-span: all; font-size: 11pt; margin: 0 0 3mm; }
-  #q2vt-print-flow .q2vt-pr-restriction { padding: 1.5mm 2mm; margin: 0 0 2mm; border-radius: 2mm;
-    border: 0.2mm solid #bbb; background: none; break-inside: avoid; }
-  #q2vt-print-flow details.q2vt-rich-block > summary { display: block; list-style: none; font-size: 11pt; font-weight: 700;
-    margin: 0 0 3mm; padding: 0 0 1.5mm; border-bottom: 0.3mm solid #000; color: #000; }
+  #q2vt-print-flow details.q2vt-rich-block { display: block; margin: 0 0 3mm; }
+  #q2vt-print-flow details.q2vt-rich-block > summary { display: block; list-style: none; font-size: 10pt; font-weight: 700;
+    margin: 0 0 2mm; padding: 0 0 1mm; border-bottom: 0.3mm solid #000; color: #000; break-after: avoid; }
   #q2vt-print-flow details.q2vt-rich-block > summary::-webkit-details-marker { display: none; }
   #q2vt-print-flow details.q2vt-rich-block > summary::marker { content: ""; }
-  #q2vt-print-flow .q2vt-rich { columns: 2; column-gap: 8mm; column-rule: 0.2mm solid #ddd; font-size: 8.5pt;
-    orphans: 3; widows: 3; max-height: none; overflow: visible; }
+  #q2vt-print-flow .q2vt-rich { font-size: 8pt; max-height: none; overflow: visible; }
+  #q2vt-print-flow .q2vt-rich p { margin: 0 0 1.2mm; }
   #q2vt-print-flow .q2vt-rich :is(h1, h2, h3, h4, h5, h6, p:has(> strong:only-child), p:has(> b:only-child)) {
     break-after: avoid; break-inside: avoid; }
   #q2vt-print-flow .q2vt-rich :is(li, tr, img) { break-inside: avoid; }
-  #q2vt-print-flow .q2vt-rich hr { border: 0; border-top: 0.3mm solid #888; margin: 3mm 0; }
+  #q2vt-print-flow .q2vt-rich hr { border: 0; border-top: 0.3mm solid #888; margin: 2mm 0; }
+  #q2vt-print-flow .q2vt-print-same { font-style: italic; color: #444; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 
