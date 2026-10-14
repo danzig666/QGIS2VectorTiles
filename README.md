@@ -42,7 +42,10 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.5**. Newest first:
+This README describes QWebMap **4.38.6**. Newest first:
+
+**4.38.6** — parcel report legend graphics as thin as the legend's
+- The parcel report's zone and restriction graphics are drawn like the legend: lines sized in map units at the map scale of the most detailed tiles (they came out far too thick), with a margin so outlines aren't cut off at the edge.
 
 **4.38.5** — no change in the generic plugin (a Hungarian-edition release).
 
