@@ -42,7 +42,9 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.4**. Newest first:
+This README describes QWebMap **4.38.5**. Newest first:
+
+**4.38.5** — no change in the generic plugin (a Hungarian-edition release).
 
 **4.38.4** — no change in the generic plugin (a Hungarian-edition release).
 
