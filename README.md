@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.2**. Newest first:
+This README describes QWebMap **4.38.3**. Newest first:
+
+**4.38.3** — search as a magnifier on phones
+- On phones the search field is a magnifier button in the title bar; tapping it opens the field
+  (with the keyboard), and it closes again after a result is chosen. Wider screens are unchanged.
 
 **4.38.2** — even thinner hairlines
 - Thin hairlines are about half as heavy again: a third of QGIS's hairline (narrower and lighter).
