@@ -88,6 +88,11 @@ def _argb_hex(value) -> str:
     return text
 
 
+# "Thin hairlines": a zero-width line's width in CSS px by zoom - one device
+# pixel on a 2x screen at the zooms where lines crowd, a little more far in.
+THIN_HAIRLINE_WIDTH = ("interpolate", ["linear"], ["zoom"], 14, 0.5, 20, 0.8)
+
+
 def hairline(width):
     """QGIS draws a zero stroke width as a one-pixel (cosmetic) hairline."""
     if ex.is_number(width):
@@ -4277,6 +4282,15 @@ class QgisMapLibreStyleExporter:
             layer_def["layout"]["line-join"] = "miter"
         layer_def["layout"]["line-miter-limit"] = 2.0
 
+    @staticmethod
+    def _is_solid_hairline(symbol_layer) -> bool:
+        """A solid zero-width (hairline) line with a static width. Dashed
+        ones keep 1 px: MapLibre's dashes are in line widths."""
+        props = symbol_layer.dataDefinedProperties()
+        return symbol_layer.width() == 0 and _enum_int(symbol_layer.penStyle()) == 1 \
+            and not symbol_layer.useCustomDashPattern() \
+            and not props.property(QgsSymbolLayer.Property.PropertyStrokeWidth).isActive()
+
     def _convert_simple_or_pattern_line_symbol_layer(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -4309,9 +4323,17 @@ class QgisMapLibreStyleExporter:
             if isinstance(offset, list) or (ex.is_number(offset) and offset != 0):
                 layer_def["paint"]["line-offset"] = offset
 
+            if self.profile.thin_hairlines and self._is_solid_hairline(symbol_layer):
+                # "Thin hairlines" (Publish window, Output): QGIS's hairline
+                # is one device pixel - two on a high-DPI screen at 1 px,
+                # and dense parcel lines run together like a fill. Thinner
+                # (lighter where a pixel is wider), a little wider far in.
+                layer_def["paint"]["line-width"] = list(THIN_HAIRLINE_WIDTH)
+                layer_def.setdefault("metadata", {})["q2vt:hairline"] = True
             width_value = layer_def["paint"]["line-width"]
-            layer_def["paint"]["line-opacity"] = thin_line_opacity(
-                width_value, layer_def["paint"]["line-opacity"])
+            if not layer_def.get("metadata", {}).get("q2vt:hairline"):
+                layer_def["paint"]["line-opacity"] = thin_line_opacity(
+                    width_value, layer_def["paint"]["line-opacity"])
             # A data-defined width: the dashes follow the static one.
             width_px = width_value if ex.is_number(width_value) or (
                 ex.is_zoom_curve(width_value) and ex.is_camera_only(width_value)) \

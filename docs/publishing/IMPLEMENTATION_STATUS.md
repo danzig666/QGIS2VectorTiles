@@ -1540,6 +1540,9 @@ with 4.26/4.27: identical (label layers as sets of features); fidelity diagnosti
   journal in memory (thread-local GDAL options); export log names the slowest layers.
 - *Fast marker lines* (`output.fastMarkers`, off): screen-unit interval marker lines are left
   to MapLibre's line placement (reported as `Q2VT_MARKER_PLACEMENT_APPROX`).
+- *Thin hairlines* (`output.thinHairlines`, on; 4.38): solid zero-width lines get
+  `maplibre_converter.THIN_HAIRLINE_WIDTH` (0.5 CSS px, 0.8 px at zoom 20) instead of QGIS's
+  1 px, tagged `metadata["q2vt:hairline"]`; dashed ones keep 1 px.
 
 | Run | Result |
 |---|---|

@@ -500,3 +500,27 @@ def test_scale_limited_map_unit_dashes_keep_their_ratio_zoomed_out(mc):
     for zoom in (8.0, 10.0, 12.5):
         dash, gap = _dash_at(dasharray, zoom) if not ex.is_number(dasharray[0]) else dasharray[:2]
         assert (dash, gap) == pytest.approx((10.0, 3.5), rel=0.01)
+
+
+@pytest.mark.parametrize("thin,dashed", [(True, False), (True, True), (False, False)])
+def test_thin_hairlines_option(mc, thin, dashed):
+    """"Thin hairlines" (on by default when publishing): a solid zero-width
+    line is drawn thinner than QGIS's one pixel, tagged q2vt:hairline (dense
+    parcel boundaries ran together like a fill). Dashed hairlines keep 1 px
+    (MapLibre's dashes are in line widths); off: QGIS's 1 px."""
+    import dataclasses
+    exporter = _line_style_exporter(mc)
+    exporter.profile = dataclasses.replace(exporter.profile, thin_hairlines=thin)
+    layer = QgsSimpleLineSymbolLayer(QColor("black"), 0)
+    if dashed:
+        layer.setPenStyle(Qt.PenStyle.DashLine)
+    exporter._convert_symbol(QgsLineSymbol([layer]), "s", "src", "q2vt", 0, 22)
+    paint = exporter.style["layers"][0]["paint"]
+    metadata = exporter.style["layers"][0].get("metadata", {})
+    if thin and not dashed:
+        assert paint["line-width"] == list(mc.THIN_HAIRLINE_WIDTH)
+        assert metadata.get("q2vt:hairline") is True
+        assert paint["line-opacity"] == 1  # no thin-line ink correction on top
+    else:
+        assert paint["line-width"] == 1.0
+        assert "q2vt:hairline" not in metadata

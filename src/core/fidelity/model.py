@@ -66,6 +66,9 @@ class ExportProfile:
     # Highest zoom the web map shows (overzooming the last tiles): map-unit
     # pattern textures are made up to it.
     view_max_zoom: float = 22.0
+    # Zero-width (hairline) lines thinner than QGIS's one device pixel
+    # (maplibre_converter.THIN_HAIRLINE_WIDTH).
+    thin_hairlines: bool = False
 
     @property
     def strict(self) -> bool:
