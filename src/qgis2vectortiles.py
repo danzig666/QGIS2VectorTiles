@@ -836,6 +836,7 @@ class QGIS2VectorTiles:
                              if rule.layer is not None and rule.get_attr("t") == 0
                              and rule.layer.opacity() < 1.0},
             view_max_zoom=self.view_max_zoom,
+            layer_zooms=self._layer_zooms(rules or []),
         )
         exporter.export()
         return exporter

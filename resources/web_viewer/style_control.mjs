@@ -90,7 +90,10 @@ export class StyleControl {
           const def = style.layers.find((l) => l.id === styleId);
           const paint = {};
           for (const prop of OPACITY[def.type] || []) paint[prop] = def.paint ? def.paint[prop] : undefined;
-          this.originals.set(styleId, { filter: def.filter, paint, minzoom: def.minzoom ?? 0, maxzoom: def.maxzoom ?? 24, type: def.type });
+          // The zooms it draws its data in (q2vt:zooms: before its range was
+          // widened to bridge tile loading, see bridge_zoom_bands).
+          const [low, high] = (def.metadata && def.metadata["q2vt:zooms"]) || [def.minzoom, def.maxzoom];
+          this.originals.set(styleId, { filter: def.filter, paint, minzoom: low ?? 0, maxzoom: high ?? 24, type: def.type });
         }
       }
     }

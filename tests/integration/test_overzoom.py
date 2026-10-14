@@ -756,3 +756,29 @@ def test_screen_interval_markers_get_sub_zoom_bands_where_lines_hold_several(plu
         assert [r.visibility for r in bands(zoom)] == [ZoomInterval(float(zoom), zoom + 1.0)]
     for zoom in range(12, 17):
         assert len(bands(zoom)) == 8
+
+
+def test_bridge_zoom_bands_only_where_the_tiles_lack_the_data():
+    """At publication a layer's range grows by one zoom where the tiles there
+    hold none of its data (no blank map while the next zoom's tiles load),
+    never where they do (shared dataset, fractional limit, last zoom's
+    enlarged tiles), and keeps the range it draws its data in for the viewer."""
+    from q2vt_plugin.src.core.fidelity.zoom import note_tile_zooms  # pylint: disable=import-error
+    from q2vt_plugin.src.publishing.zoom_bridge import bridge_zoom_bands  # pylint: disable=import-error
+    layer = lambda name, low, high, source="q2vt_tiles": {  # noqa: E731
+        "id": name, "source": source, "source-layer": name, "minzoom": low, "maxzoom": high}
+    style = {"layers": [layer("a", 10, 15), layer("b", 15, 19), layer("shared", 12, 15),
+                        layer("frac", 15.4, 17.3), layer("last", 17, 24),
+                        layer("base", 5, 10, source="basemap"), layer("top", 0, 15)]}
+    note_tile_zooms(style, {"a": (10, 14), "b": (15, 18), "shared": (12, 18), "frac": (15, 17),
+                            "last": (17, 18), "base": (5, 9), "top": (0, 14)}, "q2vt_tiles")
+    exported = {l["id"]: (l["minzoom"], l["maxzoom"]) for l in style["layers"]}
+    bridge_zoom_bands(style)
+    got = {l["id"]: (l["minzoom"], l["maxzoom"]) for l in style["layers"]}
+    assert exported["a"] == (10, 15)                          # the export keeps QGIS's ranges
+    assert got["a"] == (9, 16) and got["b"] == (14, 19)      # b: zoom 19+ draws zoom 18's tiles
+    assert got["shared"] == (11, 15)                          # zoom 15's tiles hold its data
+    assert got["frac"] == (15.4, 17.3)                        # tiles 15 and 17 hold its data
+    assert got["last"] == (16, 24) and got["base"] == (5, 10) and got["top"] == (0, 16)
+    assert style["layers"][0]["metadata"]["q2vt:zooms"] == [10, 15]
+    assert "q2vt:zooms" not in style["layers"][3]["metadata"]

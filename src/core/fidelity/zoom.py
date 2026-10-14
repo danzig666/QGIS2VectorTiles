@@ -14,7 +14,7 @@ unbounded). ``minimumScale`` is therefore the zoomed-*out* limit and
 """
 
 import math
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from .model import ZoomInterval
 
@@ -115,3 +115,16 @@ def fit_zoom(width_m: float, height_m: float, min_zoom: float, max_zoom: float,
             fits.append(math.log2(pixels * padding * earth / (512.0 * size_m)))
     zoom = min(fits) if fits else float(min_zoom)
     return round(max(float(min_zoom), min(float(max_zoom), zoom)), 2)
+
+
+def note_tile_zooms(style: dict, layer_zooms: Dict[str, Tuple[int, int]], source_name: str) -> None:
+    """Record on each data layer the zooms whose tiles hold its dataset
+    (``q2vt:tiles``, inclusive: the tile writer's CONF) and the archive's last
+    zoom on the style, for publishing.zoom_bridge."""
+    if not layer_zooms:
+        return
+    for layer_def in style.get("layers", []):
+        zooms = layer_zooms.get(layer_def.get("source-layer"))
+        if layer_def.get("source") == source_name and zooms is not None:
+            layer_def.setdefault("metadata", {})["q2vt:tiles"] = [int(zooms[0]), int(zooms[1])]
+    style.setdefault("metadata", {})["q2vt:tiles-max-zoom"] = max(high for _, high in layer_zooms.values())

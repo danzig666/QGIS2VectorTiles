@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.8**. Newest first:
+This README describes QWebMap **4.39.0**. Newest first:
+
+**4.39.0** — no blank map between zoom levels; safer export (from upstream)
+- Published web maps no longer go blank for a moment where layers change between zoom levels: while the next zoom's tiles load, layers are drawn from the tiles already there.
+- Data-defined properties are read by following only the style objects that hold them, no longer by calling every method of every style object (one of which crashed a QGIS worker in the original plugin).
 
 **4.38.8** — parcel report print: shared texts once, no blank space
 - The opened full regulation texts run one after the other in three columns (two on portrait paper) without page breaks between them; a section shared by several zones (the general rules) is printed once, with a line pointing to it at the other zones. The parts and restrictions beside the map are compact rows.
