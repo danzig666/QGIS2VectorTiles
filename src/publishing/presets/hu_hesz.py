@@ -200,8 +200,15 @@ def _find_parcels(layers) -> Optional[object]:
 def _find_zoning(layers, exclude) -> Optional[object]:
     candidates = [layer for layer in layers if layer not in exclude and _geometry(layer) == "polygon"
                   and _field(layer, ZONE_CODE_FIELDS)]
-    # The coloured one first: its symbols become the zone graphic of the report.
-    candidates.sort(key=lambda layer: (not _drawn(layer), "szin" not in plain(layer.name())))
+    # The coloured one first: its symbols become the zone graphic of the
+    # report. Then one named like the zoning ("Szabályozás övezetek"), the
+    # one with the most zones: other layers may carry the code too ("Parti
+    # sáv", "Területfelhasználás").
+    def rank(layer):
+        name = plain(layer.name())
+        named = 0 if "szin" in name else 1 if ("szabalyozas" in name or "ovezet" in name) else 2
+        return (not _drawn(layer), named, -layer.featureCount())
+    candidates.sort(key=rank)
     return candidates[0] if candidates else None
 
 

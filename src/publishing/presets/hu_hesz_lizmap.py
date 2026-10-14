@@ -197,7 +197,8 @@ def collect(project, zoning, code_field: str) -> Tuple[Optional[object], Dict[st
                      "mindegyikük szövege bekerült: " + ", ".join(mixed[:10]) + (" …" if len(mixed) > 10 else ""))
     real_missing = sorted(path for path in missing_files if not re.search(r"/(sajatos-)?\.html?$", path))
     if real_missing:
-        notes.append("Hiányzó Lizmap-szövegfájlok: " + ", ".join(real_missing[:10])
+        notes.append("Ezekre a Lizmap-mezők szövegfájlt adnak, de nincs ilyen fájl (a Lizmap sem mutatott "
+                     "ott szöveget; a többi szöveg megvan): " + ", ".join(real_missing[:10])
                      + (" …" if len(real_missing) > 10 else ""))
     return source, texts, notes
 

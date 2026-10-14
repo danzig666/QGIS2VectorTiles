@@ -68,6 +68,11 @@ elkészíti a „HÉSZ övezeti előírások szövege (Lizmap)” táblát (`hes
 a projekt mellett) – övezeti jelenként a telekinformációban látható jel szerint. Csak a
 `media` mappán belüli fájlokat olvassa; a hiányzó fájlokat felsorolja. Ha a QGIS a kifejezésmezőt
 nem tölti be, mert az adatforrásnak is van ilyen nevű mezője, a kifejezést a projektfájlból veszi.
+Ha a sablon csak bizonyos HTML-mezőket mutat, csak azokat veszi át; az övezetkódonkénti fájlok
+(pl. `'media/html/' + szab_ov + '.html'` → `Lke-1.html`) a sablon szerinti helyre kerülnek, és ha
+egy kódhoz nincs fájl, a többi (pl. övezettípus, általános) szöveg megmarad – ahogy a Lizmapben is.
+Több övezeti jellegű réteg közül a kirajzolt, színezett szabályozási/övezeti réteget választja
+(nem pl. a „Parti sáv”-ot), azon belül a legtöbb elemet tartalmazót.
 Minden futtatáskor újra elkészül, így a HTML-fájlok módosításai is átkerülnek; a saját (prompttal
 készült) szövegtábla előnyt élvez. A projektet utána menteni kell.
 

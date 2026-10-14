@@ -99,7 +99,7 @@ def test_lizmap_texts_become_the_zone_text_table(plugin, tmp_path):
     # nothing is read outside the media folder.
     assert rows["Gá-1"] == FILES["altalanos"]
     assert "nem publikus" not in "".join(rows.values())
-    assert any("Hiányzó Lizmap-szövegfájlok: media/html/Gá.html" in note for note in notes), notes
+    assert any("nincs ilyen fájl" in note and "media/html/Gá.html" in note for note in notes), notes
     assert any("Lizmap-előírások átvéve" in note and "5 övezeti jel" in note for note in notes), notes
     assert not any("szabov_htm" in note for note in notes)  # not in the template: not used
     assert os.path.isfile(tmp_path / "hesz_eloirasok_szovege_lizmap.gpkg")
@@ -150,3 +150,46 @@ def test_zone_values_of_lizmap_plans(plugin, tmp_path):
     assert fields == {"Beépítési mód": "beepmod", "Legnagyobb beépítettség (%)": "beepszaz",
                       "Legnagyobb épületmagasság (m)": "magassag", "Legkisebb telekterület (m²)": "m2",
                       "Legkisebb zöldfelület (%)": "p_zold", "Közművesítettség": "kozmu"}
+
+
+def test_zone_code_files_first_as_the_template_says(plugin, tmp_path):
+    """Another Lizmap layout: a file per zone code too ('media/html/' + szab_ov
+    + '.html' where the zone has a number), shown first by the template, then
+    the zone kind's and the general one; the special mark is not in this
+    template. The zoning layer is the one named like the zoning with the
+    most zones, not another coloured layer carrying the code ("Parti sáv")."""
+    from q2vt_fixtures import reset_project
+    project = reset_project()
+    media = tmp_path / "media" / "html"
+    media.mkdir(parents=True)
+    for name, text in {"Lke-1": "<br />Beépítési mód: <strong>O</strong>", "Lke": "<p>Lke kertvárosias</p>",
+                       "Ut": "<p>Ut közlekedési</p>", "altalanos": "<p>Általános</p>",
+                       "sajatos-M": "<p>nem kell</p>"}.items():
+        (media / f"{name}.html").write_text(text, encoding="utf-8")
+    fields = ["szab_ov", "szerk_ov", "szabovszam", "csak_szab", "sajatos"]
+    project.addMapLayer(_layer("Földrészletek", ["hrsz"], [("1/1",)]))
+    project.addMapLayer(_layer("Parti sáv", fields, [("Lke-1", "Lke", "1", None, "/M")]))
+    project.addMapLayer(_layer("Szabályozás övezetek", fields, [("Lke-1", "Lke", "1", None, "/M"),
+                                                                ("Ut-2", "Ut", "2", None, None),
+                                                                ("Ut", "Ut", None, None, None)]))
+    web = _layer("szab_webdata", fields, [])
+    for name, expression in {
+            "szab_rov": "'media/html/'+if(csak_szab is null, szerk_ov, csak_szab)+'.html'",
+            "sajatos_htm": "'media/html/'+replace(sajatos,'/','sajatos-')+'.html'",
+            "szabov_htm": "CASE WHEN szabovszam is not null THEN 'media/html/'+szab_ov+'.html' ELSE '' END",
+            "altalanos": "'media/html/altalanos.html'"}.items():
+        web.addExpressionField(expression, QgsField(name, QVariant.String))
+    project.addMapLayer(web)
+    assert project.write(str(tmp_path / "plad.qgs"))
+    popup = "Övezeti jel: <b>{$szab_ov}</b><br>{$szabov_htm}<br><b>{$overlap1}</b><hr>{$szab_rov}<hr>{$altalanos}"
+    (tmp_path / "plad.qgs.cfg").write_text(json.dumps({"layers": {"szab_webdata": {
+        "name": "szab_webdata", "popupSource": "lizmap", "popupTemplate": popup}}}), encoding="utf-8")
+    profile, notes = _apply(project)
+    assert project.mapLayer(profile.parcel_info.zoning_layer_id).name() == "Szabályozás övezetek"
+    rows = _rows(project, profile)
+    lke = rows["Lke-1"]
+    assert lke.index("Beépítési mód") < lke.index("Lke kertvárosias") < lke.index("Általános")
+    assert "nem kell" not in lke  # sajatos_htm is not in the template
+    assert rows["Ut"] == "<p>Ut közlekedési</p>\n<hr>\n<p>Általános</p>"
+    assert rows["Ut-2"] == rows["Ut"]  # no Ut-2.html: the kind's and the general text
+    assert any("media/html/Ut-2.html" in note for note in notes), notes
