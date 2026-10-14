@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.37.1**. Newest first:
+This README describes QWebMap **4.37.2**. Newest first:
+
+**4.37.2** — Viewer options use the window's width
+- The Viewer checkboxes (Publish window, Interaction tab) take as many columns as the window is
+  wide, so on a wide window they take fewer rows and leave more room for the layer list.
 
 **4.37.1** — the Web menu no longer disappears
 - Depending on the order QGIS loaded the plugins, the whole Web menu (with QWebMap and MetaSearch)

@@ -30,7 +30,7 @@ from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCo
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-                                 QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+                                 QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
                                  QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                  QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                  QRadioButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
@@ -43,6 +43,7 @@ from ..publishing.models import (XyzBasemap, BASEMAP_FLAVORS, FIELD_TYPES, CutLi
                                  RestrictionConfig, slugify)
 from ..publishing.profile import disclosure_fingerprint, needs_review, publication_prefix, validate
 from . import publication_profiles as store
+from .column_flow import flow_container
 from .layer_search import fold as _fold, searchable
 
 TAG = "QWebMap"
@@ -1094,9 +1095,9 @@ class PublishDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         options = QGroupBox(tr("Viewer"))
-        grid = QGridLayout(options)
+        viewer = QVBoxLayout(options)
         self.i_flags = {}
-        for index, (key, label) in enumerate([
+        for key, label in ([
                 ("labels_toggle", tr("Labels switch")), ("opacity_controls", tr("Opacity sliders")),
                 ("search", tr("Search")), ("filters", tr("Attribute filters")),
                 ("popups", tr("Popups")), ("permalinks", tr("Shareable links")),
@@ -1109,16 +1110,16 @@ class PublishDialog(QDialog):
                 ("street_search", tr("Search street names (OpenStreetMap)")),
                 ("overview_map", tr("Overview map (inset)")), ("three_d", tr("3D view")),
                 ("drawing", tr("Drawing tools")), ("street_view", tr("Street View (Google)"))]):
-            box = QCheckBox(label)
-            self.i_flags[key] = box
-            grid.addWidget(box, index // 3, index % 3)
+            self.i_flags[key] = QCheckBox(label)
         self.i_google_key = QLineEdit()
         self.i_google_key.setPlaceholderText(tr("Google Maps API key (needed for Street View)"))
         self.i_google_key.setEnabled(False)
         self.i_flags["street_view"].toggled.connect(self.i_google_key.setEnabled)
         self.i_flags["search"].setToolTip(tr(
             "The found feature is zoomed to and marked, and its popup opened when Popups is on."))
-        grid.addWidget(self.i_google_key, index // 3, index % 3 + 1, 1, 3 - index % 3 - 1 or 1)
+        # As many columns as the window's width allows (the key after the last one).
+        self.i_flags_box = flow_container(list(self.i_flags.values()), wide=self.i_google_key)
+        viewer.addWidget(self.i_flags_box)
         street_view_help = tr(
             "A Street View button on the map: tap a place to see it, the panorama looks toward the "
             "tapped point. Blue lines on the map show where Street View exists. Needs a Google "
@@ -1161,7 +1162,7 @@ class PublishDialog(QDialog):
         self.i_address_layer.setToolTip(tr(
             "A point (or building) layer with house numbers: the search finds \"street number\" "
             "(e.g. Fő utca 12) and zooms there. Only the street, the number and a point are published."))
-        grid.addLayout(address_row, grid.rowCount(), 0, 1, 3)
+        viewer.addLayout(address_row)
         layout.addWidget(options)
         split = QSplitter()
         split.setChildrenCollapsible(False)
