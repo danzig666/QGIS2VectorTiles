@@ -42,7 +42,14 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.37.2**. Newest first:
+This README describes QWebMap **4.38.0**. Newest first:
+
+**4.38.0** — thin hairlines; dimension arrows
+- **Thin hairlines** (Publish window, Output; on by default): lines and outlines of width 0
+  (parcel boundaries) are drawn thinner than QGIS's one pixel, so dense ones no longer run
+  together like a fill; still visible at every zoom. Off: as in QGIS.
+- Double-headed arrows whose body tapers to 0 (dimension lines) were missing from the web map:
+  their heads and the hairline between them are drawn now.
 
 **4.37.2** — Viewer options use the window's width
 - The Viewer checkboxes (Publish window, Interaction tab) take as many columns as the window is

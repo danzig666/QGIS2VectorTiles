@@ -1839,8 +1839,10 @@ function lineSpots(loaded, properties, view, avoid, options) {
   const result = (c) => ({ point: c.point, properties: withRotation(c.rotation), box: c.box,
                            line: options.curved ? { chain: c.chain, s: c.s } : null });
   // Half the label along the line: it must fit along the stretch (a level
-  // label only needs its centre on the line).
-  const lo = half && !level ? half[0] : 0;
+  // label only needs its centre on the line). The bare text, as QGIS
+  // measures it (the box's LABEL_MARGIN_PX are for keeping labels apart): a
+  // dimension line just longer than its label has it along the line.
+  const lo = half && !level ? Math.max(half[0] - LABEL_MARGIN_PX * (options.precision || 0), half[0] / 2) : 0;
   // The first clear spot from the middle of [a, b] outwards, in steps of a
   // quarter label (at most 40), and the first that only fits the screen
   // (``partial``: a box that only overlaps the screen, its centre on it).

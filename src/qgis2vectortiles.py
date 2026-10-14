@@ -188,6 +188,7 @@ class QGIS2VectorTiles:
         scale_limits=None,
         background_tiles: bool = False,
         fast_markers: bool = False,
+        thin_hairlines: bool = True,
         view_max_zoom: int = 22,
         min_label_px: float = 0.0,
         cap_tiles: bool = False,
@@ -258,6 +259,8 @@ class QGIS2VectorTiles:
             # Nothing is drawn past the last tile zoom when overzoom stops.
             view_max_zoom=float(self.max_zoom if int(overzoom) else
                                 max(view_max_zoom - viewer, self.max_zoom)),
+            # Hairlines thinner than QGIS's one pixel (on by default).
+            thin_hairlines=bool(thin_hairlines),
         )
         # Overzoom stopped: nothing is drawn past the last tile zoom.
         self.view_max_zoom = self.max_zoom if self.profile.overzoom == OverzoomPolicy.STOP \

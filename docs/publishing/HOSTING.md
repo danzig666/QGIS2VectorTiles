@@ -92,6 +92,12 @@ tab shows sizes, not a bill).
   level — on a plan with many such lines most of the export. With this option the browser
   places them along the lines instead: a much faster export, but the markers are not exactly
   where QGIS draws them (the fidelity report says so).
+* **Thin hairlines** (*Output*, on by default): QGIS draws a line or outline of width 0 (a
+  hairline, e.g. parcel boundaries) one screen pixel wide — two device pixels on a
+  high-resolution screen at 1 CSS px, and where many run close together the map looks filled
+  in. With this option the web map draws solid hairlines 0.5 CSS px wide (one device pixel on a
+  high-resolution screen, a lighter line on others), widening to 0.8 px from zoom 14 to 20.
+  Dashed hairlines keep 1 px. Off: as in QGIS.
 * **Network output folder** (a Windows share, a mapped network drive, an NFS/SMB mount): the
   work files and the export cache stay on this computer (system temp folder); only the
   finished release is written to the network folder, and the export log and fidelity report
