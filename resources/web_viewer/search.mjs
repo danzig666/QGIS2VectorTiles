@@ -41,10 +41,40 @@ export class Search {
     this.input.addEventListener("input", () => { clear.hidden = !this.input.value; });
     field.append(icon("search", 18), this.input, clear);
     container.append(field, this.list);
+    this.collapsible(container, clear);
     this.input.addEventListener("focus", () => this.start(), { once: true });
     this.input.addEventListener("input", () => this.debounce());
     this.input.addEventListener("keydown", (e) => this.key(e));
     document.addEventListener("click", (e) => { if (!container.contains(e.target)) this.close(); });
+  }
+
+  // Phones (styles.css, max-width 760px): only a magnifier in the header
+  // row; the field opens when it is tapped and closes again when left empty,
+  // with Escape, or once a result is chosen (the magnifier then shows that
+  // a search is set). Wider screens always show the field.
+  collapsible(container, clear) {
+    const header = container.closest("#q2vt-header");
+    const row = header && header.querySelector(".q2vt-header-row");
+    if (!row) return;
+    const toggle = button("q2vt-icon-btn q2vt-search-toggle", t("app.search"), "search");
+    toggle.setAttribute("aria-controls", "q2vt-searchbox");
+    toggle.setAttribute("aria-expanded", "false");
+    row.append(toggle);
+    this.setSearchOpen = (open) => {
+      header.classList.toggle("q2vt-search-open", open);
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.classList.toggle("q2vt-has-query", !open && Boolean(this.input.value));
+    };
+    toggle.addEventListener("click", () => {
+      const open = !header.classList.contains("q2vt-search-open");
+      this.setSearchOpen(open);
+      if (open) this.input.focus();  // in the tap: phones show the keyboard
+      else this.close();
+    });
+    this.input.addEventListener("blur", () => setTimeout(() => {
+      if (!this.input.value && this.list.hidden && !container.contains(document.activeElement)) this.setSearchOpen(false);
+    }, 200));
+    clear.addEventListener("click", () => toggle.classList.remove("q2vt-has-query"));
   }
 
   start() {
@@ -122,7 +152,11 @@ export class Search {
   }
 
   key(event) {
-    if (event.key === "Escape") { this.close(); return; }
+    if (event.key === "Escape") {
+      if (this.list.hidden && this.setSearchOpen) { this.setSearchOpen(false); this.input.blur(); }
+      this.close();
+      return;
+    }
     if (!this.items.length) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -153,6 +187,10 @@ export class Search {
     if (!result) return;
     this.close();
     this.input.value = result.label || result.key;
+    if (this.setSearchOpen) {  // phones: the map gets the room back (the keyboard too)
+      if (matchMedia("(max-width: 760px)").matches) this.input.blur();
+      this.setSearchOpen(false);
+    }
     await goTo(this.map, result);
     this.marker(result.anchor);
     if (this.identify && result.layerId !== STREETS && result.layerId !== ADDRESSES) {

@@ -370,3 +370,30 @@ def test_compact_embed_mode_in_another_page(site, tmp_path):
                                          "document.getElementById('q2vt-panel').hidden, "
                                          "q2vtViewer.map.cooperativeGestures.isEnabled()];"}], tmp_path)
     assert normal[0] == [False, False, False]  # the full map is unchanged
+
+
+def test_phone_search_is_a_magnifier_until_tapped(site, tmp_path):
+    """Phones: the search field took a whole row of the header. Now only a
+    magnifier until it is tapped; the field opens focused, and closes once a
+    result is chosen (the magnifier marks that a search is set). Wider
+    screens keep the field."""
+    state = """const box = document.getElementById('q2vt-searchbox'), toggle = document.querySelector('.q2vt-search-toggle');
+               return { field: box.offsetHeight > 0, toggle: !!toggle && toggle.offsetHeight > 0,
+                        focused: document.activeElement === document.getElementById('q2vt-search'),
+                        marked: !!toggle && toggle.classList.contains('q2vt-has-query'),
+                        header: document.getElementById('q2vt-header').offsetHeight };"""
+    phone = _run(site["url"], [
+        {"eval": state},
+        {"eval": "document.querySelector('.q2vt-search-toggle').click(); await new Promise((r) => setTimeout(r, 100));" + state},
+        {"type": ["#q2vt-search", "00123/5"]},
+        {"wait": 1200},
+        {"press": "ArrowDown"}, {"press": "Enter"},
+        {"wait": 1500},
+        {"eval": state},
+    ], tmp_path, width=390, height=800)
+    closed, opened, chosen = phone[0], phone[1], phone[2]
+    assert closed["toggle"] and not closed["field"], closed
+    assert opened["field"] and opened["focused"] and opened["header"] > closed["header"] + 30, opened
+    assert not chosen["field"] and chosen["marked"], chosen
+    (wide,) = _run(site["url"], [{"eval": state}], tmp_path)
+    assert wide["field"] and not wide["toggle"], wide
