@@ -38,6 +38,11 @@ SMOKE = textwrap.dedent("""
     class Iface:
         window = QMainWindow()
         web_menu = WebMenu("Web")
+        raster_menu = window.menuBar().addMenu("Raster")
+        help_menu = window.menuBar().addMenu("Help")
+        def rasterMenu(self): return self.raster_menu
+        def databaseMenu(self): return None
+        def helpMenu(self): return self.help_menu
         def mainWindow(self): return self.window
         def addWebToolBarIcon(self, action): calls.append(("toolbar", action.text()))
         def webMenu(self): return self.web_menu
@@ -60,6 +65,10 @@ SMOKE = textwrap.dedent("""
     plugin.initProcessing()  # QGIS does this first (hasProcessingProvider=yes), then initGui
     plugin.initGui()
     assert registry.providerById("QGIS2VectorTilesFork") is plugin.provider
+    # The Web menu is on the menu bar, after Raster, even when QWebMap is the
+    # first plugin to put anything in it (QGIS only adds it for submenus).
+    bar = [a.text() for a in Iface.window.menuBar().actions()]
+    assert bar == ["Raster", "Web", "Help"], bar
     plugin.show_publish_dialog()
     assert plugin.dialog is not None and plugin.dialog.isVisible()
 
@@ -87,6 +96,8 @@ SMOKE = textwrap.dedent("""
     assert registry.providerById("QGIS2VectorTilesFork") is again.provider
     again.unload()
     assert registry.providerById("QGIS2VectorTilesFork") is None
+    bar = [a.text() for a in Iface.window.menuBar().actions()]
+    assert bar == ["Raster", "Help"], bar  # the emptied Web menu goes away, as in QGIS
     print("CALLS", calls)
     print("SDK", versions)
     app.exitQgis()
