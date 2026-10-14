@@ -42,7 +42,10 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.38.1**. Newest first:
+This README describes QWebMap **4.38.2**. Newest first:
+
+**4.38.2** — even thinner hairlines
+- Thin hairlines are about half as heavy again: a third of QGIS's hairline (narrower and lighter).
 
 **4.38.1** — thin hairlines on high-resolution screens too
 - On a 4K (high-DPI) screen the thin hairlines were one physical pixel, as in QGIS. They are now

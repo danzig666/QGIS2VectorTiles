@@ -95,10 +95,10 @@ tab shows sizes, not a bill).
 * **Thin hairlines** (*Output*, on by default): QGIS draws a line or outline of width 0 (a
   hairline, e.g. parcel boundaries) one screen pixel wide — two device pixels on a
   high-resolution screen at 1 CSS px, and where many run close together the map looks filled
-  in. With this option the web map draws solid hairlines half a device pixel wide on every
-  screen (0.5 px divided by the screen's pixel ratio: a pixel cannot be thinner, so the line is
-  lighter), widening to 0.8 device px from zoom 14 to 20. Dashed hairlines keep 1 px. Off: as
-  in QGIS.
+  in. With this option the web map draws solid hairlines 0.35 device pixel wide on every
+  screen (divided by the screen's pixel ratio: a pixel cannot be thinner, so the line is
+  lighter) at 70 % of their opacity, widening to 0.6 device px from zoom 14 to 20: about a third
+  of the ink of QGIS's hairline. Dashed hairlines keep 1 px. Off: as in QGIS.
 * **Network output folder** (a Windows share, a mapped network drive, an NFS/SMB mount): the
   work files and the export cache stay on this computer (system temp folder); only the
   finished release is written to the network folder, and the export log and fidelity report

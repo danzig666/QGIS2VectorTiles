@@ -88,9 +88,13 @@ def _argb_hex(value) -> str:
     return text
 
 
-# "Thin hairlines": a zero-width line's width in CSS px by zoom - one device
-# pixel on a 2x screen at the zooms where lines crowd, a little more far in.
-THIN_HAIRLINE_WIDTH = ("interpolate", ["linear"], ["zoom"], 14, 0.5, 20, 0.8)
+# "Thin hairlines": a zero-width line's width in device pixels by zoom (the
+# viewer divides it by the screen's pixel ratio) and its opacity factor: a
+# third of QGIS's one-pixel hairline's ink where lines crowd, a little more
+# far in (MapLibre's antialiasing keeps a narrower line about as dark, so
+# it is also lighter).
+THIN_HAIRLINE_WIDTH = ("interpolate", ["linear"], ["zoom"], 14, 0.35, 20, 0.6)
+THIN_HAIRLINE_OPACITY = 0.7
 
 
 def hairline(width):
@@ -4329,6 +4333,8 @@ class QgisMapLibreStyleExporter:
                 # and dense parcel lines run together like a fill. Thinner
                 # (lighter where a pixel is wider), a little wider far in.
                 layer_def["paint"]["line-width"] = list(THIN_HAIRLINE_WIDTH)
+                layer_def["paint"]["line-opacity"] = ex.mul(
+                    layer_def["paint"]["line-opacity"], THIN_HAIRLINE_OPACITY)
                 layer_def.setdefault("metadata", {})["q2vt:hairline"] = True
             width_value = layer_def["paint"]["line-width"]
             if not layer_def.get("metadata", {}).get("q2vt:hairline"):
