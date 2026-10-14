@@ -60,12 +60,28 @@ export class ParcelReport {
   // [west, south, east, north] of the shown parcel (the print zooms on it).
   bounds() { return (this.record && this.record.bb) || null; }
 
-  // The shown report for the print sheet (without its buttons).
+  // The shown report for the print sheet (without its buttons). The
+  // restrictions and the opened full regulations are marked to flow after
+  // the first page across the whole width (see Printer.fill), the
+  // restrictions first; closed regulations are left out.
   printCard() {
     const card = this.container && this.container.querySelector("article.q2vt-pr");
     if (!card) return null;
     const copy = card.cloneNode(true);
     for (const node of copy.querySelectorAll(".q2vt-chips, button")) node.remove();
+    const texts = copy.querySelector(".q2vt-pr-texts");
+    const restrictions = [...copy.querySelectorAll(".q2vt-pr-section")].pop();
+    if (restrictions && restrictions !== texts && restrictions.querySelector("h3")) {
+      restrictions.dataset.printFlow = "";
+      restrictions.classList.add("q2vt-pr-restrictions");
+    }
+    if (texts) {
+      if (restrictions && restrictions.dataset.printFlow !== undefined) texts.before(restrictions);
+      for (const block of texts.querySelectorAll("details.q2vt-rich-block")) {
+        if (block.open && block.querySelector(".q2vt-rich")) block.dataset.printFlow = "";
+        else block.remove();
+      }
+    }
     return copy;
   }
 

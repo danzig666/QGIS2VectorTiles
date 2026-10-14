@@ -12,6 +12,10 @@ import { el } from "./icons.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 
 const SHEET = "q2vt-print-sheet";
+// What follows the first page across the whole width (the sheet beside the
+// map is a narrow column): the parcel report's restrictions, then each
+// opened full regulation text from a new page, in two columns.
+const FLOW = "q2vt-print-flow";
 const PAGE_STYLE = "q2vt-print-page";
 // Paper layouts: the page, the map's printed size (mm) inside 8 mm margins
 // (the sheet takes the rest: a column beside it, or rows under it).
@@ -170,7 +174,19 @@ export class Printer {
     head.append(el("p", "", [`${t("print.date")}: ${date}`, this.manifest.attribution].filter(Boolean).join(" — ")));
     const body = this.content(mode) || el("div");
     body.classList.add("q2vt-print-body");
+    const flow = [...body.querySelectorAll("[data-print-flow]")];
     this.sheet().replaceChildren(head, body);
+    this.flow().replaceChildren(...flow);
+  }
+
+  flow() {
+    let flow = document.getElementById(FLOW);
+    if (!flow) {
+      flow = el("section");
+      flow.id = FLOW;
+      document.getElementById("q2vt-app").append(flow);
+    }
+    return flow;
   }
 
   async print(mode = "map", focus = null) {
@@ -187,6 +203,8 @@ export class Printer {
     document.body.classList.remove("q2vt-printing", "q2vt-printing-map", "q2vt-printing-parcel", "q2vt-print-portrait");
     const sheet = document.getElementById(SHEET);
     if (sheet) sheet.replaceChildren();
+    const flow = document.getElementById(FLOW);
+    if (flow) flow.replaceChildren();
     for (const node of this.map.getContainer().querySelectorAll(".q2vt-print-north")) node.remove();
     this.map.resize();
     if (this.view) this.map.jumpTo(this.view);
