@@ -13,6 +13,10 @@
 # only its own files count (those that differ from main, see
 # docs/BRANCHES.md): main's changes are tested on main.
 #
+# GitHub drops scheduled runs under load (most often at the top of the hour),
+# so a second entry at 4:13 Budapest time runs only when the 3:00 one did not
+# start that night.
+#
 # "Run workflow" in the Actions tab always runs everything, on the branch
 # chosen there (tick "nightly" to get the nightly check instead).
 name: Tests
@@ -20,6 +24,8 @@ name: Tests
 on:
   schedule:
     - cron: "0 3 * * *"
+      timezone: Europe/Budapest
+    - cron: "13 4 * * *"  # backup, see above
       timezone: Europe/Budapest
   workflow_dispatch:
     inputs:
@@ -46,8 +52,21 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Skip the backup slot if tonight's run already started
+        id: backup
+        if: github.event_name == 'schedule' && github.event.schedule == '13 4 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
+          others="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs?event=schedule&created=%3E%3D${since}&per_page=10" \
+                    --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})] | length")"
+          if [ "${others}" != "0" ]; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            echo "The 3:00 run started tonight: backup slot skipped." | tee -a "${GITHUB_STEP_SUMMARY}"
+          fi
       - name: Start the nightly runs of the variant branches
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' && steps.backup.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -60,11 +79,13 @@ jobs:
       - name: Decide whether to run the tests
         id: decide
         env:
+          SKIP: ${{ steps.backup.outputs.skip == 'true' }}
           GH_TOKEN: ${{ github.token }}
           NIGHTLY: ${{ github.event_name == 'schedule' || inputs.nightly == true }}
           BRANCH: ${{ github.ref_name }}
         run: |
           run() { echo "run=$1" >> "${GITHUB_OUTPUT}"; echo "$2"; echo "$2" >> "${GITHUB_STEP_SUMMARY}"; exit 0; }
+          [ "${SKIP}" != "true" ] || run false "Tonight's run already started: skipped."
           [ "${NIGHTLY}" = "true" ] || run true "Manual run: all tests."
           last="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
                   --jq '.workflow_runs[0].head_sha // ""')"
