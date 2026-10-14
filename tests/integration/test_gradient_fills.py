@@ -344,7 +344,7 @@ def test_arrow_draws_every_fill_layer_with_its_screen_offset(plugin, tmp_path):
     assert all(r.translate is None for r in fills if r not in shadow_rules)
     # The fills' default outline is a line on each copy, shifted with it.
     outlines = [r for r in rules if r.get_attr("c") == 1 and r.recipe is not None
-                and r.recipe.param("part") is None]  # (not the overzoom's body lines)
+                and r.recipe.param("part") == "rings"]  # (not the overzoom's body lines)
     assert {r.get_attr("m") for r in outlines} == {1, 2}
     assert all(r.translate == ((-1.2, 1.4, "MM") if r.get_attr("m") == 1 else None)
                for r in outlines)

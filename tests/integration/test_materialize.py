@@ -1218,6 +1218,43 @@ def test_arrow_outline_is_a_line_on_the_arrow_rings(plugin, tmp_path):
     assert "fill-outline-color" not in layer_defs[0]["paint"]
 
 
+def test_dimension_arrow_tapering_to_nothing_keeps_its_heads_and_hairline(plugin, tmp_path):
+    """A dimension line: a double-headed arrow whose body tapers to 0 width,
+    with a hairline (0 width) outline. QGIS fills the two heads and strokes
+    the zero-area body between them; its outline touches itself, so
+    makeValid() made GeometryCollection(MultiPolygon, LineString), whose
+    nested polygons were dropped: no arrow was exported at all."""
+    from qgis.core import QgsArrowSymbolLayer
+    layer = _layer("LineString", ["LINESTRING(-60 -50, 60 50)"], str(tmp_path / "dim.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    for name, value in (("ArrowStartWidth", 8), ("ArrowWidth", 0), ("HeadLength", 32),
+                        ("HeadThickness", 16)):
+        getattr(arrow, f"set{name}")(value)
+        getattr(arrow, f"set{name}Unit")(Qgis.RenderUnit.MapUnits)
+    arrow.setIsCurved(True)
+    arrow.setIsRepeated(True)
+    arrow.setHeadType(QgsArrowSymbolLayer.HeadType(2))  # both ends
+    fill = arrow.subSymbol().symbolLayer(0)
+    fill.setColor(QColor("black"))
+    fill.setStrokeColor(QColor("black"))
+    fill.setStrokeWidth(0)  # a hairline
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, _ = _export(plugin, layer, tmp_path)
+
+    assert [r.get_attr("c") for r in rules] == [2, 1]
+    assert len(outputs) == 2 and all(o.featureCount() for o in outputs)
+    assert outputs[1].geometryType() == Qgis.GeometryType.Line  # the rings, the body's line included
+    ours = ink_mask(render(outputs[::-1], EXTENT, (240, 240)))
+    assert mask_difference(reference, ours) < 0.01
+    # The hairline between the heads (the middle of the line): drawn by the
+    # outline, not by the fill.
+    def inked(mask):
+        return any((120 + dx, 120 + dy) in mask for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+    assert inked(reference) and inked(ours)
+    assert not inked(ink_mask(render(outputs[:1], EXTENT, (240, 240))))
+
+
 @pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.Millimeters])
 def test_arrow_fill_offset_grows_with_the_map_in_map_units(plugin, tmp_path, unit):
     """An arrow fill's offset becomes a viewport translate. In map units it

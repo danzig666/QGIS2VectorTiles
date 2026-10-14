@@ -136,6 +136,23 @@ from .fidelity import materialize as mat
 from .materializer import pattern_anchor_kind
 from .fidelity.materialize import Recipe
 
+def _polygonal(geometry):
+    """The polygons of `geometry`, also those of a multipolygon nested in a
+    collection: makeValid() of a self-touching arrow (a body tapering to 0)
+    gives GeometryCollection(MultiPolygon, LineString), and
+    convertGeometryCollectionToSubclass() drops the nested multipolygon."""
+    from qgis.core import QgsGeometry, QgsWkbTypes  # pylint: disable=import-outside-toplevel
+    if geometry.type() == QgsWkbTypes.PolygonGeometry and not geometry.isEmpty():
+        return geometry
+    polygons = []
+    for part in geometry.asGeometryCollection():
+        if part.type() == QgsWkbTypes.PolygonGeometry and not part.isEmpty():
+            polygons.extend(QgsGeometry(p) for p in part.asGeometryCollection())
+    if not polygons:
+        return QgsGeometry.fromWkt("MultiPolygon EMPTY")
+    return QgsGeometry.collectGeometry(polygons)
+
+
 def _enum_value(value) -> int:
     return int(getattr(value, "value", value))
 
@@ -2447,7 +2464,9 @@ class RulesExporter:
         """Worker: the polygons QGIS fills for an arrow symbol layer
         (``fidelity/arrows.py``), built in painter pixels (y down) of the
         recipe's zoom in the recipe CRS (the project CRS, like QGIS).
-        Recipe part "body": the bodies' centre lines instead; "heads": a
+        Recipe part "rings": their outlines as lines, as QGIS strokes them
+        (a zero-area body between two heads included, which the polygons
+        lose); "body": the bodies' centre lines instead; "heads": a
         point at every head's tip with its azimuth (mat.ANGLE_FIELD), only
         those pointing back or forward with param "backward"."""
         from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform,  # pylint: disable=import-outside-toplevel
@@ -2481,8 +2500,8 @@ class RulesExporter:
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "FlatGeobuf"
         options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
-        kind = {"body": QgsWkbTypes.MultiLineString, "heads": QgsWkbTypes.Point}.get(
-            drawn, QgsWkbTypes.MultiPolygon)
+        kind = {"body": QgsWkbTypes.MultiLineString, "rings": QgsWkbTypes.MultiLineString,
+                "heads": QgsWkbTypes.Point}.get(drawn, QgsWkbTypes.MultiPolygon)
         writer = QgsVectorFileWriter.create(out, fields, kind, layer.crs(),
                                             QgsProject.instance().transformContext(), options)
         # Opaque multi-layer fills: QGIS fills every arrow with all layers
@@ -2511,7 +2530,7 @@ class RulesExporter:
 
                 def to_map(x, y, x0=x0, y0=y0):
                     return QgsPointXY(x0 + x * pixel, y0 - y * pixel)
-                if drawn is not None:
+                if drawn not in (None, "rings"):
                     bodies, heads = arrow_skeletons(pixels, curved, repeated, start, width,
                                                     head_length, head_type, arrow_type, offset)
                     if drawn == "body":
@@ -2531,10 +2550,16 @@ class RulesExporter:
                     continue
                 for polygon in arrow_polygons(pixels, curved, repeated, start, width, head_length,
                                               thickness, head_type, arrow_type, offset):
+                    if drawn == "rings":
+                        ring = [to_map(x, y) for x, y in polygon]
+                        if ring and ring[0] != ring[-1]:
+                            ring.append(ring[0])
+                        if len(ring) > 2:
+                            shapes.append(QgsGeometry.fromPolylineXY(ring))
+                        continue
                     shape = QgsGeometry.fromPolygonXY([[
                         QgsPointXY(x0 + x * pixel, y0 - y * pixel) for x, y in polygon]])
-                    shape = shape.makeValid()  # Qt fills self-crossings odd-even
-                    shape.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
+                    shape = _polygonal(shape.makeValid())  # Qt fills self-crossings odd-even
                     if not shape.isEmpty():
                         shapes.append(shape)
             if shifts and drawn is None:
@@ -2764,8 +2789,7 @@ class RulesExporter:
             mine = drawn[order][1]
             later = [drawn[i][1] for i in spatial.intersects(mine.boundingBox()) if i > order]
             if later:
-                mine = mine.difference(QgsGeometry.unaryUnion(later))
-                mine.convertGeometryCollectionToSubclass(QgsWkbTypes.PolygonGeometry)
+                mine = _polygonal(mine.difference(QgsGeometry.unaryUnion(later)))
             if mine.isEmpty():
                 continue
             mine.translate(-dx, -dy)
@@ -3863,7 +3887,7 @@ class RulesExporter:
         if recipe is not None and recipe.kind == "arrow_polygons":
             # Polygons built by _arrow_polygons; the arrow's outline
             # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
-            if recipe.param("part") == "body":
+            if recipe.param("part") in ("body", "rings"):
                 return [1, "@geometry"]
             if recipe.param("part") == "heads":
                 return [0, "@geometry"]

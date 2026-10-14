@@ -3031,8 +3031,11 @@ class SymbolMaterializer:
                     derived.translate = translate
                     rules.append(derived)
                 if outline is not None:
-                    stroke = self._with_symbol(band_rule, outline.clone(), 1, 1 + copy,
-                                               recipe(zoom, copy))
+                    # The arrow's outline as QGIS strokes it: its rings as
+                    # lines, a zero-width body (a body tapering to 0) included.
+                    fill_recipe = recipe(zoom, copy)
+                    stroke = self._with_symbol(band_rule, outline.clone(), 1, 1 + copy, mat.Recipe(
+                        "arrow_polygons", params=fill_recipe.params + (("part", "rings"),)))
                     stroke.translate = translate  # shifted with its fill
                     rules.append(stroke)
             for rule in native:
