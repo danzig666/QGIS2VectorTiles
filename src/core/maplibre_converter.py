@@ -2080,6 +2080,7 @@ class QgisMapLibreStyleExporter:
         layer_opacities: Optional[Dict[str, float]] = None,
         disjoint_bands: Optional[set] = None,
         view_max_zoom: Optional[int] = None,
+        layer_zooms: Optional[Dict[str, Tuple[int, int]]] = None,
     ):
         """Initialise the exporter.
 
@@ -2108,6 +2109,8 @@ class QgisMapLibreStyleExporter:
             view_max_zoom:   The browser's zoom limit (None: the profile's,
                              MapLibre's 22 by default): map-unit textures
                              with screen-unit lengths get one per zoom up to it.
+            layer_zooms:     The tile zoom range of each dataset (source
+                             layer), noted for bridge_zoom_bands.
         """
         self.visible_polygons = visible_polygons or {}
         # Style name -> heatmap spec (fidelity.heatmap): drawn as a heatmap layer.
@@ -2143,6 +2146,7 @@ class QgisMapLibreStyleExporter:
         self.minzoom = minzoom
         self.maxzoom = maxzoom
         self._view_max_zoom_override = view_max_zoom
+        self.layer_zooms = layer_zooms or {}
         self.diagnostics = diagnostics or DiagnosticCollector()
         self.profile = profile or ExportProfile()
         self.visibility = visibility or {}
@@ -2259,6 +2263,7 @@ class QgisMapLibreStyleExporter:
             for style in labeling.styles():
                 self._convert_labeling_style(style)
 
+        fidelity_zoom.note_tile_zooms(self.style, self.layer_zooms, self.source_name)
         self.save_to_file()
         return self.style
 

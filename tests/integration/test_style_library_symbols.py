@@ -152,3 +152,32 @@ def test_rotated_svg_fill_is_seamless(plugin, tmp_path):
     big = np.asarray(exporter._rotated_texture(tile, (2 * width, 2 * height, u, v, 0), 1)).astype(int)
     quads = [big[:height, :width], big[:height, width:], big[height:, :width], big[height:, width:]]
     assert all(np.abs(q - quads[0]).mean() < 2 for q in quads[1:])
+
+
+def test_data_defined_walk_calls_only_the_style_accessors():
+    """The fetcher follows only the getters that lead to data-defined
+    properties (symbol layers, sub-symbols, text format, callout ...), never
+    other zero-argument methods such as preview renderers, which crashed a
+    worker without a GUI; the properties found are the same."""
+    from qgis.core import QgsProperty, QgsSymbolLayer  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core.ddp_fetcher import DataDefinedPropertiesFetcher  # pylint: disable=import-error
+    line = QgsMarkerLineSymbolLayer()
+    sub = line.subSymbol()
+    marker_props = sub.symbolLayer(0).dataDefinedProperties()
+    marker_props.setProperty(QgsSymbolLayer.PropertySize, QgsProperty.fromField("size"))
+    sub.symbolLayer(0).setDataDefinedProperties(marker_props)
+    called = []
+
+    class Spy:  # a style object with a preview getter next to its symbol
+        def symbol(self):
+            symbol = QgsLineSymbol()
+            symbol.changeSymbolLayer(0, line.clone())
+            return symbol
+
+        def bigSymbolPreviewImage(self):  # noqa: N802 - QGIS's name
+            called.append("preview")
+            raise RuntimeError("must not be called")
+
+    fields = DataDefinedPropertiesFetcher(Spy(), 1000).fetch()
+    assert called == []
+    assert [name.rsplit("_", 1)[0] for _, _, name in fields] == ["q2vt_property_size_0_00"]

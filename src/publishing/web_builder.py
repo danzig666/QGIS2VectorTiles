@@ -41,6 +41,7 @@ from .errors import Cancelled, PublishingError
 from .models import DOCUMENT_EXTENSIONS, ExportBundle, PublicationProfile, slugify
 from .pmtiles_builder import ArchiveDescriptor, PmtilesOptions, build_pmtiles
 from .progress import Progress
+from .zoom_bridge import bridge_zoom_bands
 from .validation import (assert_vector_only, check_public_file, required_source_layers,
                          safe_relative_path, scan_bundle, validate_pmtiles, vector_only_violations)
 
@@ -518,6 +519,8 @@ def _assemble(bundle, profile, staging, release_id, transport, progress, extra_f
     if problems:
         raise PublishingError("Q2VT_PUB_BUNDLE_INVALID",
                               "Packaging changed the style: " + "; ".join(problems[:5]))
+    # No blank map while a zoom's tiles load (after the check: it changes ranges on purpose).
+    bridge_zoom_bands(style)
     raster_sources = _add_raster_layers(style, bundle, staging, progress)
     basemap_manifest = _add_basemap(style, bundle, profile, staging)
     write_json_atomic(os.path.join(staging, "style.json"), style)

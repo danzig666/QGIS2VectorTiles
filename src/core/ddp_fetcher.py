@@ -46,12 +46,16 @@ def is_random_only(expression: str) -> bool:
 class DataDefinedPropertiesFetcher:
     """Recursively fetch active data-defined properties from a QGIS symbol/label object."""
 
-    # Attribute name fragments whose getters are unsafe to call reflectively.
-    _SKIP_FRAGMENTS: frozenset = frozenset({
-        "_", "value", "index", "available", "config", "next", "attr",
-        "clone", "function", "flag", "capabil", "remove", "symbols",
-        "clear", "prepare", "dump", "copy", "create", "update", "replace",
-    })
+    # The getters that lead to objects with data-defined properties: a rule's
+    # symbol or label settings, a symbol's layers, a symbol layer's sub-symbol,
+    # label settings' text format and callout, a callout's or background's
+    # symbols. Only these are called (sorted, the order of the field names):
+    # calling every getter also ran ones that render symbol previews, which
+    # can crash a worker without a GUI.
+    _ACCESSORS: tuple = tuple(sorted({
+        "symbol", "settings", "symbolLayers", "subSymbol", "format", "textFormat",
+        "callout", "lineSymbol", "fillSymbol", "markerSymbol",
+    }))
 
     _DATA_TYPE_MAP: dict = {
         QgsPropertyDefinition.DataType.DataTypeString: QVariant.String,
@@ -60,17 +64,6 @@ class DataDefinedPropertiesFetcher:
     }
 
     FIELD_PREFIX = "q2vt"
-
-    # The safe getter names of each class (dir() and the name checks were most
-    # of the walk's time, every rule of every zoom walking the same classes).
-    _safe_attrs: dict = {}
-    # (class, getter) found to give a plain value (a number, text, a dict, a
-    # Qt image or colour): never walked, so not called again (the symbol
-    # preview images were a fifth of the walk). Lists and anything else are
-    # always called: their items depend on the object (a Python symbol layer
-    # in a list of symbol layers).
-    _no_objects: set = set()
-    _PLAIN_TYPES = (bool, int, float, str, bytes, dict, tuple)
 
     def __init__(self, qgis_object, min_scale, suffix=0, diagnostics=None, context=None):
         self._root = qgis_object
@@ -92,14 +85,6 @@ class DataDefinedPropertiesFetcher:
         self._walk(self._root)
         return self._results
 
-    def _is_safe_attr(self, attr: str) -> bool:
-        lower = attr.lower()
-        return not (
-            any(frag in lower for frag in self._SKIP_FRAGMENTS)
-            or (attr.startswith("set") and attr != lower)
-            or attr[0].isupper()
-        )
-
     def _walk(self, obj):
         """Recursively introspect obj's QGIS sub-objects for data-defined properties."""
         texture = type(obj).__name__ in _TEXTURE_PATTERNS
@@ -116,39 +101,21 @@ class DataDefinedPropertiesFetcher:
         finally:
             self._in_texture -= texture
 
-    def _attributes(self, obj) -> list:
-        if getattr(obj, "__dict__", None):  # instance attributes: not the class's list
-            return [attr for attr in dir(obj) if self._is_safe_attr(attr)]
-        kind = type(obj)
-        names = self._safe_attrs.get(kind)
-        if names is None:
-            names = self._safe_attrs[kind] = [attr for attr in dir(obj) if self._is_safe_attr(attr)]
-        return names
-
     def _walk_attributes(self, obj):
-        kind = type(obj)
-        no_objects = self._no_objects
-        for attr in self._attributes(obj):
-            if (kind, attr) in no_objects:
+        for attr in self._ACCESSORS:
+            getter = getattr(obj, attr, None)
+            if not callable(getter):
                 continue
             try:
-                getter = getattr(obj, attr)
-                if not callable(getter):
-                    continue
-
                 result = getter()
                 children = result if isinstance(result, list) else [result]
                 if not children:
                     continue
 
                 first = children[0]
-                if not isinstance(result, list) and (
-                        type(result) in self._PLAIN_TYPES
-                        or type(result).__module__.startswith(("PyQt5.", "PyQt6."))):
-                    no_objects.add((kind, attr))
-                    continue
                 if (
-                    isinstance(first, type(obj))
+                    first is None
+                    or isinstance(first, type(obj))
                     or "qgis." not in str(type(first))
                     or first in self._results
                 ):

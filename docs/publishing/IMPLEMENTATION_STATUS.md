@@ -1873,3 +1873,28 @@ Second review fixes:
 Not verified here: Windows (askpass `.cmd` helper and its UTF-8 output, the `ssh -V` check,
 `System32\OpenSSH` lookup, the listing of non-ASCII names by Win32-OpenSSH) and non-OpenSSH
 SFTP servers (the non-atomic replace path is covered by unit tests of the batch only).
+
+## 4.39.0 — no blank map between zooms; safer data-defined walk (from upstream v3.8–v4.0)
+
+- **Zoom bridging** (`publishing/zoom_bridge.py`, after upstream's `bridge_zoom_bands`): the
+  style exporter notes on each data layer the zooms whose tiles hold its dataset
+  (`metadata["q2vt:tiles"]`, the tile writer's CONF) and the archive's last zoom
+  (`metadata["q2vt:tiles-max-zoom"]`); at publication a layer's range grows by one zoom on a
+  side whose tiles hold none of its data, so while the next zoom's tiles load MapLibre draws it
+  from the stand-in tiles instead of leaving it blank. Never where the tiles hold its data
+  (shared datasets, fractional scale limits, the last zoom's enlarged tiles), never past
+  zoom 24. The range it draws its own data in stays in `metadata["q2vt:zooms"]`, which the
+  viewer's layer list uses for "available at this zoom". The exported style.json keeps QGIS's
+  ranges.
+- **Data-defined properties walk** (`core/ddp_fetcher.py`, after upstream 7a01f3b): only the
+  accessors that lead to data-defined properties are called (`symbol`, `settings`,
+  `symbolLayers`, `subSymbol`, `format`, `textFormat`, `callout`, `lineSymbol`, `fillSymbol`,
+  `markerSymbol`), sorted as before; no more reflective calls of every getter (which ran
+  symbol-preview renderers that crashed a GUI-less worker upstream).
+
+| Run | Result |
+|---|---|
+| Old vs new walk on every symbol layer type (marker, line, fill) and callout type, every property active | identical: 3365 fields, same order |
+| Symbology / label integration selection (`-k "symbology or ddp or ... or style_library"`) | 514 passed |
+| `test_overzoom`, `test_end_to_end`, `test_publishing_pipeline`, `test_publish_scale_limits`, style tests, `tests/unit` | passed |
+| `test_web_viewer_parcel`, `test_web_viewer_features` (published sites) | 22 passed |
