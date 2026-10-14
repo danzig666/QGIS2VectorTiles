@@ -520,7 +520,7 @@ def test_thin_hairlines_option(mc, thin, dashed):
     if thin and not dashed:
         assert paint["line-width"] == list(mc.THIN_HAIRLINE_WIDTH)
         assert metadata.get("q2vt:hairline") is True
-        assert paint["line-opacity"] == 1  # no thin-line ink correction on top
+        assert paint["line-opacity"] == pytest.approx(mc.THIN_HAIRLINE_OPACITY)  # only the hairline factor
     else:
         assert paint["line-width"] == 1.0
         assert "q2vt:hairline" not in metadata

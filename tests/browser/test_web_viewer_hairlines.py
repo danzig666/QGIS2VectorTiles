@@ -58,7 +58,7 @@ def test_hairlines_are_half_a_device_pixel_on_every_screen(site, tmp_path, monke
         curve = json.loads(width)
         assert device == ratio
         assert curve[:3] == ["interpolate", ["linear"], ["zoom"]]
-        assert curve[4] == pytest.approx(0.5 / ratio) and curve[6] == pytest.approx(0.8 / ratio)
+        assert curve[4] == pytest.approx(0.35 / ratio) and curve[6] == pytest.approx(0.6 / ratio)
     # Still drawn: dark pixels where the outlines are (no fills).
     image = Image.open(shot).convert("L")
     assert image.size[0] == 1200 * ratio
