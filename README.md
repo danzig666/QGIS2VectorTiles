@@ -42,7 +42,11 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.37.0**. Newest first:
+This README describes QWebMap **4.37.1**. Newest first:
+
+**4.37.1** — the Web menu no longer disappears
+- Depending on the order QGIS loaded the plugins, the whole Web menu (with QWebMap and MetaSearch)
+  could be missing from the menu bar. QWebMap now puts it there itself.
 
 **4.37.0** — "My location" is an option, off by default
 - The web map's location button is now an option (Publish window, Viewer: "My location button"),

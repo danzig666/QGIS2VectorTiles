@@ -63,8 +63,39 @@ class QGIS2VectorTiles:
         self.iface.addWebToolBarIcon(self.publish_action)
         # Right in the Web menu, not in a submenu of its own.
         self.iface.webMenu().addAction(self.publish_action)
+        self._show_web_menu()
         self.dialog = None
         self._warn_old_plugin()
+
+    def _show_web_menu(self):
+        """Put the Web menu on the menu bar, where QGIS puts it.
+
+        QGIS adds the Web menu to the menu bar only from addPluginToWebMenu,
+        and only when that leaves exactly one entry in it. Our action goes
+        into the menu directly, so when QWebMap loaded first, the next
+        plugin's submenu (MetaSearch) made two entries and the whole Web menu
+        stayed off the menu bar."""
+        menu = self.iface.webMenu()
+        bar = self.iface.mainWindow().menuBar()
+        actions = bar.actions()
+        if menu.menuAction() in actions:
+            return
+        before = None
+        for anchor in ("databaseMenu", "rasterMenu"):  # after Database, else after Raster
+            getter = getattr(self.iface, anchor, None)
+            anchor_menu = getter() if getter is not None else None
+            if anchor_menu is not None and anchor_menu.menuAction() in actions:
+                index = actions.index(anchor_menu.menuAction()) + 1
+                before = actions[index] if index < len(actions) else None
+                break
+        if before is None:
+            help_menu = getattr(self.iface, "helpMenu", lambda: None)()
+            if help_menu is not None and help_menu.menuAction() in actions:
+                before = help_menu.menuAction()
+        if before is None:
+            bar.addMenu(menu)
+        else:
+            bar.insertMenu(before, menu)
 
     def _warn_old_plugin(self):
         """Tell the user to remove the plugin's pre-rename copy if it is installed."""
@@ -102,7 +133,10 @@ class QGIS2VectorTiles:
         action = getattr(self, "publish_action", None)
         if action is not None and self.iface is not None:
             self.iface.removeWebToolBarIcon(action)
-            self.iface.webMenu().removeAction(action)
+            menu = self.iface.webMenu()
+            menu.removeAction(action)
+            if not menu.actions():  # like QGIS: no empty Web menu on the menu bar
+                self.iface.mainWindow().menuBar().removeAction(menu.menuAction())
             action.deleteLater()
         if getattr(self, "dialog", None) is not None:
             self.dialog.close()
