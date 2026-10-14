@@ -13,7 +13,7 @@ const [url, actionsPath, width = "1000", height = "700"] = process.argv.slice(2)
 const actions = JSON.parse(readFileSync(actionsPath, "utf8"));
 const executablePath = process.env.Q2VT_CHROMIUM || "/opt/pw-browsers/chromium";
 const browser = await chromium.launch({ executablePath, args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader"] });
-const context = await browser.newContext({ viewport: { width: +width, height: +height }, deviceScaleFactor: 1,
+const context = await browser.newContext({ viewport: { width: +width, height: +height }, deviceScaleFactor: +(process.env.Q2VT_DSF || 1),
   reducedMotion: process.env.Q2VT_MOTION === "1" ? "no-preference" : "reduce" });
 await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
 // Google's Street View coverage tiles (streetview tests stub the session
