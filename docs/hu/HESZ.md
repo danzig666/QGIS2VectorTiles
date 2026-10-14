@@ -24,8 +24,8 @@ Az előbeállítás csak a beállításokat tölti ki; adatot nem módosít és 
 |---|---|
 | Telkek | polygon réteg `hrsz` mezővel, neve „földrészlet” / „telek” (ékezet nélkül is) |
 | Telekadatok | `kozter_nev` (Közterület), `kivett` (Megnevezés), `muv_ag` (Művelési ág), `fekves` (Fekvés) |
-| Övezetek | polygon réteg `szab_ov` mezővel; a színekkel rajzolt réteg az elsődleges (az ő jele kerül a telekinfóba) |
-| Övezeti értékek | `p_beepmod`, `p_beepszaz`, `p_beepmag`, `p_terulet`, `p_zold`, `p_szabkieg` |
+| Övezetek | polygon réteg `szab_ov` (vagy `szab_kod`) mezővel; a színekkel rajzolt réteg az elsődleges (az ő jele kerül a telekinfóba) |
+| Övezeti értékek | `p_beepmod`, `p_beepszaz`, `p_beepmag`, `p_terulet`, `p_zold`, `p_szabkieg`; ha nincsenek: `beepmod`, `beepszaz`, `magassag`, `m2`, `zold`, `kozmu` |
 | Vágóvonalak | „Szabályozási vonal”, „Övezethatár” (ha nincsenek: a `lszerk_ov`/`rszerk_ov` mezős vonalrétegek) |
 | Korlátozások | a lenti katalógus szerinti nevű rétegek, megnevezés-mező: `nev`, `name`, `megnevezes`, `vedettOrokErtekNev`, `azon`, `tipus`, `kategoria` |
 | Előírások teljes szövege | tábla „HÉSZ … szöveg” / „html” névvel, övezetkód mezővel (`szab_ov` …) és szövegmezővel (`eloiras_html`, `html`, `szoveg` …); a telekinformációban és az övezet felugró ablakában lenyitható |
@@ -58,6 +58,18 @@ prompttal a nyelvi modell övezetenként összegyűjti a HÉSZ minden ott alkalm
 általános és a feltételes előírásokat is), szó szerint, egyszerű HTML-ben. A mellékelt QGIS-szkript
 ebből egy második táblát készít („HÉSZ övezeti előírások szövege”: `szab_ov`, `eloiras_html`). A
 webtérképen minden övezet alatt lenyitható: „A(z) Lke-1 övezet teljes előírásai”.
+
+**Lizmap-pel publikált tervek:** ha a projekt mellett van `media/html` mappa, és egy rétegnek
+vannak olyan kifejezésmezői, amelyek ide mutatnak (pl. `'media/html/' + szerk_ov + '.html'`), az
+előbeállítás átveszi ezeket a szövegeket. A kifejezéseket az övezeti réteg minden elemén
+kiértékeli (ugyanazokat a mezőket olvassák: `szerk_ov`, `csak_szab`, `sajatos` …), a fájlokat a
+réteg Lizmap felugró sablonjának sorrendjében (`<projekt>.qgs.cfg`, `{$mező}`) fűzi össze, és
+elkészíti a „HÉSZ övezeti előírások szövege (Lizmap)” táblát (`hesz_eloirasok_szovege_lizmap.gpkg`
+a projekt mellett) – övezeti jelenként a telekinformációban látható jel szerint. Csak a
+`media` mappán belüli fájlokat olvassa; a hiányzó fájlokat felsorolja. Ha a QGIS a kifejezésmezőt
+nem tölti be, mert az adatforrásnak is van ilyen nevű mezője, a kifejezést a projektfájlból veszi.
+Minden futtatáskor újra elkészül, így a HTML-fájlok módosításai is átkerülnek; a saját (prompttal
+készült) szövegtábla előnyt élvez. A projektet utána menteni kell.
 
 Az övezeti réteg felugró ablakába az előbeállítás felveszi az övezetkódot (enélkül nem
 találná meg az előírásokat). A webes megjelenítés egy változat-kiegészítő

@@ -42,7 +42,9 @@ PARCEL_FIELDS = (
     ("muv_ag", "Művelési ág"),
     ("fekves", "Fekvés"),
 )
-ZONE_CODE_FIELDS = ("szab_ov",)
+ZONE_CODE_FIELDS = ("szab_ov", "szab_kod")
+# The first field of a title wins (p_… names, then those of plans made for
+# Lizmap: beepmod, beepszaz, magassag, m2, zold, kozmu).
 ZONE_FIELDS = (
     ("p_beepmod", "Beépítési mód"),
     ("p_beepszaz", "Legnagyobb beépítettség (%)"),
@@ -50,6 +52,12 @@ ZONE_FIELDS = (
     ("p_terulet", "Legkisebb telekterület (m²)"),
     ("p_zold", "Legkisebb zöldfelület (%)"),
     ("p_szabkieg", "Kiegészítő előírás"),
+    ("beepmod", "Beépítési mód"),
+    ("beepszaz", "Legnagyobb beépítettség (%)"),
+    ("magassag", "Legnagyobb épületmagasság (m)"),
+    ("m2", "Legkisebb telekterület (m²)"),
+    ("zold", "Legkisebb zöldfelület (%)"),
+    ("kozmu", "Közművesítettség"),
 )
 REGULATION_NAMES = ("eloiras", "hesz", "szabalyzat", "ovezeti")
 REGULATION_CODE_FIELDS = ("szab_ov", "ovezet", "ovezet_jel", "ovezetjel", "jel", "kod")
@@ -277,7 +285,7 @@ def _fields(layer, pairs) -> List[PopupField]:
     out = []
     for name, title in pairs:
         actual = _field(layer, (name,))
-        if actual:
+        if actual and all(item.alias != title for item in out):
             out.append(PopupField(actual, title, _type(layer, actual)))
     return out
 
@@ -334,8 +342,28 @@ def apply(project, profile) -> List[str]:
     notes.append(f"Övezetek: „{zoning.name()}”, övezetkód: {info.zoning_code_field}; "
                  f"{len(info.zoning_fields)} övezeti érték.")
 
-    # The full regulation texts per zone (HTML): opened under each zone.
-    texts, text_code, text_field = _find_texts(layers, [parcels, zoning])
+    # The full regulation texts per zone (HTML): opened under each zone. A
+    # table of its own first; else those of a Lizmap project (media/html
+    # files, made again each time: edited files are taken over).
+    from . import hu_hesz_lizmap as lizmap  # pylint: disable=import-outside-toplevel
+    made = [layer for layer in layers if layer.source().split("|")[0].endswith(lizmap.FILE_NAME)]
+    texts, text_code, text_field = _find_texts(layers, [parcels, zoning] + made)
+    if texts is None:
+        source, lizmap_texts, lizmap_notes = lizmap.collect(project, zoning, info.zoning_code_field)
+        notes.extend(lizmap_notes)
+        if lizmap_texts:
+            texts = lizmap.write_table(project, lizmap_texts)
+            layers = _vector_layers(project)  # the table made before was replaced
+            if texts is None:
+                notes.append(f"A Lizmap-előírások táblája nem írható a projekt mappájába ({lizmap.FILE_NAME}).")
+            else:
+                text_code, text_field = lizmap.CODE_FIELD, lizmap.TEXT_FIELD
+                notes.append(f"Lizmap-előírások átvéve („{source.name()}” réteg, media/html): "
+                             f"{len(lizmap_texts)} övezeti jel szövege a(z) „{texts.name()}” táblába "
+                             f"({lizmap.FILE_NAME}, a projekt mellett). Mentse a projektet.")
+        elif source is not None:
+            notes.append(f"A(z) „{source.name()}” Lizmap-réteg szövegei nem párosíthatók a(z) "
+                         f"„{zoning.name()}” övezeteivel.")
     if texts is not None:
         info.text_layer_id, info.text_code_field, info.text_field = texts.id(), text_code, text_field
         notes.append(f"Övezeti előírások teljes szövege: „{texts.name()}” ({text_code} szerint, "
