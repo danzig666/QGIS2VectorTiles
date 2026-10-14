@@ -1542,7 +1542,9 @@ with 4.26/4.27: identical (label layers as sets of features); fidelity diagnosti
   to MapLibre's line placement (reported as `Q2VT_MARKER_PLACEMENT_APPROX`).
 - *Thin hairlines* (`output.thinHairlines`, on; 4.38): solid zero-width lines get
   `maplibre_converter.THIN_HAIRLINE_WIDTH` (0.5 CSS px, 0.8 px at zoom 20) instead of QGIS's
-  1 px, tagged `metadata["q2vt:hairline"]`; dashed ones keep 1 px.
+  1 px, tagged `metadata["q2vt:hairline"]`; dashed ones keep 1 px. The viewer
+  (`app.mjs` `screenHairlines`, 4.38.1) divides it by `devicePixelRatio`: half a device pixel
+  on every screen (at 2x, 0.5 CSS px was a whole device pixel, QGIS's hairline).
 
 | Run | Result |
 |---|---|

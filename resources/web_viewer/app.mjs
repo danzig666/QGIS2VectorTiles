@@ -254,6 +254,7 @@ async function start() {
       map.once("load", () => { map.off("error", failed); resolve(); });
     });
     document.body.classList.add("q2vt-loaded");
+    screenHairlines(map);
     const sourceId = manifest.sources[0].id;
     // Layers whose every feature keeps its label (shrunk where it does not fit).
     const always = new Set();
@@ -282,6 +283,32 @@ async function start() {
 }
 
 start();
+
+
+// "Thin hairlines" (style metadata q2vt:hairline): the exported width is in
+// device pixels - half of one where lines crowd. A pixel cannot be thinner,
+// only lighter: at a 2x (4K) screen 0.5 CSS px was a whole device pixel,
+// QGIS's hairline. Divided by the screen's pixel ratio (again when the window
+// moves to another screen).
+export function screenHairlines(map) {
+  const exported = new Map();
+  for (const layer of map.getStyle().layers || []) {
+    if (layer.metadata?.["q2vt:hairline"]) exported.set(layer.id, layer.paint?.["line-width"]);
+  }
+  if (!exported.size) return;
+  const scaled = (value, ratio) => (typeof value === "number" ? value / ratio
+    : Array.isArray(value) && value[0] === "interpolate"
+      ? value.map((v, i) => (i > 3 && i % 2 === 0 && typeof v === "number" ? v / ratio : v)) : value);
+  const apply = () => {
+    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    for (const [id, width] of exported) {
+      if (map.getLayer(id)) map.setPaintProperty(id, "line-width", scaled(width, ratio));
+    }
+    matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      .addEventListener("change", apply, { once: true });
+  };
+  apply();
+}
 
 
 // "Keep the web map on the extent": the map's centre cannot leave the
