@@ -22,10 +22,6 @@ a full web viewer · no map server, database or Docker
 > [latest release](https://github.com/danzig666/QWebMap/releases/latest) and report issues
 > [here](https://github.com/danzig666/QWebMap/issues). It installs as **QWebMap**
 > next to the official QGIS2VectorTiles plugin.
->
-> **Updating from 4.8.1 or older** (then called *QGIS2VectorTiles (fork)*): install QWebMap, then
-> uninstall *QGIS2VectorTiles (fork)* in *Plugins → Manage and Install Plugins*. Settings saved
-> in your projects, the window position and saved keys carry over.
 
 <a href="https://danzig666.github.io/QWebMap/">
 <kbd>
