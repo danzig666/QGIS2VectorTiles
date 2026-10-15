@@ -5,7 +5,7 @@
 # is Ubuntu 22.04 with sip 6.5, whose bindings crash on plain PyQGIS such as
 # QgsLineSymbol([QgsSimpleLineSymbolLayer()]); it cannot run the tests.)
 #
-# Nightly at 3:00 Budapest time on main, which also starts the run of each
+# Nightly at 1:23 Budapest time on main, which also starts the run of each
 # variant branch (hu-hesz). A nightly run stops within seconds when no commit
 # since the branch's last successful run changed code or tests (src/, tests/,
 # schemas/, resources/, tools/, metadata.txt, pytest.ini or this file); docs,
@@ -13,9 +13,11 @@
 # only its own files count (those that differ from main, see
 # docs/BRANCHES.md): main's changes are tested on main.
 #
-# GitHub drops scheduled runs under load (most often at the top of the hour),
-# so a second entry at 4:13 Budapest time runs only when the 3:00 one did not
-# start that night.
+# GitHub delays or drops scheduled runs under load (most of all at the top of
+# the hour, and in the European morning: the 3:00 slot started as late as
+# 7:39), so the slots are at odd minutes in the quiet night hours (around
+# midnight UTC), and a second entry at 2:47 Budapest time runs only when the 1:23 one
+# did not start that night.
 #
 # "Run workflow" in the Actions tab always runs everything, on the branch
 # chosen there (tick "nightly" to get the nightly check instead).
@@ -23,9 +25,9 @@ name: Tests
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "23 1 * * *"
       timezone: Europe/Budapest
-    - cron: "13 4 * * *"  # backup, see above
+    - cron: "47 2 * * *"  # backup, see above
       timezone: Europe/Budapest
   workflow_dispatch:
     inputs:
@@ -63,7 +65,7 @@ jobs:
                     --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})] | length")"
           if [ "${others}" != "0" ]; then
             echo "skip=true" >> "${GITHUB_OUTPUT}"
-            echo "The 3:00 run started tonight: backup slot skipped." | tee -a "${GITHUB_STEP_SUMMARY}"
+            echo "The 1:23 run started tonight: backup slot skipped." | tee -a "${GITHUB_STEP_SUMMARY}"
           fi
       - name: Start the nightly runs of the variant branches
         if: github.event_name == 'schedule' && steps.backup.outputs.skip != 'true'
