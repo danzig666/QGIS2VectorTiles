@@ -85,6 +85,14 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("Data-defined appearance is bounded by the sprite variant budget.",),
                ("tests/integration/test_sprites.py",)),
     Capability("RasterMarker", "marker", Strategy.SPRITE, "Rendered by QGIS to a sprite."),
+    Capability("AnimatedMarker", "marker", Strategy.SPRITE,
+               "Every frame of the GIF / WebP / PNG animation is rendered by QGIS to a sprite "
+               "(the frame QGIS draws at the marker's frame rate) as one icon layer per "
+               "frame; the web viewer shows them in turn at that rate (the first frame when "
+               "printing or when the visitor's system asks for reduced motion).",
+               ("Markers whose appearance varies by data-defined values (sprite variants) "
+                "show their first frame.", "A data-defined frame rate uses the static one."),
+               ("tests/integration/test_animated_markers.py",)),
     Capability("FontMarker", "font_marker", Strategy.NATIVE,
                "Map-unit markers with a static character on point layers: the glyph outlines "
                "QGIS draws, as polygons (exact at every zoom). Otherwise browser text (glyphs "
@@ -183,6 +191,12 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                ("QGIS draws random positions in screen coordinates (they move with the "
                 "view); positions differ, count and density match.",
                 "Markers crossing the polygon edge are not clipped.")),
+    Capability("MaskMarker", "marker", Strategy.APPROXIMATE,
+               "Drawn as its shape in the map's background colour where the marker is, over "
+               "the layers drawn before it (QGIS cuts only the masked symbol layers there).",
+               ("Everything below the marker is covered, not only the masked symbol layers; "
+                "exact over a plain background.",),
+               ("tests/integration/test_masks.py",)),
     Capability("CentroidFill", "marker", Strategy.MATERIALIZED,
                "Marker points at the QGIS position (exterior-ring centroid, or GEOS "
                "point-on-surface when requested and needed).",

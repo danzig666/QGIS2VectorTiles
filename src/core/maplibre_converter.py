@@ -24,7 +24,7 @@ from qgis.core import (
     QgsExpression,
     QgsProperty,
     QgsSymbolLayer,
-    QgsTextFormat,
+    QgsTextBufferSettings, QgsTextFormat,
     QgsProject,
     QgsTextBackgroundSettings,
 )
@@ -183,6 +183,8 @@ def _enum_name(value) -> str:
     return name if isinstance(name, str) else ""
 
 
+# Frames of one animated marker exported at most (each is a sprite image).
+_MAX_ANIMATION_FRAMES = 120
 # QgsSymbol opacity property key: "PropertyOpacity" up to 3.3x, "Opacity" later.
 _SYMBOL_OPACITY_KEY = getattr(QgsSymbol.Property, "Opacity",
                               getattr(QgsSymbol.Property, "PropertyOpacity", None))
@@ -2081,6 +2083,7 @@ class QgisMapLibreStyleExporter:
         disjoint_bands: Optional[set] = None,
         view_max_zoom: Optional[int] = None,
         layer_zooms: Optional[Dict[str, Tuple[int, int]]] = None,
+        diagrams: Optional[Dict[str, dict]] = None,
     ):
         """Initialise the exporter.
 
@@ -2147,6 +2150,7 @@ class QgisMapLibreStyleExporter:
         self.maxzoom = maxzoom
         self._view_max_zoom_override = view_max_zoom
         self.layer_zooms = layer_zooms or {}
+        self.diagrams = diagrams or {}
         self.diagnostics = diagnostics or DiagnosticCollector()
         self.profile = profile or ExportProfile()
         self.visibility = visibility or {}
@@ -2335,6 +2339,9 @@ class QgisMapLibreStyleExporter:
         if style.styleName() in self.heatmaps:
             self._heatmap_layer(style, self.heatmaps[style.styleName()], bounds)
             return
+        if style.styleName() in getattr(self, "diagrams", {}):
+            self._diagram_layer(style, self.diagrams[style.styleName()], bounds)
+            return
         if style.styleName() in getattr(self, "inner_effects", {}):
             self._inner_effect_layers(style, self.inner_effects[style.styleName()], bounds)
             return
@@ -2440,6 +2447,104 @@ class QgisMapLibreStyleExporter:
         layer_def["layout"]["visibility"] = "visible"
         layer_def["paint"] = heatmap_paint(spec, weight)
         self.style["layers"].append(layer_def)
+
+    # The largest image a diagram in map units is drawn at (CSS px); the map
+    # scales it with the zoom from there.
+    DIAGRAM_MAX_PX = 256.0
+
+    def _diagram_layer(self, style, spec: dict, bounds) -> None:
+        """A layer's QGIS diagrams as a symbol layer drawn by the web viewer
+        (resources/web_viewer/diagrams.mjs): the icon of each feature is
+        named after its size and category values, which the placeholder
+        marker carried into the tiles (fidelity.diagrams)."""
+        from .fidelity import diagrams as dg  # pylint: disable=import-outside-toplevel
+        marker = self._diagram_marker(style.symbol())
+        if marker is None:
+            return
+        props = marker.dataDefinedProperties()
+        values = PropertyExtractor.get_value_or_expression("", props.property(dg.VALUES_PROPERTY), "string")
+        size = spec["width"]
+        if spec.get("size") and props.property(dg.SIZE_PROPERTY) is not None:
+            size = PropertyExtractor.get_value_or_expression(spec["width"], props.property(dg.SIZE_PROPERTY),
+                                                             "number")
+        px, icon_size, reference = dg.px_per_unit(spec["unit"]), 1.0, None
+        if px is None:  # map units: drawn at a reference zoom, scaled with the map
+            largest = max(spec["width"], spec["height"], 1e-9)
+            reference = float(min(bounds[1], self.maxzoom))
+            px = PropertyExtractor.static_pixels(1.0, Qgis.RenderUnit.MapUnits, reference)
+            while largest * px > self.DIAGRAM_MAX_PX and reference > 0:
+                reference -= 1.0
+                px /= 2.0
+            icon_size = ["interpolate", ["exponential", 2], ["zoom"],
+                         0, 2.0 ** (0 - reference), 24, 2.0 ** (24 - reference)]
+        line_px = dg.px_per_unit(spec["lineUnit"]) or px
+        number = ["to-string", size] if not ex.is_number(size) else str(round(size, 3))
+        name = style.styleName()
+        layer_def = self._base_layer_def("symbol", name, style.layerName(), self.source_name,
+                                         bounds[0], bounds[1])
+        layer_def["layout"].update({
+            "icon-image": ["concat", f"{dg.IMAGE_PREFIX}{name}|", number, "|", values],
+            "icon-size": icon_size,
+            "icon-anchor": "center",
+            "icon-allow-overlap": bool(spec["showAll"]),
+            "icon-ignore-placement": bool(spec["showAll"]),
+            "symbol-placement": "point",
+            "visibility": "visible",
+        })
+        layer_def["paint"]["icon-opacity"] = round(float(spec["opacity"]), 3)
+        layer_def["metadata"] = {"q2vt:diagram": {
+            "id": name, "type": spec["type"], "colors": spec["colors"], "labels": spec["labels"],
+            "px": px, "linePx": line_px, "width": spec["width"], "height": spec["height"],
+            "aspect": spec["aspect"], "barWidth": spec["barWidth"], "spacing": spec["spacing"],
+            "penColor": spec["penColor"], "penWidth": spec["penWidth"],
+            "background": spec["background"], "rotation": spec["rotation"],
+            "clockwise": spec["clockwise"], "orientation": spec["orientation"],
+            "interpolated": spec["interpolated"], "scale": spec["scale"],
+            "referenceZoom": reference}}
+        self.style["layers"].append(layer_def)
+
+    def _apply_label_mask(self, layer_def, text_format, label_settings) -> None:
+        """A label's selective mask as its halo in the background colour
+        (fidelity.masks): the mask's size, as opaque as the mask. A buffer,
+        when the label has one, stays the halo."""
+        from .fidelity import masks  # pylint: disable=import-outside-toplevel
+        mask = masks.label_mask(text_format)
+        if mask is None:
+            return
+        if text_format.buffer().enabled():
+            self.context.report("Q2VT_MASK_APPROXIMATE",
+                                "A label's mask is not drawn: the label's buffer is its halo.")
+            return
+        as_buffer = QgsTextFormat(text_format)
+        buffer = QgsTextBufferSettings()
+        buffer.setEnabled(True)
+        buffer.setSize(mask.size())
+        buffer.setSizeUnit(mask.sizeUnit())
+        buffer.setSizeMapUnitScale(mask.sizeMapUnitScale())
+        as_buffer.setBuffer(buffer)
+        colour = masks.background_colour()
+        colour.setAlphaF(colour.alphaF() * max(0.0, min(1.0, float(mask.opacity()))))
+        layer_def["paint"]["text-halo-color"] = PropertyExtractor.convert_qcolor_to_maplibre(colour)
+        layer_def["paint"]["text-halo-width"] = TextPropertyExtractor.get_text_halo_width(as_buffer)
+        self.context.report("Q2VT_MASK_APPROXIMATE",
+                            "A label's mask is drawn as a halo in the background colour.")
+
+    @classmethod
+    def _diagram_marker(cls, symbol):
+        """The placeholder marker layer (with the values property) in a
+        diagram rule's symbol, sub-symbols included."""
+        from .fidelity import diagrams as dg  # pylint: disable=import-outside-toplevel
+        if symbol is None:
+            return None
+        for layer in symbol.symbolLayers():
+            props = layer.dataDefinedProperties()
+            prop = props.property(dg.VALUES_PROPERTY) if props is not None else None
+            if prop is not None and prop.isActive():
+                return layer
+            found = cls._diagram_marker(layer.subSymbol())
+            if found is not None:
+                return found
+        return None
 
     _SORT_KEYS = {"fill": "fill-sort-key", "line": "line-sort-key",
                   "circle": "circle-sort-key", "symbol": "symbol-sort-key"}
@@ -2619,7 +2724,7 @@ class QgisMapLibreStyleExporter:
         if request.attributes:
             return name
         key = (QgsSymbolLayerUtils.symbolProperties(request.symbol), request.bake_rotation,
-               repr(request.map_units_per_pixel), repr(request.oversampling))
+               repr(request.map_units_per_pixel), repr(request.oversampling), request.frame)
         shared = self.__dict__.setdefault("_sprite_requests", {})
         known = shared.get(key)
         if known is not None and known in self.marker_symbols:
@@ -4027,11 +4132,20 @@ class QgisMapLibreStyleExporter:
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             scaled_symbol, scaled_layer)
         sprite_symbol, icon_opacity = self._marker_opacity(symbol)
+        animation = self._animation(sprite_symbol)
         self.marker_symbols[marker_name] = SpriteRequest(
             sprite_symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
             oversampling=oversampling)
         icon_image = self._marker_variants(sprite_symbol, marker_name, source_layer_name,
                                            map_units_per_pixel, oversampling, independent)
+        if animation is not None and icon_image != marker_name:
+            self.context.report("Q2VT_SYMBOL_APPROXIMATE",
+                                "Animated marker with data-defined appearance: its first frame "
+                                "is shown, not animated.")
+            animation = None
+        if animation is not None:
+            self.marker_symbols[marker_name].frame = 0
+            self.marker_symbols[marker_name].frame_rate = animation[1]
         if icon_image == marker_name:
             icon_image = marker_name = self._shared_sprite(marker_name)
 
@@ -4066,6 +4180,50 @@ class QgisMapLibreStyleExporter:
         })
 
         self.style["layers"].append(layer_def)
+        if animation is not None:
+            self._animation_frames(layer_def, marker_name, animation)
+
+    @staticmethod
+    def _animation(symbol):
+        """(frame count, frames a second) of a marker symbol with an animated
+        marker layer (its image's frames at the layer's frame rate), or None.
+        Several animated layers in one symbol: the one with the most frames."""
+        from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
+        best = None
+        for layer in symbol.symbolLayers():
+            if layer.layerType() != "AnimatedMarker" or not layer.path():
+                continue
+            try:
+                count = QgsApplication.imageCache().totalFrameCount(layer.path(), True)
+            except (AttributeError, RuntimeError, TypeError):
+                count = 0
+            rate = float(layer.frameRate() or 0)
+            if count > 1 and rate > 0 and (best is None or count > best[0]):
+                best = (min(count, _MAX_ANIMATION_FRAMES), rate)
+        return best
+
+    def _animation_frames(self, layer_def: dict, first: str, animation) -> None:
+        """Frames 1.. of an animated marker: copies of its icon layer (frame 0)
+        with that frame's sprite, drawn transparent; the web viewer shows the
+        frames in turn (resources/web_viewer/animation.mjs)."""
+        count, rate = animation
+        group = layer_def["id"]
+        opacity = layer_def["paint"].get("icon-opacity", 1)
+        request = self.marker_symbols[first]
+        layer_def.setdefault("metadata", {})["q2vt:frame"] = {
+            "group": group, "index": 0, "count": count, "fps": rate, "opacity": opacity}
+        for index in range(1, count):
+            name = self._next_name("marker")
+            self.marker_symbols[name] = dataclasses.replace(request, symbol=request.symbol.clone(),
+                                                            frame=index)
+            name = self._shared_sprite(name)
+            frame_def = copy.deepcopy(layer_def)
+            frame_def["id"] = f"{group}_f{index}"
+            frame_def["layout"]["icon-image"] = name
+            frame_def["paint"]["icon-opacity"] = 0
+            frame_def["metadata"]["q2vt:frame"] = {
+                "group": group, "index": index, "count": count, "fps": rate, "opacity": opacity}
+            self.style["layers"].append(frame_def)
 
     @staticmethod
     def _marker_opacity(symbol):
@@ -4793,6 +4951,7 @@ class QgisMapLibreStyleExporter:
             "text-translate": translate or TextPropertyExtractor.get_text_translate(),
             "text-translate-anchor": TextPropertyExtractor.get_text_translate_anchor(),
         })
+        self._apply_label_mask(layer_def, text_format, label_settings)
 
         # Deep-copy label settings to avoid mutating the caller's object.
         label_settings = QgsPalLayerSettings(label_settings)

@@ -90,6 +90,8 @@ export class StyleControl {
           const def = style.layers.find((l) => l.id === styleId);
           const paint = {};
           for (const prop of OPACITY[def.type] || []) paint[prop] = def.paint ? def.paint[prop] : undefined;
+          // An animated marker's frames: the Animator owns their icon-opacity.
+          if (def.metadata && def.metadata["q2vt:frame"]) delete paint["icon-opacity"];
           // The zooms it draws its data in (q2vt:zooms: before its range was
           // widened to bridge tile loading, see bridge_zoom_bands).
           const [low, high] = (def.metadata && def.metadata["q2vt:zooms"]) || [def.minzoom, def.maxzoom];

@@ -90,6 +90,11 @@ class SpriteRequest:
     attributes: Optional[Dict[str, object]] = None
     # Oversampling (= declared pixelRatio of the 1x image); None: generator default.
     oversampling: Optional[float] = None
+    # An animated marker's frame: drawn with the render context at this frame
+    # of an animation running at ``frame_rate`` frames a second (QGIS picks
+    # the image's frame from them); None: not animated.
+    frame: Optional[int] = None
+    frame_rate: float = 0.0
 
 
 @dataclass
@@ -173,6 +178,9 @@ class SymbolImage:
     # Map scale of the render context (QgsMapUnitScale scale ranges read
     # it); None: the scale of map_units_per_pixel per CSS pixel.
     renderer_scale: Optional[float] = None
+    # Animation frame and rate of the render context (SpriteRequest.frame).
+    frame: Optional[int] = None
+    frame_rate: float = 0.0
     img: Img = field(init=False)
     width: int = field(init=False)
     height: int = field(init=False)
@@ -239,6 +247,10 @@ class SymbolImage:
         context.setRendererScale(self.renderer_scale
                                  or fidelity_zoom.scale_of_map_units_per_px(self.map_units_per_pixel))
         context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+        if self.frame is not None and self.frame_rate > 0:
+            # Without them QGIS picks an animated marker's frame by the clock.
+            context.setFrameRate(self.frame_rate)
+            context.setCurrentFrame(self.frame)
         return context
 
     def _render_marker(self, symbol: QgsMarkerSymbol, canvas: int = 0) -> QImage:
@@ -379,11 +391,12 @@ class SpriteGenerator:
             request = SpriteRequest(request)
         try:
             quality = request.oversampling or self.scale_factor
+            frame = {"frame": request.frame, "frame_rate": request.frame_rate}
             one = SymbolImage(request.symbol, name, quality, request.bake_rotation,
-                              request.map_units_per_pixel, request.attributes)
+                              request.map_units_per_pixel, request.attributes, **frame)
             two = SymbolImage(request.symbol, name, quality * self.lower_factor,
                               request.bake_rotation, request.map_units_per_pixel,
-                              request.attributes)
+                              request.attributes, **frame)
         except SpriteInputError as err:
             self.failed[name] = str(err)
             self.diagnostics.add("Q2VT_SPRITE_WRONG_INPUT", str(err), component=name)
