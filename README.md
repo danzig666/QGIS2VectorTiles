@@ -16,9 +16,10 @@
 **Your QGIS symbology, converted accurately to vector tiles** · one-click publishing ·
 a full web viewer · no map server, database or Docker
 
-> **QWebMap** started as a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles)
-> by Jossef Kanter and grew into a complete web map publisher. Download builds from
-> [Releases](https://github.com/danzig666/QWebMap/releases) and report issues
+> **QWebMap** by Ábel Kőszeghy started as a fork of
+> [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles) by Jossef Kanter
+> and grew into a complete web map publisher. Download the
+> [latest release](https://github.com/danzig666/QWebMap/releases/latest) and report issues
 > [here](https://github.com/danzig666/QWebMap/issues). It installs as **QWebMap**
 > next to the official QGIS2VectorTiles plugin.
 >
@@ -42,8 +43,8 @@ a full web viewer · no map server, database or Docker
 
 ## Install
 
-QWebMap needs QGIS 3.44 or newer. Download `QWebMap-<version>.zip` from
-[Releases](https://github.com/danzig666/QWebMap/releases) (not the `-hu` file: that is a
+QWebMap needs QGIS 3.44 or newer. Download `QWebMap-<version>.zip` from the
+[latest release](https://github.com/danzig666/QWebMap/releases/latest) (not the `-hu` file: that is a
 special Hungarian zoning-plan edition, not for general use), then *Plugins → Manage and Install
 Plugins → Install from ZIP*. Install a newer ZIP the same way to upgrade.
 
@@ -425,6 +426,15 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 [implementation status](docs/publishing/IMPLEMENTATION_STATUS.md);
 [`docs/fidelity/`](docs/fidelity/) for the symbology conversion;
 [changelog](docs/changelog.html) and [release notes](releases/).
+
+## Authors
+
+- **Ábel Kőszeghy** ([@danzig666](https://github.com/danzig666)) — QWebMap: the Publish Web Map
+  window, the web viewer, publishing and hosting, and the symbology conversion as it is today.
+- **Jossef Kanter** — author of [QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles),
+  the plugin QWebMap started from; its converter of QGIS projects to vector tiles is still the
+  foundation of QWebMap. QWebMap is not an official release of QGIS2VectorTiles and installs
+  next to it.
 
 ## What's new
 
