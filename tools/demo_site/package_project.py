@@ -24,7 +24,7 @@ FONT_FILES = ("OpenSans-Regular.ttf", "OpenSans-Italic.ttf", "OpenSans-Bold.ttf"
 README = """QWebMap demo project: Swellendam
 ================================
 
-The QGIS project behind the live demo at https://danzig666.github.io/QGIS2VectorTiles/
+The QGIS project behind the live demo at https://danzig666.github.io/QWebMap/
 Open it in QGIS next to the web map to compare the two.
 
 1. Unzip everything into one folder (the project finds its data next to it).
@@ -33,7 +33,7 @@ Open it in QGIS next to the web map to compare the two.
 3. Open Swellendam.qgz in QGIS 3.44 or newer.
 
 To publish it yourself, install the QWebMap plugin
-(https://github.com/danzig666/QGIS2VectorTiles/releases/latest) and open
+(https://github.com/danzig666/QWebMap/releases/latest) and open
 Web > QWebMap: Publish Web Map... The settings of the demo (popups, search, zoom range)
 are saved in the project. Choose an export folder on the Destination tab, then Export locally.
 
