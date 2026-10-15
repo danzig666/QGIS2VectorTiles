@@ -91,6 +91,9 @@ class FlattenedRule:
     # its line (RulesFlattener._split_line_label_windows), one label per
     # repeat part, as QGIS chops the line clipped to the map extent.
     visible_repeat: bool = False
+    # The layer's diagrams (fidelity.diagrams.diagram_spec): a placeholder
+    # marker carries their values into the tiles; the style draws them.
+    diagram: Optional[dict] = None
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -100,7 +103,7 @@ class FlattenedRule:
             self.pre_generator, self.provenance, self.merge, self.heatmap,
             self.point_group, self.translate, self.effect_role, self.inner_effect,
             self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
-            self.label_filter, self.shift, self.visible_repeat,
+            self.label_filter, self.shift, self.visible_repeat, self.diagram,
         )
 
     def evaluation_zoom(self) -> float:

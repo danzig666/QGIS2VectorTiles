@@ -95,8 +95,8 @@ function idle(map, timeout = 6000) {
 
 export class Printer {
   // content(mode) -> the sheet's body for "map" (legend) or "parcel" (report).
-  constructor({ map, manifest, content, threeD = null }) {
-    Object.assign(this, { map, manifest, content, viewer3d: threeD });
+  constructor({ map, manifest, content, threeD = null, animator = null }) {
+    Object.assign(this, { map, manifest, content, viewer3d: threeD, animator });
     this.active = false;
     this.scale = 0;  // 0: the screen's scale, rounded to a standard scale
     this.paper = "a4-landscape";
@@ -136,6 +136,7 @@ export class Printer {
     }
     page.textContent = `@media print { @page { size: ${paper.page}; margin: 8mm; } }`;
     body.classList.add("q2vt-printing", `q2vt-printing-${mode}`);
+    if (this.animator) this.animator.pause();  // animated markers: their first frame
     this.map.resize();
     const canvas = this.map.getContainer();
     const fitted = focus ? focusView(focus, canvas.clientWidth, canvas.clientHeight) : null;
@@ -209,6 +210,7 @@ export class Printer {
     this.map.resize();
     if (this.view) this.map.jumpTo(this.view);
     if (this.threeD) { this.threeD.set(true); this.threeD = null; }
+    if (this.animator) this.animator.resume();
   }
 
   destroy() {

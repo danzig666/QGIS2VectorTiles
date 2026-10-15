@@ -65,6 +65,11 @@ What carries over:
   radius and colours), point cluster and point displacement (grouped with QGIS's method per
   eighth of a zoom; QGIS groups only the points in view, so some groups differ, reported); symbol
   levels and QGIS's feature order (*Control feature rendering order*).
+  **Diagrams** (pie, histogram, stacked bar and text) are drawn by the browser from each
+  feature's values, with QGIS's sizes (fixed or interpolated, scaled by area), colours, start
+  angle and direction, bar orientation and scale range, over the feature like QGIS places them
+  (data-defined diagram settings other than *Show*, the histogram axis and an *around*
+  placement's distance are not reproduced; reported).
   Overlapping lines and polygons of different categories or rules also keep QGIS's order, up to
   5,000 re-ordered features and 8 levels of overlap per layer, in layers of up to 100,000 features
   (beyond that, rule order, reported; layers with inner shadow or inner glow lines keep rule
@@ -105,8 +110,12 @@ What carries over:
 - **Units:** millimetres, points, pixels, inches, map units and metres at scale, with sizes
   computed per zoom level.
 
-Every built-in QGIS symbol layer type is converted except the animated marker, the mask marker and
-the linear referencing line; these are reported as unsupported and left out.
+Every built-in QGIS symbol layer type is converted except the linear referencing line, which is
+reported as unsupported and left out. Animated markers (GIF, WebP, animated PNG) play in the
+browser at their QGIS frame rate (still when printing or when the visitor's system asks for
+reduced motion). Selective masks are approximated: a label's mask becomes its halo and a mask
+marker its shape, both in the map's background colour, so they cover everything under them, not
+only the masked symbol layers (exact over a plain background; reported).
 
 <p align="center">
 <img width="900" alt="Twelve close-up pairs, QGIS on the left and QWebMap on the right of each pair: SVG icons on a circle and on a rounded square with their labels, road casings with one-way arrows, a shapeburst fill, a lineburst river with flow arrows and a curved label, a cross point-pattern fill, an SVG tree pattern, a cross-hatched fill, a park border with an inner band, a letter-spaced town label, a radial gradient and geometry-generator building shadows" src="docs/images/symbology-gallery.png" />
@@ -114,10 +123,10 @@ the linear referencing line; these are reported as unsupported and left out.
 </p>
 
 Not everything has a browser equivalent yet (for example the blur effect and other paint effects
-on fills, Qt brush styles other than solid, label shadows and masks, and blend modes on vector
+on fills, Qt brush styles other than solid, label shadows, and blend modes on vector
 layers). **Every export writes a fidelity report** that lists the components that were
 approximated or left out, with their layer (and rule or symbol layer when known) and usually a
-suggested fix (label shadows and masks are not in it, and blend modes on vector layers only get
+suggested fix (label shadows are not in it, and blend modes on vector layers only get
 a warning in the Publish window), and a *Strict* mode refuses to publish when the report has an error or a warning
 about an unsupported or approximated component. The generated table of each symbol layer type's
 strategy and constraints is in [`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
@@ -130,7 +139,7 @@ Processing tool, and for *Publish Web Map* in the work folder
 code (`Q2VT_*`), where it happened (the layer, plus the rule or symbol layer when known), the
 export strategy when one applies, and usually a suggested fix, so missing hatches or unsupported
 symbols are visible without reading the log. A few differences are not in the report: label
-shadows and masks, and the callouts of labels that QGIS places itself, are left out without an
+shadows and the callouts of labels that QGIS places itself are left out without an
 entry, and blend modes on vector layers only get a warning in the Publish window.
 
 Both the Processing tool (*Fidelity Mode*, *Beyond Maximum Zoom*) and the Publish Web Map window
@@ -434,7 +443,13 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.39.1**. Newest first:
+This README describes QWebMap **4.40.0**. Newest first:
+
+**4.40.0** — diagrams, animated markers and selective masks on the web map
+- QGIS diagrams (pie, histogram, stacked bar, text) are drawn by the browser from each feature's values, with QGIS's sizes, colours, angles and scale range.
+- Animated markers (GIF, WebP, animated PNG) play at their QGIS frame rate; still when printing or with reduced motion.
+- Selective masks are approximated in the map's background colour: label masks as a halo, mask markers as their shape (reported).
+- The plugin metadata names the author, Ábel Kőszeghy, and credits the original QGIS2VectorTiles plugin by Jossef Kanter.
 
 **4.39.1** — the repository is now github.com/danzig666/QWebMap
 - The plugin's homepage, issue tracker and changelog links point to the renamed repository (the old address still forwards), and the live demo is at danzig666.github.io/QWebMap.

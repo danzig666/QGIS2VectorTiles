@@ -26,9 +26,13 @@ plan* (30 Sep 2026) in this fork. "Done" means implemented **and** covered by te
 
 ## Symbology added beyond the plan (4.14)
 
-Every built-in QGIS 3.34 symbol layer type is now converted except the animated marker and the
-mask marker (and, in later QGIS versions, the linear referencing line); these and
-plugin-provided symbol layer types are reported as unsupported. Measured with the gallery (`tools/gallery`,
+Every built-in QGIS 3.34 symbol layer type is now converted (in later QGIS versions, except the
+linear referencing line); plugin-provided symbol layer types are reported as unsupported. Since
+4.40 animated markers play their frames (one sprite icon layer per frame, shown in turn by the
+viewer), mask markers are drawn as their shape in the background colour, label masks as a
+background-coloured halo (`Q2VT_MASK_APPROXIMATE`), and diagrams (pie, histogram, stacked bar,
+text) are drawn by the viewer (`resources/web_viewer/diagrams.mjs`) from per-feature values
+carried in the tiles (`src/core/fidelity/diagrams.py`, `Q2VT_DIAGRAM_APPROXIMATE`). Measured with the gallery (`tools/gallery`,
 zooms 14.6 / 16.25 / 17.8, colour mismatch = pixels whose colour is outside the browser's
 blend tolerance):
 

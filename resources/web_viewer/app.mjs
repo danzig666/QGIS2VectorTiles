@@ -10,6 +10,7 @@ import { enableVisibleLabels } from "./visible_labels.mjs";
 import { RASTER_TILE_TYPES, ViewerError, bindStyle, checkRelative, openArchives, resolveUrl } from "./transport.mjs";
 import { loadLocale, t } from "./i18n.mjs";
 import { fetchChecked, notice, showError, state as diagnostics, warn } from "./diagnostics.mjs";
+import { installDiagrams } from "./diagrams.mjs";
 
 export const EXPECTED_MAPLIBRE = "6.11.2";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
@@ -229,6 +230,7 @@ async function start() {
     });
     map.touchZoomRotate.disableRotation();
     viewer.map = map;
+    viewer.diagrams = installDiagrams(map, style);
     if (stay) stay.attach(map);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.FullscreenControl(), "top-right");

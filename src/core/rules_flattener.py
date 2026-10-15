@@ -227,6 +227,8 @@ class RulesFlattener:
             self._apply_reference_scale(layer, rule_system, rule_type)
             self._rule_systems.append(rule_system)
             self._drop_missing_field_properties(rule_system, layer, rule_type)
+            if rule_type == 0:
+                self._knock_out_mask_markers(rule_system, layer)
             root_rule = self._prepare_root_rule(rule_system, layer, rule_type)
             if rule_type == 0:
                 self._draw_seq = 0
@@ -247,6 +249,46 @@ class RulesFlattener:
                         layer.renderer().type() in self.POINT_GROUP_MODES and \
                         layer.renderer().embeddedRenderer() is not None:
                     self._expand_point_groups(layer, before)
+            if rule_type == 0:
+                self._add_diagram_rules(layer, layer_idx)
+
+    def _knock_out_mask_markers(self, rule_system, layer) -> None:
+        """Mask markers as their shape in the background colour
+        (fidelity.masks), on the cloned rule system."""
+        from .fidelity import masks  # pylint: disable=import-outside-toplevel
+        colour = masks.background_colour()
+        count = sum(masks.knock_out_mask_markers(rule.symbol(), colour)
+                    for rule in rule_system.rootRule().descendants())
+        if count:
+            self.diagnostics.add(
+                "Q2VT_MASK_APPROXIMATE",
+                f"Layer '{layer.name()}': {count} mask marker(s) drawn as their shape in the "
+                f"background colour (covering every layer below, not only the masked ones).",
+                layer_id=layer.id())
+
+    def _add_diagram_rules(self, layer, layer_idx: int) -> None:
+        """The layer's diagrams as one more renderer rule: a placeholder marker
+        at each diagram's position carrying its values (fidelity.diagrams),
+        drawn above the features of every layer (QGIS draws diagrams with the
+        labels) and only in the diagrams' scale range."""
+        from .fidelity import diagrams  # pylint: disable=import-outside-toplevel
+        spec, notes = diagrams.diagram_spec(layer)
+        for note in notes:
+            self.diagnostics.add("Q2VT_DIAGRAM_APPROXIMATE", f"Layer '{layer.name()}': {note}.",
+                                 layer_id=layer.id())
+        if spec is None:
+            return
+        most_in, most_out = spec["scaleRange"] or (0.0, 0.0)
+        root = QgsRuleBasedRenderer.Rule(None)
+        root.appendChild(QgsRuleBasedRenderer.Rule(
+            diagrams.placeholder_symbol(spec, layer.geometryType()), int(most_in), int(most_out),
+            spec["show"], "Diagram"))
+        before = len(self.flattened_rules)
+        self._child_base = {}
+        self._flatten_rule(layer, layer_idx, root, 0, 0, 0)
+        for flat_rule in self.flattened_rules[before:]:
+            flat_rule.diagram = spec
+            flat_rule.order = (1_000_000, -layer_idx) + tuple(flat_rule.order or ())
 
     def _apply_reference_scale(self, layer, rule_system, rule_type: int) -> None:
         """Screen-unit sizes of a layer with a symbology reference scale

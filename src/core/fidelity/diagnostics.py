@@ -157,6 +157,13 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_ELSE_NESTED_SIBLINGS": CodeInfo(
         Severity.WARNING, "ELSE rule approximated: sibling rules have nested children",
         "The ELSE condition uses sibling filters only."),
+    "Q2VT_DIAGRAM_APPROXIMATE": CodeInfo(
+        Severity.WARNING, "Diagram setting reproduced only approximately",
+        "See the message for the setting that is not applied."),
+    "Q2VT_MASK_APPROXIMATE": CodeInfo(
+        Severity.WARNING, "Selective mask drawn in the background colour",
+        "The web map cannot cut chosen layers: a label mask is the label's halo and a mask marker "
+        "its shape, both in the map's background colour, covering everything below them."),
     "Q2VT_CALLOUT_APPROX": CodeInfo(
         Severity.WARNING, "Label callout exported as an approximate straight leader"),
     "Q2VT_FEATURE_ORDER_ACROSS_RULES": CodeInfo(

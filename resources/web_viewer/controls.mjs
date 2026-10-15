@@ -5,6 +5,7 @@
 import { t } from "./i18n.mjs";
 import { ViewerState, defaults as defaultState, presetMatches, presets, sanitizeFilters } from "./state.mjs";
 import { StyleControl } from "./style_control.mjs";
+import { Animator } from "./animation.mjs";
 import { LayerControls } from "./layer_controls.mjs";
 import { Legend } from "./legend.mjs";
 import { Printer } from "./print.mjs";
@@ -362,8 +363,11 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
     }
   }
   const control = new StyleControl(map, manifest);
+  const animator = new Animator(map, control);
+  viewer.animator = animator;
   const apply = () => {
     control.apply(state.value);
+    animator.refresh();
     if (viewer.labels && viewer.labels.setEligibility) viewer.labels.setEligibility(control.eligibility(state.value));
   };
   state.onChange(apply);
@@ -408,7 +412,7 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   }
   parts.legend = new Legend({ map, manifest, state, control, container: panel.panes.legend, releaseBase });
   // Print: the map with the legend of what it draws, or the parcel report.
-  parts.printer = new Printer({ map, manifest, threeD: viewer.threeD, content: (mode) =>
+  parts.printer = new Printer({ map, manifest, threeD: viewer.threeD, animator, content: (mode) =>
     (mode === "parcel" && parts.parcel ? parts.parcel.printCard() : null) || parts.legend.printList() });
   viewer.printer = parts.printer;
   if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel", parts.parcel.bounds());
