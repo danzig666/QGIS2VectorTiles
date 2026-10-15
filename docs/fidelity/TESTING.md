@@ -42,7 +42,7 @@ headless application (in the recorded container it was `~/.local/share/profiles/
 (QGIS 3.34 LTR on Ubuntu 24.04, Python 3.12, pytest 7.4.4; the image of exactly 3.34.4 has
 broken Python bindings): unit + integration tests in one job, browser tests
 in another, each test file in its own process (`tools/ci/run_test_files.sh`), so a QGIS crash
-fails only that file. Nightly at 3:00 Budapest time (backup slot 4:13, used only if GitHub dropped the 3:00 run) on `main`, which also starts the run of
+fails only that file. Nightly at 1:23 Budapest time (backup slot 2:47, used only if GitHub dropped the 1:23 run) on `main`, which also starts the run of
 `hu-hesz`; a nightly run is skipped when nothing under `src/`, `tests/`, `schemas/`,
 `resources/`, `tools/`, `metadata.txt`, `pytest.ini` or the workflow changed since the
 branch's last successful run (on `hu-hesz` only its own files count). *Run workflow* in the
