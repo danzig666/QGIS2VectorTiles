@@ -40,270 +40,6 @@ a full web viewer · no map server, database or Docker
 
 <br>
 
-## What's new
-
-This README describes QWebMap **4.39.1**. Newest first:
-
-**4.39.1** — the repository is now github.com/danzig666/QWebMap
-- The plugin's homepage, issue tracker and changelog links point to the renamed repository (the old address still forwards), and the live demo is at danzig666.github.io/QWebMap.
-
-**4.39.0** — no blank map between zoom levels; safer export (from upstream)
-- Published web maps no longer go blank for a moment where layers change between zoom levels: while the next zoom's tiles load, layers are drawn from the tiles already there.
-- Data-defined properties are read by following only the style objects that hold them, no longer by calling every method of every style object (one of which crashed a QGIS worker in the original plugin).
-
-**4.38.8** — parcel report print: shared texts once, no blank space
-- The opened full regulation texts run one after the other in three columns (two on portrait paper) without page breaks between them; a section shared by several zones (the general rules) is printed once, with a line pointing to it at the other zones. The parts and restrictions beside the map are compact rows.
-
-**4.38.7** — parcel report print laid out across the page
-- The first page has the map with the parcel and its parts beside it; the restrictions follow on the next page, then each opened full regulation text from a new page, all across the whole width in two columns. Headings stay with their text and cards are not split.
-
-**4.38.6** — parcel report legend graphics as thin as the legend's
-- The parcel report's zone and restriction graphics are drawn like the legend: lines sized in map units at the map scale of the most detailed tiles (they came out far too thick), with a margin so outlines aren't cut off at the edge.
-
-**4.38.5** — no change in the generic plugin (a Hungarian-edition release).
-
-**4.38.4** — no change in the generic plugin (a Hungarian-edition release).
-
-**4.38.3** — search as a magnifier on phones
-- On phones the search field is a magnifier button in the title bar; tapping it opens the field
-  (with the keyboard), and it closes again after a result is chosen. Wider screens are unchanged.
-
-**4.38.2** — even thinner hairlines
-- Thin hairlines are about half as heavy again: a third of QGIS's hairline (narrower and lighter).
-
-**4.38.1** — thin hairlines on high-resolution screens too
-- On a 4K (high-DPI) screen the thin hairlines were one physical pixel, as in QGIS. They are now
-  half a physical pixel on every screen: a lighter line where they crowd.
-
-**4.38.0** — thin hairlines; dimension arrows
-- **Thin hairlines** (Publish window, Output; on by default): lines and outlines of width 0
-  (parcel boundaries) are drawn thinner than QGIS's one pixel, so dense ones no longer run
-  together like a fill; still visible at every zoom. Off: as in QGIS.
-- Double-headed arrows whose body tapers to 0 (dimension lines) were missing from the web map:
-  their heads and the hairline between them are drawn now.
-
-**4.37.2** — Viewer options use the window's width
-- The Viewer checkboxes (Publish window, Interaction tab) take as many columns as the window is
-  wide, so on a wide window they take fewer rows and leave more room for the layer list.
-
-**4.37.1** — the Web menu no longer disappears
-- Depending on the order QGIS loaded the plugins, the whole Web menu (with QWebMap and MetaSearch)
-  could be missing from the menu bar. QWebMap now puts it there itself.
-
-**4.37.0** — "My location" is an option, off by default
-- The web map's location button is now an option (Publish window, Viewer: "My location button"),
-  off by default. When on, a location outside the map's area only shows a message; the map no
-  longer flies off to an empty place.
-
-**4.36.7** — large map-unit markers stay right when zoomed in
-- A simple marker sized in map units (e.g. a 920 m dashed circle on a polygon's centroid for a
-  protection distance) is drawn as its real shape from the zoom where it is 128 px wide: it no
-  longer disappears when its centre is off screen, and its outline stays sharp and dashed.
-
-**4.36.6** — no false "map style is invalid"
-- 4.36.5 showed "The map style is invalid" for a map with a layer that is empty in the export
-  extent (MapLibre reports its missing source layer, but draws the map). Only a style MapLibre
-  rejects stops the map now.
-
-**4.36.5** — web maps that would not load
-- 4.36.4 could publish a style layer that starts past zoom 24 (a scale-limited point pattern);
-  the browser rejected the whole style and the map stayed on "Loading…". Fixed, and every export
-  now leaves out any layer the browser would reject, with a warning in the export report.
-- If a map style still fails to load, the viewer shows an error instead of loading for ever.
-
-**4.36.4** — export crash and cut-off markers fixed
-- Exports no longer stop with a RecursionError on a point pattern fill whose map-unit row
-  distance has a scale range ("Min/max size") and whose Y displacement is 0.
-- Large map-unit markers drawn with a filled outline (e.g. a 5 m ring) are no longer cut off at
-  the highest zooms.
-
-**4.36.3** — tiny map-unit labels hidden, dashes kept zoomed out
-- Labels whose text size is in map units are hidden where they are smaller than 6 px on screen
-  (Publish window, Output: "Hide labels smaller than", on by default); QGIS's pixel size-based
-  label visibility is now honoured too.
-- Map-unit dash patterns with a scale range ("Min/max size") no longer turn into a solid line
-  zoomed out.
-
-**4.36.2** — zoomed-out load windows keep their size
-- Long layer names are shortened with "…" in the progress window and the table (the whole name
-  in the tooltip), so the windows stay centred; the tick boxes explain themselves.
-
-**4.36.1** — labels weigh more in the zoomed-out load, with progress
-- Many labels in a tile now count as heavy on their own (every label is laid out, even the hidden
-  ones), so their suggested zoom moves in even when they would fit; the speed slider scales it.
-- The estimate shows its progress layer by layer, and can be cancelled.
-
-**4.36.0** — a speed slider for the zoomed-out load
-- *Zoomed-out load…* has a slider from **very slow** to **very fast**: faster hides small features
-  and crowded labels from closer zooms on (less to load zoomed out), slower shows more zoomed out.
-  Zoomed in, everything is shown either way. The setting is remembered.
-
-**4.35.4** — no more tiles flooded with a polygon's colour
-- A polygon that is valid in the project CRS can cross itself once reprojected to Web Mercator
-  (edges that nearly touch); the tiles then showed large areas filled with its colour at some
-  zooms. Reprojected polygons are now repaired too.
-
-**4.35.3** — labels of features drawn with an invisible symbol
-- Features of a renderer rule whose symbol draws nothing (no fill, no outline; often the ELSE
-  rule) got no labels on the web; QGIS labels them.
-
-**4.35.2** — a legend entry without its layer no longer stops the export
-- A layer QGIS could not create (such as a virtual layer over a missing source) stopped the
-  export with "'NoneType' object has no attribute 'id'"; it is now skipped.
-
-**4.35.1** — hatches stay inside their polygons
-- Line-pattern fills clipped during render (QGIS's default) no longer stick out of the polygon
-  when zoomed in: map-unit hatches are exported as the strips QGIS paints. Hatches clipped
-  before render or not clipped are laid out like QGIS draws them.
-
-**4.35.0** — views that fit, a closed map panel
-- **Map theme views that do not fit** in one row of the web map become a drop-down instead of
-  buttons running off the screen.
-- **Map panel closed at start** (Interaction, off by default): the web map opens with more of the
-  map on screen; the menu button opens the panel.
-- **Publish its layers** on a map theme also offers that theme as a view of the web map.
-
-**4.34.1** — names and expressions that broke the export
-- Field names with a double quote, filter fields with capital letters, expressions ending in a
-  `-- comment`, a backslash wrap character, invalid whole-word label replacements, `$area` after a
-  comment, heatmap weights from text fields and export folders with special characters no longer
-  drop layers or labels or stop the export.
-
-**4.34.0** — huge exports finish, map-view expressions, export fixes
-- **Huge exports of coarse data finish:** when the tiles would be far too many (over 200,000),
-  they end at the zoom that holds all of the data's detail and the web map zooms in on them —
-  it looks the same. Country borders of a continent down to zoom 16 took hours.
-- **Map-view expressions** (`@map_extent_center`, `@map_extent_width`, `@map_crs`…) hold the web
-  map's starting view instead of nothing.
-- **Fixed:** a layer name with an apostrophe broke the export; "Nothing to publish" now names the
-  cause; data-defined colours of gradient and shapeburst fills; labels with a geometry generator
-  on polygon layers.
-
-**4.33.1** — curved line labels follow the road
-- **Curved line labels** are laid along the line letter by letter, as in QGIS, round bends within
-  QGIS's curved angle limit, at every zoom (they were straight labels turned to the line).
-- **Word spacing** from QGIS is kept, and line labels **above or below** their line stay on their side.
-
-**4.33.0** — conversion audit: zooms past the last tiles, mixed units, QGIS rule semantics
-- **Zooming in past the last tile zoom (17–22):** symbols in millimetres keep their size (arrows,
-  point patterns, shapeburst bands, offset markers grew 2× per zoom); rules, layers and labels
-  shown only there are drawn; `@map_scale` expressions, map-unit patterns and point clusters keep
-  following the zoom.
-- **Map units and millimetres:** labels mixing them (map-unit text with millimetre offsets and the
-  reverse) are placed and drawn; map-unit dashes and line patterns follow every zoom; min/max size
-  limits, degree and feet CRSs, the reference scale, "Meters at scale" and geometry-generator units
-  are converted as QGIS does; random marker fills with a map-unit density no longer crash the export.
-- **Rules, labels and symbols:** ELSE / "all other values" no longer draw hidden features; polygon
-  labels avoid each other, label every part and place outside polygons; horizontal line labels sit
-  mid-line and upside-down labels turn; hatches touching a corner, translucent shapeburst, symbol
-  opacity on drawn parts, generator fills, fill offsets and more are fixed.
-
-**4.32.0** — finding layers in big projects, editable zoomed-out limits
-- **Finding layers:** the *Map* tab's layer list has a filter box (part of the name, upper or
-  lower case, accents not needed) and *Only published layers*; the *Interaction* tab lists the
-  layers by name with a find box; every layer drop-down takes typing.
-- **Zoomed-out load…:** every layer's feature and label zooms can be changed by hand; the lowest
-  zoom removes a limit.
-- **Fixes:** map-unit pattern fills of maps exported from zoom 0 showed only their outline
-  (hatched areas); dimension labels longer than their line are drawn level at the line, as QGIS
-  does with *Allow degraded placement*; line labels overlap where QGIS allows it; label frames
-  turn with their label (corners included); Free polygon labels sit in the middle of long strips.
-
-**4.31.0** — SSH / SFTP publishing, click-to-draw extent, fidelity fixes
-- **No more missing rules or blank maps:** a rule whose expression fails on one feature (for
-  example text in a numeric field) is no longer dropped from the web map; like QGIS, the export
-  skips just that value. Nested rule-based renderers (rules inside rules) no longer share ids,
-  which stopped the whole web map from loading; a repeated style layer id is now always renamed
-  and reported.
-- **Drawing order and fills:** overlapping lines and polygons of different categories or rules
-  keep QGIS's feature order (up to 5,000 re-ordered features and 8 levels of overlap per layer, in
-  layers of up to 100,000 features; beyond that the layer keeps rule order and the fidelity report
-  says so; layers with inner shadow or inner glow lines keep rule order). Polygon outline bands in millimetres are on the
-  correct side and are buffered rings like QGIS's (no dark wedges at corners). Shapeburst
-  distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %;
-  big layers get one setting per half zoom or per zoom, within about 19 % or 41 %, reported).
-  Gradient fills of small features (a village green published from zoom 11) keep their outer
-  colours instead of ending in one flat band. A layer's opacity (*Layer Rendering*) is converted
-  (it was ignored).
-- **Labels:** a feature drawn by two renderer rules (a category and a filterless outline rule) has
-  one label again (it had one per rule); the viewer measures each character's own width, so Free
-  labels that fit in QGIS are no longer dropped; labels with empty text no longer draw their
-  background; DemiBold, Medium and Light fonts use the face QGIS draws; repeat distances in map
-  units grow with the map;
-  around-point labels try QGIS's positions in QGIS's order, keep clear of other labels, and small
-  polygons keep theirs.
-- **Markers:** hairline (zero-width) marker outlines are one pixel wide, and point-pattern dots
-  are crisp.
-- **More fixes:** Qt brush fills (hatched, cross) draw their pattern instead of a solid colour;
-  polygon labels *Using perimeter*, upper-case labels from lower-case data, labels with an empty
-  (NULL) data-defined size and labels with a non-numeric data-defined position show again; label
-  frames wrap the text like QGIS; line labels allowed above or below the line go beside it;
-  overlapping point markers stack in feature order.
-
-Also in 4.31.0, in the Publish window:
-- **SSH / SFTP server** (*Destination* tab): the map goes straight into the folder you give on
-  your own web server, not versioned. Only new and changed files are uploaded; files with the
-  same names are replaced, your other files stay. Log in with a key, ssh-agent or a **password**
-  (typed for the session or saved encrypted in QGIS); *Test connection* checks the login and the
-  folder.
-- **Drawing the extent:** *Map* tab → *Extent* → **Draw…** works like QGIS's own rectangle tools:
-  click one corner, then the opposite one (no need to hold the mouse button; dragging still
-  works, and a click that slips a few pixels is still a click). Corners snap when QGIS snapping
-  is on; the status bar says which corner comes next; right click or Esc cancels, also while
-  dragging.
-
-**4.30**
-- *Map* tab → **Zoomed-out load…** estimates which layers make the web map slow when zoomed out
-  and suggests a zoom from which their features, or only their labels, are drawn (on a synthetic
-  city project the heaviest tile went from about 5.0 MB to about 1 MB with the suggestions).
-- **Labels-only scale limit:** a layer's labels can be hidden when zoomed out while its features
-  are still drawn.
-- 4.30.1: the export no longer stops on labels made in older QGIS versions
-  (`LabelMultiLineAlignment`); shapeburst fills with a millimetre distance now shade from the edge
-  inwards instead of being one colour; labels of layers whose symbols are placed per zoom (arrows
-  along rivers, one-way arrows) show at every zoom; label letter spacing is converted.
-
-**4.29**
-- The search index, the feature records and the parcel report records are one file each
-  (`.pack` files read by byte ranges; a small search index is one `index.json`): a city's map is a
-  few hundred files to upload instead of over 40,000 (on a city-size test, the search index and
-  feature records went from 47,959 files / 45.8 MB to 2 files / 4.8 MB).
-- *Map* tab → *Extent* → **Draw…**: drag the published area on the QGIS map.
-- **Web → QWebMap: Publish Web Map…** is directly in the Web menu (no submenu).
-
-**4.28**
-- **Much faster export:** marker positions computed directly, helper QGIS processes, tiles cut in
-  parallel and in the background. An 88-layer zoning plan (zoom 0–16, no cache, 4 cores) went
-  from 6.9 min in 4.27 to 54 s, with the same tiles.
-- **Fast marker lines** (optional, off by default): the browser places screen-size line markers.
-  The same plan took 27 s, but the markers are not exactly where QGIS draws them.
-- A network output folder keeps the work files and the cache on this computer; the export log
-  names the slowest layers.
-- 4.28.1–4.28.2: a switched-off data-defined setting that reads `@map_scale` no longer exports a
-  layer once per zoom (city-size test: the whole publication from 8.3 to 6.1 min); the progress
-  bar follows ogr2ogr's own progress; packaging checks on a city-size map went from 107 s to 32 s.
-
-**4.27**
-- Rule steps run in memory and are shared within an export: the 88-layer plan from scratch went
-  from 21.5 min to 6.9 min, with the same tiles.
-
-**4.26**
-- **Full regulation texts** in the parcel report: an optional table of one simple-HTML text per
-  zone code. Each zone of a clicked parcel gets a closed section that loads when opened; an
-  opened section is printed with the report. Links, images, scripts and attributes are removed
-  at export and again in the browser.
-
-**4.25**
-- The overview map, the 3D view and the drawing tools (new in 4.24) are optional and **off by
-  default** (*Interaction → Viewer*).
-- The *Review* tab names the third parties visitors' browsers contact (web basemaps, Google
-  Street View); a new approval is needed when they, or a published document, change.
-- Terrain problems are warnings instead of stopping the export; a missing document file or
-  house-number field is reported before the export starts.
-
-Every release: [changelog](docs/changelog.html) and
-[Releases](https://github.com/danzig666/QWebMap/releases) (with the release notes).
-
 ## Install
 
 QWebMap needs QGIS 3.44 or newer. Download `QWebMap-<version>.zip` from
@@ -689,3 +425,267 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 [implementation status](docs/publishing/IMPLEMENTATION_STATUS.md);
 [`docs/fidelity/`](docs/fidelity/) for the symbology conversion;
 [changelog](docs/changelog.html) and [release notes](releases/).
+
+## What's new
+
+This README describes QWebMap **4.39.1**. Newest first:
+
+**4.39.1** — the repository is now github.com/danzig666/QWebMap
+- The plugin's homepage, issue tracker and changelog links point to the renamed repository (the old address still forwards), and the live demo is at danzig666.github.io/QWebMap.
+
+**4.39.0** — no blank map between zoom levels; safer export (from upstream)
+- Published web maps no longer go blank for a moment where layers change between zoom levels: while the next zoom's tiles load, layers are drawn from the tiles already there.
+- Data-defined properties are read by following only the style objects that hold them, no longer by calling every method of every style object (one of which crashed a QGIS worker in the original plugin).
+
+**4.38.8** — parcel report print: shared texts once, no blank space
+- The opened full regulation texts run one after the other in three columns (two on portrait paper) without page breaks between them; a section shared by several zones (the general rules) is printed once, with a line pointing to it at the other zones. The parts and restrictions beside the map are compact rows.
+
+**4.38.7** — parcel report print laid out across the page
+- The first page has the map with the parcel and its parts beside it; the restrictions follow on the next page, then each opened full regulation text from a new page, all across the whole width in two columns. Headings stay with their text and cards are not split.
+
+**4.38.6** — parcel report legend graphics as thin as the legend's
+- The parcel report's zone and restriction graphics are drawn like the legend: lines sized in map units at the map scale of the most detailed tiles (they came out far too thick), with a margin so outlines aren't cut off at the edge.
+
+**4.38.5** — no change in the generic plugin (a Hungarian-edition release).
+
+**4.38.4** — no change in the generic plugin (a Hungarian-edition release).
+
+**4.38.3** — search as a magnifier on phones
+- On phones the search field is a magnifier button in the title bar; tapping it opens the field
+  (with the keyboard), and it closes again after a result is chosen. Wider screens are unchanged.
+
+**4.38.2** — even thinner hairlines
+- Thin hairlines are about half as heavy again: a third of QGIS's hairline (narrower and lighter).
+
+**4.38.1** — thin hairlines on high-resolution screens too
+- On a 4K (high-DPI) screen the thin hairlines were one physical pixel, as in QGIS. They are now
+  half a physical pixel on every screen: a lighter line where they crowd.
+
+**4.38.0** — thin hairlines; dimension arrows
+- **Thin hairlines** (Publish window, Output; on by default): lines and outlines of width 0
+  (parcel boundaries) are drawn thinner than QGIS's one pixel, so dense ones no longer run
+  together like a fill; still visible at every zoom. Off: as in QGIS.
+- Double-headed arrows whose body tapers to 0 (dimension lines) were missing from the web map:
+  their heads and the hairline between them are drawn now.
+
+**4.37.2** — Viewer options use the window's width
+- The Viewer checkboxes (Publish window, Interaction tab) take as many columns as the window is
+  wide, so on a wide window they take fewer rows and leave more room for the layer list.
+
+**4.37.1** — the Web menu no longer disappears
+- Depending on the order QGIS loaded the plugins, the whole Web menu (with QWebMap and MetaSearch)
+  could be missing from the menu bar. QWebMap now puts it there itself.
+
+**4.37.0** — "My location" is an option, off by default
+- The web map's location button is now an option (Publish window, Viewer: "My location button"),
+  off by default. When on, a location outside the map's area only shows a message; the map no
+  longer flies off to an empty place.
+
+**4.36.7** — large map-unit markers stay right when zoomed in
+- A simple marker sized in map units (e.g. a 920 m dashed circle on a polygon's centroid for a
+  protection distance) is drawn as its real shape from the zoom where it is 128 px wide: it no
+  longer disappears when its centre is off screen, and its outline stays sharp and dashed.
+
+**4.36.6** — no false "map style is invalid"
+- 4.36.5 showed "The map style is invalid" for a map with a layer that is empty in the export
+  extent (MapLibre reports its missing source layer, but draws the map). Only a style MapLibre
+  rejects stops the map now.
+
+**4.36.5** — web maps that would not load
+- 4.36.4 could publish a style layer that starts past zoom 24 (a scale-limited point pattern);
+  the browser rejected the whole style and the map stayed on "Loading…". Fixed, and every export
+  now leaves out any layer the browser would reject, with a warning in the export report.
+- If a map style still fails to load, the viewer shows an error instead of loading for ever.
+
+**4.36.4** — export crash and cut-off markers fixed
+- Exports no longer stop with a RecursionError on a point pattern fill whose map-unit row
+  distance has a scale range ("Min/max size") and whose Y displacement is 0.
+- Large map-unit markers drawn with a filled outline (e.g. a 5 m ring) are no longer cut off at
+  the highest zooms.
+
+**4.36.3** — tiny map-unit labels hidden, dashes kept zoomed out
+- Labels whose text size is in map units are hidden where they are smaller than 6 px on screen
+  (Publish window, Output: "Hide labels smaller than", on by default); QGIS's pixel size-based
+  label visibility is now honoured too.
+- Map-unit dash patterns with a scale range ("Min/max size") no longer turn into a solid line
+  zoomed out.
+
+**4.36.2** — zoomed-out load windows keep their size
+- Long layer names are shortened with "…" in the progress window and the table (the whole name
+  in the tooltip), so the windows stay centred; the tick boxes explain themselves.
+
+**4.36.1** — labels weigh more in the zoomed-out load, with progress
+- Many labels in a tile now count as heavy on their own (every label is laid out, even the hidden
+  ones), so their suggested zoom moves in even when they would fit; the speed slider scales it.
+- The estimate shows its progress layer by layer, and can be cancelled.
+
+**4.36.0** — a speed slider for the zoomed-out load
+- *Zoomed-out load…* has a slider from **very slow** to **very fast**: faster hides small features
+  and crowded labels from closer zooms on (less to load zoomed out), slower shows more zoomed out.
+  Zoomed in, everything is shown either way. The setting is remembered.
+
+**4.35.4** — no more tiles flooded with a polygon's colour
+- A polygon that is valid in the project CRS can cross itself once reprojected to Web Mercator
+  (edges that nearly touch); the tiles then showed large areas filled with its colour at some
+  zooms. Reprojected polygons are now repaired too.
+
+**4.35.3** — labels of features drawn with an invisible symbol
+- Features of a renderer rule whose symbol draws nothing (no fill, no outline; often the ELSE
+  rule) got no labels on the web; QGIS labels them.
+
+**4.35.2** — a legend entry without its layer no longer stops the export
+- A layer QGIS could not create (such as a virtual layer over a missing source) stopped the
+  export with "'NoneType' object has no attribute 'id'"; it is now skipped.
+
+**4.35.1** — hatches stay inside their polygons
+- Line-pattern fills clipped during render (QGIS's default) no longer stick out of the polygon
+  when zoomed in: map-unit hatches are exported as the strips QGIS paints. Hatches clipped
+  before render or not clipped are laid out like QGIS draws them.
+
+**4.35.0** — views that fit, a closed map panel
+- **Map theme views that do not fit** in one row of the web map become a drop-down instead of
+  buttons running off the screen.
+- **Map panel closed at start** (Interaction, off by default): the web map opens with more of the
+  map on screen; the menu button opens the panel.
+- **Publish its layers** on a map theme also offers that theme as a view of the web map.
+
+**4.34.1** — names and expressions that broke the export
+- Field names with a double quote, filter fields with capital letters, expressions ending in a
+  `-- comment`, a backslash wrap character, invalid whole-word label replacements, `$area` after a
+  comment, heatmap weights from text fields and export folders with special characters no longer
+  drop layers or labels or stop the export.
+
+**4.34.0** — huge exports finish, map-view expressions, export fixes
+- **Huge exports of coarse data finish:** when the tiles would be far too many (over 200,000),
+  they end at the zoom that holds all of the data's detail and the web map zooms in on them —
+  it looks the same. Country borders of a continent down to zoom 16 took hours.
+- **Map-view expressions** (`@map_extent_center`, `@map_extent_width`, `@map_crs`…) hold the web
+  map's starting view instead of nothing.
+- **Fixed:** a layer name with an apostrophe broke the export; "Nothing to publish" now names the
+  cause; data-defined colours of gradient and shapeburst fills; labels with a geometry generator
+  on polygon layers.
+
+**4.33.1** — curved line labels follow the road
+- **Curved line labels** are laid along the line letter by letter, as in QGIS, round bends within
+  QGIS's curved angle limit, at every zoom (they were straight labels turned to the line).
+- **Word spacing** from QGIS is kept, and line labels **above or below** their line stay on their side.
+
+**4.33.0** — conversion audit: zooms past the last tiles, mixed units, QGIS rule semantics
+- **Zooming in past the last tile zoom (17–22):** symbols in millimetres keep their size (arrows,
+  point patterns, shapeburst bands, offset markers grew 2× per zoom); rules, layers and labels
+  shown only there are drawn; `@map_scale` expressions, map-unit patterns and point clusters keep
+  following the zoom.
+- **Map units and millimetres:** labels mixing them (map-unit text with millimetre offsets and the
+  reverse) are placed and drawn; map-unit dashes and line patterns follow every zoom; min/max size
+  limits, degree and feet CRSs, the reference scale, "Meters at scale" and geometry-generator units
+  are converted as QGIS does; random marker fills with a map-unit density no longer crash the export.
+- **Rules, labels and symbols:** ELSE / "all other values" no longer draw hidden features; polygon
+  labels avoid each other, label every part and place outside polygons; horizontal line labels sit
+  mid-line and upside-down labels turn; hatches touching a corner, translucent shapeburst, symbol
+  opacity on drawn parts, generator fills, fill offsets and more are fixed.
+
+**4.32.0** — finding layers in big projects, editable zoomed-out limits
+- **Finding layers:** the *Map* tab's layer list has a filter box (part of the name, upper or
+  lower case, accents not needed) and *Only published layers*; the *Interaction* tab lists the
+  layers by name with a find box; every layer drop-down takes typing.
+- **Zoomed-out load…:** every layer's feature and label zooms can be changed by hand; the lowest
+  zoom removes a limit.
+- **Fixes:** map-unit pattern fills of maps exported from zoom 0 showed only their outline
+  (hatched areas); dimension labels longer than their line are drawn level at the line, as QGIS
+  does with *Allow degraded placement*; line labels overlap where QGIS allows it; label frames
+  turn with their label (corners included); Free polygon labels sit in the middle of long strips.
+
+**4.31.0** — SSH / SFTP publishing, click-to-draw extent, fidelity fixes
+- **No more missing rules or blank maps:** a rule whose expression fails on one feature (for
+  example text in a numeric field) is no longer dropped from the web map; like QGIS, the export
+  skips just that value. Nested rule-based renderers (rules inside rules) no longer share ids,
+  which stopped the whole web map from loading; a repeated style layer id is now always renamed
+  and reported.
+- **Drawing order and fills:** overlapping lines and polygons of different categories or rules
+  keep QGIS's feature order (up to 5,000 re-ordered features and 8 levels of overlap per layer, in
+  layers of up to 100,000 features; beyond that the layer keeps rule order and the fidelity report
+  says so; layers with inner shadow or inner glow lines keep rule order). Polygon outline bands in millimetres are on the
+  correct side and are buffered rings like QGIS's (no dark wedges at corners). Shapeburst
+  distances in millimetres keep their width on screen (set per quarter zoom, within about 9 %;
+  big layers get one setting per half zoom or per zoom, within about 19 % or 41 %, reported).
+  Gradient fills of small features (a village green published from zoom 11) keep their outer
+  colours instead of ending in one flat band. A layer's opacity (*Layer Rendering*) is converted
+  (it was ignored).
+- **Labels:** a feature drawn by two renderer rules (a category and a filterless outline rule) has
+  one label again (it had one per rule); the viewer measures each character's own width, so Free
+  labels that fit in QGIS are no longer dropped; labels with empty text no longer draw their
+  background; DemiBold, Medium and Light fonts use the face QGIS draws; repeat distances in map
+  units grow with the map;
+  around-point labels try QGIS's positions in QGIS's order, keep clear of other labels, and small
+  polygons keep theirs.
+- **Markers:** hairline (zero-width) marker outlines are one pixel wide, and point-pattern dots
+  are crisp.
+- **More fixes:** Qt brush fills (hatched, cross) draw their pattern instead of a solid colour;
+  polygon labels *Using perimeter*, upper-case labels from lower-case data, labels with an empty
+  (NULL) data-defined size and labels with a non-numeric data-defined position show again; label
+  frames wrap the text like QGIS; line labels allowed above or below the line go beside it;
+  overlapping point markers stack in feature order.
+
+Also in 4.31.0, in the Publish window:
+- **SSH / SFTP server** (*Destination* tab): the map goes straight into the folder you give on
+  your own web server, not versioned. Only new and changed files are uploaded; files with the
+  same names are replaced, your other files stay. Log in with a key, ssh-agent or a **password**
+  (typed for the session or saved encrypted in QGIS); *Test connection* checks the login and the
+  folder.
+- **Drawing the extent:** *Map* tab → *Extent* → **Draw…** works like QGIS's own rectangle tools:
+  click one corner, then the opposite one (no need to hold the mouse button; dragging still
+  works, and a click that slips a few pixels is still a click). Corners snap when QGIS snapping
+  is on; the status bar says which corner comes next; right click or Esc cancels, also while
+  dragging.
+
+**4.30**
+- *Map* tab → **Zoomed-out load…** estimates which layers make the web map slow when zoomed out
+  and suggests a zoom from which their features, or only their labels, are drawn (on a synthetic
+  city project the heaviest tile went from about 5.0 MB to about 1 MB with the suggestions).
+- **Labels-only scale limit:** a layer's labels can be hidden when zoomed out while its features
+  are still drawn.
+- 4.30.1: the export no longer stops on labels made in older QGIS versions
+  (`LabelMultiLineAlignment`); shapeburst fills with a millimetre distance now shade from the edge
+  inwards instead of being one colour; labels of layers whose symbols are placed per zoom (arrows
+  along rivers, one-way arrows) show at every zoom; label letter spacing is converted.
+
+**4.29**
+- The search index, the feature records and the parcel report records are one file each
+  (`.pack` files read by byte ranges; a small search index is one `index.json`): a city's map is a
+  few hundred files to upload instead of over 40,000 (on a city-size test, the search index and
+  feature records went from 47,959 files / 45.8 MB to 2 files / 4.8 MB).
+- *Map* tab → *Extent* → **Draw…**: drag the published area on the QGIS map.
+- **Web → QWebMap: Publish Web Map…** is directly in the Web menu (no submenu).
+
+**4.28**
+- **Much faster export:** marker positions computed directly, helper QGIS processes, tiles cut in
+  parallel and in the background. An 88-layer zoning plan (zoom 0–16, no cache, 4 cores) went
+  from 6.9 min in 4.27 to 54 s, with the same tiles.
+- **Fast marker lines** (optional, off by default): the browser places screen-size line markers.
+  The same plan took 27 s, but the markers are not exactly where QGIS draws them.
+- A network output folder keeps the work files and the cache on this computer; the export log
+  names the slowest layers.
+- 4.28.1–4.28.2: a switched-off data-defined setting that reads `@map_scale` no longer exports a
+  layer once per zoom (city-size test: the whole publication from 8.3 to 6.1 min); the progress
+  bar follows ogr2ogr's own progress; packaging checks on a city-size map went from 107 s to 32 s.
+
+**4.27**
+- Rule steps run in memory and are shared within an export: the 88-layer plan from scratch went
+  from 21.5 min to 6.9 min, with the same tiles.
+
+**4.26**
+- **Full regulation texts** in the parcel report: an optional table of one simple-HTML text per
+  zone code. Each zone of a clicked parcel gets a closed section that loads when opened; an
+  opened section is printed with the report. Links, images, scripts and attributes are removed
+  at export and again in the browser.
+
+**4.25**
+- The overview map, the 3D view and the drawing tools (new in 4.24) are optional and **off by
+  default** (*Interaction → Viewer*).
+- The *Review* tab names the third parties visitors' browsers contact (web basemaps, Google
+  Street View); a new approval is needed when they, or a published document, change.
+- Terrain problems are warnings instead of stopping the export; a missing document file or
+  house-number field is reported before the export starts.
+
+Every release: [changelog](docs/changelog.html) and
+[Releases](https://github.com/danzig666/QWebMap/releases) (with the release notes).
