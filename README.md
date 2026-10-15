@@ -6,8 +6,8 @@
 
 # QWebMap
 
-[![🐞 Issues](https://img.shields.io/badge/Issues-🐞-98b023?style=for-the-badge)](https://github.com/danzig666/QGIS2VectorTiles/issues)
-[![📦 Releases](https://img.shields.io/badge/Releases-📦-black?style=for-the-badge)](https://github.com/danzig666/QGIS2VectorTiles/releases)
+[![🐞 Issues](https://img.shields.io/badge/Issues-🐞-98b023?style=for-the-badge)](https://github.com/danzig666/QWebMap/issues)
+[![📦 Releases](https://img.shields.io/badge/Releases-📦-black?style=for-the-badge)](https://github.com/danzig666/QWebMap/releases)
 [![🌐 Upstream](https://img.shields.io/badge/Upstream-🌐-black?style=for-the-badge)](https://github.com/GallPeters/QGIS2VectorTiles)
 [![📜 License](https://img.shields.io/badge/License-📜-98b023?style=for-the-badge)](https://www.gnu.org/licenses/old-licenses/gpl-2.0-standalone.html)
 
@@ -18,21 +18,21 @@ a full web viewer · no map server, database or Docker
 
 > **QWebMap** started as a fork of [GallPeters/QGIS2VectorTiles](https://github.com/GallPeters/QGIS2VectorTiles)
 > by Jossef Kanter and grew into a complete web map publisher. Download builds from
-> [Releases](https://github.com/danzig666/QGIS2VectorTiles/releases) and report issues
-> [here](https://github.com/danzig666/QGIS2VectorTiles/issues). It installs as **QWebMap**
+> [Releases](https://github.com/danzig666/QWebMap/releases) and report issues
+> [here](https://github.com/danzig666/QWebMap/issues). It installs as **QWebMap**
 > next to the official QGIS2VectorTiles plugin.
 >
 > **Updating from 4.8.1 or older** (then called *QGIS2VectorTiles (fork)*): install QWebMap, then
 > uninstall *QGIS2VectorTiles (fork)* in *Plugins → Manage and Install Plugins*. Settings saved
 > in your projects, the window position and saved keys carry over.
 
-<a href="https://danzig666.github.io/QGIS2VectorTiles/">
+<a href="https://danzig666.github.io/QWebMap/">
 <kbd>
 <img width="840" alt="QWebMap showcase: a richly styled QGIS project in QGIS (left) and as the published web map (right) at the same views: rule-based roads with casings, hatched and point-pattern fills, a curved arrow, shapeburst water, lineburst rivers with flow arrows, SVG icons and curved, haloed labels; then a swipe between QGIS and the web map" src="docs/images/qwebmap-showcase.gif" />
 </kbd>
 </a>
 
-<a href="https://danzig666.github.io/QGIS2VectorTiles/"><b>🗺️ Try the live demo map</b></a> &nbsp;·&nbsp; <a href="https://danzig666.github.io/QGIS2VectorTiles/#video"><b>▶ Watch the full video (1080p)</b></a>
+<a href="https://danzig666.github.io/QWebMap/"><b>🗺️ Try the live demo map</b></a> &nbsp;·&nbsp; <a href="https://danzig666.github.io/QWebMap/#video"><b>▶ Watch the full video (1080p)</b></a>
 
 <sub>Demo data: Swellendam from the <a href="https://github.com/qgis/QGIS-Training-Data">QGIS training data</a> (GPL-2.0, from OpenStreetMap).</sub>
 
@@ -42,7 +42,10 @@ a full web viewer · no map server, database or Docker
 
 ## What's new
 
-This README describes QWebMap **4.39.0**. Newest first:
+This README describes QWebMap **4.39.1**. Newest first:
+
+**4.39.1** — the repository is now github.com/danzig666/QWebMap
+- The plugin's homepage, issue tracker and changelog links point to the renamed repository (the old address still forwards), and the live demo is at danzig666.github.io/QWebMap.
 
 **4.39.0** — no blank map between zoom levels; safer export (from upstream)
 - Published web maps no longer go blank for a moment where layers change between zoom levels: while the next zoom's tiles load, layers are drawn from the tiles already there.
@@ -299,12 +302,12 @@ Also in 4.31.0, in the Publish window:
   house-number field is reported before the export starts.
 
 Every release: [changelog](docs/changelog.html) and
-[Releases](https://github.com/danzig666/QGIS2VectorTiles/releases) (with the release notes).
+[Releases](https://github.com/danzig666/QWebMap/releases) (with the release notes).
 
 ## Install
 
 QWebMap needs QGIS 3.44 or newer. Download `QWebMap-<version>.zip` from
-[Releases](https://github.com/danzig666/QGIS2VectorTiles/releases) (not the `-hu` file: that is a
+[Releases](https://github.com/danzig666/QWebMap/releases) (not the `-hu` file: that is a
 special Hungarian zoning-plan edition, not for general use), then *Plugins → Manage and Install
 Plugins → Install from ZIP*. Install a newer ZIP the same way to upgrade.
 

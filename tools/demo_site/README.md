@@ -1,6 +1,6 @@
 # Demo site (GitHub Pages)
 
-The live demo at <https://danzig666.github.io/QGIS2VectorTiles/> is built from these files and served
+The live demo at <https://danzig666.github.io/QWebMap/> is built from these files and served
 from the `gh-pages` branch. It shows the Swellendam showcase project (the
 [QGIS training data](https://github.com/qgis/QGIS-Training-Data), GPL-2.0, from OpenStreetMap)
 published with the plugin, the showcase video and code for embedding the map.
