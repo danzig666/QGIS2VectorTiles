@@ -135,7 +135,7 @@ generated table of every symbol layer type's strategy and limits is in
 
 - **2.5D renderer and embedded-symbol renderer** (styles stored inside KML, DWG and similar files):
   the layer is not drawn (reported). For buildings, the viewer has its own optional 3D buildings.
-- **Label shadows:** left out, and not in the report.
+- **Label shadows of point labels and of background shapes:** not drawn (reported).
 - **Paint effects on fills and other lines:** blur, colorise, transform, glows and shadows are
   ignored (reported). Exceptions: outer glow and drop shadow on simple lines; inner shadow and
   inner glow on solid simple lines with a screen-unit width; markers, which QGIS renders into images
@@ -175,6 +175,9 @@ generated table of every symbol layer type's strategy and limits is in
   come out a little darker.
 - **Inner shadow and inner glow on lines:** computed for straight lines, so they can differ where
   lines overlap or nearly touch.
+- **Label shadows of polygon and line labels:** a soft copy of the label (or its buffer) in the
+  shadow colour at the shadow's offset. The blur is capped at about a pixel, and a shadow's scale
+  and an offset turned with the label are not reproduced (reported).
 - **Heatmaps:** the colours can scale differently from QGIS unless the renderer has a fixed
   maximum value (reported).
 - **Point clusters and point displacement:** grouped with QGIS's method, but QGIS groups only the
@@ -187,8 +190,8 @@ Processing tool, and for *Publish Web Map* in the work folder
 `<Local output folder>/.q2vt-work/<slug>/<export>/` (never uploaded). Each entry names a stable
 code (`Q2VT_*`), where it happened (the layer, plus the rule or symbol layer when known), the
 export strategy when one applies, and usually a suggested fix, so missing hatches or unsupported
-symbols are visible without reading the log. A few differences are not in the report: label
-shadows and the callouts of labels that QGIS places itself are left out without an
+symbols are visible without reading the log. A few differences are not in the report: the
+callouts of labels that QGIS places itself are left out without an
 entry, and blend modes on vector layers only get a warning in the Publish window.
 
 Both the Processing tool (*Fidelity Mode*, *Beyond Maximum Zoom*) and the Publish Web Map window
@@ -492,7 +495,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.40.3**. Newest first:
+This README describes QWebMap **4.41.0**. Newest first:
+
+**4.41.0** — label shadows
+- Polygon and line labels with a QGIS shadow get a soft shadow on the web map, at QGIS's offset and colour. Point labels and the shadows of background shapes are reported instead.
 
 **4.40.3** — unsupported renderers are reported
 - A layer with a renderer the web map cannot draw (2.5D, embedded symbols) is now listed in the fidelity report instead of silently missing.
