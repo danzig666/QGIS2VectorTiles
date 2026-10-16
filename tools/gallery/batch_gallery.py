@@ -77,12 +77,11 @@ def merge(out, batches, total):
                     view["id"] = prefix + view["id"]
                 card["id"] = prefix + card["id"]
                 cards.append(card)
-    cards.sort(key=lambda c: -c["score"]["shape"])
+    build_gallery.sort_cards(cards)
     done = [b for b in batches if b["state"] == "done"]
     failed = [b for b in batches if b["state"] != "done"]
-    mean = sum(c["score"]["shape"] for c in cards) / max(1, len(cards))
-    summary = (f"{len(cards)} of {total} styles in {len(done)} finished batches, mean shape "
-               f"mismatch {mean:.1%}. Worst first.")
+    summary = (f"{len(cards)} of {total} styles in {len(done)} finished batches, "
+               f"{build_gallery.summarize(cards)}")
     if failed:
         summary += " Not finished: " + "; ".join(
             f"batch {b['batch']} (styles {b['offset']}-{b['offset'] + b['size'] - 1}): {b['state']}"
