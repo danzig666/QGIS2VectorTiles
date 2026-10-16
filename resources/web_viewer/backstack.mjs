@@ -22,7 +22,8 @@ function restoreUrl() {
   }
 }
 
-window.addEventListener("popstate", (event) => {
+// (Only in a browser: the pure helpers that import this also run in Node.)
+globalThis.window?.addEventListener("popstate", (event) => {
   ownUntil = performance.now() + 1000;
   if (skips > 0) {
     skips -= 1;
