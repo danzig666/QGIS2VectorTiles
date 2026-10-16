@@ -57,7 +57,9 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("SimpleLine", "line", Strategy.NATIVE,
                "Stroke color, width, opacity, offset, cap, join and dash patterns. Map-unit "
                "custom dashes are exported as their dashes (Qt pattern restarted on every "
-               "line and ring) from the zoom where the pattern is 6 px long. Offsets are "
+               "line and ring) from the zoom where the pattern is 6 px long; so are screen-unit "
+               "custom dashes of a symbol that also places screen-spaced interval markers "
+               "(letters or ticks in the gaps), per sixteenth of a zoom like the markers. Offsets are "
                "QGIS's offset curves where MapLibre's line-offset would loop at corners "
                "(screen units: per eighth of a zoom up to the zoom where the corners allow "
                "it). Outer glow and drop shadow are blurred lines drawn from a copy "
@@ -106,7 +108,8 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("MarkerLine", "marker_line", Strategy.MATERIALIZED,
                "First/last/every vertex, inner vertices, central point, segment centres and "
                "intervals (with offset along the line; map units exactly, screen units per "
-               "eighth of a zoom) are exported as point features at the QGIS positions with the "
+               "sixteenth of a zoom: spacing within ±2.2 %, which adds up along long lines) are "
+               "exported as point features at the QGIS positions with the "
                "line azimuth; polygon outline offsets buffer every ring like QGIS.",
                ("Data-defined intervals, and screen-unit intervals with Fast marker lines on, "
                 "are a native repeated symbol: start position differs and spacing is within "

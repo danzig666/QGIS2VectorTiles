@@ -1531,11 +1531,11 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
     zooms = {r.get_attr("o") for r in placed}
     assert len(zooms) > 3
-    # Eighths of a zoom, each with 4 mm (96 dpi, Web Mercator grid) at its
-    # middle: within +-4 % of QGIS's spacing anywhere in the band.
+    # Sixteenths of a zoom, each with 4 mm (96 dpi, Web Mercator grid) at
+    # its middle: within +-2.2 % of QGIS's spacing anywhere in the band.
     from fidelity.zoom import zoom_to_scale
     top = max(zooms)
-    assert len([r for r in placed if r.get_attr("o") == top]) == 8
+    assert len([r for r in placed if r.get_attr("o") == top]) == 16
     longest = max(QgsGeometry.fromWkt(wkt).length() for wkt in LINES)
     for rule in placed:
         band = rule.visibility
@@ -1547,7 +1547,7 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
             # line at its start, one placement for the zoom.
             assert longest < 0.004 * zoom_to_scale(band.max_zoom)
             continue
-        assert band.max_zoom - band.min_zoom == pytest.approx(1 / 8)
+        assert band.max_zoom - band.min_zoom == pytest.approx(1 / 16)
         assert rule.recipe.param("interval") == pytest.approx(0.004 * zoom_to_scale(middle), rel=1e-6)
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
     assert any(r.recipe is None and r.visibility is not None
