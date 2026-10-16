@@ -117,7 +117,9 @@ def _expressions_of_symbol(symbol):
     return exprs
 
 
-_RANDOM_CALL = re.compile(r"\b(?:rand|randf)\s*\(", re.IGNORECASE)
+# rand(), randf() and the randomized waves (wave_randomized, triangular_ /
+# square_wave_randomized).
+_RANDOM_CALL = re.compile(r"\b(?:rand|randf|\w*wave_randomized)\s*\(", re.IGNORECASE)
 
 
 def _symbol_layers(symbol):
