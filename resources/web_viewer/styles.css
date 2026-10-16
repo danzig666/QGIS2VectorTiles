@@ -329,6 +329,8 @@ input[type="range"].q2vt-opacity::-moz-range-thumb { width: 14px; height: 14px; 
 .q2vt-basemap-option[aria-pressed="true"] { color: var(--q2vt-accent); font-weight: 650; }
 .q2vt-basemap-none { display: grid; place-items: center; color: var(--q2vt-muted); height: 100%;
   background: repeating-linear-gradient(45deg, var(--q2vt-field), var(--q2vt-field) 6px, var(--q2vt-surface-solid) 6px, var(--q2vt-surface-solid) 12px); }
+.q2vt-basemap-plain { background: var(--q2vt-field); }
+.q2vt-basemap-web img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
 /* Attribution (our own: plain text, no HTML from the data) */
 .q2vt-attribution { font-size: 11px; line-height: 1.3; color: var(--q2vt-muted); background: var(--q2vt-surface);

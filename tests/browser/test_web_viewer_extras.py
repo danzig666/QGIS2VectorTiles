@@ -157,8 +157,31 @@ def test_overview_map_follows_the_view(site, tmp_path):
     if SHOTS:
         actions.append({"screenshot": os.path.join(SHOTS, "overview.png")})
     out = _run(site["url"], actions, tmp_path)[0]
-    assert out["shown"] and abs(out["mainZoom"] - out["zoom"] - 4) < 0.01
+    assert out["shown"] and abs(out["mainZoom"] - out["zoom"] - 6) < 0.01
     assert out["box"] == [True, True] and out["labels"] == 0
+
+
+def test_overview_map_follows_layers_and_basemap_while_loading(site, tmp_path):
+    """A layer switched off and another basemap chosen right after a move
+    (the overview still loading its tiles) reach the overview too: the
+    change was skipped while its tiles loaded and never applied."""
+    out = _run(site["url"], [{"eval": """
+      const o = q2vtViewer.controls.overview, v = q2vtViewer, m = v.map;
+      await new Promise((r) => (o.mini.loaded() ? r() : o.mini.once('load', r)));
+      const id = v.manifest.layers[0].id;
+      const vis = (style) => Object.fromEntries(style.layers.map((l) => [l.id, (l.layout || {}).visibility || 'visible']));
+      const shownBefore = vis(m.getStyle());
+      m.jumpTo({ center: [19.06, 47.42], zoom: 14 });  // the overview loads tiles now
+      v.controls.state.setIn('layers', id, false);
+      v.controls.state.set({ basemap: 'xyz-1' }, 'basemap');
+      await new Promise((r) => setTimeout(r, 2500));
+      const main = vis(m.getStyle()), mini = vis(o.mini.getStyle());
+      const switched = Object.keys(main).filter((k) => shownBefore[k] === 'visible' && main[k] === 'none' && k in mini);
+      return { switched: switched.length, mini: switched.map((k) => mini[k]),
+               basemap: o.mini.getStyle().layers.some((l) => l.id.includes('xyz-1')) };
+    """}], tmp_path)[0]
+    assert out["switched"], out
+    assert set(out["mini"]) == {"none"} and out["basemap"], out
 
 
 def test_drawing_travels_in_the_link_and_exports(site, tmp_path):

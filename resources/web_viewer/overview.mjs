@@ -9,7 +9,7 @@ import { button, el } from "./icons.mjs";
 const KEY = "q2vt:overview";
 const VIEW = "q2vt_overview_view";
 const EXTENT = "q2vt_overview_extent";
-const ZOOM_OUT = 4;
+const ZOOM_OUT = 6;  // zoom levels further out than the main map (64× the area)
 
 // The main style for the overview: no labels, icons, 3D or terrain.
 export function overviewStyle(style) {
@@ -57,7 +57,7 @@ export class OverviewControl {
     this.box.hidden = !open;
     this.root.classList.toggle("q2vt-overview-open", open);
     if (open && !this.mini) this.create();
-    if (open && this.mini) { this.mini.resize(); this.sync(); }
+    if (open && this.mini) { this.mini.resize(); this.restyle(); this.sync(); }
   }
 
   create() {
@@ -68,6 +68,7 @@ export class OverviewControl {
       center: map.getCenter(), zoom: Math.max(0, map.getZoom() - ZOOM_OUT),
     });
     this.mini.on("load", () => {
+      this.ready = true;
       const bounds = this.manifest.view && this.manifest.view.bounds;
       if (Array.isArray(bounds) && bounds.length === 4) {
         this.mini.addSource(EXTENT, { type: "geojson", data: { type: "Feature", properties: {},
@@ -79,6 +80,8 @@ export class OverviewControl {
       const accent = getComputedStyle(document.documentElement).getPropertyValue("--q2vt-accent").trim() || "#2563eb";
       this.mini.addLayer({ id: `${VIEW}-fill`, type: "fill", source: VIEW, paint: { "fill-color": accent, "fill-opacity": 0.15 } });
       this.mini.addLayer({ id: VIEW, type: "line", source: VIEW, paint: { "line-color": accent, "line-width": 2 } });
+      // A style change while the overview loaded its first style.
+      this.restyle();
       this.sync();
     });
     // A click on the overview centres the main map there.
@@ -112,8 +115,12 @@ export class OverviewControl {
     if (source) source.setData(this.viewFeature());
   }
 
+  // The overview draws what the main map draws now (layers switched, a
+  // theme, another basemap). Not skipped while tiles load (isStyleLoaded()
+  // is false then, and a skipped change was never applied): only before the
+  // overview's own first style, which applies it on load.
   restyle() {
-    if (!this.mini || !this.mini.isStyleLoaded()) return;
+    if (!this.mini || !this.ready) return;
     const style = overviewStyle(this.map.getStyle());
     for (const id of [EXTENT, VIEW]) if (this.mini.getSource(id)) style.sources[id] = this.mini.getStyle().sources[id];
     style.layers.push(...this.mini.getStyle().layers.filter((l) => [EXTENT, `${VIEW}-fill`, VIEW].includes(l.id)));

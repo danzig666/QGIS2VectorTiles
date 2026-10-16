@@ -208,7 +208,17 @@ def test_web_basemap_in_the_menu_page_policy_and_raster_layer(site, tmp_path):
           await new Promise((r) => setTimeout(r, 500));
           const layer = v.map.getLayer('q2vt-bm-xyz-1');
           const source = layer && v.map.getSource(layer.source);
-          return { titles, active: v.basemap.active, type: layer && layer.type, tiles: source && source.tiles,
+          // Thumbnails: a tile of each web basemap at the map's centre; no basemap: the project's colour.
+          const { tileUrl } = await import(new URL('assets/basemap.mjs', v.releaseUrl).href);
+          const at = [19.0456, 47.4762];
+          const thumbs = {
+            xyz: tileUrl({ tiles: ['https://t.test/{z}/{x}/{y}.png'], maxzoom: 19 }, ...at, 18),
+            tms: tileUrl({ tiles: ['https://t.test/{z}/{x}/{y}.png'], scheme: 'tms', maxzoom: 19 }, ...at, 18),
+            capped: tileUrl({ tiles: ['https://t.test/{z}/{x}/{y}.png'], maxzoom: 12 }, ...at, 18),
+            wms: tileUrl({ tiles: ['https://w.test/ows?BBOX={bbox-epsg-3857}'] }, 0.001, 0.001, 1),
+            own: v.basemap.thumbnail('xyz-1'),
+            none: document.querySelector('.q2vt-basemap-plain')?.style.background || '' };
+          return { titles, active: v.basemap.active, thumbs, type: layer && layer.type, tiles: source && source.tiles,
             scheme: source && source.scheme, attribution: document.querySelector('.q2vt-attribution')?.textContent || '',
             below: v.map.getStyle().layers.findIndex((l) => l.id === 'q2vt-bm-xyz-1')
               < v.map.getStyle().layers.findIndex((l) => l.source === 'q2vt_tiles') };"""},
@@ -217,3 +227,10 @@ def test_web_basemap_in_the_menu_page_policy_and_raster_layer(site, tmp_path):
     assert any("Teszt műhold" in t for t in state["titles"]) and state["active"] == "xyz-1"
     assert state["type"] == "raster" and state["scheme"] == "tms" and len(state["tiles"]) == 3
     assert "© Példa" in state["attribution"] and state["below"]  # under the plan's layers
+    thumbs = state["thumbs"]
+    assert thumbs["xyz"] == "https://t.test/18/144940/91692.png"
+    assert thumbs["tms"] == f"https://t.test/18/144940/{2 ** 18 - 1 - 91692}.png"
+    assert thumbs["capped"].startswith("https://t.test/12/")
+    assert thumbs["wms"] == "https://w.test/ows?BBOX=0.00,0.00,20037508.34,20037508.34"
+    assert thumbs["own"].startswith("https://a.tiles.example.test/")
+    assert thumbs["none"]  # the project's background colour
