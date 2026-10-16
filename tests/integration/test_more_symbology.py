@@ -542,8 +542,10 @@ def test_dense_marker_line_is_a_line_pattern(plugin):
 
 
 def test_line_blur_spreads_the_same_ink(plugin):
-    """A blurred line (a firefly glow) is widened by the blur radius on each
-    side, faded from its middle and made fainter: the blur was ignored."""
+    """A blurred line (a firefly glow) fades over the scale of QGIS's stack
+    blur (exponential smoothing both ways: QgsImageOperation) with the same
+    ink, as a line with a triangular profile: the blur was ignored."""
+    import math as _math
     from qgis.core import QgsBlurEffect, QgsEffectStack, QgsLineSymbol, QgsSimpleLineSymbolLayer
     exporter = _converter()
     line = QgsSimpleLineSymbolLayer()
@@ -555,9 +557,12 @@ def test_line_blur_spreads_the_same_ink(plugin):
     exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 14, 24)
     paint = exporter.style["layers"][0]["paint"]
     px = 96 / 25.4
-    assert paint["line-width"] == pytest.approx((1.8 + 6.4) * px, rel=0.01)
-    assert paint["line-blur"] == pytest.approx(paint["line-width"] / 2, rel=0.01)
-    assert paint["line-opacity"] == pytest.approx(2 * 1.8 / (1.8 + 6.4), rel=0.01)
+    width = 1.8 * px
+    scale = -1 / _math.log(0.875)  # radius 12 px: weight 2 of 16
+    half = width / 2 + 2 * scale
+    assert paint["line-width"] == pytest.approx(2 * half, rel=0.01)
+    assert paint["line-blur"] == pytest.approx(half, rel=0.01)
+    assert paint["line-opacity"] == pytest.approx(width / half, rel=0.01)
     assert not exporter.context.diagnostics.by_code("Q2VT_UNSUPPORTED_EFFECT")
 
 

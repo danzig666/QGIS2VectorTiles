@@ -5084,12 +5084,30 @@ class QgisMapLibreStyleExporter:
             return [e for e in effect.effectList() if e.enabled()]
         return [effect]
 
+    # QgsImageOperation::stackBlur: smoothing weight (of 16) per radius.
+    _STACK_BLUR_WEIGHTS = (14, 10, 8, 6, 5, 5, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2)
+
+    @classmethod
+    def blur_scale(cls, effect, radius_px: float) -> float:
+        """Length (px) over which a QGIS blur effect of ``radius_px`` fades:
+        the stack blur smooths each pixel 1/16 x weight towards the next,
+        both ways (QgsImageOperation::stackBlur): a two-sided exponential
+        of scale -1 / ln(decay); a Gaussian blur's sigma is radius / 3."""
+        radius = int(round(radius_px))
+        if radius <= 0:
+            return 0.0
+        if _enum_int(effect.blurMethod()) == 1:  # GaussianBlur
+            return radius / 3.0
+        weight = 1 if radius > 17 else cls._STACK_BLUR_WEIGHTS[radius - 1]
+        decay = 1.0 - weight / 16.0
+        return -1.0 / math.log(decay) if 0 < decay < 1 else 0.0
+
     def _line_blur(self, symbol_layer, layer_def: dict) -> None:
-        """A simple line's blur effect (a glowing firefly line): QGIS blurs
-        the drawn line over the blur radius on each side, keeping its ink.
-        Here the line is widened by the radius on each side, faded from its
-        middle (line-blur half its width: a triangular profile inking half
-        the width) and made fainter to ink as much as the line."""
+        """A simple line's blur effect (a glowing firefly line), as QGIS
+        blurs the drawn line (QgsBlurEffect): a peaked profile fading over
+        the blur's scale. Drawn as a line with a triangular profile (line-blur
+        half its width) reaching two scales past the line's edge, with the
+        line's ink (its long faint tail left out)."""
         if not isinstance(symbol_layer, QgsSimpleLineSymbolLayer):
             return
         for effect in self._effect_list(symbol_layer):
@@ -5099,17 +5117,17 @@ class QgisMapLibreStyleExporter:
             if name != "QgsBlurEffect" or _enum_int(effect.drawMode()) == 1:
                 continue
             unit = effect.blurUnit() if hasattr(effect, "blurUnit") else Qgis.RenderUnit.Millimeters
-            radius = PropertyExtractor.static_pixels(effect.blurLevel(), unit)
-            if radius <= 0:
+            scale = self.blur_scale(effect, PropertyExtractor.static_pixels(effect.blurLevel(), unit))
+            if scale <= 0:
                 return
-            paint = layer_def["paint"]
             width = max(PropertyExtractor.static_pixels(symbol_layer.width(),
                                                         symbol_layer.widthUnit()), 1.0)
-            wide = ex.add(paint.get("line-width", 1), 2 * radius)
-            paint["line-width"] = wide
-            paint["line-blur"] = ex.mul(wide, 0.5)
-            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1), float(effect.opacity()) * min(
-                1.0, 2.0 * width / (width + 2.0 * radius)))
+            half = width / 2.0 + 2.0 * scale  # triangle half-width; ink = peak x half
+            paint = layer_def["paint"]
+            paint["line-width"] = ex.add(paint.get("line-width", 1), 2 * half - width)
+            paint["line-blur"] = round(half, 3)
+            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1),
+                                           float(effect.opacity()) * min(1.0, width / half))
             return
 
     def _line_effect_layers(self, symbol_layer, layer_def: dict):
