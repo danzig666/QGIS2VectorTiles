@@ -158,6 +158,11 @@ jobs:
           chromium="$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")"
           test -x "${chromium}"
           echo "Q2VT_CHROMIUM=${chromium}" >> "${GITHUB_ENV}"
+      - name: MapLibre bundle is built from tools/maplibre
+        working-directory: tools/maplibre
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          python3 build.py --check
       - name: Browser tests
         run: tools/ci/run_test_files.sh "Browser tests" $(ls tests/browser/test_*.py | sort)
       - uses: actions/upload-artifact@v5

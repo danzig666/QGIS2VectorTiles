@@ -39,7 +39,7 @@ def test_release_layout_and_inventory(tmp_path, bundle, profile):
     assert result.activated and read_current(_pub(tmp_path))["releaseId"] == result.release_id
     for path in ("index.html", "manifest.json", "style.json", "release.json", "data/map.pmtiles",
                  "assets/app.mjs", "assets/transport.mjs", "assets/maplibre-gl.mjs",
-                 "assets/maplibre-gl-worker.mjs", "assets/maplibre-gl-shared.mjs",
+                 "assets/maplibre-gl-worker.mjs",
                  "assets/visible_labels.mjs", "assets/vendor/pmtiles.js", "assets/locales/hu.json",
                  "sprite/sprite.json", "sprite/sprite@2x.png", "glyphs/Noto Sans Regular/0-255.pbf",
                  "licenses/MAPLIBRE-LICENSE.txt", "licenses/PMTILES-LICENSE.txt",

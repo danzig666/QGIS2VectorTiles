@@ -583,7 +583,7 @@ class LinePropertyExtractor:
         middle of every half zoom (within 2^0.25 of QGIS), every whole zoom
         for round caps (whose dashes take 15 rows of MapLibre's 512-row line
         atlas each). The patched MapLibre multiplies by the width at the
-        current zoom (tools/patch_maplibre.py)."""
+        current zoom (tools/maplibre/patches)."""
         low, high = LinePropertyExtractor._DASH_PERIOD_PX
         step = 1.0 if round_cap else 0.5
         start = math.floor(max(0.0, min_zoom) / step) * step
@@ -3492,7 +3492,7 @@ class QgisMapLibreStyleExporter:
     MAX_OVERZOOM_PATTERN_SPRITE_PX = 400_000
     _overzoom_pattern_px = 0
     # Style layer metadata: the zoom of the last per-zoom texture, which the
-    # patched MapLibre (tools/patch_maplibre.py) keeps scaling with the map
+    # patched MapLibre (tools/maplibre/patches) keeps scaling with the map
     # above it (stock MapLibre draws it in the pixels of the view's integer
     # zoom: 2x too small one zoom deeper, 4x two zooms deeper ...).
     PATTERN_ZOOM_FLAG = "q2vt:pattern-zoom"
@@ -3632,7 +3632,7 @@ class QgisMapLibreStyleExporter:
     # QGIS (instead of 1x-2x), exact in the middle of every zoom.
     # Textures of patterns sized only in screen units are drawn at their true
     # size instead: their style layer carries SCREEN_PATTERN_FLAG, which the
-    # patched MapLibre (tools/patch_maplibre.py) draws at the real zoom.
+    # patched MapLibre (tools/maplibre/patches) draws at the real zoom.
     TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
     SCREEN_PATTERN_FLAG = "q2vt:screen-pattern"
     PATTERN_ANCHOR_FLAG = "q2vt:pattern-anchor"
@@ -6124,7 +6124,7 @@ class QgisMapLibreStyleExporter:
         shape = _enum_int(background.type(), 0)
         if _enum_int(background.sizeType(), 0) == 0 and shape in self.FRAME_SHAPES:
             # QGIS bounds the text by the shape, then adds the buffer: the
-            # patched MapLibre enlarges the fitted text box (tools/patch_maplibre.py).
+            # patched MapLibre enlarges the fitted text box (tools/maplibre/patches).
             layer_def.setdefault("metadata", {})["q2vt:frame-shape"] = self.FRAME_SHAPES[shape]
             background = self._stroke_centred_buffer(background)
         image = self._background_image(background, zoom=fixed_zoom)

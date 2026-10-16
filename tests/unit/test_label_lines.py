@@ -5,7 +5,6 @@ import json
 import math
 import os
 import random
-import re
 import shutil
 import subprocess
 
@@ -13,8 +12,9 @@ import pytest
 
 import label_lines as ll
 
-SHARED_MJS = os.path.join(os.path.dirname(__file__), "..", "..", "resources", "ml_viewer",
-                          "maplibre-gl-shared.mjs")
+# MapLibre's readable build (tools/maplibre: npm ci), which the bundle is built from.
+READABLE_MJS = os.path.join(os.path.dirname(__file__), "..", "..", "tools", "maplibre", "node_modules",
+                            "maplibre-gl", "dist", "maplibre-gl-worker-dev.mjs")
 
 
 def _zigzag(x, y, count, segment, half_turn, direction=0.0):
@@ -121,35 +121,38 @@ def test_windows_never_cross_a_tile_edge():
 
 
 def _maplibre_functions():
-    """The vendored MapLibre's checkMaxAngle and getCenterAnchor (and the
-    helpers they call), as JavaScript source."""
-    source = open(SHARED_MJS, encoding="utf-8").read()
+    """MapLibre's checkMaxAngle and getCenterAnchor (and the helpers they
+    call), as JavaScript source."""
+    source = open(READABLE_MJS, encoding="utf-8").read()
 
     def function(name):
-        start = source.index(f"function {name}(")
+        start = source.index(f"\nfunction {name}(") + 1
         depth, i = 0, source.index("{", start)
         while True:
             depth += {"{": 1, "}": -1}.get(source[i], 0)
             i += 1
             if depth == 0:
                 return source[start:i]
-    check = re.search(r"function (\w+)\(e,t,n,r,i\)\{if\(t\.segment===void 0\|\|n===0\)return!0;",
-                      source)
-    center = re.search(r"function (\w+)\(e,t,n,r,i,a\)\{let o=([\w$]+)\(n,i,a\),s=([\w$]+)\(n,r\)"
-                       r"\*a,c=0,l=([\w$]+)\(e\)/2;", source)
-    assert check and center, "MapLibre changed: check the port in core/label_lines.py"
-    body = function(center.group(1))
-    anchor, interpolate = re.search(r"new ([\w$]+)\(([\w$]+)\.number\(", body).groups()
-    names = [check.group(1), center.group(1), center.group(2), center.group(3), center.group(4)]
-    return "\n".join(function(name) for name in names), names[0], names[1], anchor, interpolate
+    names = ["checkMaxAngle", "getCenterAnchor", "getAngleWindowSize", "getShapedLabelLength",
+             "getLineLength"]
+    try:
+        functions = "\n".join(function(name) for name in names)
+    except ValueError:
+        raise AssertionError("MapLibre changed: check the port in core/label_lines.py") from None
+    body = function("getCenterAnchor")
+    assert "new Anchor(interpolateFactory.number(" in body, \
+        "MapLibre changed: check the port in core/label_lines.py"
+    return functions, names[0], names[1], "Anchor", "interpolateFactory"
 
 
 def test_check_max_angle_is_maplibre_s(tmp_path):
-    """The port gives MapLibre's answers (the vendored maplibre-gl-shared.mjs
-    run in Node) on random lines, labels and anchors."""
+    """The port gives MapLibre's answers (MapLibre's own code run in Node) on
+    random lines, labels and anchors."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is not installed")
+    if not os.path.exists(READABLE_MJS):
+        pytest.skip("MapLibre's readable build is not installed (tools/maplibre: npm ci)")
     functions, check, center, anchor, interpolate = _maplibre_functions()
     rng = random.Random(3)
     cases = []

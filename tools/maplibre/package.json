@@ -1,0 +1,9 @@
+{
+  "name": "q2vt-maplibre-build",
+  "private": true,
+  "description": "Builds resources/ml_viewer/maplibre-gl*.mjs: MapLibre's readable build, our patches, minified. See README.md.",
+  "dependencies": {
+    "esbuild": "0.28.2",
+    "maplibre-gl": "6.14.0"
+  }
+}

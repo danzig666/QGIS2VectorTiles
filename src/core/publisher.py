@@ -9,7 +9,7 @@ a sub-directory of one) can host, with no tile server.
       style.json            relative tile, sprite and glyph URLs
       tiles/{z}/{x}/{y}.pbf  uncompressed Mapbox Vector Tiles (XYZ rows)
       sprite*.json|png, glyphs/...
-      maplibre-gl.mjs, maplibre-gl-shared.mjs, maplibre-gl-worker.mjs, maplibre-gl.css
+      maplibre-gl.mjs, maplibre-gl-worker.mjs, maplibre-gl.css
 
 The package is first written to a temporary sibling folder; a previous
 package is moved to a backup, the new one renamed into place and the backup
@@ -110,8 +110,8 @@ def write_static_package(export_dir: str, style: dict, source_name: str,
         for name in ("sprite", "glyphs"):
             if os.path.isdir(os.path.join(style_dir, name)):
                 shutil.copytree(os.path.join(style_dir, name), os.path.join(staging, name))
-        for name in ("maplibre-gl.mjs", "maplibre-gl-shared.mjs", "maplibre-gl-worker.mjs",
-                     "maplibre-gl.css", "MAPLIBRE-LICENSE.txt", "visible_labels.mjs"):
+        for name in ("maplibre-gl.mjs", "maplibre-gl-worker.mjs", "maplibre-gl.css",
+                     "MAPLIBRE-LICENSE.txt", "visible_labels.mjs"):
             shutil.copy2(os.path.join(viewer_dir, name), os.path.join(staging, name))
         with open(os.path.join(staging, "index.html"), "w", encoding="utf-8") as handle:
             handle.write(_VIEWER.format(center=json.dumps([float(c) for c in center]),

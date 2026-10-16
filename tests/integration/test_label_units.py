@@ -502,9 +502,10 @@ def test_a_border_in_another_unit_than_the_buffer_joins_it_per_zoom(mc, at):
 
 
 def test_the_bundled_maplibre_fits_flagged_frames_around_their_shape():
-    """tools/patch_maplibre.py patched the frame fit of the shared bundle."""
+    """The bundle was built with the frame fit patch (tools/maplibre); its
+    worker lays out the labels."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    with open(os.path.join(root, "resources", "ml_viewer", "maplibre-gl-shared.mjs"), encoding="utf-8") as handle:
+    with open(os.path.join(root, "resources", "ml_viewer", "maplibre-gl-worker.mjs"), encoding="utf-8") as handle:
         bundle = handle.read()
-    assert "/*q2vt-frame-shape*/" in bundle
-    assert bundle.count("q2FrameBox(") == 3  # the helper and both fits (horizontal, vertical text)
+    assert "09_label_frames" in bundle.split("\n", 1)[0]
+    assert '"q2vt:frame-shape"' in bundle
