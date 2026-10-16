@@ -1322,9 +1322,11 @@ class PublishDialog(QDialog):
         self.r_detail.blockSignals(True)
         self.r_detail.clear()
         if best is not None:
-            self.r_detail.addItem(tr("Like the image: {} per pixel (recommended)").format(
-                _metres(plan.native_m)), "image")
-        finer = tr(" – finer than the image, no more detail")
+            like = (tr("Like the service's sharpest tiles: {} per pixel (recommended)") if plan.online
+                    else tr("Like the image: {} per pixel (recommended)"))
+            self.r_detail.addItem(like.format(_metres(plan.native_m)), "image")
+        finer = (tr(" – finer than the service, no more detail") if plan.online
+                 else tr(" – finer than the image, no more detail"))
         map_zoom = self.e_max_zoom.value()
         self.r_detail.addItem(tr("Like the map: {} per pixel").format(
             _metres(ground_resolution(map_zoom, lat))) + (finer if best is not None and map_zoom > best

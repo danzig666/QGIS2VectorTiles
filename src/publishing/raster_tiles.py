@@ -109,6 +109,49 @@ def native_resolution(layer, transform_context=None) -> Optional[float]:
     return math.sqrt(dx * dy)
 
 
+def service_resolution(layer, transform_context, at_3857) -> Optional[float]:
+    """Ground metres per pixel of the finest tiles of a tiled online service
+    (XYZ, WMTS: QGIS lists their tile resolutions), measured at ``at_3857``
+    (the published area's centre, Web Mercator); None for services that
+    draw at any resolution (plain WMS)."""
+    try:
+        finest = min((r for r in layer.dataProvider().nativeResolutions() if r > 0), default=None)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        finest = None
+    if not finest:
+        finest = _xyz_zmax_resolution(layer)
+    if not finest or not layer.crs().isValid():
+        return None
+    from qgis.core import (QgsCoordinateTransformContext, QgsDistanceArea,  # pylint: disable=import-outside-toplevel
+                           QgsPointXY)
+    context = transform_context or QgsCoordinateTransformContext()
+    try:
+        to_layer = QgsCoordinateTransform(QgsCoordinateReferenceSystem(WEB_MERCATOR), layer.crs(), context)
+        centre = to_layer.transform(QgsPointXY(at_3857))
+        area = QgsDistanceArea()
+        area.setSourceCrs(layer.crs(), context)
+        area.setEllipsoid("WGS84")
+        dx = area.measureLine(centre, QgsPointXY(centre.x() + finest, centre.y()))
+        dy = area.measureLine(centre, QgsPointXY(centre.x(), centre.y() + finest))
+    except Exception:  # noqa: BLE001 - a point outside the CRS's area
+        return None
+    return math.sqrt(dx * dy) if dx > 0 and dy > 0 else None
+
+
+def _xyz_zmax_resolution(layer) -> Optional[float]:
+    """Web Mercator metres per pixel at the ``zmax`` of an XYZ layer's source
+    ("type=xyz&url=...&zmax=18"), or None."""
+    from urllib.parse import parse_qs  # pylint: disable=import-outside-toplevel
+    query = parse_qs(layer.source() or "")
+    if (query.get("type") or [""])[0].lower() != "xyz":
+        return None
+    try:
+        zmax = int((query.get("zmax") or [""])[0])
+    except ValueError:
+        return None
+    return 2 * ORIGIN / 256 / (1 << max(0, min(zmax, 24)))
+
+
 def zoom_range(config: LayerConfig, profile: PublicationProfile) -> Tuple[int, int]:
     low = profile.view.min_zoom if config.raster_min_zoom is None else config.raster_min_zoom
     high = profile.view.max_zoom if config.raster_max_zoom is None else config.raster_max_zoom
@@ -152,6 +195,10 @@ def plan_layer(project, layer, config: LayerConfig, profile: PublicationProfile,
     centre_y = (area if not area.isEmpty() else QgsRectangle(extent_3857)).center().y()
     latitude = math.degrees(math.atan(math.sinh(centre_y / 6378137.0)))
     native_m = native_resolution(layer, project.transformContext())
+    if native_m is None and (layer.providerType() or "").lower() in ONLINE_PROVIDERS:
+        # A tiled service (XYZ, WMTS): as sharp as its finest tiles.
+        centre = (area if not area.isEmpty() else QgsRectangle(extent_3857)).center()
+        native_m = service_resolution(layer, project.transformContext(), centre)
     hidpi = bool(getattr(config, "raster_hidpi", False))
     low, high = zoom_range(config, profile)
     if config.raster_max_zoom is None and getattr(config, "raster_match_native", False) and native_m:

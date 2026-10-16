@@ -313,3 +313,23 @@ def test_matching_the_image_resolution_sets_the_maximum_zoom(tmp_path):
     assert plan.max_zoom == 14 and plan.resolution(14) <= plan.native_m * 1.04 < plan.resolution(13)
     config.raster_hidpi = True
     assert raster_tiles.plan_layer(project, ortho, config, profile, EXTENT).max_zoom == 13
+
+
+def test_tiled_online_layer_is_as_sharp_as_its_finest_tiles(tmp_path):
+    """An XYZ layer (an online service: no image resolution of its own) gets
+    image tiles down to its source's max zoom ("zmax"), not only to the
+    vector tiles' maximum zoom; plain online layers without tile levels keep
+    the map's zooms."""
+    from q2vt_plugin.src.publishing import raster_tiles  # pylint: disable=import-error
+    project, profile, parcels, _ortho = _project(tmp_path)
+    profile.view.max_zoom = 16
+    xyz = QgsRasterLayer("crs=EPSG:3857&format&type=xyz&url=http://tiles.example.invalid/%7Bz%7D/%7Bx%7D/%7By%7D.png"
+                         "&zmax=18&zmin=0", "Műhold", "wms")
+    assert xyz.isValid()
+    project.addMapLayer(xyz)
+    config = LayerConfig(xyz.id())  # defaults: "like the image"
+    plan = raster_tiles.plan_layer(project, xyz, config, profile, EXTENT)
+    assert plan.online and plan.max_zoom == 18 and plan.native_m
+    assert raster_tiles._xyz_zmax_resolution(xyz) == pytest.approx(0.5971642834779395)  # pylint: disable=protected-access
+    config.raster_match_native = False  # "like the map"
+    assert raster_tiles.plan_layer(project, xyz, config, profile, EXTENT).max_zoom == 16
