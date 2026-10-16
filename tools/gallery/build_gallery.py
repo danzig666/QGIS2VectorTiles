@@ -553,17 +553,21 @@ def main():
                           "layer": layer.name()})
     # Each view shows only its own layer's style layers (as QGIS renders
     # only that layer): a neighbour's metre-wide line bled into the image.
-    owner = {}
-    with open(os.path.join(export_dir, "export_log.txt"), encoding="utf-8") as handle:
-        for line in handle:
-            match = re.search(r"Rule group (\S+): '\{layer: (.*?),type:", line)
-            if match:
-                owner[match.group(1)] = match.group(2)
+    # A dataset name starts with its layer's place in the layer tree (l07...).
+    tree_name = {i: layer.name() for layer in layers for lid, i in tree_index.items()
+                 if lid == layer.id()}
     with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
         style_layers = json.load(handle)["layers"]
     for view in views:
-        view["only"] = [l["id"] for l in style_layers
-                        if owner.get(l.get("source-layer") or "") == view["layer"]]
+        view["only"] = []
+        for style_layer in style_layers:
+            match = re.match(r"l(\d+)t", style_layer.get("source-layer") or "")
+            if match and tree_name.get(int(match.group(1))) == view["layer"]:
+                view["only"].append(style_layer["id"])
+    empty = sum(not view["only"] for view in views)
+    if empty:
+        print(f"WARNING: {empty} of {len(views)} views have no style layer of their own "
+              "(drawn blank in the browser)", flush=True)
     with open(os.path.join(out, "views.json"), "w", encoding="utf-8") as f:
         json.dump(views, f)
 
