@@ -152,6 +152,10 @@ CODES: Dict[str, CodeInfo] = {
     "Q2VT_UNSUPPORTED_SYMBOL_LAYER": CodeInfo(
         Severity.WARNING, "Symbol layer type is not supported by the web style",
         "Replace it with a supported symbol layer or accept its omission."),
+    "Q2VT_UNSUPPORTED_RENDERER": CodeInfo(
+        Severity.WARNING, "Layer renderer not supported: the layer is not drawn",
+        "Use a single symbol, categorized, graduated or rule-based renderer for this layer (for "
+        "2.5D buildings, the viewer's 3D buildings option)."),
     "Q2VT_UNSUPPORTED_EFFECT": CodeInfo(
         Severity.WARNING, "Paint effect or blend mode is ignored in the web style"),
     "Q2VT_ELSE_NESTED_SIBLINGS": CodeInfo(

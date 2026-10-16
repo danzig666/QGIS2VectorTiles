@@ -841,7 +841,16 @@ class RulesFlattener:
             return self._heatmap_placeholder(system, layer.fields())
         if system.type() in self.POINT_GROUP_MODES and system.embeddedRenderer() is not None:
             return self._point_group_rules(system)
-        return self._as_rule_renderer(system)
+        rules = self._as_rule_renderer(system)
+        if rules is None:
+            # QGIS cannot express it as rules (2.5D, embedded symbols, plugin
+            # renderers): the layer draws nothing on the web map.
+            self.diagnostics.add(
+                "Q2VT_UNSUPPORTED_RENDERER",
+                f"Layer '{layer.name()}': the {system.type()} renderer is not supported; "
+                "the layer is not drawn on the web map.",
+                layer_id=layer.id(), detail=system.type())
+        return rules
 
     @classmethod
     def _quote_class_fields(cls, renderer, fields) -> None:
