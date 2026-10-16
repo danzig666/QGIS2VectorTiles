@@ -356,7 +356,9 @@ class SymbolMaterializer:
             effects = self._line_effects(flat_rule, layer)
             if effects is not None:
                 return effects
-            dashes = self._dash_segments(flat_rule, layer)
+            dashes = self._screen_dash_bands(flat_rule, layer) if flat_rule.band_dashes else None
+            if dashes is None:
+                dashes = self._dash_segments(flat_rule, layer)
             if dashes is not None:
                 return dashes
             if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
@@ -1837,6 +1839,83 @@ class SymbolMaterializer:
                                  elements=length / period * max(1, len(pattern) // 2),
                                  what="Dash pattern", overzoom=True)
 
+    def _screen_dash_bands(self, native: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """Screen-unit custom dashes of a line whose symbol also places
+        screen-spaced interval markers (FlattenedRule.band_dashes): drawn as
+        their dashes per band of a zoom, with the markers' band steps and
+        middle zooms, so letters and ticks stay in the gaps QGIS leaves for
+        them. MapLibre's own dashes keep their exact screen length but
+        restart at every tile edge, while the markers' spacing is banded.
+        Past the archive's last zoom MapLibre's dashes draw."""
+        if not layer.useCustomDashPattern() or layer.penStyle() == Qt.PenStyle.NoPen or \
+                normalize_unit(layer.customDashPatternUnit()) == "map":
+            return None
+        props = layer.dataDefinedProperties()
+        P = QgsSymbolLayer.Property
+        if any(props.isActive(k) for k in (P.PropertyCustomDash, P.PropertyOffset,
+                                           P.PropertyDashPatternOffset,
+                                           P.PropertyTrimStart, P.PropertyTrimEnd)):
+            return None
+        if layer.alignDashPattern() or layer.tweakDashPatternOnCorners() or \
+                layer.trimDistanceStart() or layer.trimDistanceEnd() or abs(layer.offset()) > 1e-9:
+            return None
+        pattern = [_to_mm(float(v), layer.customDashPatternUnit()) for v in layer.customDashVector()]
+        if any(v is None for v in pattern):
+            return None
+        pattern = self._merge_empty_dashes(pattern)
+        if not pattern or min(pattern) < 0 or any(v <= 0 for v in pattern[0::2]):
+            return None
+        dash_offset = 0.0
+        if layer.dashPatternOffset():
+            dash_offset = _to_mm(layer.dashPatternOffset(), layer.dashPatternOffsetUnit())
+            if dash_offset is None:
+                return None
+        period = sum(pattern) * (2 if len(pattern) % 2 else 1)
+        if period * 96.0 / 25.4 < self.DASH_MIN_PERIOD_PX:
+            return None
+        low, high = self._zoom_range(native)
+        if low > high:
+            return None
+        length = self._layer_totals(native.layer)[1]
+        per_zoom_elements = sum(length / (period * ZoomLevels.map_units_per_mm(zoom + 0.5))
+                                * max(1, len(pattern) // 2) for zoom in range(low, high + 1))
+        steps = next((n for n in self.INTERVAL_BAND_STEPS
+                      if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        if self._over_budget(native, per_zoom_elements * steps, "Dash pattern"):
+            return None
+        crs = self.project_crs or native.layer.crs().authid()
+        rings = _ring_filter(layer) if native.get_attr("g") == 2 else 0
+        zoom_rules = self._per_zoom(native)
+        rules = []
+        visibility = native.visibility
+        if visibility is None or visibility.max_zoom is None or visibility.max_zoom > high + 1:
+            over = native.derive()
+            over.band_dashes = False
+            over.set_attr("o", high)
+            over.set_attr("i", high)
+            over.visibility = (visibility or ZoomInterval(float(low), None)).intersect(
+                ZoomInterval(float(high + 1), None))
+            last = zoom_rules[-1]
+            last.visibility = (last.visibility or ZoomInterval(float(high), None)).intersect(
+                ZoomInterval(float(high), float(high + 1)))
+            if not over.visibility.is_empty:
+                rules.append(over)
+        for index, zoom_rule in enumerate(zoom_rules):
+            for rule, zoom in self._sub_zoom_bands(zoom_rule, steps, index == len(zoom_rules) - 1):
+                per_mm = ZoomLevels.map_units_per_mm(zoom)
+                band = rule.derive()
+                band.band_dashes = False
+                clone = band.rule.symbol().symbolLayer(0)
+                clone.setUseCustomDashPattern(False)
+                clone.setPenStyle(Qt.PenStyle.SolidLine)
+                if hasattr(clone, "setRingFilter"):
+                    clone.setRingFilter(QgsLineSymbolLayer.RenderRingFilter.AllRings)
+                band.recipe = mat.dash_recipe([v * per_mm for v in pattern], dash_offset * per_mm,
+                                              crs, 0.0, rings)
+                band.set_attr("m", 2)
+                rules.append(band)
+        return rules
+
     # A map-unit grid becomes point features only from the zoom where its
     # spacing reaches this many CSS px; below that it is a per-zoom texture
     # (identical look, a fraction of the features).
@@ -1866,6 +1945,8 @@ class SymbolMaterializer:
 
     # Interval markers along a line are few per tile even when close together.
     INTERVAL_MIN_SPACING_PX = 2.0
+    # Bands per zoom of screen-spaced interval markers, finest first within the budget.
+    INTERVAL_BAND_STEPS = (16, 8, 4, 2)
 
     # Budget of generated pattern features per rule (markers, dashes, line
     # work): past it the pattern is a texture at every zoom (reported), so
@@ -2538,9 +2619,12 @@ class SymbolMaterializer:
         length = self._layer_totals(native.layer)[1]
         per_zoom_elements = sum(length / max(to_map(layer.interval(), layer.intervalUnit(), zoom + 0.5),
                                              1e-9) for zoom in range(low, high + 1))
-        # Positions in eighths of a zoom (spacing within +-4 % of QGIS's;
-        # fewer bands when the markers would exceed the output budget).
-        steps = next((n for n in (8, 4, 2) if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        # Positions in sixteenths of a zoom (spacing within +-2.2 % of
+        # QGIS's; fewer bands when the markers would exceed the output
+        # budget). A dashed line of the symbol is banded alike
+        # (_screen_dash_bands) so the markers stay in its gaps.
+        steps = next((n for n in self.INTERVAL_BAND_STEPS
+                      if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
         if self._over_budget(native, per_zoom_elements * steps, "Marker line"):
             return None
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, 0.0,

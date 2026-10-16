@@ -1144,6 +1144,25 @@ class RulesFlattener:
         return bool(parsed.referencedColumns()) or parsed.needsGeometry() or \
             bool({"feature", "id", "geometry"} & set(parsed.referencedVariables()))
 
+    @staticmethod
+    def _screen_interval_markers(symbol, except_index: int) -> bool:
+        """Whether another layer of ``symbol`` places markers (or hashes) at a
+        screen-unit interval: letters or ticks along the line, which a
+        dashed line of the symbol often leaves gaps for."""
+        from .ddp_fetcher import dense_marker_line  # pylint: disable=import-outside-toplevel
+        interval = int(getattr(Qgis.MarkerLinePlacement.Interval, "value",
+                               Qgis.MarkerLinePlacement.Interval))
+        for index, layer in enumerate(symbol.symbolLayers()):
+            if index == except_index or not layer.enabled() or \
+                    layer.layerType() not in ("MarkerLine", "HashLine"):
+                continue
+            flags = int(getattr(layer.placements(), "value", layer.placements()))
+            if flags & interval and layer.interval() > 0 and not dense_marker_line(layer) and \
+                    layer.intervalUnit() not in (Qgis.RenderUnit.MapUnits,
+                                                 Qgis.RenderUnit.MetersInMapUnits):
+                return True
+        return False
+
     def _fold_enabled_property(self, flat_rule: FlattenedRule, symbol_layer):
         """Turn a feature-dependent data-defined *enabled* into a rule filter.
 
@@ -1648,6 +1667,8 @@ class RulesFlattener:
             # stratum (0 here; fidelity.feature_order), rule, symbol layer, part.
             order = (-flat_rule.get_attr("l"), draw_pass, 0, self._draw_seq, layer_idx)
             rule_clone.order = order + (0,)
+            rule_clone.band_dashes = layer_type == "SimpleLine" and \
+                self._screen_interval_markers(symbol, layer_idx)
             materialized = self.materializer.materialize(rule_clone, clone_symbol_layer)
             if materialized is not None:
                 for part, component in enumerate(materialized):

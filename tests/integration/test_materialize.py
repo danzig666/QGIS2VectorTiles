@@ -1531,11 +1531,11 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
     placed = [r for r in rules if r.recipe is not None and r.recipe.kind == "marker_points"]
     zooms = {r.get_attr("o") for r in placed}
     assert len(zooms) > 3
-    # Eighths of a zoom, each with 4 mm (96 dpi, Web Mercator grid) at its
-    # middle: within +-4 % of QGIS's spacing anywhere in the band.
+    # Sixteenths of a zoom, each with 4 mm (96 dpi, Web Mercator grid) at
+    # its middle: within +-2.2 % of QGIS's spacing anywhere in the band.
     from fidelity.zoom import zoom_to_scale
     top = max(zooms)
-    assert len([r for r in placed if r.get_attr("o") == top]) == 8
+    assert len([r for r in placed if r.get_attr("o") == top]) == 16
     longest = max(QgsGeometry.fromWkt(wkt).length() for wkt in LINES)
     for rule in placed:
         band = rule.visibility
@@ -1547,7 +1547,7 @@ def test_screen_interval_markers_are_placed_per_zoom(plugin, tmp_path):
             # line at its start, one placement for the zoom.
             assert longest < 0.004 * zoom_to_scale(band.max_zoom)
             continue
-        assert band.max_zoom - band.min_zoom == pytest.approx(1 / 8)
+        assert band.max_zoom - band.min_zoom == pytest.approx(1 / 16)
         assert rule.recipe.param("interval") == pytest.approx(0.004 * zoom_to_scale(middle), rel=1e-6)
     # Beyond the last tile zoom, the native placement keeps the screen spacing.
     assert any(r.recipe is None and r.visibility is not None
@@ -1908,6 +1908,36 @@ def test_map_unit_dashes_match_qgis(plugin, tmp_path, geometry, offset, ring_fil
             [rules[-1].rule.symbol().symbolLayer(0).clone()])))
     ours = ink_mask(render(dashed, EXTENT, (240, 240)))
     assert mask_difference(reference, ours) < 0.05
+
+
+def test_screen_dashes_banded_with_their_interval_markers(plugin, tmp_path):
+    """A screen-unit dashed line whose symbol places markers every so many
+    mm (letters in the dash gaps) is drawn as its dashes, per band of a
+    zoom like the markers (same bands, same middle zoom), so the markers
+    stay in the gaps; MapLibre's dashes would restart at every tile edge."""
+    from qgis.core import QgsMarkerLineSymbolLayer
+    from q2vt_plugin.src.utils.zoom_levels import ZoomLevels
+    layer = _layer("LineString", LINES, str(tmp_path / "gaps.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 0.3)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector([4.0, 2.0])
+    line.setCustomDashPatternUnit(Qgis.RenderUnit.Millimeters)
+    markers = QgsMarkerLineSymbolLayer(True, 6.0)
+    markers.setPlacements(Qgis.MarkerLinePlacement.Interval)
+    markers.setOffsetAlongLine(5.0)
+    markers.setSubSymbol(_marker(Qgis.MarkerShape.Circle, 1.0))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line, markers])))
+    _, rules, _ = _export(plugin, layer, tmp_path)
+    dashes = [r for r in rules if r.recipe is not None and r.recipe.kind == "dash_segments"]
+    points = [r for r in rules if r.recipe is not None and r.recipe.kind != "dash_segments"]
+    assert dashes and points
+    bands = {(r.get_attr("o"), r.get_attr("b")) for r in dashes}
+    assert {(r.get_attr("o"), r.get_attr("b")) for r in points} <= bands
+    assert max(b for _, b in bands) == 15  # 16 bands a zoom
+    for rule in dashes:
+        middle = rule.get_attr("o") + (rule.get_attr("b") + 0.5) / 16
+        assert rule.recipe.param("pattern")[0] == pytest.approx(
+            4.0 * ZoomLevels.map_units_per_mm(middle), rel=1e-6)
 
 
 @pytest.mark.parametrize("size,clip,colour_ddp,textured", [

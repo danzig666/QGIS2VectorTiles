@@ -117,6 +117,38 @@ def _expressions_of_symbol(symbol):
     return exprs
 
 
+# rand(), randf() and the randomized waves (wave_randomized, triangular_ /
+# square_wave_randomized).
+_RANDOM_CALL = re.compile(r"\b(?:rand|randf|\w*wave_randomized)\s*\(", re.IGNORECASE)
+
+
+def _symbol_layers(symbol):
+    for layer in symbol.symbolLayers():
+        yield layer
+        if layer.subSymbol():
+            yield from _symbol_layers(layer.subSymbol())
+
+
+def random_reason(item, exprs, probe=None) -> str:
+    """What makes a style draw differently on every render (random values),
+    or "": its QGIS and browser images cannot match, so the gallery marks it
+    and leaves it out of the averages."""
+    if any(_RANDOM_CALL.search(text or "") for text in exprs):
+        return "random expression"
+    symbols = [item["symbol"]] if item["kind"] == "symbol" else []
+    if probe is not None and probe.renderer() is not None:
+        from qgis.core import QgsRenderContext
+        symbols += probe.renderer().symbols(QgsRenderContext())
+    for symbol in symbols:
+        for layer in _symbol_layers(symbol):
+            if layer.layerType() == "RandomMarkerFill":
+                return "random marker fill"
+            if layer.layerType() == "PointPatternFill" and (
+                    layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY()):
+                return "random point pattern"
+    return ""
+
+
 def _expressions_of_labels(settings):
     exprs = [settings.fieldName if settings.isExpression else f'"{settings.fieldName}"']
     props = settings.dataDefinedProperties()
@@ -283,6 +315,7 @@ def build_layer(item, index, data_dir, hard=False):
                            QgsVectorLayer, QgsVectorLayerSimpleLabeling)
     from qgis.PyQt.QtCore import QVariant
     geom, rules, exprs, probe = describe_layer(item)
+    item["random"] = random_reason(item, exprs, probe)
     columns, bools = set(), set()
     for text in exprs + [r[0] for r in rules]:
         expression = QgsExpression(text or "")
@@ -431,6 +464,29 @@ def color_score(a, b) -> float:
     return round(float(bad.sum()) / total, 4)
 
 
+def sort_cards(cards):
+    """Worst first; styles with random values (no fixed answer) last."""
+    cards.sort(key=lambda c: (bool(c.get("random")), -c["score"]["shape"]))
+
+
+def summarize(cards) -> str:
+    """Mean shape mismatch, overall and per geometry, of the styles without
+    random values."""
+    fixed = [c for c in cards if not c.get("random")]
+    mean = sum(c["score"]["shape"] for c in fixed) / max(1, len(fixed))
+    by_geometry = []
+    for geometry in ("Point", "LineString", "Polygon"):
+        values = [c["score"]["shape"] for c in fixed if c["geometry"] == geometry]
+        if values:
+            by_geometry.append(f"{geometry.lower()}s {sum(values) / len(values):.1%} "
+                               f"({len(values)})")
+    random_count = len(cards) - len(fixed)
+    return (f"mean shape mismatch {mean:.1%} ({'; '.join(by_geometry)})"
+            + (f", without the {random_count} styles with random values (listed last, marked "
+               "random: they draw differently on every render)" if random_count else "")
+            + ". Worst first.")
+
+
 def write_html(out_dir, cards, summary):
     esc = html.escape
     rows = []
@@ -449,7 +505,7 @@ def write_html(out_dir, cards, summary):
   </div>""")
         rows.append(f"""
 <section class="card">
-  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · {esc(card.get('geometry', ''))} · shape mismatch {card['score']['shape']:.1%}</small></h2>{''.join(figures)}
+  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · {esc(card.get('geometry', ''))} · shape mismatch {card['score']['shape']:.1%}{' · random: ' + esc(card['random']) + ', not in the averages' if card.get('random') else ''}</small></h2>{''.join(figures)}
   <ul class="diags">{diags or '<li class="ok">No diagnostics</li>'}</ul>
 </section>""")
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -623,20 +679,12 @@ def main():
         result["shape"] = round(sum(v["score"]["shape"] for v in per_zoom) / len(per_zoom), 4)
         cards.append({"id": item["id"], "name": item["name"], "kind": item["kind"],
                       "geometry": item["geometry"], "score": result, "diagnostics": own,
-                      "views": per_zoom})
-    cards.sort(key=lambda c: -c["score"]["shape"])
+                      "views": per_zoom, "random": item.get("random", "")})
+    sort_cards(cards)
     with open(os.path.join(img_dir, "results.json"), "w", encoding="utf-8") as f:
         json.dump(cards, f, indent=1, ensure_ascii=False)
-    mean = sum(c["score"]["shape"] for c in cards) / max(1, len(cards))
-    by_geometry = []
-    for geometry in ("Point", "LineString", "Polygon"):
-        values = [c["score"]["shape"] for c in cards if c["geometry"] == geometry]
-        if values:
-            by_geometry.append(f"{geometry.lower()}s {sum(values) / len(values):.1%} "
-                               f"({len(values)})")
     write_html(img_dir, cards, f"{len(cards)} styles{' (hard shapes)' if args.hard else ''}, "
-               f"zoom {', '.join(f'{z:g}' for z in zooms)}, mean shape mismatch {mean:.1%} "
-               f"({'; '.join(by_geometry)}). Worst first.")
+               f"zoom {', '.join(f'{z:g}' for z in zooms)}, {summarize(cards)}")
     print(f"Gallery: {os.path.join(img_dir, 'index.html')}")
     # Self-contained comparison page (overlay, swipe, blink, zoom) of every
     # style that differs.

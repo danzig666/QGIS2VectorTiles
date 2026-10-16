@@ -84,13 +84,21 @@ def marker_length_mm(marker) -> Optional[float]:
     return longest
 
 
+# Interval markers at least this far apart (screen px at 96 dpi) are placed
+# as points (materializer), however long the marker: a line pattern bends
+# markers around corners and restarts at every tile edge.
+DENSE_MARKER_MAX_SPACING_PX = 4.0
+
+
 def dense_marker_line(layer) -> bool:
     """A marker line whose markers stand closer than 4/3 of their length
-    along the line (screen units, along an interval, turned with the line),
-    where MapLibre would widen the spacing to the icon's length plus a
-    quarter of it: MapLibreConverter._dense_marker_line draws it as a line
-    pattern, by QGIS, so a random value is drawn per marker there (as in a
-    texture). A hash across the line is only its stroke's width long."""
+    along the line and less than DENSE_MARKER_MAX_SPACING_PX apart (screen
+    units, along an interval, turned with the line): too many to place one
+    by one, and MapLibre would widen the spacing of a repeated icon to its
+    length plus a quarter of it. MapLibreConverter._dense_marker_line draws
+    it as a line pattern, by QGIS, so a random value is drawn per marker
+    there (as in a texture). A hash across the line is only its stroke's
+    width long."""
     if type(layer).__name__ != "QgsMarkerLineSymbolLayer":
         return False
     try:
@@ -104,6 +112,8 @@ def dense_marker_line(layer) -> bool:
         return False
     if flags != interval_flag or not layer.rotateSymbols() or interval is None or \
             interval <= 0 or marker is None or marker.usesMapUnits() or layer.offsetAlongLine():
+        return False
+    if interval * 96.0 / 25.4 >= DENSE_MARKER_MAX_SPACING_PX:
         return False
     length = marker_length_mm(marker)
     return length is not None and interval < 4.0 / 3.0 * length

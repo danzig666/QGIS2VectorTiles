@@ -500,7 +500,11 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.43.0**. Newest first:
+This README describes QWebMap **4.44.0**. Newest first:
+
+**4.44.0** — markers along lines placed more exactly
+- Markers spaced in screen units (mm, points) along lines keep QGIS's spacing within ±2.2 % (was ±4.4 %), and a dashed line drawn with them is laid out alike, so letters and ticks stay in the dash gaps QGIS leaves for them (e.g. boundary lines with crosses, outlines with codes).
+- Markers made long by an offset part (a symbol of several parts) or a wide glyph, at ordinary spacing, are placed one by one again instead of as a repeating pattern that bent them around corners.
 
 **4.43.0** — QGIS styles drawn more faithfully, MapLibre GL JS 6.14
 - Checked against 853 styles of the QGIS Hub: the average difference between QGIS and the web map fell from 5.5 % to 3.4 %, and styles more than 20 % off from 81 to 42. Fixed among others: hatches made of markers or pencil dots, dense marker lines (moss, sketchy lines), glowing (blurred) lines, embedded images in raster lines, zero-width hatch lines, geometry generators using aggregates, `@symbol_color` in nested symbols, rotated point patterns, arrow drop shadows, sizes in meters at scale.

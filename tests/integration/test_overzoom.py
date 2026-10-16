@@ -734,10 +734,10 @@ def test_overzoom_budget_is_shared_by_every_rule_of_the_last_tiles(plugin, tmp_p
 
 
 def test_screen_interval_markers_get_sub_zoom_bands_where_lines_hold_several(plugin, tmp_path):
-    """Screen-unit interval markers are placed per eighth of a zoom (their
-    map spacing halves within a zoom). Where no ring is an interval long,
-    every polygon has one marker, at its offset along the ring: one
-    placement a zoom, not eight copies of the layer."""
+    """Screen-unit interval markers are placed per sixteenth of a zoom
+    (their map spacing halves within a zoom). Where no ring is an interval
+    long, every polygon has one marker, at its offset along the ring: one
+    placement a zoom, not sixteen copies of the layer."""
     from fidelity.model import ZoomInterval
     marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 1)
     marker.setSizeUnit(MM)
@@ -755,7 +755,7 @@ def test_screen_interval_markers_get_sub_zoom_bands_where_lines_hold_several(plu
     for zoom in range(0, 12):
         assert [r.visibility for r in bands(zoom)] == [ZoomInterval(float(zoom), zoom + 1.0)]
     for zoom in range(12, 17):
-        assert len(bands(zoom)) == 8
+        assert len(bands(zoom)) == 16
 
 
 def test_bridge_zoom_bands_only_where_the_tiles_lack_the_data():
