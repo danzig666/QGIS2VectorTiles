@@ -152,3 +152,23 @@ def test_scale_range_and_show_property(export, tmp_path):  # noqa: F811
     values = [v for f in _tile_features(result, layers[0]["source-layer"])
               for k, v in f["properties"].items() if k.startswith("q2vt_property_name")]
     assert values == ["10;20;40"]  # the second feature's diagram is not shown (a = 5)
+
+
+def test_diagrams_with_a_symbol_and_without_one(export, tmp_path):  # noqa: F811
+    """The diagram rule has a dataset of its own (it shared the first
+    renderer rule's name, so the symbol became a diagram too), and a "No
+    symbols" layer, the usual way to show diagrams only, keeps them."""
+    from qgis.core import QgsNullSymbolRenderer  # pylint: disable=import-outside-toplevel
+    layer = _diagrams(_layer(tmp_path, "Point", "stations"), QgsPieDiagram())
+    _, result = export(layer)
+    layers, style = _diagram_layers(result)
+    symbols = [l for l in style["layers"] if l.get("source-layer") and l not in layers
+               and l["type"] in ("circle", "symbol")]
+    assert len(layers) == 1 and symbols
+    assert layers[0]["source-layer"] not in {l["source-layer"] for l in symbols}
+    alone = _diagrams(_layer(tmp_path, "Point", "only"), QgsPieDiagram())
+    alone.setRenderer(QgsNullSymbolRenderer())
+    exporter, result = export(alone)
+    layers, _ = _diagram_layers(result)
+    assert len(layers) == 1
+    assert not exporter.diagnostics.by_code("Q2VT_UNSUPPORTED_RENDERER")

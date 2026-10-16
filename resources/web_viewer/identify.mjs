@@ -93,6 +93,7 @@ export class Identify {
 
   async click(event) {
     if (this.viewer.measuring || this.viewer.streetView || this.viewer.drawing) return;
+    this.ticket = (this.ticket || 0) + 1;  // an earlier click still loading is dropped
     const hits = this.hits(event.point);
     if (!hits.length) {
       this.popup.remove();
@@ -104,6 +105,8 @@ export class Identify {
   }
 
   async open(layerId, key, lngLat, feature = null) {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    const stale = () => ticket !== this.ticket;  // a newer click came meanwhile
     if (this.intercept && this.intercept(layerId, key, lngLat)) {
       this.popup.remove();
       this.select({ layerId, key });
@@ -112,6 +115,7 @@ export class Identify {
     const layer = this.layers.get(layerId);
     let record = null;
     try { record = await this.lookup.get(layerId, key); } catch { record = null; }
+    if (stale()) return;
     const box = element("div", "q2vt-popup");
     box.append(element("h3", "", (record && record.t) || (layer ? layer.title : key)));
     if (layer) box.append(element("div", "q2vt-popup-layer", layer.title));
@@ -168,6 +172,7 @@ export class Identify {
     // Edition add-ons append their own sections (e.g. zone rules).
     if (this.extend) {
       try { await this.extend(box, { layerId, key, record }); } catch { /* the popup without them */ }
+      if (stale()) return;
     }
     const where = lngLat || (record && record.p) || this.map.getCenter();
     this.popup.setLngLat(where).setDOMContent(box).addTo(this.map);

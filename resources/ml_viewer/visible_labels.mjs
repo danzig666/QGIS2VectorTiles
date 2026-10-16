@@ -278,6 +278,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
     pending = null;
     if (paused || unsupported) return;
     last = performance.now();
+    // Final once the map stands still with its tiles loaded.
+    if (!map.isMoving() && map.isSourceLoaded(sourceId)) dirty = false;
     const view = viewRect(map, maplibregl);
     const perPx = (view[2] - view[0]) / Math.max(1, map.getContainer().clientWidth);
     const margin = EDGE_PX * perPx;
@@ -363,7 +365,12 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   };
   // Throttled, not debounced: the first change is handled at once, later
   // ones at most every `interval` ms, so labels follow tiles and moves.
+  // "idle" also follows paint-only changes (an animated marker's frames, ten
+  // a second): labels are placed again only when something they depend on
+  // changed since the last final placement (moves, tiles, toggles).
+  let dirty = true;
   const throttled = (interval) => () => {
+    dirty = true;
     if (pending || paused || unsupported) return;
     pending = setTimeout(update, Math.max(0, last + interval - performance.now()));
   };
@@ -376,7 +383,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   map.on("move", onMove);
   map.on("moveend", onMoveEnd);
   map.on("sourcedata", onSourceData);
-  map.on("idle", schedule);
+  const onIdle = () => { if (dirty) schedule(); };
+  map.on("idle", onIdle);
   update();
   return {
     update, sync: overlap.sync, groups,
@@ -393,7 +401,7 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
       map.off("move", onMove);
       map.off("moveend", onMoveEnd);
       map.off("sourcedata", onSourceData);
-      map.off("idle", schedule);
+      map.off("idle", onIdle);
       overlap.destroy();
       for (const group of groups.values()) {
         const source = map.getSource(group.source);

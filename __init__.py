@@ -122,7 +122,11 @@ class QGIS2VectorTiles:
         self.dialog.activateWindow()
 
     def _dialog_closed(self):
-        self.dialog = None
+        dialog, self.dialog = self.dialog, None
+        # Deleted with its widgets (their links to the project end), unless
+        # an upload still reports to it.
+        if dialog is not None and getattr(dialog, "task", None) is None:
+            dialog.deleteLater()
 
     def unload(self):
         """Unload plugin: remove the provider, the action and stop previews."""
@@ -139,8 +143,10 @@ class QGIS2VectorTiles:
                 self.iface.mainWindow().menuBar().removeAction(menu.menuAction())
             action.deleteLater()
         if getattr(self, "dialog", None) is not None:
-            self.dialog.close()
-            self.dialog = None
+            dialog, self.dialog = self.dialog, None
+            dialog.close()
+            if getattr(dialog, "task", None) is None:
+                dialog.deleteLater()
         from .src.publishing.preview_server import stop_all  # pylint: disable=import-outside-toplevel
         stop_all()
 

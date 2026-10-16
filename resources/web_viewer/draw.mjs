@@ -91,7 +91,8 @@ export function decodeDrawing(text) {
   let total = 0;
   for (const item of raw.slice(0, MAX_FEATURES)) {
     if (!Array.isArray(item) || typeof item[1] !== "string") continue;
-    const kind = KINDS[item[0]];
+    // Only own indexes: "constructor" & co. are Array properties too.
+    const kind = Number.isInteger(item[0]) ? KINDS[item[0]] : undefined;
     let coords;
     try { coords = decodeLine(item[1]); } catch { continue; }
     coords = coords.filter(([lng, lat]) => Math.abs(lng) <= 180 && Math.abs(lat) <= 85.06);
@@ -100,7 +101,7 @@ export function decodeDrawing(text) {
     if (kind === "point" || kind === "text") coords = coords.slice(0, 1);
     total += coords.length;
     if (total > MAX_POINTS) break;
-    const color = COLORS[item[2]] || COLORS[0];
+    const color = (Number.isInteger(item[2]) && COLORS[item[2]]) || COLORS[0];
     const label = kind === "text" ? clip(item[3] ?? "", MAX_TEXT).trim() : "";
     if (kind === "text" && !label) continue;
     out.push({ kind, coords, color, text: label });

@@ -6,6 +6,7 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
     Qgis,
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterNumber,
     QgsProcessingParameterExtent,
     QgsProcessingParameterFolderDestination,
@@ -361,8 +362,9 @@ class QGIS2VectorTilesAlgorithm(QgsProcessingAlgorithm):
                 return results
 
         except (NameError, ValueError, AttributeError, TypeError) as e:
-            feedback.reportError(f"Error during Vector tiles package generation: {str(e)}")
-            return {}
+            # A failed run must fail (models and batch runs check it), not
+            # end as a success without outputs.
+            raise QgsProcessingException(f"Error during Vector tiles package generation: {e}") from e
 
         # Return empty results dictionary (modify as needed for your use case)
         return {}

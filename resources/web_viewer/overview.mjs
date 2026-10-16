@@ -90,9 +90,11 @@ export class OverviewControl {
     this.onMove = () => this.sync();
     map.on("move", this.onMove);
     // Layers switched on/off, another basemap: the overview follows (later).
+    // Throttled, not debounced: an animated marker changes the style every
+    // frame, and a debounce restarted on each change never ran.
     this.onStyle = () => {
-      clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.restyle(), 600);
+      if (this.timer) return;
+      this.timer = setTimeout(() => { this.timer = null; this.restyle(); }, 600);
     };
     map.on("styledata", this.onStyle);
   }

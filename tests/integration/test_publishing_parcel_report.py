@@ -81,6 +81,7 @@ def build_site(tmp_path, **profile_changes):
     profile = PublicationProfile(title="Telekinfó", slug="telekinfo", locale="hu")
     profile.view.min_zoom, profile.view.max_zoom = 14, 15
     profile.output.local_directory = str(tmp_path / "out")
+    profile.output.local_versions = True  # the viewer tests use the stable entry page
     profile.layers = [LayerConfig(parcels.id())]
     info = profile.parcel_info
     info.enabled, info.parcel_layer_id, info.key_field = True, parcels.id(), "hrsz"

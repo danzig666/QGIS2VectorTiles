@@ -49,6 +49,8 @@ def searchable(combo: QComboBox) -> QComboBox:
 
     def finished():
         text = combo.currentText()
+        if text == combo.itemText(combo.currentIndex()):
+            return  # the chosen layer (two layers may share its name: findText finds the first)
         index = combo.findText(text, Qt.MatchFlag.MatchExactly)
         if index >= 0:
             if index != combo.currentIndex():

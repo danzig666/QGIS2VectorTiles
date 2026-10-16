@@ -138,11 +138,15 @@ def verify_release(public_release_url: str, release_dir: str, viewer_origin: Opt
         if ok and not truncated and rel in inventory:
             ok = hashlib.sha256(_decoded(body, head)).hexdigest() == inventory[rel]["sha256"]
         result.add(f"mime:{rel}", ok, f"status {status}, Content-Type {head.get('content-type')!r}")
-    status, head, body, _ = http.request(join_url(public_release_url, "manifest.json"))
+    # The whole manifest (a large project's is over SMALL; cut short it did
+    # not parse and the release was never activated).
+    local_manifest = os.path.join(release_dir, "manifest.json")
+    limit = max(SMALL, os.path.getsize(local_manifest) * 2 + 1024) if os.path.exists(local_manifest) else SMALL
+    status, head, body, _ = http.request(join_url(public_release_url, "manifest.json"), limit=limit)
     try:
         remote = json.loads(_decoded(body, head))
-        ok = status == 200 and remote.get("releaseId") == manifest["releaseId"]
-    except ValueError:
+        ok = status == 200 and isinstance(remote, dict) and remote.get("releaseId") == manifest["releaseId"]
+    except (ValueError, OSError, EOFError):  # not JSON, or a cut / broken gzip body
         ok = False
     result.add("manifest", ok, f"status {status}")
     # The archive: ranges, no outer encoding, a decodable tile.

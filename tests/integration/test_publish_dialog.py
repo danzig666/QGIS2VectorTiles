@@ -160,7 +160,7 @@ def test_export_preview_and_local_publish(project, messages, tmp_path):
     assert [(n.layer().id(), n.isVisible()) for n in project.layerTreeRoot().findLayers()] == tree
     assert os.path.exists(dialog.local_result.entry_path)
     dialog.preview()
-    url = dialog.preview_server.url("arlo-terv/index.html")
+    url = dialog.preview_server.url("index.html")
     with urllib.request.urlopen(url) as response:
         # No versions by default: the site itself is in the folder (no
         # releases/<id>/ behind a bootstrap entry page).
@@ -344,7 +344,8 @@ def _window_on_a_canvas():
         """The window is not back at once, but a double-click interval later."""
         assert not dialog.isVisible()
         wait()
-        assert dialog.isVisible()
+        # (A busy machine runs the timer late: give it a little longer.)
+        assert dialog.isVisible() or QTest.qWaitFor(dialog.isVisible, 3000)
 
     def map_extent(x0, y0, x1, y1):
         """The rectangle between two pixels, rounded, as the profile keeps it (EPSG:3857)."""

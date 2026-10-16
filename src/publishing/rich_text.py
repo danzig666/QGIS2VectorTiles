@@ -16,26 +16,39 @@ ALLOWED = {"h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "strong", "em", "b", "
            "sub", "table", "thead", "tbody", "tr", "th", "td", "blockquote", "hr"}
 RENAMED = {"h1": "h3", "h2": "h3"}       # the panel's own heading is above
 EMPTY = {"br", "hr"}
-DROPPED = {"script", "style", "iframe", "object", "embed", "template", "noscript", "svg", "math",
+DROPPED = {"script", "style", "iframe", "object", "template", "noscript", "svg", "math",
            "head", "title", "textarea", "select", "button", "form"}
+VOID_DROPPED = {"embed", "img", "input", "link", "meta", "source", "track", "wbr", "area", "base"}
 SPANS = {"colspan", "rowspan"}
 
 
 class _Cleaner(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.out, self.open, self.skip = [], [], 0
+        self.out, self.open = [], []
+        self.dropping = []  # the dropped elements open around the current text
+
+    @property
+    def skip(self) -> bool:
+        return bool(self.dropping)
 
     def handle_starttag(self, tag, attrs):
         tag = RENAMED.get(tag, tag)
+        if tag in VOID_DROPPED:
+            return  # no end tag: never "open" (an <embed> hid all the text after it)
+        if tag == "body" or (tag in ALLOWED and set(self.dropping) == {"head"}):
+            # The document body starts: a <head> without its optional end tag ends.
+            self.dropping = [t for t in self.dropping if t != "head"]
+            if tag == "body":
+                return
         if tag in DROPPED:
-            self.skip += 1
+            self.dropping.append(tag)
             return
         if self.skip or tag not in ALLOWED:
             return
         spans = "".join(f' {name}="{int(value)}"' for name, value in attrs
-                        if tag in ("td", "th") and name in SPANS and value and value.isdigit()
-                        and 1 <= int(value) <= 50)
+                        if tag in ("td", "th") and name in SPANS and value
+                        and re.fullmatch(r"[0-9]{1,2}", value) and 1 <= int(value) <= 50)
         if tag in EMPTY:
             self.out.append(f"<{tag}>")
             return
@@ -53,7 +66,8 @@ class _Cleaner(HTMLParser):
     def handle_endtag(self, tag):
         tag = RENAMED.get(tag, tag)
         if tag in DROPPED:
-            self.skip = max(0, self.skip - 1)
+            if tag in self.dropping:  # the innermost open one of that name
+                del self.dropping[len(self.dropping) - 1 - self.dropping[::-1].index(tag)]
             return
         if self.skip or tag not in self.open:
             return

@@ -168,6 +168,10 @@ export class StreetView {
       }
       const { session } = await response.json();
       if (!session || !this.active) return;
+      if (this.map.getLayer(COVERAGE)) {  // a quick off/on: the other request added it first
+        this.map.setLayoutProperty(COVERAGE, "visibility", "visible");
+        return;
+      }
       this.map.addSource(COVERAGE, {
         type: "raster", tileSize: 256, maxzoom: 22,
         tiles: [`https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${encodeURIComponent(session)}&key=${encodeURIComponent(this.key)}`],

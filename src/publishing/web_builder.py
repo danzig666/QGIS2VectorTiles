@@ -142,7 +142,9 @@ def recover(publication_dir: str) -> List[str]:
                 removed.append(f"releases/{name}")
     if os.path.isdir(publication_dir):
         for name in os.listdir(publication_dir):
-            if ".tmp-" in name:
+            # Only the temporary files of what is written here (the pointer
+            # and the entry page): the folder is the user's site folder too.
+            if re.fullmatch(r"(current\.json|index\.html|bootstrap\.[0-9a-f]+\.mjs)\.tmp-[0-9a-f-]+", name):
                 try:
                     os.remove(os.path.join(publication_dir, name))
                     removed.append(name)

@@ -76,6 +76,7 @@ def site(tmp_path_factory):
     from publishing.models import XyzBasemap  # pylint: disable=import-outside-toplevel
     profile.basemap.xyz = [XyzBasemap("Teszt műhold", "https://{s}.tiles.example.test/{z}/{x}/{-y}.png",
                                       "© Példa", 0, 18)]  # a web basemap (never loaded in these tests)
+    profile.output.local_versions = True  # releases/<id>/ behind the stable entry page
     result = export_local(project, profile, EXTENT)
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         yield {"server": server, "url": server.url(f"{profile.slug}/index.html"),

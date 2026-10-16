@@ -225,8 +225,10 @@ class GlyphGenerator:
         OGR-readable format.
         """
         try:
-            from osgeo import ogr, gdal
-            gdal.UseExceptions()
+            # No gdal.UseExceptions(): it switched GDAL/OGR to exceptions for
+            # the whole QGIS session (other code here and other plugins
+            # test for None). Failures return None and are skipped below.
+            from osgeo import ogr  # pylint: disable=import-outside-toplevel
         except ImportError:
             # logger.error("GDAL/OGR Python bindings (osgeo) not available in this environment.")
             return set()

@@ -19,9 +19,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_end_to_end import export  # noqa: E402,F401  pylint: disable=wrong-import-position,unused-import
 
 
-def _labelled(layer, placement=QgsTextShadowSettings.ShadowPlacement.ShadowLowest, buffer=False):
+def _labelled(layer, placement=QgsTextShadowSettings.ShadowPlacement.ShadowLowest, buffer=False,
+              label_placement=None):
     settings = QgsPalLayerSettings()
     settings.fieldName = "zone"
+    if label_placement is not None:
+        settings.placement = label_placement
     fmt = QgsTextFormat()
     fmt.setSize(10)
     shadow = fmt.shadow()
@@ -69,7 +72,7 @@ def test_polygon_label_gets_a_shadow_copy_under_it(export, tmp_path):  # noqa: F
     assert found and all(d.severity.value == "info" for d in found)
 
 
-def _towns(tmp_path, names=("Town",), spacing=0):
+def _towns(tmp_path, names=("Town",), spacing=0, label_placement=Qgis.LabelPlacement.OverPoint):
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer  # pylint: disable=import-outside-toplevel
     from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
     from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
@@ -81,7 +84,7 @@ def _towns(tmp_path, names=("Town",), spacing=0):
         feature.setAttributes([name])
         feature.setGeometry(QgsGeometry.fromWkt(f"POINT({2121000 + i * spacing} 6021000)"))
         points.dataProvider().addFeatures([feature])
-    return _labelled(to_geopackage(points, str(tmp_path / "towns.gpkg")))
+    return _labelled(to_geopackage(points, str(tmp_path / "towns.gpkg")), label_placement=label_placement)
 
 
 def test_point_label_shadow_waits_for_its_label(export, tmp_path):  # noqa: F811
@@ -97,6 +100,14 @@ def test_point_label_shadow_waits_for_its_label(export, tmp_path):  # noqa: F811
         opacity = json.dumps(shadow["paint"]["text-opacity"])
         assert '["feature-state", "%s"]' % state in opacity
     assert not [d for d in exporter.diagnostics.by_code("Q2VT_LABEL_SHADOW") if d.severity.value != "info"]
+
+
+def test_around_point_label_shadow_is_reported(export, tmp_path):  # noqa: F811
+    """Around point: MapLibre picks one of several positions to avoid other
+    labels, which a copy cannot follow: no shadow, reported."""
+    exporter, result = export(_towns(tmp_path, label_placement=Qgis.LabelPlacement.AroundPoint))
+    assert not [l for l in _style(result)["layers"] if (l.get("metadata") or {}).get("q2vt:shadow-of")]
+    assert any("candidate positions" in d.message for d in exporter.diagnostics.by_code("Q2VT_LABEL_SHADOW"))
 
 
 def test_background_shape_shadows_are_reported(export, tmp_path):  # noqa: F811
