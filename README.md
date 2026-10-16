@@ -443,7 +443,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.40.0**. Newest first:
+This README describes QWebMap **4.40.1**. Newest first:
+
+**4.40.1** — long regulation texts in a large reading window
+- A zone's full regulations open in a large window over the map, with larger or smaller type; from there the text alone can be printed or saved as an HTML file.
 
 **4.40.0** — diagrams, animated markers and selective masks on the web map
 - QGIS diagrams (pie, histogram, stacked bar, text) are drawn by the browser from each feature's values, with QGIS's sizes, colours, angles and scale range.

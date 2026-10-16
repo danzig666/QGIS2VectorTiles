@@ -101,3 +101,61 @@ def test_parcel_report_opens_the_zone_text(site, tmp_path):
     assert out["headings"] == ["Az övezet saját előírásai", "15. § (3)"] and out["items"] == 2
     assert out["attrs"] == 0 and out["hacked"] == 0
     assert out["dirty"] == "<p>a</p>b"
+
+
+READER = """
+  const pane = document.getElementById('q2vt-pane-parcel');
+  const block = pane.querySelector('details.q2vt-rich-block');
+  block.open = true;
+  await new Promise((r) => setTimeout(r, 600));
+  const opener = block.querySelector('.q2vt-rich-open');
+  opener.focus();
+  opener.click();
+  const dialog = document.querySelector('.q2vt-reader[role=dialog]');
+  const text = dialog.querySelector('.q2vt-reader-text');
+  const before = parseFloat(text.style.fontSize);
+  dialog.querySelector('.q2vt-reader-size[aria-label="Nagyobb betű"]').click();
+  const after = parseFloat(text.style.fontSize);
+  const box = dialog.getBoundingClientRect();
+  // The pages handed to blob URLs (fetching a blob: URL is outside the CSP).
+  const blobs = new Map();
+  const create = URL.createObjectURL;
+  URL.createObjectURL = (blob) => { const url = create(blob); blobs.set(url, blob); return url; };
+  // Save: the page goes to a download link (recorded, not followed).
+  let saved = null;
+  const click = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () { saved = { href: this.href, name: this.download }; };
+  [...dialog.querySelectorAll('button')].find((b) => b.textContent === 'Mentés').click();
+  HTMLAnchorElement.prototype.click = click;
+  const page = await blobs.get(saved.href).text();
+  // Print: the page alone in a hidden frame.
+  [...dialog.querySelectorAll('button')].find((b) => b.textContent === 'Nyomtatás').click();
+  const frame = document.querySelector('iframe.q2vt-reader-frame');
+  const framed = await blobs.get(frame.src).text();
+  URL.createObjectURL = create;
+  await new Promise((r) => setTimeout(r, 500));
+  const printed = frame.contentDocument && frame.contentDocument.querySelector('h1');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  return { title: dialog.querySelector('h2').textContent, width: box.width, height: box.height,
+           headings: [...text.querySelectorAll('h3, h4')].map((h) => h.textContent), before, after,
+           name: saved.name, page, framed: framed === page, printed: printed && printed.textContent,
+           closed: !document.querySelector('.q2vt-reader'), focus: document.activeElement.className };
+"""
+
+
+def test_zone_text_opens_in_a_large_window_to_print_or_save(site, tmp_path):
+    out = _run(site["url"], [
+        {"eval": "q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;" % json.dumps(site["parcel"])},
+        {"idle": True}, {"clickLngLat": site["parcel"]}, {"wait": 900}, {"eval": READER},
+    ], tmp_path)[1]
+    assert out["title"] == "A(z) Lke-1 övezet teljes előírásai"
+    assert out["width"] > 900 and out["height"] > 600  # much larger than the side panel
+    assert out["headings"] == ["Az övezet saját előírásai", "15. § (3)"]
+    assert out["after"] > out["before"]
+    assert out["name"] == "a-z-lke-1-ovezet-teljes-eloirasai.html"
+    page = out["page"]
+    assert page.startswith("<!doctype html>") and '<html lang="hu">' in page
+    assert "<h1>A(z) Lke-1 övezet teljes előírásai</h1>" in page and "<p>Szövegek</p>" in page
+    assert "<h4>15. § (3)</h4>" in page and "<script" not in page.split("</style>")[1]
+    assert out["printed"] == out["title"]  # the frame loaded the page (allowed by the CSP)
+    assert out["framed"] and out["closed"] and "q2vt-rich-open" in out["focus"]

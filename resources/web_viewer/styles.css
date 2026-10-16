@@ -651,3 +651,33 @@ body.q2vt-printing #q2vt-map { position: fixed; left: 0; top: 0; width: var(--q2
   .q2vt-rich { max-height: none; overflow: visible; }
   .q2vt-rich-block:not([open]) { display: none; }
 }
+
+/* Large reading window (reader.mjs) for long texts. */
+.q2vt-rich-open { margin: 4px 0 2px; height: 30px; }
+.q2vt-reader-backdrop { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(15, 23, 42, 0.45); }
+.q2vt-reader { display: flex; flex-direction: column; width: min(980px, 100%); height: min(92vh, 100%);
+  background: var(--q2vt-surface-solid); color: var(--q2vt-fg); border-radius: var(--q2vt-radius);
+  box-shadow: var(--q2vt-shadow); overflow: hidden; }
+.q2vt-reader-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 14px 12px 22px;
+  border-bottom: 1px solid var(--q2vt-border); }
+.q2vt-reader-titles { flex: 1 1 260px; min-width: 0; }
+.q2vt-reader-titles h2 { margin: 0; font-size: 17px; text-wrap: balance; }
+.q2vt-reader-titles p { margin: 2px 0 0; font-size: 12.5px; color: var(--q2vt-muted); }
+.q2vt-reader-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.q2vt-reader-size { min-width: 42px; justify-content: center; font-weight: 700; }
+.q2vt-reader-tools button:disabled { opacity: .4; cursor: default; }
+.q2vt-reader-body { flex: 1; overflow: auto; padding: 18px 24px 32px; }
+.q2vt-reader-body .q2vt-reader-text { max-width: 46em; margin: 0 auto; max-height: none; overflow: visible;
+  line-height: 1.6; padding: 0; }
+.q2vt-reader-text h3 { font-size: 1.15em; } .q2vt-reader-text h4 { font-size: 1.05em; }
+.q2vt-reader-text table { font-size: .92em; }
+.q2vt-reader-frame { position: fixed; width: 0; height: 0; border: 0; left: -10px; top: -10px; visibility: hidden; }
+@media (max-width: 640px) {
+  .q2vt-reader-backdrop { padding: 0; }
+  .q2vt-reader { height: 100%; border-radius: 0; }
+  .q2vt-reader-head { padding: 10px 12px; }
+  .q2vt-reader-body { padding: 14px 16px 28px; }
+  .q2vt-reader-tools button:not(.q2vt-reader-size) .q2vt-btn-text { display: none; }
+}
+@media print { .q2vt-reader-backdrop, .q2vt-rich-open { display: none !important; } }
