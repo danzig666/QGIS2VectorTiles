@@ -1190,6 +1190,7 @@ class RulesExporter:
         each (gigabytes for one style)."""
         if not expression or not self._DENSIFYING.search(expression):
             return expression
+        expression = _capped_smoothing(expression)
         layer = self._open(source, "crs")
         tolerance = self._simplification_tolerance()
         if layer.isValid() and layer.crs().isGeographic():
@@ -4196,3 +4197,75 @@ class RulesExporter:
                     os.remove(p)
             except OSError:
                 pass
+
+
+# smooth() passes kept in exported generators: each pass doubles the
+# vertices (10 passes: 10 million for a 300 m polygon, 1.4 GB per feature)
+# and moves the outline about a quarter as much as the pass before, so
+# beyond this it changes nothing a web map shows.
+MAX_SMOOTH_ITERATIONS = 5
+
+
+def _capped_smoothing(expression: str) -> str:
+    """``expression`` with every smooth() limited to MAX_SMOOTH_ITERATIONS
+    passes (a literal iteration count above it is lowered; computed counts
+    stay). Rewritten through QGIS's parser, so nesting and named arguments
+    are respected; the expression is returned unchanged if anything fails."""
+    from qgis.core import QgsExpression, QgsExpressionNode  # pylint: disable=import-outside-toplevel
+    parsed = QgsExpression(expression)
+    if parsed.hasParserError() or parsed.rootNode() is None:
+        return expression
+    text = parsed.rootNode().dump()
+    changed = False
+
+    def visit(node):
+        nonlocal text, changed
+        if node is None:
+            return
+        if node.nodeType() == QgsExpressionNode.ntFunction:
+            function = QgsExpression.Functions()[node.fnIndex()]
+            args = node.args().list() if node.args() else []
+            if function.name().lower() == "smooth" and len(args) >= 2 \
+                    and args[1].nodeType() == QgsExpressionNode.ntLiteral:
+                try:
+                    passes = int(args[1].value())
+                except (TypeError, ValueError):
+                    passes = 0
+                if passes > MAX_SMOOTH_ITERATIONS:
+                    old = node.dump()
+                    parts = [arg.dump() for arg in args]
+                    parts[1] = str(MAX_SMOOTH_ITERATIONS)
+                    text = text.replace(old, f"smooth({', '.join(parts)})")
+                    changed = True
+        for child in _expression_children(node):
+            visit(child)
+
+    visit(parsed.rootNode())
+    if not changed or QgsExpression(text).hasParserError():
+        return expression
+    return text
+
+
+def _expression_children(node) -> list:
+    """The child nodes of an expression node (function arguments, operands,
+    CASE branches, IN lists...)."""
+    from qgis.core import QgsExpressionNode  # pylint: disable=import-outside-toplevel
+    kind = node.nodeType()
+    if kind == QgsExpressionNode.ntFunction:
+        return node.args().list() if node.args() else []
+    if kind == QgsExpressionNode.ntBinaryOperator:
+        return [node.opLeft(), node.opRight()]
+    if kind == QgsExpressionNode.ntUnaryOperator:
+        return [node.operand()]
+    if kind == QgsExpressionNode.ntCondition:
+        out = []
+        for when in node.conditions():
+            out += [when.whenExp(), when.thenExp()]
+        return out + ([node.elseExp()] if node.elseExp() else [])
+    if kind == QgsExpressionNode.ntInOperator:
+        return [node.node()] + (node.list().list() if node.list() else [])
+    if kind == QgsExpressionNode.ntIndexOperator:
+        return [node.container(), node.index()]
+    if kind == getattr(QgsExpressionNode, "ntBetweenOperator", -1):
+        return [node.node(), node.lowerBound(), node.higherBound()]
+    return []

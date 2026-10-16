@@ -3171,3 +3171,24 @@ def test_dense_generated_geometry_is_thinned_before_bands_and_tiles(plugin, tmp_
     for output in outputs:
         for feature in output.getFeatures():
             assert feature.geometry().constGet().nCoordinates() < dense
+
+
+@pytest.mark.parametrize("expression,capped", [
+    ("smooth(wave_randomized($geometry, 1, 3, 0.01, 0.015, 20), 10)", True),
+    ("smooth($geometry, iterations:=8, offset:=0.3)", True),
+    ("CASE WHEN $area > 5 THEN smooth(smooth($geometry, 9), 7) ELSE $geometry END", True),
+    ("smooth($geometry, 3)", False),
+    ("smooth($geometry, \"passes\")", False),
+])
+def test_smooth_passes_are_capped_in_exported_generators(plugin, expression, capped):
+    """Each smooth() pass doubles the vertices (10 passes: 10 million for a
+    300 m polygon); beyond five the outline moves by millimetres."""
+    from qgis.core import QgsExpression
+    from q2vt_plugin.src.core.rules_exporter import MAX_SMOOTH_ITERATIONS, _capped_smoothing
+    out = _capped_smoothing(expression)
+    assert not QgsExpression(out).hasParserError()
+    if not capped:
+        assert out == expression
+        return
+    passes = [int(p) for p in __import__("re").findall(r"smooth\(.*?, (\d+), 0\.3|, (\d+), 0\.25", out) for p in p if p]
+    assert passes and max(passes) == MAX_SMOOTH_ITERATIONS
