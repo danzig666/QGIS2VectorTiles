@@ -3148,3 +3148,26 @@ def test_screen_offset_line_from_a_polygon_generator_exports(plugin, tmp_path):
     layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
     outputs, rules, _diags = _export(plugin, layer, tmp_path)
     assert rules and outputs
+
+
+def test_dense_generated_geometry_is_thinned_before_bands_and_tiles(plugin, tmp_path):
+    """A fill generator smoothing a randomized wave (QGIS Hub "Sketchy
+    Water Feature": a million vertices per feature) under a shapeburst:
+    every band was an inward buffer of the full outline (minutes each) and
+    tiling ran out of memory. Generated geometry denser than the tiles show
+    is simplified to their precision first."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsShapeburstFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"], str(tmp_path / "lake.gpkg"))
+    burst = QgsShapeburstFillSymbolLayer(QColor(55, 126, 184), QColor(255, 255, 255))
+    burst.setUseWholeShape(True)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "smooth(wave_randomized($geometry, 1, 3, 0.2, 0.4, 20), 6)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([burst]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    plugin_exporter = __import__("q2vt_plugin.src.core.rules_exporter", fromlist=["RulesExporter"]).RulesExporter
+    dense = plugin_exporter.DENSE_GENERATED_VERTICES
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert rules and outputs
+    for output in outputs:
+        for feature in output.getFeatures():
+            assert feature.geometry().constGet().nCoordinates() < dense

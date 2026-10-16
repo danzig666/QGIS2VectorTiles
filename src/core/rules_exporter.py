@@ -1150,6 +1150,33 @@ class RulesExporter:
             OUTPUT=dst_path,
         )
 
+    # Vertices per feature from which generated geometry is simplified.
+    DENSE_GENERATED_VERTICES = 20000
+
+    def _thin_dense(self, source: str) -> str:
+        """Generated geometry with a feature of more vertices than the tiles
+        can show (``smooth(wave_randomized(...), 10)``: a million) simplified
+        to the tiles' own precision (_simplification_tolerance): at full
+        density the colour bands took minutes each and tiling ran out of
+        memory. Other datasets are returned as they are."""
+        layer = self._open(source, "dense")
+        if not layer.isValid():
+            return source
+        dense = False
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry.isNull() and geometry.constGet().nCoordinates() > self.DENSE_GENERATED_VERTICES:
+                dense = True
+                break
+        if not dense:
+            return source
+        tolerance = self._simplification_tolerance()
+        if layer.crs().isGeographic():
+            tolerance /= 111320.0
+        del layer
+        return self._run_alg_safe("simplifygeometries", "native", INPUT=source, METHOD=0,
+                                  TOLERANCE=tolerance)
+
     def _simplification_tolerance(self) -> float:
         """Simplification tolerance in EPSG:3857 metres: a fraction of one
         tile unit (1/4096 of a tile) at the max zoom, so that simplification
@@ -1822,6 +1849,11 @@ class RulesExporter:
         if not check.isValid() or check.featureCount() <= 0:
             self._report_empty_output(grp, transbase)
             return None
+        if grp.geometry_expression.strip() not in ("@geometry", "$geometry"):
+            thinned = self._thin_dense(transformed)
+            if thinned != transformed:
+                transformed = thinned
+                check = self._open(transformed, "check")
         if ranked:
             del check
             transformed = self._ranked_points(transformed)
@@ -1882,6 +1914,7 @@ class RulesExporter:
                                  OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
                                  EXPRESSION=grp.pre_generator)
         out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
+        out = self._thin_dense(out)
         out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
         for ftype, expr, name in grp.generated_fields:
             out = self._run_alg_safe(
