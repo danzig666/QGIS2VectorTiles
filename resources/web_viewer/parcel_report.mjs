@@ -4,12 +4,13 @@
 // restrictions with their legend graphic, overlap and explanation, and the
 // notice. Data: parcels/catalog.json + one shard per lookup; no geometry.
 // Everything goes into the DOM as text.
-import { t, formatNumber } from "./i18n.mjs";
+import { locale, t, formatNumber } from "./i18n.mjs";
 import { featureShardKey } from "./search_core.mjs";
 import { fetchShard, shardId } from "./shards.mjs";
 import { button, el, icon } from "./icons.mjs";
 import { formatValue } from "./identify.mjs";
 import { richText } from "./rich_text.mjs";
+import { openReader } from "./reader.mjs";
 
 export function formatArea(m2) {
   if (m2 >= 10000) return `${formatNumber(m2 / 10000, 4)} ha`;
@@ -149,7 +150,22 @@ export class ParcelReport {
       block.append(wait);
       try {
         const html = await this.regulationText(code);
-        wait.replaceWith(html ? richText(html) : el("p", "q2vt-muted", t("parcel.textMissing")));
+        if (!html) {
+          wait.replaceWith(el("p", "q2vt-muted", t("parcel.textMissing")));
+          return;
+        }
+        const text = richText(html);
+        // Long texts read better in a large window (reader.mjs), printed or
+        // saved from there on their own.
+        const bigger = button("q2vt-chip q2vt-chip-ghost q2vt-rich-open", null, "expand",
+          { text: t("reader.open") });
+        bigger.addEventListener("click", () => openReader({
+          title: t("parcel.fullText", { code: zoneKey(code) }),
+          subtitle: (this.manifest && this.manifest.title) || "",
+          content: text,
+          lang: locale,
+        }));
+        wait.replaceWith(bigger, text);
       } catch {
         loaded = false;
         wait.replaceWith(el("p", "q2vt-muted", t("parcel.textMissing")));
