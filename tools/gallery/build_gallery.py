@@ -42,6 +42,8 @@ ORIGIN = (2110000.0, 6030000.0)
 COLUMNS = 16
 EARTH = 40075016.68557849
 _APP = None
+RENDER_TIMEOUT_S = 120   # per QGIS reference render
+TIMED_OUT = set()        # view ids whose QGIS render was given up
 
 
 def init_qgis():
@@ -359,7 +361,23 @@ def qgis_render(layer, center, zoom, size, path):
     ]))
     job = QgsMapRendererSequentialJob(settings)
     job.start()
-    job.waitForFinished()
+    # A style that never finishes in QGIS (seen: one waiting on a remote
+    # resource) gets a blank reference after RENDER_TIMEOUT_S instead of
+    # holding up the rest of its batch.
+    from qgis.PyQt.QtCore import QCoreApplication
+    deadline = time.time() + RENDER_TIMEOUT_S
+    while job.isActive() and time.time() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.02)
+    if job.isActive():
+        job.cancelWithoutBlocking()
+        from qgis.PyQt.QtGui import QImage
+        blank = QImage(size, size, QImage.Format.Format_ARGB32)
+        blank.fill(QColor("white"))
+        blank.save(path)
+        TIMED_OUT.add(os.path.basename(path).rsplit("_qgis", 1)[0])
+        print(f"QGIS render timed out after {RENDER_TIMEOUT_S} s: {path}", flush=True)
+        return
     job.renderedImage().save(path)
 
 
@@ -573,6 +591,10 @@ def main():
             return (d.layer_id == layer.id() or (d.layer_id or "").startswith(prefix)
                     or owner.startswith(prefix))
         own = [d.to_dict() for d in diagnostics if belongs(d)]
+        if any(view_id(item, k) in TIMED_OUT for k in range(len(zooms))):
+            own.insert(0, {"severity": "warning", "code": "GALLERY_QGIS_RENDER_TIMEOUT",
+                           "message": f"QGIS did not finish its reference render in {RENDER_TIMEOUT_S} s; "
+                                      "the QGIS image is blank."})
         per_zoom = []
         for k, zoom in enumerate(zooms):
             result = score(os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"),
