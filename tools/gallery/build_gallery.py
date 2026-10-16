@@ -42,6 +42,8 @@ ORIGIN = (2110000.0, 6030000.0)
 COLUMNS = 16
 EARTH = 40075016.68557849
 _APP = None
+RENDER_TIMEOUT_S = 30    # per QGIS reference render
+TIMED_OUT = set()        # view ids whose QGIS render was given up
 
 
 def init_qgis():
@@ -93,6 +95,8 @@ def load_items(args):
     wanted = [n.strip().lower() for n in (getattr(args, "names", "") or "").split(",") if n.strip()]
     if wanted:
         items = [i for i in items if any(w in i["name"].lower() for w in wanted)]
+    if getattr(args, "offset", 0):
+        items = items[args.offset:]
     if args.limit:
         items = items[: args.limit]
     return items
@@ -357,7 +361,23 @@ def qgis_render(layer, center, zoom, size, path):
     ]))
     job = QgsMapRendererSequentialJob(settings)
     job.start()
-    job.waitForFinished()
+    # A style that never finishes in QGIS (seen: one waiting on a remote
+    # resource) gets a blank reference after RENDER_TIMEOUT_S instead of
+    # holding up the rest of its batch.
+    from qgis.PyQt.QtCore import QCoreApplication
+    deadline = time.time() + RENDER_TIMEOUT_S
+    while job.isActive() and time.time() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.02)
+    if job.isActive():
+        job.cancelWithoutBlocking()
+        from qgis.PyQt.QtGui import QImage
+        blank = QImage(size, size, QImage.Format.Format_ARGB32)
+        blank.fill(QColor("white"))
+        blank.save(path)
+        TIMED_OUT.add(os.path.basename(path).rsplit("_qgis", 1)[0])
+        print(f"QGIS render timed out after {RENDER_TIMEOUT_S} s: {path}", flush=True)
+        return
     job.renderedImage().save(path)
 
 
@@ -457,6 +477,8 @@ def main():
     parser.add_argument("--zoom", type=float, default=16.25)
     parser.add_argument("--size", type=int, default=400)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--offset", type=int, default=0,
+                        help="skip this many styles first (batch_gallery.py runs slices)")
     parser.add_argument("--names", default="",
                         help="only styles whose name contains one of these (comma-separated)")
     parser.add_argument("--port", type=int, default=9000)
@@ -527,7 +549,25 @@ def main():
             qgis_render(layer, center, zoom, args.size,
                         os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"))
             views.append({"id": view_id(item, k), "lon": point.x(), "lat": point.y(),
-                          "zoom": zoom, "width": args.size, "height": args.size})
+                          "zoom": zoom, "width": args.size, "height": args.size,
+                          "layer": layer.name()})
+    # Each view shows only its own layer's style layers (as QGIS renders
+    # only that layer): a neighbour's metre-wide line bled into the image.
+    # A dataset name starts with its layer's place in the layer tree (l07...).
+    tree_name = {i: layer.name() for layer in layers for lid, i in tree_index.items()
+                 if lid == layer.id()}
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        style_layers = json.load(handle)["layers"]
+    for view in views:
+        view["only"] = []
+        for style_layer in style_layers:
+            match = re.match(r"l(\d+)t", style_layer.get("source-layer") or "")
+            if match and tree_name.get(int(match.group(1))) == view["layer"]:
+                view["only"].append(style_layer["id"])
+    empty = sum(not view["only"] for view in views)
+    if empty:
+        print(f"WARNING: {empty} of {len(views)} views have no style layer of their own "
+              "(drawn blank in the browser)", flush=True)
     with open(os.path.join(out, "views.json"), "w", encoding="utf-8") as f:
         json.dump(views, f)
 
@@ -569,6 +609,10 @@ def main():
             return (d.layer_id == layer.id() or (d.layer_id or "").startswith(prefix)
                     or owner.startswith(prefix))
         own = [d.to_dict() for d in diagnostics if belongs(d)]
+        if any(view_id(item, k) in TIMED_OUT for k in range(len(zooms))):
+            own.insert(0, {"severity": "warning", "code": "GALLERY_QGIS_RENDER_TIMEOUT",
+                           "message": f"QGIS did not finish its reference render in {RENDER_TIMEOUT_S} s; "
+                                      "the QGIS image is blank."})
         per_zoom = []
         for k, zoom in enumerate(zooms):
             result = score(os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"),

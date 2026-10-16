@@ -49,6 +49,7 @@ from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .fidelity.qgis_expr import SCALE_VARIABLES, enclosed, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector, Severity
@@ -123,6 +124,79 @@ def _to_mm(value: float, unit) -> Optional[float]:
     if factor is None:
         return None
     return value * factor / physical_factor(MM)
+
+
+# Oversampling of a hash drawn as an image (_hash_image_marker) and the
+# largest side of that image.
+_HASH_IMAGE_PX_PER_MM = 96.0 / 25.4 * 8
+_HASH_IMAGE_MAX_PX = 2048
+
+
+def _hash_image_marker(layer, hash_symbol):
+    """A hash whose line sub-symbol is not one plain line (an arrow, a
+    double or dashed line) as a raster marker of that sub-symbol drawn once.
+    At hash angle 0 QGIS draws the hash from the left of the line to its
+    right, rotating it clockwise with the angle like a marker (the "line"
+    marker shape of a plain hash is the same upright stroke). None for a
+    map-unit or data-defined length, or a data-defined sub-symbol."""
+    # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsExpressionContext, QgsRasterMarkerSymbolLayer, QgsRenderContext
+    from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice
+    from qgis.PyQt.QtGui import QImage, QPainter, QPolygonF
+    from PIL import Image
+    length_mm = _to_mm(layer.hashLength(), layer.hashLengthUnit())
+    props = layer.dataDefinedProperties()
+    if hash_symbol is None or not length_mm or length_mm <= 0 or (
+            props is not None and props.isActive(QgsSymbolLayer.Property.PropertyLineDistance)):
+        return None
+    for sub_layer in hash_symbol.symbolLayers():
+        sub_props = sub_layer.dataDefinedProperties()
+        if sub_props is not None and sub_props.hasActiveProperties():
+            return None
+    # Room for heads, caps and offsets around the hash.
+    span_mm = 3 * length_mm + 20
+    px_per_mm = min(_HASH_IMAGE_PX_PER_MM, _HASH_IMAGE_MAX_PX / span_mm)
+    size = int(math.ceil(span_mm * px_per_mm))
+    centre = size / 2.0
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    try:
+        context = with_map_distances(QgsRenderContext.fromQPainter(painter))
+        context.setScaleFactor(px_per_mm)
+        context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+        context.setExpressionContext(QgsExpressionContext())
+        symbol = hash_symbol.clone()
+        symbol.setOpacity(1.0)  # the marker symbol carries it
+        half = length_mm * px_per_mm / 2.0
+        symbol.startRender(context)
+        symbol.renderPolyline(QPolygonF([QPointF(centre, centre - half),
+                                         QPointF(centre, centre + half)]), None, context)
+        symbol.stopRender(context)
+    finally:
+        painter.end()
+    bbox = Image.frombuffer("RGBA", (size, size), image.constBits().asstring(size * size * 4),
+                            "raw", "BGRA", 0, 1).getchannel("A").getbbox()
+    if bbox is None:
+        return None
+    # Cropped symmetrically: the image centre stays the hash's middle.
+    half_w = max(centre - bbox[0], bbox[2] - centre)
+    half_h = max(centre - bbox[1], bbox[3] - centre)
+    left, top = int(math.floor(centre - half_w)), int(math.floor(centre - half_h))
+    width, height = size - 2 * left, size - 2 * top
+    crop = image.copy(left, top, width, height)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    crop.save(buffer, "PNG")
+    buffer.close()
+    marker = QgsRasterMarkerSymbolLayer("base64:" + bytes(data.toBase64()).decode("ascii"))
+    marker.setSize(width / px_per_mm)
+    marker.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    marker.setFixedAspectRatio(height / width)
+    marker.setAngle(layer.hashAngle())
+    return marker
 
 
 def _limited(scale) -> bool:
@@ -286,7 +360,7 @@ class SymbolMaterializer:
             if dashes is not None:
                 return dashes
             if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
-                    and normalize_unit(layer.offsetUnit()) == "map":
+                    and self._offset_in_map_units(layer) is not None:
                 return self._offset_line(flat_rule, layer)
             if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
                     and _to_mm(layer.offset(), layer.offsetUnit()) is not None:
@@ -1292,9 +1366,34 @@ class SymbolMaterializer:
         rule = flat_rule.derive()
         rule.rule.symbol().symbolLayer(0).setOffset(0.0)
         rule.recipe = mat.Recipe("line_offset", params=(
-            ("offset", float(layer.offset())), ("crs", crs)))
+            ("offset", self._offset_in_map_units(layer)), ("crs", crs)))
         rule.set_attr("m", 1)
         return [rule]
+
+    def _along_in_map_units(self, layer) -> Optional[float]:
+        """A marker line's offset along the line in project map units when
+        it scales with the map (map units, "meters at scale" in a projected
+        CRS); None for screen units."""
+        return self._scaled_map_distance(float(layer.offsetAlongLine()), layer.offsetAlongLineUnit())
+
+    def _scaled_map_distance(self, value: float, unit) -> Optional[float]:
+        name = normalize_unit(unit)
+        if name == "map":
+            return value
+        if name != "m":
+            return None
+        from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes  # pylint: disable=import-outside-toplevel
+        crs = QgsCoordinateReferenceSystem(self.project_crs) if self.project_crs else QgsProject.instance().crs()
+        if not crs.isValid() or crs.isGeographic():
+            return None
+        return value * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
+
+    def _offset_in_map_units(self, layer) -> Optional[float]:
+        """A line layer's offset in project map units when it scales with the
+        map: map units as they are, "meters at scale" (military symbols:
+        +-350 m) in a projected CRS's units; None for screen units or metres
+        in a geographic CRS (left to the screen-unit paths)."""
+        return self._scaled_map_distance(float(layer.offset()), layer.offsetUnit())
 
     # Vertices whose offset loops are tolerated before an offset is drawn
     # natively (MapLibre line-offset) at a zoom.
@@ -1327,8 +1426,7 @@ class SymbolMaterializer:
                 continue
             if transform is not None:
                 geometry.transform(transform)
-            for part in geometry.constParts():
-                line = part.curveToLine() if part.hasCurvedSegments() else part
+            for line in _offset_lines(geometry):
                 points = [(line.xAt(i), line.yAt(i)) for i in range(line.numPoints())]
                 points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
                 for a, b, c in zip(points, points[1:], points[2:]):
@@ -2645,13 +2743,17 @@ class SymbolMaterializer:
                 along = float(layer.offsetAlongLine())
             except AttributeError:
                 along = 0.0
-            if along and points - {"Interval"}:
+            # QGIS moves only the first / last vertex markers along the line
+            # (checked against its renders); other placements ignore it.
+            along_map = self._along_in_map_units(layer) if along else 0.0
+            if along and points & {"FirstVertex", "LastVertex"} and along_map is None:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                             "Offset along the line is not applied to vertex/centre markers.",
-                             flat_rule)
+                             "A screen-size offset along the line is not applied to first/last "
+                             "vertex markers.", flat_rule)
+                along_map = 0.0
             def placed(rule, line_offset, marker=None, rings=None):
                 rings = _ring_filter(layer) if rings is None else rings
-                recipe = mat.marker_points(points, offset=line_offset, crs=crs)
+                recipe = mat.marker_points(points, offset=line_offset, crs=crs, along=along_map)
                 if rings:
                     recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
                         ("ring_filter", rings), ("crs", crs)))
@@ -2736,6 +2838,8 @@ class SymbolMaterializer:
                         QgsSymbolLayer.Property.PropertyStrokeWidth):
                 if line_props.isActive(key):
                     marker.setDataDefinedProperty(key, QgsProperty(line_props.property(key)))
+        elif (image := _hash_image_marker(layer, hash_symbol)) is not None:
+            marker = image
         else:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                          "Hash sub-symbol is not a simple line; drawn as a thin line.", flat_rule)
@@ -2874,6 +2978,38 @@ class SymbolMaterializer:
     # within +-4.5 % of QGIS's), fewer bands when over the output budget.
     ARROW_BAND_STEPS = (8, 4, 2, 1)
 
+    def _arrow_shadow(self, layer, flat_rule: FlattenedRule):
+        """An arrow's drop shadow (paint effect drawn under it) as a fill of
+        the shadow's colour and opacity under the arrow, shifted as QGIS
+        shifts it (QgsShadowEffect: 0° up, 90° right, y down); not blurred."""
+        from qgis.core import QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        effect = layer.paintEffect()
+        if effect is None or not effect.enabled():
+            return None
+        effects = effect.effectList() if type(effect).__name__ == "QgsEffectStack" else [effect]
+        for item in effects:
+            if not item.enabled():
+                continue
+            name = type(item).__name__
+            if name == "QgsDrawSourceEffect":
+                return None  # only an effect drawn before the arrow lies under it
+            if name != "QgsDropShadowEffect" or _enum_value(item.drawMode()) == 1:
+                continue
+            color = QColor(item.color())
+            color.setAlphaF(color.alphaF() * item.opacity())
+            shadow = QgsSimpleFillSymbolLayer(color, Qt.BrushStyle.SolidPattern, QColor(0, 0, 0, 0),
+                                              Qt.PenStyle.NoPen)
+            angle = math.radians(item.offsetAngle())
+            distance = item.offsetDistance()
+            shadow.setOffset(QPointF(-distance * math.cos(angle + math.pi / 2),
+                                     -distance * math.sin(angle + math.pi / 2)))
+            shadow.setOffsetUnit(item.offsetUnit())
+            shadow.setOffsetMapUnitScale(item.offsetMapUnitScale())
+            self._report("Q2VT_UNSUPPORTED_EFFECT",
+                         "Arrow drop shadow drawn as an unblurred shifted fill.", flat_rule)
+            return shadow
+        return None
+
     def _arrow(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A QGIS arrow as the polygons QGIS fills (fidelity/arrows.py, built
         by the exporter in painter pixels at the band's zoom), drawn with
@@ -2887,6 +3023,9 @@ class SymbolMaterializer:
                        if fill.symbolLayer(i).enabled()]
         if not fill_layers:
             return []
+        shadow = self._arrow_shadow(layer, flat_rule)
+        if shadow is not None:
+            fill_layers.insert(0, shadow)
         props = layer.dataDefinedProperties()
         if props is not None and props.hasActiveProperties():
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
@@ -3554,7 +3693,7 @@ class SymbolMaterializer:
         from qgis.core import QgsMapToPixel, QgsRenderContext, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
         zoom = float(self._zoom_range(flat_rule)[1])
         per_px = self._map_units_per_mm(flat_rule, zoom) * 25.4 / 96.0
-        context = QgsRenderContext()
+        context = with_map_distances(QgsRenderContext())
         context.setScaleFactor(96.0 / 25.4)
         context.setMapToPixel(QgsMapToPixel(per_px))
         context.setRendererScale(ZoomLevels.zoom_to_scale(int(zoom)) or 0.0)
@@ -3637,3 +3776,19 @@ class SymbolMaterializer:
         lines.set_attr("h", 0)
         strips.set_attr("h", 1)
         return [lines, strips]
+
+
+def _offset_lines(geometry):
+    """The lines an offset line symbol layer draws along: the parts of a
+    line geometry, the rings (outer boundary and holes) of a polygon's (an
+    outline inside a fill symbol). Curves as straight segments."""
+    from qgis.core import QgsCurvePolygon  # pylint: disable=import-outside-toplevel
+    for part in geometry.constParts():
+        if isinstance(part, QgsCurvePolygon):
+            rings = [part.exteriorRing()] + [part.interiorRing(i) for i in range(part.numInteriorRings())]
+        else:
+            rings = [part]
+        for ring in rings:
+            if ring is None:
+                continue
+            yield ring.curveToLine() if ring.hasCurvedSegments() else ring

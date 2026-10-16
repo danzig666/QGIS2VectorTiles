@@ -453,3 +453,181 @@ def test_marker_line_with_map_unit_details_gets_a_sprite_per_zoom(plugin):
         request = exporter.marker_symbols[layers[f"s_z{zoom}"]["layout"]["icon-image"]]
         assert request.map_units_per_pixel == pytest.approx(
             1.0 / PropertyExtractor.static_pixels(1.0, "map", zoom), rel=1e-6)
+
+
+def test_embedded_raster_line_image_is_a_line_pattern(plugin, tmp_path):
+    """A raster line with its image embedded in the style (base64:) is the
+    image along the line like a file's; QImageReader took it for a missing
+    file and the line was a faint symbol preview (Shoe Prints)."""
+    import base64
+    from PIL import Image
+    from qgis.core import QgsLineSymbol, QgsRasterLineSymbolLayer
+    path = tmp_path / "prints.png"
+    Image.new("RGBA", (40, 10), (0, 0, 0, 255)).save(path)
+    exporter = _converter()
+    raster = QgsRasterLineSymbolLayer("base64:" + base64.b64encode(path.read_bytes()).decode())
+    raster.setWidth(4)
+    exporter._convert_symbol(QgsLineSymbol([raster]), "s", "src", "q2vt", 14, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    one = exporter.pattern_images[paint["line-pattern"]].img_1x
+    assert one.width / one.height == pytest.approx(4, rel=0.01)
+    assert not exporter.context.diagnostics.by_code("Q2VT_PATTERN_APPROXIMATE")
+
+
+def test_hatch_of_zero_width_lines_is_a_hairline(plugin):
+    """A hatch line of width 0 is QGIS's one-pixel hairline: the texture was
+    fully transparent (geo_e5 lost its blue hatch)."""
+    from qgis.core import QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsLineSymbol
+    exporter = _converter()
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setDistance(1.6)
+    hatch.setLineAngle(0)
+    hatch.setSubSymbol(QgsLineSymbol.createSimple({"color": "0,170,255", "width": "0"}))
+    exporter._convert_symbol(QgsFillSymbol([hatch]), "s", "src", "q2vt", 14, 24)
+    name = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    alpha = exporter.pattern_images[name].img_1x.getchannel("A")
+    assert alpha.getextrema()[1] > 100  # was 0
+
+
+def test_unused_offset_unit_does_not_mix_a_metre_marker(plugin):
+    """A marker sized in metres with an offset of 0 mm is all in map units
+    (Course End was reported as mixing units)."""
+    from qgis.core import QgsSimpleMarkerSymbolLayer
+    exporter = _converter()
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 90)
+    marker.setSizeUnit(Qgis.RenderUnit.MetersInMapUnits)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MetersInMapUnits)
+    marker.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    exporter._convert_symbol(QgsMarkerSymbol([marker]), "s", "src", "q2vt", 14, 24)
+    assert not exporter.context.diagnostics.by_code("Q2VT_MIXED_UNITS")
+
+
+def test_hatch_of_markers_is_qgis_brush_tile(plugin):
+    """A hatch whose line is a marker line (arrowheads every 3.2 mm, 3.2 mm
+    apart) is drawn the way QGIS fills it by default: the sub-symbol drawn
+    into a tile truncated to whole pixels (applyPattern); a cropped preview
+    repeated at the wrong period made a dense dark mesh."""
+    import math as _math
+    from qgis.core import (QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsLineSymbol,
+                           QgsMarkerLineSymbolLayer, QgsMarkerSymbol)
+    exporter = _converter()
+    exporter._exact_screen_texture = True
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setDistance(3.2)
+    hatch.setLineAngle(45)
+    markers = QgsMarkerLineSymbolLayer(True, 3.2)
+    markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "arrowhead", "size": "3"}))
+    hatch.setSubSymbol(QgsLineSymbol([markers]))
+    pencil = hatch.clone()
+    exporter._convert_symbol(QgsFillSymbol([hatch]), "s", "src", "q2vt", 14, 24)
+    image = exporter.pattern_images[exporter.style["layers"][0]["paint"]["fill-pattern"]].img_1x
+    spacing = 3.2 * 96 / 25.4
+    side = int(spacing / _math.sin(_math.radians(45)))
+    assert image.size == (side, side)
+    assert image.getchannel("A").getextrema()[1] > 200
+    # A line symbol with data-defined properties (a pencil hatch's random
+    # dots) is drawn line by line, at the exact spacing (startRender).
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    pencil.subSymbol().symbolLayer(0).subSymbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyFillColor, QgsProperty.fromExpression("'red'"))
+    exporter.style["layers"] = []
+    exporter._convert_symbol(QgsFillSymbol([pencil]), "s", "src", "q2vt", 14, 24)
+    image = exporter.pattern_images[exporter.style["layers"][0]["paint"]["fill-pattern"]].img_1x
+    assert image.size != (side, side)
+
+
+def test_dense_marker_line_is_a_line_pattern(plugin):
+    """Markers closer than their size (moss: 1 mm every 0.2 mm) are a line
+    pattern drawn by QGIS: MapLibre widens a line symbol's spacing to its
+    length, which kept one marker in five."""
+    from qgis.core import QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol
+    exporter = _converter()
+    markers = QgsMarkerLineSymbolLayer(True, 0.2)
+    markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "circle", "size": "1"}))
+    exporter._convert_symbol(QgsLineSymbol([markers]), "s", "src", "q2vt", 14, 24)
+    layer_def = exporter.style["layers"][0]
+    assert layer_def["type"] == "line" and "line-pattern" in layer_def["paint"]
+    image = exporter.pattern_images[layer_def["paint"]["line-pattern"]].img_1x
+    assert image.width & (image.width - 1) == 0 and layer_def["paint"]["line-width"] == image.height
+
+
+def test_line_blur_spreads_the_same_ink(plugin):
+    """A blurred line (a firefly glow) fades over the scale of QGIS's stack
+    blur (exponential smoothing both ways: QgsImageOperation) with the same
+    ink, as a line with a triangular profile: the blur was ignored."""
+    import math as _math
+    from qgis.core import QgsBlurEffect, QgsEffectStack, QgsLineSymbol, QgsSimpleLineSymbolLayer
+    exporter = _converter()
+    line = QgsSimpleLineSymbolLayer()
+    line.setWidth(1.8)
+    blur = QgsBlurEffect()
+    blur.setBlurLevel(3.2)
+    blur.setBlurUnit(Qgis.RenderUnit.Millimeters)
+    line.setPaintEffect(QgsEffectStack(blur))
+    exporter._convert_symbol(QgsLineSymbol([line]), "s", "src", "q2vt", 14, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    px = 96 / 25.4
+    width = 1.8 * px
+    scale = -1 / _math.log(0.875)  # radius 12 px: weight 2 of 16
+    half = width / 2 + 2 * scale
+    assert paint["line-width"] == pytest.approx(2 * half, rel=0.01)
+    assert paint["line-blur"] == pytest.approx(half, rel=0.01)
+    assert paint["line-opacity"] == pytest.approx(width / half, rel=0.01)
+    assert not exporter.context.diagnostics.by_code("Q2VT_UNSUPPORTED_EFFECT")
+
+
+def test_screen_blended_layer_is_left_out(plugin):
+    """A layer drawn only through a Screen blend (an overlay for dark maps)
+    leaves a white map white in QGIS: it is left out, not drawn plainly."""
+    from qgis.core import QgsDrawSourceEffect, QgsEffectStack, QgsFillSymbol, QgsSimpleFillSymbolLayer
+    from qgis.PyQt.QtGui import QColor, QPainter
+    exporter = _converter()
+    fill = QgsSimpleFillSymbolLayer(QColor("orange"))
+    source = QgsDrawSourceEffect()
+    source.setBlendMode(QPainter.CompositionMode.CompositionMode_Screen)
+    fill.setPaintEffect(QgsEffectStack(source))
+    exporter._convert_symbol(QgsFillSymbol([fill]), "s", "src", "q2vt", 14, 24)
+    assert exporter.style["layers"] == []
+    assert exporter.context.diagnostics.by_code("Q2VT_UNSUPPORTED_EFFECT")
+
+
+def test_marker_layers_keep_their_angles_against_the_first(plugin):
+    """Each layer of a marker on a line turns by the line's angle plus its own
+    (a data-defined angle per layer): the sprite keeps each layer's angle
+    against the first one's, which drives icon-rotate. Without the field
+    QGIS drew every layer at 0 degrees (a measure line's arrowheads)."""
+    from qgis.core import (QgsMarkerSymbol, QgsProperty, QgsSimpleMarkerSymbolLayer,
+                           QgsSymbolLayer)
+    exporter = _converter()
+    tick = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Line, 8)
+    head = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Triangle, 3)
+    head.setAngle(90)
+    for layer, base in ((tick, 0.0), (head, 90.0)):
+        layer.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyAngle,
+                                     QgsProperty.fromExpression(f'"q2vt_mat_angle" - 90 + {base}'))
+    symbol = QgsMarkerSymbol([tick, head])
+    sprite = exporter._relative_layer_angles(symbol, tick)
+    assert [layer.angle() for layer in sprite.symbolLayers()] == [0.0, 90.0]
+    assert not any(layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyAngle)
+                   for layer in sprite.symbolLayers())
+    # The style's symbol keeps its rotation for icon-rotate.
+    assert symbol.symbolLayer(0).dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyAngle)
+
+
+def test_random_values_of_dense_marker_lines_stay_with_qgis(plugin):
+    """The random size of a dense marker line's markers is left to QGIS,
+    which draws a new one for every marker of the line pattern; one value
+    per feature (a generated field) made every marker alike."""
+    from qgis.core import QgsMarkerLineSymbolLayer, QgsMarkerSymbol
+    from q2vt_plugin.src.core.ddp_fetcher import dense_marker_line
+    markers = QgsMarkerLineSymbolLayer(True, 0.3)
+    markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "circle", "size": "0.375"}))
+    assert dense_marker_line(markers)
+    markers.setInterval(1.0)
+    assert not dense_marker_line(markers)  # MapLibre spaces them right
+    hashes = QgsMarkerLineSymbolLayer(True, 3.0)  # strokes across the line
+    hashes.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "line", "size": "3"}))
+    assert not dense_marker_line(hashes)
+    markers.setInterval(0.3)
+    markers.setRotateSymbols(False)
+    assert not dense_marker_line(markers)

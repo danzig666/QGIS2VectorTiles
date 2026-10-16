@@ -39,6 +39,7 @@ from qgis.PyQt.QtCore import qVersion
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
@@ -59,6 +60,8 @@ Img: TypeAlias = Image.Image
 
 _BASE_CANVAS_PX = 1000
 _MAX_CANVAS_PX = 4096
+# First canvas when QGIS's bounds of a marker are larger than the largest.
+_PROBE_CANVAS_PX = 1024
 # WebGL MAX_TEXTURE_SIZE on common desktop GPUs; many phones allow 4096.
 MAX_SHEET_PX = 16384
 _PX_PER_MM = 96.0 / 25.4
@@ -185,6 +188,8 @@ class SymbolImage:
     width: int = field(init=False)
     height: int = field(init=False)
     transparent: bool = field(init=False, default=False)
+    # Canvas QGIS's bounds asked for when it was over _MAX_CANVAS_PX.
+    _bounds_claimed: int = field(init=False, default=0)
 
     def __post_init__(self):
         if not isinstance(self.symbol, QgsSymbol):
@@ -233,13 +238,17 @@ class SymbolImage:
                      abs(bounds.bottom()), 1.0)
         canvas = int(math.ceil(2 * extent)) + 16
         if canvas > _MAX_CANVAS_PX:
-            raise SpriteRenderError(
-                f"Sprite '{self.name}' would be {canvas} px wide; reduce its size or "
-                "the export's zoom range")
+            # QGIS's bounds of a rotated, anchored SVG marker (or of one with
+            # a random data-defined angle, evaluated again for the drawing)
+            # can lie hundreds of pixels from its ink: draw it and believe
+            # the ink, which _render_marker grows the canvas for. Too large
+            # only when the ink still reaches the edge of the largest canvas.
+            self._bounds_claimed = canvas
+            return _PROBE_CANVAS_PX
         return canvas
 
     def _context(self, painter):
-        context = QgsRenderContext.fromQPainter(painter)
+        context = with_map_distances(QgsRenderContext.fromQPainter(painter))
         context.setScaleFactor(_PX_PER_MM * self.scale_factor)
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
         # Left at 1, a scale range of a map-unit size (QgsMapUnitScale::
@@ -293,8 +302,13 @@ class SymbolImage:
             # fill: a thick map-unit ring was cut off zoomed in): ink at the
             # edge of the canvas, draw again on a larger one.
             bbox = self._qt_to_pil(image).getbbox()
-            if bbox is None or canvas >= _MAX_CANVAS_PX or (
-                    bbox[0] > 0 and bbox[1] > 0 and bbox[2] < canvas and bbox[3] < canvas):
+            inside = bbox is not None and (
+                bbox[0] > 0 and bbox[1] > 0 and bbox[2] < canvas and bbox[3] < canvas)
+            if canvas >= _MAX_CANVAS_PX and not inside and self._bounds_claimed:
+                raise SpriteRenderError(
+                    f"Sprite '{self.name}' would be {self._bounds_claimed} px wide; reduce its "
+                    "size or the export's zoom range")
+            if bbox is None or canvas >= _MAX_CANVAS_PX or inside:
                 return image
             canvas = min(_MAX_CANVAS_PX, canvas * 2)
 

@@ -500,7 +500,12 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.42.4**. Newest first:
+This README describes QWebMap **4.43.0**. Newest first:
+
+**4.43.0** — QGIS styles drawn more faithfully, MapLibre GL JS 6.14
+- Checked against 853 styles of the QGIS Hub: the average difference between QGIS and the web map fell from 5.5 % to 3.4 %, and styles more than 20 % off from 81 to 42. Fixed among others: hatches made of markers or pencil dots, dense marker lines (moss, sketchy lines), glowing (blurred) lines, embedded images in raster lines, zero-width hatch lines, geometry generators using aggregates, `@symbol_color` in nested symbols, rotated point patterns, arrow drop shadows, sizes in meters at scale.
+- Exports that failed on some styles now finish (very dense smoothed generators, a pattern too large for a sprite, a polygon generator drawing lines with a screen offset).
+- The viewer uses MapLibre GL JS 6.14.0 (was 6.11.2), built by `tools/maplibre` from MapLibre's readable code with QWebMap's patches.
 
 **4.42.4** — overview map and basemap switcher
 - The overview map follows every layer switch, theme and basemap change of the main map (changes made while it was loading tiles were lost), and shows a wider area (6 zoom levels out instead of 4).

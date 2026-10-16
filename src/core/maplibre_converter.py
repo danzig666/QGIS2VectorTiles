@@ -5,6 +5,7 @@ import dataclasses
 import decimal
 import json
 import math
+import sys
 import re
 import os
 from os.path import join
@@ -32,6 +33,7 @@ from qgis.core import NULL, Qgis, QgsFontUtils, QgsSymbolLayerUtils, QgsFillSymb
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
 from .fidelity import expressions as ex
 from .fidelity import feature_order
@@ -581,7 +583,7 @@ class LinePropertyExtractor:
         middle of every half zoom (within 2^0.25 of QGIS), every whole zoom
         for round caps (whose dashes take 15 rows of MapLibre's 512-row line
         atlas each). The patched MapLibre multiplies by the width at the
-        current zoom (tools/patch_maplibre.py)."""
+        current zoom (tools/maplibre/patches)."""
         low, high = LinePropertyExtractor._DASH_PERIOD_PX
         step = 1.0 if round_cap else 0.5
         start = math.floor(max(0.0, min_zoom) / step) * step
@@ -956,7 +958,7 @@ class IconPropertyExtractor:
                              1e-12)
             return icon_size, mupp, context.sprite_oversampling or float(_SPRITE_QUALITY)
         # (screen-size markers do not grow with the zoom)
-        layer_units = {normalize_unit(symbol.symbolLayer(i).outputUnit())
+        layer_units = {IconPropertyExtractor._unit_of_lengths(symbol.symbolLayer(i))
                        for i in range(symbol.symbolLayerCount())} if symbol else set()
         if layer_units - {"map", "m"}:
             PropertyExtractor.context.report(
@@ -1001,6 +1003,18 @@ class IconPropertyExtractor:
             map_units_per_pixel, oversampling
 
     @staticmethod
+    def _unit_of_lengths(layer) -> str:
+        """A symbol layer's output unit, a zero offset's unit left out (a
+        metre-sized marker with an unused millimetre offset is not mixed)."""
+        offset = getattr(layer, "offset", None)
+        if callable(offset) and hasattr(layer, "setOffsetUnit") and hasattr(layer, "sizeUnit"):
+            value = offset()
+            if (value.isNull() if hasattr(value, "isNull") else value == 0):
+                layer = layer.clone()
+                layer.setOffsetUnit(layer.sizeUnit())
+        return normalize_unit(layer.outputUnit())
+
+    @staticmethod
     def uses_map_units(symbol: QgsSymbol) -> bool:
         """Whether any size, width or offset of the marker is in map units."""
         if symbol is None:
@@ -1030,7 +1044,7 @@ class IconPropertyExtractor:
             image = QImage(1, 1, QImage.Format.Format_ARGB32)
             painter = QPainter(image)
             try:
-                context = QgsRenderContext.fromQPainter(painter)
+                context = with_map_distances(QgsRenderContext.fromQPainter(painter))
                 context.setScaleFactor(96.0 / 25.4)
                 context.setMapToPixel(QgsMapToPixel(mupp))
                 probe = symbol.clone()
@@ -2601,9 +2615,32 @@ class QgisMapLibreStyleExporter:
 
     _STROKE_DDP = frozenset({"StrokeColor", "StrokeWidth", "StrokeStyle", "JoinStyle"})
 
+    # QPainter composition modes that leave white white: Plus, Screen,
+    # Lighten, ColorDodge.
+    _LIGHTENING_BLENDS = frozenset({12, 14, 17, 18})
+
+    def _drawn_lightening_only(self, symbol_layer) -> bool:
+        """Whether a layer is drawn only through a lightening blend mode (its
+        effect stack's "draw source" set to Screen: an overlay meant for dark
+        maps). QGIS draws nothing on a white map; the browser cannot blend."""
+        sources = [e for e in self._effect_list(symbol_layer)
+                   if type(e).__name__ == "QgsDrawSourceEffect"]
+        return bool(sources) and all(_enum_int(e.blendMode()) in self._LIGHTENING_BLENDS
+                                     for e in sources)
+
     def _classify(self, symbol_layer: QgsSymbolLayer, index: int) -> Strategy:
         """Classify a symbol layer and report unsupported data-defined properties."""
         layer_type = symbol_layer.layerType()
+        try:
+            if self._drawn_lightening_only(symbol_layer):
+                self.context.report(
+                    "Q2VT_UNSUPPORTED_EFFECT",
+                    f"{layer_type} drawn with a lightening blend mode (Screen, Lighten...): "
+                    "invisible on a white map in QGIS, left out (the browser cannot blend).",
+                    symbol_layer_index=index)
+                return Strategy.UNSUPPORTED
+        except (AttributeError, RuntimeError):
+            pass
         names = self._active_ddp_names(symbol_layer)
         try:
             if layer_type == "SimpleFill" and symbol_layer.strokeStyle() == Qt.PenStyle.NoPen:
@@ -2628,7 +2665,7 @@ class QgisMapLibreStyleExporter:
             # a simple line's glow and shadow become extra line layers.
             handled = {"QgsDrawSourceEffect"}
             if isinstance(symbol_layer, QgsSimpleLineSymbolLayer):
-                handled |= set(self.LINE_EFFECTS)
+                handled |= set(self.LINE_EFFECTS) | {"QgsBlurEffect"}
             ignored = sorted({e.type() for e in self._effect_list(symbol_layer)
                               if type(e).__name__ not in handled})
             cap = capability(layer_type)
@@ -2765,11 +2802,13 @@ class QgisMapLibreStyleExporter:
         falls back to an approximate preview texture.
         """
         sub = symbol_layer.subSymbol()
-        if sub is None or sub.symbolLayerCount() != 1:
+        if sub is None or sub.symbolLayerCount() == 0 or self._active_ddp_names(symbol_layer):
             return None
         line = sub.symbolLayer(0)
-        if not isinstance(line, QgsSimpleLineSymbolLayer) or _enum_int(line.penStyle()) != 1 \
-                or self._active_ddp_names(line) or self._active_ddp_names(symbol_layer):
+        if sub.symbolLayerCount() != 1 or not isinstance(line, QgsSimpleLineSymbolLayer) or \
+                _enum_int(line.penStyle()) != 1 or self._effect_list(line):
+            return self._register_drawn_line_pattern(symbol_layer)
+        if self._active_ddp_names(line):
             return None
 
         def screen_px(value, unit, what):
@@ -2786,12 +2825,13 @@ class QgisMapLibreStyleExporter:
         spec = LinePatternSpec(
             angle_deg=float(symbol_layer.lineAngle()),
             spacing_px=screen_px(symbol_layer.distance(), symbol_layer.distanceUnit(), "spacing"),
-            line_width_px=screen_px(line.width(), line.widthUnit(), "width"),
+            # A zero width is QGIS's one-pixel hairline (a geology hatch
+            # with width 0 was a fully transparent texture).
+            line_width_px=hairline(screen_px(line.width(), line.widthUnit(), "width")),
             color_rgba=(color.red(), color.green(), color.blue(), color.alpha()),
             offset_px=screen_px(symbol_layer.offset(), symbol_layer.offsetUnit(), "offset"),
         )
-        if self._exact_screen_texture and \
-                _enum_int(symbol_layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly):
+        if self._exact_screen_texture and self._qgis_hatch_image(symbol_layer):
             angle, spacing = qgis_image_hatch(spec.angle_deg, spec.spacing_px)
             spec = dataclasses.replace(spec, angle_deg=angle, spacing_px=spacing)
         cell = solve_periodic_cell(spec, self.profile)
@@ -2807,6 +2847,244 @@ class QgisMapLibreStyleExporter:
         self.pattern_images[name] = PatternImages(
             render_line_pattern(spec, cell, 1), render_line_pattern(spec, cell, 2))
         return name
+
+    # Qt's dash patterns of the plain pen styles, in pen widths.
+    _QT_DASHES = {2: (4, 2), 3: (1, 2), 4: (4, 2, 1, 2), 5: (4, 2, 1, 2, 1, 2)}
+
+    def _line_repeat_px(self, sub) -> Optional[float]:
+        """Texture px after which a line sub-symbol repeats along the line:
+        its marker or hash interval, its dash pattern (the longest of
+        them); None for a line that is the same all along."""
+        from qgis.core import QgsTemplatedLineSymbolLayerBase  # pylint: disable=import-outside-toplevel
+        repeats = []
+        for line in sub.symbolLayers():
+            if isinstance(line, QgsTemplatedLineSymbolLayerBase) and \
+                    _enum_int(line.placements()) & _enum_int(Qgis.MarkerLinePlacement.Interval):
+                repeats.append(self._texture_px(line.interval(), line.intervalUnit()))
+            elif isinstance(line, QgsSimpleLineSymbolLayer) and _enum_int(line.penStyle()) not in (0, 1):
+                if line.useCustomDashPattern():
+                    repeats.append(sum(self._texture_px(dash, line.customDashPatternUnit())
+                                       for dash in line.customDashVector()))
+                elif _enum_int(line.penStyle()) in self._QT_DASHES:
+                    width = max(1.0, self._texture_px(line.width(), line.widthUnit()))
+                    repeats.append(width * sum(self._QT_DASHES[_enum_int(line.penStyle())]))
+        repeats = [r for r in repeats if r > 0]
+        return max(repeats) if repeats else None
+
+    def _register_drawn_line_pattern(self, layer) -> Optional[str]:
+        """A hatch whose line is not one plain stroke (a marker line, dashes,
+        several layers, a glow): the line sub-symbol drawn by QGIS along a
+        straight line in a tile one repeat long and one spacing high, the
+        tile turned to the hatch angle in a seamless cell. (A preview of the
+        whole fill, cropped, repeated at the wrong period: a 3.2 mm zigzag
+        hatch was a dense dark mesh.) QGIS starts every hatch line where it
+        crosses the feature's box, so its markers are not in step from one
+        line to the next; here they are. None for map-unit or data-defined
+        sub-symbols."""
+        from qgis.core import QgsExpressionContext, QgsRenderContext  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtCore import QPointF  # pylint: disable=import-outside-toplevel
+        from qgis.PyQt.QtGui import QImage, QPainter, QPolygonF  # pylint: disable=import-outside-toplevel
+        from .fidelity.patterns import rotated_lattice_cell  # pylint: disable=import-outside-toplevel
+        from .fidelity.render_context import with_map_distances  # pylint: disable=import-outside-toplevel
+        from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
+        sub = layer.subSymbol()
+        if normalize_unit(layer.distanceUnit()) in ("map", "m") or \
+                sub.usesMapUnits() or \
+                any(self._active_ddp_names(line) for line in sub.symbolLayers()):
+            return None
+        spacing = self._texture_px(layer.distance(), layer.distanceUnit())
+        if spacing < 1:
+            return None
+        repeat = self._line_repeat_px(sub) or spacing
+        if repeat < 1 or repeat > 512 or spacing > 512:
+            return None
+        per_mm = self._texture_px(1.0, Qgis.RenderUnit.Millimeters)
+        if self._qgis_hatch_image(layer):
+            cells = [self._qgis_hatch_brush(layer, per_mm * ratio) for ratio in (1, 2)]
+            if all(cell is not None for cell in cells):
+                return self._textures(cells[0], cells[1], 0.0, "Hatch")
+        angle = float(layer.lineAngle()) % 360.0
+        lattice = rotated_lattice_cell(repeat, spacing, -angle) if angle else None
+        if angle and lattice is None:
+            return None
+        cells, error = [], 0.0
+        for ratio in (1, 2):
+            tile_w, tile_h = max(1, round(repeat * ratio)), max(1, round(spacing * ratio))
+            image = QImage(tile_w, tile_h, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            try:
+                context = with_map_distances(QgsRenderContext.fromQPainter(painter))
+                # Whole pixels per repeat: the drawing is stretched that much.
+                context.setScaleFactor(per_mm * ratio * tile_w / (repeat * ratio))
+                context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+                context.setExpressionContext(QgsExpressionContext())
+                symbol = sub.clone()
+                symbol.startRender(context)
+                # On the tile's edge (and the hatch offset away), as
+                # render_line_pattern draws plain hatches; the neighbouring
+                # lines for their overhang.
+                first = (self._texture_px(layer.offset(), layer.offsetUnit()) * ratio) % tile_h
+                for dy in (-tile_h, 0, tile_h, 2 * tile_h):
+                    y = first + dy
+                    symbol.renderPolyline(QPolygonF([QPointF(-4.0 * tile_w, y),
+                                                     QPointF(5.0 * tile_w, y)]), None, context)
+                symbol.stopRender(context)
+            finally:
+                painter.end()
+            tile = SymbolImage._qt_to_pil(image)  # pylint: disable=protected-access
+            if lattice is not None:
+                tile = self._rotated_texture(tile, lattice, ratio)
+            cells.append(tile)
+            error = max(error, abs(tile_w - repeat * ratio) / (repeat * ratio),
+                        abs(tile_h - spacing * ratio) / (spacing * ratio))
+        if lattice is not None:
+            error = max(error, lattice[4])
+        return self._textures(cells[0], cells[1], error, "Hatch")
+
+    @staticmethod
+    def _qgis_hatch_image(layer) -> bool:
+        """Whether QGIS fills with its pixel-rounded pattern image rather than
+        drawing each line (QgsLinePatternFillSymbolLayer::startRender): only
+        when clipped by the painter, with no data-defined clipping and a line
+        symbol without data-defined properties (a pencil hatch with random
+        dots is drawn line by line, at the exact spacing)."""
+        sub = layer.subSymbol()
+        return _enum_int(layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly) \
+            and not layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyLineClipping) \
+            and not (sub is not None and sub.hasDataDefinedProperties())
+
+    @staticmethod
+    def _qgis_hatch_brush(layer, px_per_mm: float):
+        """The brush image QGIS fills a hatch with in its default clip mode
+        (``QgsLinePatternFillSymbolLayer::applyPattern``, QGIS 3.34): a tile
+        whose sides are truncated to whole pixels, the line sub-symbol drawn
+        from corner to corner (and a neighbour on each side) over a buffer
+        of whole tiles, so dashes and markers restart in every tile. Marker
+        intervals are rounded to whole pixels. None when QGIS draws the lines
+        one by one instead (a tile over 2000 px)."""
+        # pylint: disable=import-outside-toplevel
+        from qgis.core import (QgsExpressionContext, QgsMarkerLineSymbolLayer, QgsRenderContext,
+                               QgsSymbolLayerUtils as Utils)
+        from qgis.PyQt.QtCore import QPointF
+        from qgis.PyQt.QtGui import QImage, QPainter, QPolygonF
+        from .sprite_generator import SymbolImage
+
+        def near(a, b):
+            return abs(a - b) <= 4 * sys.float_info.epsilon * max(1.0, abs(a), abs(b))
+        symbol = layer.subSymbol().clone()
+        probe = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
+        probe_painter = QPainter(probe)
+        try:
+            context = QgsRenderContext.fromQPainter(probe_painter)
+            context.setScaleFactor(px_per_mm)
+            bleed = max([line.estimateMaxBleed(context) for line in symbol.symbolLayers()] + [0.0])
+            dist = context.convertToPainterUnits(layer.distance(), layer.distanceUnit(),
+                                                 layer.distanceMapUnitScale())
+            offset = dist * layer.offset() / 100.0 \
+                if _enum_int(layer.offsetUnit()) == _enum_int(Qgis.RenderUnit.Percentage) \
+                else context.convertToPainterUnits(layer.offset(), layer.offsetUnit(),
+                                                   layer.offsetMapUnitScale())
+            markers = [line for line in symbol.symbolLayers()
+                       if isinstance(line, QgsMarkerLineSymbolLayer)]
+            interval = max([context.convertToPainterUnits(line.interval(), line.intervalUnit(),
+                                                          line.intervalMapUnitScale())
+                            for line in markers] + [0.0])
+        finally:
+            probe_painter.end()
+        if dist <= 0:
+            return None
+        offset = math.fmod(offset, dist)
+        if offset > dist / 2.0:
+            offset -= dist
+        if interval > 0:
+            scale = round(interval) / interval
+            interval = float(round(interval))
+            for line in markers:
+                line.setInterval(scale * line.interval())
+        angle = float(layer.lineAngle()) % 360.0
+        if any(near(angle, a) for a in (0.0, 360.0, 180.0)):
+            height = int(dist)
+            width = int(interval) if interval > 0 else height
+        elif any(near(angle, a) for a in (90.0, 270.0)):
+            width = int(dist)
+            height = int(interval) if interval > 0 else width
+        else:
+            height = int(dist / math.cos(math.radians(angle)))
+            width = int(dist / math.sin(math.radians(angle)))
+            angle = math.degrees(math.atan2(height, width))
+            if angle < 0:
+                angle += 360.0
+            height, width = abs(height), abs(width)
+            dist = abs(height * math.cos(math.radians(angle)))
+            offset = int(round(offset / math.cos(math.radians(angle)))) * math.cos(math.radians(angle))
+        if width == 0 or height == 0:
+            return None
+        multi = max(int(math.ceil(bleed / width)), 1)
+        x_buffer, y_buffer = width * multi, height * multi
+        inner_w, inner_h = width, height
+        width, height = width + 2 * x_buffer, height + 2 * y_buffer
+        if width > 2000 or height > 2000:
+            return None
+        dx = dy = 0.0
+        p5 = p6 = None
+        if any(near(angle, a) for a in (0.0, 360.0, 180.0)):
+            p1, p2 = QPointF(0, y_buffer), QPointF(width, y_buffer)
+            p3, p4 = QPointF(0, y_buffer + inner_h), QPointF(width, y_buffer + inner_h)
+        elif any(near(angle, a) for a in (90.0, 270.0)):
+            p1, p2 = QPointF(x_buffer, height), QPointF(x_buffer, 0)
+            p3, p4 = QPointF(x_buffer + inner_w, height), QPointF(x_buffer + inner_w, 0)
+        elif 0 < angle < 90 or 180 < angle < 270:
+            dx = dist * math.cos(math.radians(90 - angle))
+            dy = dist * math.sin(math.radians(90 - angle))
+            if angle < 90:
+                p1, p2 = QPointF(0, height), QPointF(width, 0)
+                p3, p4 = QPointF(-dx, height - dy), QPointF(width - dx, -dy)
+                p5, p6 = QPointF(dx, height + dy), QPointF(width + dx, dy)
+            else:
+                p1, p2 = QPointF(width, 0), QPointF(0, height)
+                p3, p4 = QPointF(width - dx, -dy), QPointF(-dx, height - dy)
+                p5, p6 = QPointF(width + dx, dy), QPointF(dx, height + dy)
+        else:
+            dy = dist * math.cos(math.radians(180 - angle))
+            dx = dist * math.sin(math.radians(180 - angle))
+            if angle < 180:
+                p1, p2 = QPointF(0, 0), QPointF(width, height)
+                p5, p6 = QPointF(dx, -dy), QPointF(width + dx, height - dy)
+                p3, p4 = QPointF(-dx, dy), QPointF(width - dx, height + dy)
+            else:
+                p1, p2 = QPointF(width, height), QPointF(0, 0)
+                p5, p6 = QPointF(width + dx, height - dy), QPointF(dx, -dy)
+                p3, p4 = QPointF(width - dx, height + dy), QPointF(-dx, dy)
+        if layer.offset():
+            on = Utils.pointOnLineWithDistance
+            p3 = on(p1, p3, dist + offset)
+            p4 = on(p2, p4, dist + offset)
+            if p5 is not None:
+                p5 = on(p1, p5, dist - offset)
+                p6 = on(p2, p6, dist - offset)
+            p1 = on(p1, p3, offset)  # as QGIS: towards the already moved p3
+            p2 = on(p2, p4, offset)
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        try:
+            context = QgsRenderContext()
+            context.setPainter(painter)
+            context.setScaleFactor(px_per_mm)
+            context.setExpressionContext(QgsExpressionContext())
+            context.setFlag(Qgis.RenderContextFlag.RenderingSubSymbol)
+            context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+            symbol.startRender(context)
+            lines = [(p1, p2), (p3, p4)] + ([(p5, p6)] if p5 is not None else [])
+            for start, end in lines:
+                symbol.renderPolyline(QPolygonF([QPointF(start), QPointF(end)]), None, context)
+            symbol.stopRender(context)
+        finally:
+            painter.end()
+        return SymbolImage._qt_to_pil(image.copy(x_buffer, y_buffer, inner_w, inner_h))  # pylint: disable=protected-access
 
     @staticmethod
     def _offset_ems(dx, dy, size, baseline: float):
@@ -3214,7 +3492,7 @@ class QgisMapLibreStyleExporter:
     MAX_OVERZOOM_PATTERN_SPRITE_PX = 400_000
     _overzoom_pattern_px = 0
     # Style layer metadata: the zoom of the last per-zoom texture, which the
-    # patched MapLibre (tools/patch_maplibre.py) keeps scaling with the map
+    # patched MapLibre (tools/maplibre/patches) keeps scaling with the map
     # above it (stock MapLibre draws it in the pixels of the view's integer
     # zoom: 2x too small one zoom deeper, 4x two zooms deeper ...).
     PATTERN_ZOOM_FLAG = "q2vt:pattern-zoom"
@@ -3354,7 +3632,7 @@ class QgisMapLibreStyleExporter:
     # QGIS (instead of 1x-2x), exact in the middle of every zoom.
     # Textures of patterns sized only in screen units are drawn at their true
     # size instead: their style layer carries SCREEN_PATTERN_FLAG, which the
-    # patched MapLibre (tools/patch_maplibre.py) draws at the real zoom.
+    # patched MapLibre (tools/maplibre/patches) draws at the real zoom.
     TEXTURE_SCREEN_SCALE = 1.0 / math.sqrt(2.0)
     SCREEN_PATTERN_FLAG = "q2vt:screen-pattern"
     PATTERN_ANCHOR_FLAG = "q2vt:pattern-anchor"
@@ -3420,9 +3698,9 @@ class QgisMapLibreStyleExporter:
         marker = layer.subSymbol()
         if marker is None:
             return None
-        if layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY() or layer.angle():
+        if layer.maximumRandomDeviationX() or layer.maximumRandomDeviationY():
             self.context.report("Q2VT_PATTERN_APPROXIMATE",
-                                "Random deviation or rotation of pattern markers is ignored.",
+                                "Random deviation of pattern markers is ignored.",
                                 strategy=Strategy.APPROXIMATE.value)
         if hasattr(layer, "clipMode") and \
                 _enum_int(layer.clipMode()) != _enum_int(Qgis.MarkerClipMode.Shape):
@@ -3465,12 +3743,48 @@ class QgisMapLibreStyleExporter:
                     off_x * ratio, off_y * ratio)
                 cells.append(tile_markers(image, width, height, positions, wrap=False, snap=snap))
             return self._textures(cells[0], cells[1], 0.0, "Point pattern")
+        lattice = None
         for ratio, image in ((1, one), (2, two)):
             width, height, positions, _ = point_pattern_cell(
                 dx * ratio, dy * ratio, disp_x * ratio, disp_y * ratio)
             positions = [((x + off_x * ratio) % width, (y + off_y * ratio) % height)
                          for x, y in positions]
-            cells.append(tile_markers(image, width, height, positions))
+            cell = tile_markers(image, width, height, positions)
+            if layer.angle() % 360.0:
+                # A turned pattern: QGIS turns the grid (clockwise), not the
+                # markers; upright markers at the turned grid's positions in
+                # a seamless texture.
+                if lattice is None:
+                    from .fidelity.patterns import rotated_lattice_cell  # pylint: disable=import-outside-toplevel
+                    lattice = rotated_lattice_cell(width, height, layer.angle())
+                    if lattice is None:
+                        self.context.report("Q2VT_PATTERN_APPROXIMATE",
+                                            "Rotation of the point pattern is ignored.",
+                                            strategy=Strategy.APPROXIMATE.value)
+                        lattice = False
+                    elif lattice[4] > self.profile.tolerance_rel:
+                        self.context.report(
+                            "Q2VT_PATTERN_APPROXIMATE",
+                            f"Rotated point pattern: spacing turned or scaled by up to "
+                            f"{lattice[4]:.1%} so the texture repeats without seams.",
+                            strategy=Strategy.APPROXIMATE.value)
+                if lattice:
+                    cell_w, cell_h, u, v, _ = lattice
+                    cell_w, cell_h = cell_w * ratio, cell_h * ratio
+                    turned = []
+                    span = int(math.ceil(2 * max(cell_w, cell_h) / max(1.0, min(width, height)))) + 2
+                    for x, y in positions:
+                        px = x / width * u[0] * ratio + y / height * v[0] * ratio
+                        py = x / width * u[1] * ratio + y / height * v[1] * ratio
+                        for k in range(-span, span + 1):
+                            for m in range(-span, span + 1):
+                                qx = px + (k * u[0] + m * v[0]) * ratio
+                                qy = py + (k * u[1] + m * v[1]) * ratio
+                                if 0 <= qx < cell_w and 0 <= qy < cell_h:
+                                    turned.append((qx, qy))
+                    cell = tile_markers(image, int(cell_w), int(cell_h), sorted(set(
+                        (round(qx, 6), round(qy, 6)) for qx, qy in turned)))
+            cells.append(cell)
         return self._textures(cells[0], cells[1], error, "Point pattern")
 
     @staticmethod
@@ -3745,11 +4059,12 @@ class QgisMapLibreStyleExporter:
         least 64 px), which MapLibre needs for a seamless repeat."""
         from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
         from qgis.PyQt.QtCore import QSize  # pylint: disable=import-outside-toplevel
-        from qgis.PyQt.QtGui import QImageReader  # pylint: disable=import-outside-toplevel
         from PIL import Image  # pylint: disable=import-outside-toplevel
         from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
         path = layer.path()
-        source = QImageReader(path).size() if path else None
+        # The image cache also reads embedded (base64:) images and URLs,
+        # which QImageReader took for missing files.
+        source = QgsApplication.imageCache().originalSize(path, True) if path else None
         if not path or source is None or source.isEmpty():
             return None
         line_px = max(1.0, PropertyExtractor.static_pixels(layer.width(), layer.widthUnit()))
@@ -3978,6 +4293,13 @@ class QgisMapLibreStyleExporter:
                 stroke = 1.0  # QGIS draws a zero width as a one-pixel hairline
         try:
             radius = ex.clamp(ex.mul(ex.add(size, ex.mul(stroke, -1.0)), 0.5), 0, None)
+            # MapLibre fades a circle out over the pixel inside its edge,
+            # QGIS antialiases across it: the edge half a pixel further out
+            # inks as much (0.5 mm dots, 1.9 px wide, were faint grey specks).
+            if has_stroke:
+                stroke = ex.add(stroke, self.CIRCLE_EDGE_PX)
+            else:
+                radius = ex.add(radius, self.CIRCLE_EDGE_PX)
         except ex.ExpressionError:
             return False
 
@@ -4005,6 +4327,8 @@ class QgisMapLibreStyleExporter:
             })
         self.style["layers"].append(layer_def)
         return True
+
+    CIRCLE_EDGE_PX = 0.5
 
     # Map-unit sprites: one image per integer zoom, drawn at that zoom's size
     # with this oversampling, so MapLibre scales it by 1/1.5 .. 2/1.5 (the
@@ -4114,6 +4438,28 @@ class QgisMapLibreStyleExporter:
             return max(0.0, min(1.0, value / 100.0))
         return ex.clamp(ex.div(value, 100.0), 0, 1)
 
+    @staticmethod
+    def _relative_layer_angles(sprite_symbol, symbol_layer):
+        """Layers of a marker each turned by their own data-defined angle (a
+        marker line's markers: the line's angle plus each layer's own,
+        mat.marker_rotation_expression) are drawn turned by ``icon-rotate``,
+        the first layer's angle: the sprite keeps each layer's angle relative
+        to it. With the angle's field missing QGIS drew every layer at 0°
+        (a measure line's arrowheads, at 90° to its ticks, lay sideways)."""
+        angle = QgsSymbolLayer.Property.PropertyAngle
+        if sprite_symbol.symbolLayerCount() < 2 or not any(
+                layer.dataDefinedProperties().isActive(angle)
+                for layer in sprite_symbol.symbolLayers()):
+            return sprite_symbol
+        reference = float(getattr(symbol_layer, "angle", lambda: 0.0)())
+        sprite_symbol = sprite_symbol.clone()  # the style's icon-rotate reads the original
+        for layer in sprite_symbol.symbolLayers():
+            if layer.dataDefinedProperties().isActive(angle):
+                layer.dataDefinedProperties().setProperty(angle, QgsProperty())
+            if hasattr(layer, "setAngle"):
+                layer.setAngle(layer.angle() - reference)
+        return sprite_symbol
+
     def _marker_layer(
         self,
         symbol_layer: QgsSymbolLayer,
@@ -4136,6 +4482,7 @@ class QgisMapLibreStyleExporter:
         icon_size, map_units_per_pixel, oversampling = IconPropertyExtractor.marker_scale(
             scaled_symbol, scaled_layer)
         sprite_symbol, icon_opacity = self._marker_opacity(symbol)
+        sprite_symbol = self._relative_layer_angles(sprite_symbol, symbol_layer)
         animation = self._animation(sprite_symbol)
         self.marker_symbols[marker_name] = SpriteRequest(
             sprite_symbol.clone(), bake_rotation=False, map_units_per_pixel=map_units_per_pixel,
@@ -4329,6 +4676,9 @@ class QgisMapLibreStyleExporter:
             pass
         if sub_symbol is None or sub_symbol.symbolLayerCount() == 0:
             return
+        if self._dense_marker_line(symbol_layer, sub_symbol, style_name, source_layer_name,
+                                   source_name, min_zoom, max_zoom, symbol):
+            return
         if not IconPropertyExtractor.uses_map_units(sub_symbol):
             self._marker_line_layer(symbol_layer, sub_symbol, style_name, source_layer_name,
                                     source_name, min_zoom, max_zoom, symbol)
@@ -4349,6 +4699,117 @@ class QgisMapLibreStyleExporter:
         finally:
             context.reference_zoom, context.reference_zoom_span, \
                 context.sprite_oversampling = saved
+
+    def _random_only(self, layer) -> bool:
+        """Whether a symbol layer's data-defined properties (if any) only
+        vary by chance: QGIS draws them itself, marker by marker."""
+        from .ddp_fetcher import is_random_only  # pylint: disable=import-outside-toplevel
+        props = layer.dataDefinedProperties()
+        for key in props.propertyKeys():
+            prop = props.property(key)
+            if prop is not None and prop.isActive() and not (
+                    prop.propertyType() == 3 and is_random_only(prop.expressionString())):
+                return False
+        return True
+
+    def _dense_marker_line(self, symbol_layer, sub_symbol, style_name: str,
+                           source_layer_name: str, source_name: str, min_zoom: float,
+                           max_zoom: float, symbol) -> bool:
+        """Markers closer together than they are long (moss: a 1 mm marker
+        every 0.2 mm; ddp_fetcher.dense_marker_line) as a ``line-pattern``
+        of the marker line drawn by QGIS, a random size or colour drawn per
+        marker: MapLibre spaces line symbols at least their own length plus
+        a quarter of the spacing apart, which kept one marker in five.
+        Screen units only, no data-defined property but random ones. False
+        when it does not apply."""
+        # pylint: disable=import-outside-toplevel
+        from qgis.core import QgsExpressionContext, QgsLineSymbol, QgsRenderContext
+        from qgis.PyQt.QtCore import QPointF
+        from qgis.PyQt.QtGui import QImage, QPainter, QPolygonF
+        from PIL import Image
+        from .sprite_generator import SymbolImage
+        from .ddp_fetcher import dense_marker_line
+        if not dense_marker_line(symbol_layer) or sub_symbol.usesMapUnits() or \
+                self._active_ddp_names(symbol_layer) or \
+                not all(self._random_only(m) for m in sub_symbol.symbolLayers()):
+            return False
+        px_per_mm = PropertyExtractor.static_pixels(1.0, Qgis.RenderUnit.Millimeters)
+        interval = PropertyExtractor.static_pixels(symbol_layer.interval(), symbol_layer.intervalUnit())
+        probe = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
+        painter = QPainter(probe)
+        try:
+            context = QgsRenderContext.fromQPainter(painter)
+            context.setScaleFactor(px_per_mm)
+            context.setExpressionContext(QgsExpressionContext())
+            marker = sub_symbol.clone()
+            marker.startRender(context)
+            # Random sizes or offsets (rand() per marker): a few draws; the
+            # tile is drawn three times as high and cropped to its ink.
+            boxes = [marker.bounds(QPointF(0, 0), context) for _ in range(32)]
+            marker.stopRender(context)
+        finally:
+            painter.end()
+        half = min(256.0, 3.0 * max(max(abs(b.top()), abs(b.bottom())) for b in boxes) + 1.0)
+        width = 64
+        while width < 512 and abs(width / max(1, round(width / interval)) - interval) / interval > 0.01:
+            width *= 2
+        count = max(1, round(width / interval))
+        line = symbol_layer.clone()
+        line.setOffset(0)  # line-offset
+        line.setIntervalUnit(Qgis.RenderUnit.Millimeters)
+        line_symbol = QgsLineSymbol([line])
+        cells = []
+        for ratio in (1, 2):
+            tile_w, tile_h = width * ratio, 2 * int(math.ceil(half * ratio))
+            line.setInterval(width / count / px_per_mm)  # whole repeats per tile
+            image = QImage(tile_w, tile_h, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            try:
+                context = QgsRenderContext.fromQPainter(painter)
+                context.setScaleFactor(px_per_mm * ratio)
+                context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+                context.setExpressionContext(QgsExpressionContext())
+                line_symbol.startRender(context)
+                line_symbol.renderPolyline(QPolygonF([QPointF(-4.0 * tile_w, tile_h / 2.0),
+                                                      QPointF(5.0 * tile_w, tile_h / 2.0)]),
+                                           None, context)
+                line_symbol.stopRender(context)
+            finally:
+                painter.end()
+            # QGIS draws the left of the line on top; MapLibre's first row is
+            # on the right (as for raster lines).
+            cells.append(SymbolImage._qt_to_pil(image).transpose(Image.Transpose.FLIP_TOP_BOTTOM))  # pylint: disable=protected-access
+        # Cropped to the ink, symmetrically: the line stays in the middle.
+        ink = [cell.getchannel("A").getbbox() for cell in cells]
+        if ink[0] is None or ink[1] is None:
+            return False
+        reach = max(max(cells[0].height / 2.0 - ink[0][1], ink[0][3] - cells[0].height / 2.0),
+                    max(cells[1].height / 2.0 - ink[1][1], ink[1][3] - cells[1].height / 2.0) / 2.0)
+        keep = int(math.ceil(reach)) + 1
+        cells = [cell.crop((0, max(0, cell.height // 2 - keep * ratio), cell.width,
+                            min(cell.height, cell.height // 2 + keep * ratio)))
+                 for ratio, cell in ((1, cells[0]), (2, cells[1]))]
+        error = abs(width / count - interval) / interval
+        name = self._textures(cells[0], cells[1], error, "Dense marker line")
+        layer_def = self._base_layer_def("line", style_name, source_layer_name, source_name,
+                                         min_zoom, max_zoom)
+        layer_def["paint"].update({
+            "line-pattern": name,
+            "line-width": cells[0].height,
+            "line-opacity": self._symbol_opacity(symbol) if symbol is not None else 1.0,
+        })
+        offset = LinePropertyExtractor.get_marker_line_offset(symbol_layer)
+        if isinstance(offset, list) or (ex.is_number(offset) and offset != 0):
+            layer_def["paint"]["line-offset"] = offset
+        layer_def["layout"].update({"line-cap": "butt", "line-join": "miter",
+                                    "visibility": "visible"})
+        self.style["layers"].append(layer_def)
+        self.context.report("Q2VT_MARKER_PLACEMENT_APPROX",
+                            "Markers closer than their own length drawn as a repeating line "
+                            "pattern (their positions start anew at each tile).")
+        return True
 
     def _marker_line_layer(self, symbol_layer, sub_symbol, style_name: str,
                            source_layer_name: str, source_name: str,
@@ -4574,6 +5035,7 @@ class QgisMapLibreStyleExporter:
         if role == "none":
             self.style["layers"].append(layer_def)
             return
+        self._line_blur(symbol_layer, layer_def)
         below, above = self._line_effect_layers(symbol_layer, layer_def)
         if role == "outer":  # the line itself is drawn by another component
             self.style["layers"].extend(below + above)
@@ -4632,6 +5094,52 @@ class QgisMapLibreStyleExporter:
         if type(effect).__name__ == "QgsEffectStack":
             return [e for e in effect.effectList() if e.enabled()]
         return [effect]
+
+    # QgsImageOperation::stackBlur: smoothing weight (of 16) per radius.
+    _STACK_BLUR_WEIGHTS = (14, 10, 8, 6, 5, 5, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2)
+
+    @classmethod
+    def blur_scale(cls, effect, radius_px: float) -> float:
+        """Length (px) over which a QGIS blur effect of ``radius_px`` fades:
+        the stack blur smooths each pixel 1/16 x weight towards the next,
+        both ways (QgsImageOperation::stackBlur): a two-sided exponential
+        of scale -1 / ln(decay); a Gaussian blur's sigma is radius / 3."""
+        radius = int(round(radius_px))
+        if radius <= 0:
+            return 0.0
+        if _enum_int(effect.blurMethod()) == 1:  # GaussianBlur
+            return radius / 3.0
+        weight = 1 if radius > 17 else cls._STACK_BLUR_WEIGHTS[radius - 1]
+        decay = 1.0 - weight / 16.0
+        return -1.0 / math.log(decay) if 0 < decay < 1 else 0.0
+
+    def _line_blur(self, symbol_layer, layer_def: dict) -> None:
+        """A simple line's blur effect (a glowing firefly line), as QGIS
+        blurs the drawn line (QgsBlurEffect): a peaked profile fading over
+        the blur's scale. Drawn as a line with a triangular profile (line-blur
+        half its width) reaching two scales past the line's edge, with the
+        line's ink (its long faint tail left out)."""
+        if not isinstance(symbol_layer, QgsSimpleLineSymbolLayer):
+            return
+        for effect in self._effect_list(symbol_layer):
+            name = type(effect).__name__
+            if name == "QgsDrawSourceEffect":
+                return  # a blur drawn after the line is a separate copy: not this
+            if name != "QgsBlurEffect" or _enum_int(effect.drawMode()) == 1:
+                continue
+            unit = effect.blurUnit() if hasattr(effect, "blurUnit") else Qgis.RenderUnit.Millimeters
+            scale = self.blur_scale(effect, PropertyExtractor.static_pixels(effect.blurLevel(), unit))
+            if scale <= 0:
+                return
+            width = max(PropertyExtractor.static_pixels(symbol_layer.width(),
+                                                        symbol_layer.widthUnit()), 1.0)
+            half = width / 2.0 + 2.0 * scale  # triangle half-width; ink = peak x half
+            paint = layer_def["paint"]
+            paint["line-width"] = ex.add(paint.get("line-width", 1), 2 * half - width)
+            paint["line-blur"] = round(half, 3)
+            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1),
+                                           float(effect.opacity()) * min(1.0, width / half))
+            return
 
     def _line_effect_layers(self, symbol_layer, layer_def: dict):
         """A simple line's outer glow and drop shadow as extra line layers
@@ -4757,27 +5265,34 @@ class QgisMapLibreStyleExporter:
                 return None
             map_units = self._pattern_uses_map_units(symbol_layer)
             viewport = pattern_in_viewport(symbol_layer)
-            if map_units and not self._pattern_spacing_in_map_units(symbol_layer):
-                # Screen-unit spacing, map-unit marker or line: exact spacing.
-                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, True)
-                if pattern_name is not None:
-                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
-            elif map_units:
-                pattern_name = self._per_zoom_pattern(
-                    register, min_zoom, max_zoom,
-                    screen_lengths=self._pattern_has_screen_lengths(symbol_layer))
-                if pattern_name is not None:
-                    # Above its last texture the pattern scales with the map.
-                    layer_def.setdefault("metadata", {})[self.PATTERN_ZOOM_FLAG] = \
-                        self._last_pattern_zoom
-            else:
-                self._exact_screen_texture = True
-                try:
-                    pattern_name = register()
-                finally:
-                    self._exact_screen_texture = False
-                if pattern_name is not None:
-                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+            try:
+                if map_units and not self._pattern_spacing_in_map_units(symbol_layer):
+                    # Screen-unit spacing, map-unit marker or line: exact spacing.
+                    pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, True)
+                    if pattern_name is not None:
+                        layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+                elif map_units:
+                    pattern_name = self._per_zoom_pattern(
+                        register, min_zoom, max_zoom,
+                        screen_lengths=self._pattern_has_screen_lengths(symbol_layer))
+                    if pattern_name is not None:
+                        # Above its last texture the pattern scales with the map.
+                        layer_def.setdefault("metadata", {})[self.PATTERN_ZOOM_FLAG] = \
+                            self._last_pattern_zoom
+                else:
+                    self._exact_screen_texture = True
+                    try:
+                        pattern_name = register()
+                    finally:
+                        self._exact_screen_texture = False
+                    if pattern_name is not None:
+                        layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+            except SpriteRenderError as error:
+                # A marker too large for the sprite renderer even at the
+                # lowest zoom (a "meters at scale" marker hundreds of metres
+                # wide) costs this pattern, not the whole export.
+                self.context.report("Q2VT_SPRITE_RENDER_FAILED", f"{kind} left out: {error}")
+                pattern_name = None
             if viewport:
                 # Starts at the corner of the view, as in QGIS (patched
                 # MapLibre); otherwise patterns are anchored to the map.
@@ -5609,7 +6124,7 @@ class QgisMapLibreStyleExporter:
         shape = _enum_int(background.type(), 0)
         if _enum_int(background.sizeType(), 0) == 0 and shape in self.FRAME_SHAPES:
             # QGIS bounds the text by the shape, then adds the buffer: the
-            # patched MapLibre enlarges the fitted text box (tools/patch_maplibre.py).
+            # patched MapLibre enlarges the fitted text box (tools/maplibre/patches).
             layer_def.setdefault("metadata", {})["q2vt:frame-shape"] = self.FRAME_SHAPES[shape]
             background = self._stroke_centred_buffer(background)
         image = self._background_image(background, zoom=fixed_zoom)

@@ -11,6 +11,7 @@ Depends on: config, zoom_levels, flattened_rule
 
 import html
 import math
+import re
 from typing import Dict, List, Optional, Union
 
 from qgis.core import (
@@ -63,6 +64,30 @@ def combine_scale_ranges(low_a: float, high_a: float, low_b: float, high_b: floa
     lows = [v for v in (low_a, low_b) if v]
     highs = [v for v in (high_a, high_b) if v]
     return (min(lows) if lows else 0.0), (max(highs) if highs else 0.0)
+
+
+def bind_symbol_color(symbol, color=None) -> None:
+    """Replace ``@symbol_color`` in the data-defined properties of a symbol's
+    layers with the colour QGIS gives it, before the symbol is split into
+    one rule per layer (each piece would have a colour of its own): the
+    colour of the symbol whose features are drawn, also inside its marker
+    lines, hashes and patterns; a geometry generator's sub-symbol is drawn
+    as a symbol of its own, with its own colour."""
+    from qgis.core import QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
+    color = symbol.color() if color is None else color
+    literal = "'" + QgsSymbolLayerUtils.encodeColor(color) + "'"
+    for layer in symbol.symbolLayers():
+        props = layer.dataDefinedProperties()
+        for key in props.propertyKeys():
+            prop = props.property(key)
+            if prop is not None and prop.propertyType() == 3 and \
+                    re.search(r"@symbol_color\b", prop.expressionString()):
+                prop.setExpressionString(re.sub(r"@symbol_color\b", literal,
+                                                prop.expressionString()))
+                props.setProperty(key, prop)
+        sub = layer.subSymbol()
+        if sub is not None:
+            bind_symbol_color(sub, None if layer.layerType() == "GeometryGenerator" else color)
 
 
 def _drop_inactive_properties(element) -> None:
@@ -1565,6 +1590,7 @@ class RulesFlattener:
         symbol = flat_rule.rule.symbol()
         if not symbol:
             return [flat_rule]
+        bind_symbol_color(symbol)
         flattened = self._flatten_generators(symbol)
         if flattened is not None:
             del symbol  # deleted by setSymbol: no stale wrapper (see below)
@@ -1911,6 +1937,10 @@ class RulesFlattener:
             prop = fill_layer.dataDefinedProperties().property(key)
             if prop is not None and prop.isActive():
                 line_layer.setDataDefinedProperty(key, QgsProperty(prop))
+        # The fill's paint effect (a blur, a glow) is drawn on its outline too.
+        effect = fill_layer.paintEffect()
+        if effect is not None and effect.enabled():
+            line_layer.setPaintEffect(effect.clone())
 
         new_symbol.changeSymbolLayer(0, line_layer)
 

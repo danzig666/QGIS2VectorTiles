@@ -1150,6 +1150,53 @@ class RulesExporter:
             OUTPUT=dst_path,
         )
 
+    # Vertices per feature from which generated geometry is simplified.
+    DENSE_GENERATED_VERTICES = 20000
+
+    def _thin_dense(self, source: str) -> str:
+        """Generated geometry with a feature of more vertices than the tiles
+        can show (``smooth(wave_randomized(...), 10)``: a million) simplified
+        to the tiles' own precision (_simplification_tolerance): at full
+        density the colour bands took minutes each and tiling ran out of
+        memory. Other datasets are returned as they are."""
+        layer = self._open(source, "dense")
+        if not layer.isValid():
+            return source
+        dense = False
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry.isNull() and geometry.constGet().nCoordinates() > self.DENSE_GENERATED_VERTICES:
+                dense = True
+                break
+        if not dense:
+            return source
+        tolerance = self._simplification_tolerance()
+        if layer.crs().isGeographic():
+            tolerance /= 111320.0
+        del layer
+        return self._run_alg_safe("simplifygeometries", "native", INPUT=source, METHOD=0,
+                                  TOLERANCE=tolerance)
+
+    # Expression functions whose result can hold far more vertices than the
+    # tiles show (each smooth() iteration doubles them).
+    _DENSIFYING = re.compile(r"\b(smooth|wave|wave_randomized|triangular_wave|triangular_wave_randomized|"
+                             r"square_wave|square_wave_randomized|densify_by_count|densify_by_distance)\s*\(",
+                             re.IGNORECASE)
+
+    def _lean_generator(self, expression: str, source: str) -> str:
+        """A geometry generator expression that densifies (``smooth(...)``,
+        waves) wrapped in ``simplify(..., tiles' precision)``: QGIS then keeps
+        only what the tiles can show per feature, not a million vertices
+        each (gigabytes for one style)."""
+        if not expression or not self._DENSIFYING.search(expression):
+            return expression
+        expression = _capped_smoothing(expression)
+        layer = self._open(source, "crs")
+        tolerance = self._simplification_tolerance()
+        if layer.isValid() and layer.crs().isGeographic():
+            tolerance /= 111320.0
+        return f"simplify(({expression}), {tolerance!r})"
+
     def _simplification_tolerance(self) -> float:
         """Simplification tolerance in EPSG:3857 metres: a fraction of one
         tile unit (1/4096 of a tile) at the max zoom, so that simplification
@@ -1721,6 +1768,7 @@ class RulesExporter:
         # line azimuth) from the complete original lines before any field
         # expressions or tiling.
         if grp.recipe is not None and grp.recipe.kind == "marker_points":
+            current_input, grp = self._line_geometry_fields(current_input, grp)
             current_input = self._materialize_marker_points(
                 current_input, grp.recipe, grp.source_geometry)
             check = self._open(current_input, "check")
@@ -1815,13 +1863,18 @@ class RulesExporter:
             "geometrybyexpression", "native",
             INPUT=transbase,
             OUTPUT_GEOMETRY=geom_target,
-            EXPRESSION=grp.geometry_expression,
+            EXPRESSION=self._lean_generator(grp.geometry_expression, transbase),
             **({"WITH_Z": True} if ranked else {}),
         )
         check = self._open(transformed, "check")
         if not check.isValid() or check.featureCount() <= 0:
             self._report_empty_output(grp, transbase)
             return None
+        if grp.geometry_expression.strip() not in ("@geometry", "$geometry"):
+            thinned = self._thin_dense(transformed)
+            if thinned != transformed:
+                transformed = thinned
+                check = self._open(transformed, "check")
         if ranked:
             del check
             transformed = self._ranked_points(transformed)
@@ -1880,8 +1933,9 @@ class RulesExporter:
         # geometrybyexpression: OUTPUT_GEOMETRY 0 = polygon, 1 = line
         out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
                                  OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
-                                 EXPRESSION=grp.pre_generator)
+                                 EXPRESSION=self._lean_generator(grp.pre_generator, source))
         out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
+        out = self._thin_dense(out)
         out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
         for ftype, expr, name in grp.generated_fields:
             out = self._run_alg_safe(
@@ -2872,7 +2926,7 @@ class RulesExporter:
         outputs = []
         vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
         if vertex_placements:
-            outputs.append(self._vertex_points(lines, vertex_placements))
+            outputs.append(self._vertex_points(lines, vertex_placements, recipe.param("along") or 0.0))
         if "Interval" in recipe.placements and self._memory_active:
             outputs.append(self._interval_points_direct(lines, recipe))
         elif "Interval" in recipe.placements:
@@ -2901,6 +2955,33 @@ class RulesExporter:
         if len(outputs) == 1:
             return outputs[0]
         return self._run_alg_safe("mergevectorlayers", "native", LAYERS=outputs)
+
+    # QVariant type of an expression field -> fieldcalculator FIELD_TYPE
+    # (0 decimal, 1 integer, 2 text).
+    _CALCULATOR_TYPES = {6: 0, 2: 1, 4: 1, 1: 1, 10: 2}
+
+    def _line_geometry_fields(self, current_input: str, grp: _RuleGroupSnapshot):
+        """Data-defined values that read the feature's geometry ($length,
+        start_point($geometry): a measure label, a marker turned with the
+        line), computed on the lines before they become marker points, as
+        QGIS evaluates them on the feature it draws: on the points $length
+        was 0 and the label NULL. Returns the input and the group with those
+        fields read back by name."""
+        fields = list(grp.expression_fields)
+        changed = False
+        for index, (field_type, expression, name) in enumerate(fields):
+            parsed = QgsExpression(expression)
+            if not parsed.needsGeometry() or field_type not in self._CALCULATOR_TYPES or \
+                    any(column.startswith(f"{_FIELD_PREFIX}_mat_")
+                        for column in parsed.referencedColumns()):
+                continue
+            current_input = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=current_input, FIELD_NAME=name,
+                FIELD_TYPE=self._CALCULATOR_TYPES[field_type], FIELD_LENGTH=0,
+                FIELD_PRECISION=0, FORMULA=expression)
+            fields[index] = (field_type, QgsExpression.quotedColumnRef(name), name)
+            changed = True
+        return current_input, (dataclasses.replace(grp, expression_fields=fields) if changed else grp)
 
     def _build_field_mapping(
         self, grp: _RuleGroupSnapshot, current_input: str
@@ -3238,6 +3319,16 @@ class RulesExporter:
                 wrapped = f"try({cast}({expression}\n))" if cast else f"try({expression}\n)"
                 return {**field, "expression": wrapped}
             params["FIELDS_MAPPING"] = [safe(field) for field in params.get("FIELDS_MAPPING") or []]
+        scope_layer = None
+        if key and _uses_aggregates(params[key]) and params.get("INPUT"):
+            # Aggregates (collect($geometry), sum("pop")...) need a layer
+            # scope: without one Processing fails ("Cannot use aggregate
+            # function in this context") and try() left every geometry
+            # NULL. They run over the step's input, the rule's features.
+            scope_layer = self._open(params["INPUT"], "aggregate")
+            expression_context = context.expressionContext()
+            expression_context.appendScope(QgsExpressionContextUtils.layerScope(scope_layer))
+            context.setExpressionContext(expression_context)
         if self._memory_active:
             return self._run_in_memory(full_name, params, context, feedback)
 
@@ -3360,7 +3451,7 @@ class RulesExporter:
             self._group_tokens.append(token)
         return token
 
-    def _vertex_points(self, lines: str, placements: List[str]) -> str:
+    def _vertex_points(self, lines: str, placements: List[str], along: float = 0.0) -> str:
         """Worker: the vertex markers of ``lines`` (marker_points.
         vertex_markers) as points with the line's fields and ``ANGLE_FIELD``:
         QGIS turns them towards the nearest neighbours that differ from the
@@ -3395,6 +3486,15 @@ class RulesExporter:
                 ys = [line.yAt(i) for i in range(line.numPoints())]
                 drawn = set()
                 for placement in placements:
+                    if along and placement in ("FirstVertex", "LastVertex"):
+                        # Moved along the line; none where the line is shorter.
+                        moved = marker_points.along_vertex_marker(xs, ys, placement, along)
+                        if moved is not None:
+                            point = QgsFeature(fields)
+                            point.setAttributes(attributes + [moved[2]])
+                            point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(moved[0], moved[1])))
+                            writer.addFeature(point)
+                        continue
                     for index, angle in marker_points.vertex_markers(xs, ys, placement):
                         if (index, angle) in drawn:
                             continue  # the same marker of two placements
@@ -4144,3 +4244,92 @@ class RulesExporter:
                     os.remove(p)
             except OSError:
                 pass
+
+
+# smooth() passes kept in exported generators: each pass doubles the
+# vertices (10 passes: 10 million for a 300 m polygon, 1.4 GB per feature)
+# and moves the outline about a quarter as much as the pass before, so
+# beyond this it changes nothing a web map shows.
+MAX_SMOOTH_ITERATIONS = 5
+
+
+_AGGREGATE_FUNCTIONS: Optional[frozenset] = None
+
+
+def _uses_aggregates(expression: str) -> bool:
+    """Whether an expression calls a QGIS aggregate function (collect,
+    sum, count... the Aggregates group)."""
+    global _AGGREGATE_FUNCTIONS  # pylint: disable=global-statement
+    if _AGGREGATE_FUNCTIONS is None:
+        _AGGREGATE_FUNCTIONS = frozenset(
+            function.name().lower() for function in QgsExpression.Functions()
+            if "Aggregates" in function.groups())
+    if not re.search(r"\b(" + "|".join(_AGGREGATE_FUNCTIONS) + r")\s*\(", expression, re.IGNORECASE):
+        return False
+    return any(name.lower() in _AGGREGATE_FUNCTIONS
+               for name in QgsExpression(expression).referencedFunctions())
+
+
+def _capped_smoothing(expression: str) -> str:
+    """``expression`` with every smooth() limited to MAX_SMOOTH_ITERATIONS
+    passes (a literal iteration count above it is lowered; computed counts
+    stay). Rewritten through QGIS's parser, so nesting and named arguments
+    are respected; the expression is returned unchanged if anything fails."""
+    from qgis.core import QgsExpression, QgsExpressionNode  # pylint: disable=import-outside-toplevel
+    parsed = QgsExpression(expression)
+    if parsed.hasParserError() or parsed.rootNode() is None:
+        return expression
+    text = parsed.rootNode().dump()
+    changed = False
+
+    def visit(node):
+        nonlocal text, changed
+        if node is None:
+            return
+        if node.nodeType() == QgsExpressionNode.ntFunction:
+            function = QgsExpression.Functions()[node.fnIndex()]
+            args = node.args().list() if node.args() else []
+            if function.name().lower() == "smooth" and len(args) >= 2 \
+                    and args[1].nodeType() == QgsExpressionNode.ntLiteral:
+                try:
+                    passes = int(args[1].value())
+                except (TypeError, ValueError):
+                    passes = 0
+                if passes > MAX_SMOOTH_ITERATIONS:
+                    old = node.dump()
+                    parts = [arg.dump() for arg in args]
+                    parts[1] = str(MAX_SMOOTH_ITERATIONS)
+                    text = text.replace(old, f"smooth({', '.join(parts)})")
+                    changed = True
+        for child in _expression_children(node):
+            visit(child)
+
+    visit(parsed.rootNode())
+    if not changed or QgsExpression(text).hasParserError():
+        return expression
+    return text
+
+
+def _expression_children(node) -> list:
+    """The child nodes of an expression node (function arguments, operands,
+    CASE branches, IN lists...)."""
+    from qgis.core import QgsExpressionNode  # pylint: disable=import-outside-toplevel
+    kind = node.nodeType()
+    if kind == QgsExpressionNode.ntFunction:
+        return node.args().list() if node.args() else []
+    if kind == QgsExpressionNode.ntBinaryOperator:
+        return [node.opLeft(), node.opRight()]
+    if kind == QgsExpressionNode.ntUnaryOperator:
+        return [node.operand()]
+    if kind == QgsExpressionNode.ntCondition:
+        out = []
+        for when in node.conditions():
+            out += [when.whenExp(), when.thenExp()]
+        return out + ([node.elseExp()] if node.elseExp() else [])
+    if kind == QgsExpressionNode.ntInOperator:
+        return [node.node()] + (node.list().list() if node.list() else [])
+    if kind == QgsExpressionNode.ntIndexOperator:
+        return [node.container(), node.index()]
+    if kind == getattr(QgsExpressionNode, "ntBetweenOperator", -1):
+        return [node.node(), node.lowerBound(), node.higherBound()]
+    return []

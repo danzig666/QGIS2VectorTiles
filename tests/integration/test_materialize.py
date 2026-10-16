@@ -3132,3 +3132,194 @@ def test_a_large_map_unit_marker_is_drawn_as_its_shape(plugin, tmp_path):
     assert shapes[0].visibility.min_zoom == start and shapes[0].recipe.param("anchor") == "centroid"
     assert shapes[0].rule.symbol().symbolLayer(0).penStyle() == Qt.PenStyle.DashLine
     assert sprites and all(r.visibility.max_zoom == start for r in sprites)
+
+
+def test_screen_offset_line_from_a_polygon_generator_exports(plugin, tmp_path):
+    """A fill symbol whose geometry generator draws the outline as lines,
+    offset in screen units (QGIS Hub styles): the corner check walked the
+    polygon layer's parts as lines and the export crashed."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -20 10, -97 71, -97 -83),"
+                               "(-60 -60, -40 -60, -40 -40, -60 -60))"], str(tmp_path / "edge.gpkg"))
+    line = QgsLineSymbol.createSimple({"color": "black", "width": "0.6", "offset": "1.5", "offset_unit": "MM"})
+    generator = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "boundary($geometry)",
+                                                        "SymbolType": "Line"})
+    generator.setSubSymbol(line)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert rules and outputs
+
+
+def test_dense_generated_geometry_is_thinned_before_bands_and_tiles(plugin, tmp_path):
+    """A fill generator smoothing a randomized wave (QGIS Hub "Sketchy
+    Water Feature": a million vertices per feature) under a shapeburst:
+    every band was an inward buffer of the full outline (minutes each) and
+    tiling ran out of memory. Generated geometry denser than the tiles show
+    is simplified to their precision first."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer, QgsShapeburstFillSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -97 71, -97 -83))"], str(tmp_path / "lake.gpkg"))
+    burst = QgsShapeburstFillSymbolLayer(QColor(55, 126, 184), QColor(255, 255, 255))
+    burst.setUseWholeShape(True)
+    generator = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "smooth(wave_randomized($geometry, 1, 3, 0.2, 0.4, 20), 6)", "SymbolType": "Fill"})
+    generator.setSubSymbol(QgsFillSymbol([burst]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    plugin_exporter = __import__("q2vt_plugin.src.core.rules_exporter", fromlist=["RulesExporter"]).RulesExporter
+    dense = plugin_exporter.DENSE_GENERATED_VERTICES
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert rules and outputs
+    for output in outputs:
+        for feature in output.getFeatures():
+            assert feature.geometry().constGet().nCoordinates() < dense
+
+
+@pytest.mark.parametrize("expression,capped", [
+    ("smooth(wave_randomized($geometry, 1, 3, 0.01, 0.015, 20), 10)", True),
+    ("smooth($geometry, iterations:=8, offset:=0.3)", True),
+    ("CASE WHEN $area > 5 THEN smooth(smooth($geometry, 9), 7) ELSE $geometry END", True),
+    ("smooth($geometry, 3)", False),
+    ("smooth($geometry, \"passes\")", False),
+])
+def test_smooth_passes_are_capped_in_exported_generators(plugin, expression, capped):
+    """Each smooth() pass doubles the vertices (10 passes: 10 million for a
+    300 m polygon); beyond five the outline moves by millimetres."""
+    from qgis.core import QgsExpression
+    from q2vt_plugin.src.core.rules_exporter import MAX_SMOOTH_ITERATIONS, _capped_smoothing
+    out = _capped_smoothing(expression)
+    assert not QgsExpression(out).hasParserError()
+    if not capped:
+        assert out == expression
+        return
+    passes = [int(p) for p in __import__("re").findall(r"smooth\(.*?, (\d+), 0\.3|, (\d+), 0\.25", out) for p in p if p]
+    assert passes and max(passes) == MAX_SMOOTH_ITERATIONS
+
+
+def test_meters_at_scale_line_offset_is_the_offset_line(plugin, tmp_path):
+    """A line offset in "meters at scale" (military symbols: +-350 m beside
+    the axis) is the mitred offset line QGIS draws, like a map-unit offset:
+    MapLibre's line-offset looped at every bend wider than the offset."""
+    layer = _layer("LineString", ["LINESTRING(-90 -60, -20 50, 10 -40, 60 40)"], str(tmp_path / "axis.gpkg"))
+    line = QgsLineSymbol.createSimple({"color": "black", "width": "3", "width_unit": "RenderMetersInMapUnits",
+                                       "offset": "8", "offset_unit": "RenderMetersInMapUnits"})
+    layer.setRenderer(QgsSingleSymbolRenderer(line))
+    _outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert any(rule.recipe is not None and rule.recipe.kind == "line_offset"
+               and dict(rule.recipe.params).get("offset") == pytest.approx(8.0) for rule in rules)
+
+
+@pytest.mark.parametrize("placements,along", [
+    (Qgis.MarkerLinePlacement.FirstVertex, 30),     # across the first bend
+    (Qgis.MarkerLinePlacement.LastVertex, 50),      # backwards from the end
+    (Qgis.MarkerLinePlacement.FirstVertex, 1300),   # longer than both lines: none drawn
+])
+def test_first_and_last_vertex_markers_move_along_the_line_like_qgis(plugin, tmp_path, placements, along):
+    """Offset along the line (map units) moves the first vertex marker
+    forward and the last one backward, turned to the segment it lands on;
+    past the other end QGIS draws none (QGIS Hub "Enemy Main Attack": the
+    "ENY" letters 1300 m along a short line)."""
+    layer = _layer("LineString", LINES, str(tmp_path / "l.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(placements)
+    ml.setSubSymbol(_marker())
+    ml.setOffsetAlongLine(along)
+    ml.setOffsetAlongLineUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    ours = ink_mask(render(outputs, EXTENT)) if outputs else set()
+    if along > 1000:
+        assert not reference and not ours
+        return
+    assert reference and mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("angle", [0, 90, 35])
+def test_hash_of_arrows_matches_qgis(plugin, tmp_path, angle):
+    """A hash drawn with an arrow (any line sub-symbol that is not one plain
+    line) is the sub-symbol drawn once, as an image marker turned like the
+    hash: a single head points the way QGIS draws it (Bi-Directional, a
+    double-headed arrow along the line, was a thin line)."""
+    from qgis.core import QgsArrowSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "ha.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    arrow.setHeadType(QgsArrowSymbolLayer.HeadType.HeadSingle)
+    arrow.setIsCurved(False)
+    for setter in (arrow.setArrowWidth, arrow.setArrowStartWidth):
+        setter(0.4)
+    arrow.setHeadLength(1.6)
+    arrow.setHeadThickness(1.4)
+    arrow.subSymbol().setColor(QColor("black"))
+    hashes = QgsHashedLineSymbolLayer(True, 20)
+    hashes.setPlacements(Qgis.MarkerLinePlacement.SegmentCenter)
+    hashes.setHashLength(6)
+    hashes.setHashAngle(angle)
+    hashes.setSubSymbol(QgsLineSymbol([arrow]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hashes])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    symbol = rules[0].rule.symbol()
+    marker = symbol.symbolLayer(0).subSymbol() or symbol  # points: the marker itself
+    assert marker.symbolLayer(0).layerType() == "RasterMarker"
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.1
+
+
+def test_generator_of_an_aggregate_matches_qgis(plugin, tmp_path):
+    """An aggregate in a geometry generator (buffer(collect($geometry), 0):
+    the outline of all features) runs over the layer: Processing evaluated
+    it without a layer and every generated geometry was NULL (arrow 02
+    drew nothing)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "agg.gpkg"))
+    outline = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer(collect($geometry), 0)", "SymbolType": "Line"})
+    outline.setSubSymbol(QgsLineSymbol.createSimple({"color": "black", "width": "0.8"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([outline])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, _, _ = _export(plugin, layer, tmp_path)
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    # The shared edge of the two squares is inside the union: not drawn.
+    assert ours and mask_difference(reference, ours) < 0.05
+
+
+def test_marker_values_read_the_whole_line(plugin, tmp_path):
+    """A marker's data-defined text reading the feature's geometry (a measure
+    line's format_number($length)) is evaluated on the line, as QGIS does,
+    not on the marker point it becomes: the label was NULL ("00.00 m")."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "measure.gpkg"))
+    text = QgsFontMarkerSymbolLayer()
+    text.setCharacter("00.00 m")
+    text.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyCharacter,
+                                QgsProperty.fromExpression("format_number($length, 0)"))
+    label = QgsMarkerLineSymbolLayer()
+    label.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    label.setSubSymbol(QgsMarkerSymbol([text]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([label])))
+    outputs, _, _ = _export(plugin, layer, tmp_path)
+    values = sorted(f[name] for out in outputs for f in out.getFeatures()
+                    for name in out.fields().names() if "property_char" in name)
+    lengths = sorted(format(round(QgsGeometry.fromWkt(w).length()), ",") for w in LINES)
+    assert values == lengths
+
+
+def test_arrow_drop_shadow_is_a_shifted_fill(plugin, tmp_path):
+    """An arrow's drop shadow (drawn under it) is a fill of the shadow's
+    colour under the arrow, shifted as QGIS shifts it: it was dropped."""
+    from qgis.core import QgsArrowSymbolLayer, QgsDropShadowEffect, QgsEffectStack, QgsDrawSourceEffect
+    layer = _layer("LineString", LINES, str(tmp_path / "shadow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    shadow = QgsDropShadowEffect()
+    shadow.setColor(QColor(0, 0, 0))
+    shadow.setOpacity(0.5)
+    stack = QgsEffectStack(shadow)
+    stack.appendEffect(QgsDrawSourceEffect())
+    arrow.setPaintEffect(stack)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    fills = [r for r in rules if r.rule.symbol().type() == Qgis.SymbolType.Fill]
+    colors = {(r.rule.symbol().symbolLayer(0).color().alpha(), r.translate is not None)
+              for r in fills}
+    assert (128, True) in colors or (127, True) in colors
+    assert diags.by_code("Q2VT_UNSUPPORTED_EFFECT")

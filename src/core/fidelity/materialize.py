@@ -67,10 +67,13 @@ class Recipe:
         return dict(self.params).get(name, default)
 
 
-def marker_points(placements, offset: float = 0.0, crs: str = "") -> Recipe:
+def marker_points(placements, offset: float = 0.0, crs: str = "", along: float = 0.0) -> Recipe:
     """Marker positions; ``offset`` (map units, right of the line) offsets the
-    line in ``crs`` before positions are computed, as QGIS does."""
+    line in ``crs`` before positions are computed, as QGIS does; ``along``
+    (map units) moves the first / last vertex markers along the line."""
     params = (("offset", float(offset)), ("crs", crs)) if abs(offset) > 1e-9 else ()
+    if abs(along) > 1e-9:
+        params += (("along", float(along)),)
     return Recipe("marker_points", tuple(sorted(set(placements) & POINT_PLACEMENTS)), params)
 
 

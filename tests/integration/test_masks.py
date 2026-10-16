@@ -7,7 +7,7 @@ import os
 import sys
 
 import pytest
-from qgis.core import (QgsMarkerSymbol, QgsMaskMarkerSymbolLayer, QgsPalLayerSettings,
+from qgis.core import (Qgis, QgsMarkerSymbol, QgsMaskMarkerSymbolLayer, QgsPalLayerSettings,
                        QgsSingleSymbolRenderer, QgsSymbolLayerReference, QgsTextFormat,
                        QgsVectorLayerSimpleLabeling)
 from qgis.PyQt.QtGui import QColor
@@ -124,3 +124,43 @@ def test_unsupported_renderer_is_reported(export, tmp_path):  # noqa: F811
     exporter, _ = _run(export, layer)
     found = exporter.diagnostics.by_code("Q2VT_UNSUPPORTED_RENDERER")
     assert found and "25dRenderer" in found[0].message and found[0].layer_id == layer.id()
+
+
+def test_marker_sized_in_meters_at_scale_is_drawn(export, tmp_path):  # noqa: F811
+    """A marker sized in "meters at scale" (QGIS Hub military symbols: a
+    300 m square with a 40 m outline): the sprite's render context had no
+    CRS for distances, QGIS drew it a thousandth of a pixel wide and every
+    per-zoom sprite was empty."""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("POINT(2121000 6021000)"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    symbol = QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,0,0", "outline_color": "0,0,0",
+                                           "size": "300", "size_unit": "RenderMetersInMapUnits",
+                                           "outline_width": "40",
+                                           "outline_width_unit": "RenderMetersInMapUnits"})
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    exporter, result = _run(export, layer)
+    assert not exporter.diagnostics.by_code("Q2VT_SPRITE_TRANSPARENT")
+    assert [l for l in _style(result)["layers"] if l.get("type") == "symbol" and "icon-image" in l.get("layout", {})]
+
+
+def test_pattern_marker_too_large_for_a_sprite_does_not_stop_the_export(export, tmp_path):  # noqa: F811
+    """A random marker fill whose marker is sized in map units and is
+    kilometres wide (QGIS Hub "Mondriaan"): too large for a sprite even at
+    the lowest zoom. The pattern is reported and left out; the export
+    finishes (it stopped with "Sprite 'pattern-marker' would be 51519 px
+    wide")."""
+    from qgis.core import QgsFillSymbol, QgsRandomMarkerFillSymbolLayer  # pylint: disable=import-outside-toplevel
+    layer = zoning_layer(path=str(tmp_path / "zones.gpkg"))
+    fill = QgsRandomMarkerFillSymbolLayer(10, Qgis.PointCountMethod.DensityBased, 250000.0)
+    fill.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "size": "200000",
+                                                    "size_unit": "MapUnit"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    exporter, result = _run(export, layer)
+    assert result and os.path.exists(os.path.join(result, "style", "style.json"))
+    assert any("RandomMarkerFill left out" in d.message
+               for d in exporter.diagnostics.by_code("Q2VT_SPRITE_RENDER_FAILED"))

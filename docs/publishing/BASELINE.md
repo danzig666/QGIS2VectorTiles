@@ -39,10 +39,9 @@ labels MapLibre could not place; uses feature state). Labels keep
 
 | Resource | Version | SHA-256 |
 |---|---|---|
-| `resources/ml_viewer/maplibre-gl.mjs` | MapLibre GL JS 6.11.2 (ESM) | `3f5556…ee5d` |
-| `resources/ml_viewer/maplibre-gl-shared.mjs` | 6.11.2 | `76b5f5…a47960` |
-| `resources/ml_viewer/maplibre-gl-worker.mjs` | 6.11.2 | `01ad19…296e` |
-| `resources/ml_viewer/maplibre-gl.css` | 6.11.2 | `d8617d…02d3` |
+| `resources/ml_viewer/maplibre-gl.mjs` | MapLibre GL JS 6.14.0 (ESM), patched and minified by `tools/maplibre/build.py` | `aa4644…7c96` |
+| `resources/ml_viewer/maplibre-gl-worker.mjs` | 6.14.0, the same | `88c006…967e` |
+| `resources/ml_viewer/maplibre-gl.css` | 6.14.0 | `bacba6…0193` |
 | `resources/ml_viewer/visible_labels.mjs` | fork 4.1.8 | `d73200…de768` |
 | `resources/ml_viewer/viewer.html` | fork 4.1.8 | `446d79…3445` |
 | Browser-test devDependencies | `@maplibre/maplibre-gl-style-spec` 26.4.4, `playwright-core` 1.56.1, Chromium 1194 | |

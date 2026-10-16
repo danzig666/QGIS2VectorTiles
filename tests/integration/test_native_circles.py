@@ -12,6 +12,9 @@ from fidelity import expressions as ex
 from fidelity.diagnostics import DiagnosticCollector
 
 MM = 96 / 25.4
+# MapLibre fades a circle out over the pixel inside its edge: the outer edge
+# (stroke, else fill) is drawn half a pixel further out to ink like QGIS.
+EDGE = 0.5
 
 
 @pytest.fixture
@@ -46,7 +49,7 @@ def test_simple_circle_is_native(exporter):
     paint = layers[0]["paint"]
     # QGIS centres the stroke on the edge; MapLibre draws it outside the radius.
     assert paint["circle-radius"] == pytest.approx((4.0 - 0.4) / 2 * MM)
-    assert paint["circle-stroke-width"] == pytest.approx(0.4 * MM)
+    assert paint["circle-stroke-width"] == pytest.approx(0.4 * MM + EDGE)
     assert paint["circle-color"] == "rgba(255, 0, 0, 1.0)"
     assert paint["circle-stroke-color"] == "rgba(0, 0, 0, 1.0)"
     assert not exporter.marker_symbols
@@ -55,13 +58,13 @@ def test_simple_circle_is_native(exporter):
 def test_hairline_and_no_pen(exporter):
     symbol = _circle(stroke=0.0)
     paint = _convert(exporter, symbol)[0]["paint"]
-    assert paint["circle-stroke-width"] == 1.0
+    assert paint["circle-stroke-width"] == 1.0 + EDGE  # QGIS hairline: one pixel
     symbol = _circle()
     symbol.symbolLayer(0).setStrokeStyle(Qt.PenStyle.NoPen)
     exporter.style["layers"] = []
     paint = _convert(exporter, symbol)[0]["paint"]
     assert "circle-stroke-width" not in paint
-    assert paint["circle-radius"] == pytest.approx(2.0 * MM)
+    assert paint["circle-radius"] == pytest.approx(2.0 * MM + EDGE)
 
 
 def test_data_defined_size_and_color(exporter):
@@ -83,8 +86,8 @@ def test_map_unit_circle_scales_with_zoom(exporter):
     symbol.symbolLayer(0).setSizeUnit(Qgis.RenderUnit.MapUnits)
     radius = _convert(exporter, symbol)[0]["paint"]["circle-radius"]
     assert ex.is_zoom_curve(radius)
-    assert ex.evaluate_zoom_curve(radius, 17) == pytest.approx(
-        2 * ex.evaluate_zoom_curve(radius, 16), rel=1e-6)
+    assert ex.evaluate_zoom_curve(radius, 17) - EDGE == pytest.approx(
+        2 * (ex.evaluate_zoom_curve(radius, 16) - EDGE), rel=1e-6)
 
 
 @pytest.mark.parametrize("change", ["square", "offset", "dash", "translucent_stroke", "two_layers"])

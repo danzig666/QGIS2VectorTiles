@@ -95,6 +95,7 @@ class BandBuilder:
         local = QgsGeometry(geometry)
         if self._to_crs is not None:
             local.transform(self._to_crs)
+        local = self._simplified(local)
         shapes = []
         clearance = 0.0
         # Two tile units (1/4096 of a tile) at the coarsest zoom (export CRS).
@@ -126,6 +127,28 @@ class BandBuilder:
                 shapes.append((index, shape))
         return shapes
 
+
+    # Vertices from which a feature is simplified before its bands are cut.
+    DENSE_VERTICES = 20000
+
+    def _simplified(self, local: QgsGeometry) -> QgsGeometry:
+        """A very dense outline (a smoothed, randomized geometry generator:
+        a million vertices) simplified to half a pixel at ``detail_zoom``:
+        every band is an inward buffer of it, minutes each at full density,
+        and the gradient shows no difference."""
+        if self.detail_zoom is None:
+            return local
+        try:
+            count = local.constGet().nCoordinates()
+        except AttributeError:
+            return local
+        if count <= self.DENSE_VERTICES:
+            return local
+        tolerance = self.METRES_PER_PX_Z0 / 2 ** self.detail_zoom / 2
+        if self._to_crs is not None and self._to_crs.destinationCrs().isGeographic():
+            tolerance /= 111320.0
+        simple = local.simplify(tolerance)
+        return simple if simple is not None and not simple.isEmpty() and simple.isGeosValid() else local
 
     def _merged(self, geometry: QgsGeometry, local: QgsGeometry):
         """[(colour index, band recipe)]: neighbouring bands merged so none is
