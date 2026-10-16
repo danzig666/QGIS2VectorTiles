@@ -3132,3 +3132,19 @@ def test_a_large_map_unit_marker_is_drawn_as_its_shape(plugin, tmp_path):
     assert shapes[0].visibility.min_zoom == start and shapes[0].recipe.param("anchor") == "centroid"
     assert shapes[0].rule.symbol().symbolLayer(0).penStyle() == Qt.PenStyle.DashLine
     assert sprites and all(r.visibility.max_zoom == start for r in sprites)
+
+
+def test_screen_offset_line_from_a_polygon_generator_exports(plugin, tmp_path):
+    """A fill symbol whose geometry generator draws the outline as lines,
+    offset in screen units (QGIS Hub styles): the corner check walked the
+    polygon layer's parts as lines and the export crashed."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", ["POLYGON((-97 -83, 53 -83, 53 71, -20 10, -97 71, -97 -83),"
+                               "(-60 -60, -40 -60, -40 -40, -60 -60))"], str(tmp_path / "edge.gpkg"))
+    line = QgsLineSymbol.createSimple({"color": "black", "width": "0.6", "offset": "1.5", "offset_unit": "MM"})
+    generator = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "boundary($geometry)",
+                                                        "SymbolType": "Line"})
+    generator.setSubSymbol(line)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([generator])))
+    outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert rules and outputs

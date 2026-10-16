@@ -1327,8 +1327,7 @@ class SymbolMaterializer:
                 continue
             if transform is not None:
                 geometry.transform(transform)
-            for part in geometry.constParts():
-                line = part.curveToLine() if part.hasCurvedSegments() else part
+            for line in _offset_lines(geometry):
                 points = [(line.xAt(i), line.yAt(i)) for i in range(line.numPoints())]
                 points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
                 for a, b, c in zip(points, points[1:], points[2:]):
@@ -3637,3 +3636,19 @@ class SymbolMaterializer:
         lines.set_attr("h", 0)
         strips.set_attr("h", 1)
         return [lines, strips]
+
+
+def _offset_lines(geometry):
+    """The lines an offset line symbol layer draws along: the parts of a
+    line geometry, the rings (outer boundary and holes) of a polygon's (an
+    outline inside a fill symbol). Curves as straight segments."""
+    from qgis.core import QgsCurvePolygon  # pylint: disable=import-outside-toplevel
+    for part in geometry.constParts():
+        if isinstance(part, QgsCurvePolygon):
+            rings = [part.exteriorRing()] + [part.interiorRing(i) for i in range(part.numInteriorRings())]
+        else:
+            rings = [part]
+        for ring in rings:
+            if ring is None:
+                continue
+            yield ring.curveToLine() if ring.hasCurvedSegments() else ring
