@@ -1177,6 +1177,25 @@ class RulesExporter:
         return self._run_alg_safe("simplifygeometries", "native", INPUT=source, METHOD=0,
                                   TOLERANCE=tolerance)
 
+    # Expression functions whose result can hold far more vertices than the
+    # tiles show (each smooth() iteration doubles them).
+    _DENSIFYING = re.compile(r"\b(smooth|wave|wave_randomized|triangular_wave|triangular_wave_randomized|"
+                             r"square_wave|square_wave_randomized|densify_by_count|densify_by_distance)\s*\(",
+                             re.IGNORECASE)
+
+    def _lean_generator(self, expression: str, source: str) -> str:
+        """A geometry generator expression that densifies (``smooth(...)``,
+        waves) wrapped in ``simplify(..., tiles' precision)``: QGIS then keeps
+        only what the tiles can show per feature, not a million vertices
+        each (gigabytes for one style)."""
+        if not expression or not self._DENSIFYING.search(expression):
+            return expression
+        layer = self._open(source, "crs")
+        tolerance = self._simplification_tolerance()
+        if layer.isValid() and layer.crs().isGeographic():
+            tolerance /= 111320.0
+        return f"simplify(({expression}), {tolerance!r})"
+
     def _simplification_tolerance(self) -> float:
         """Simplification tolerance in EPSG:3857 metres: a fraction of one
         tile unit (1/4096 of a tile) at the max zoom, so that simplification
@@ -1842,7 +1861,7 @@ class RulesExporter:
             "geometrybyexpression", "native",
             INPUT=transbase,
             OUTPUT_GEOMETRY=geom_target,
-            EXPRESSION=grp.geometry_expression,
+            EXPRESSION=self._lean_generator(grp.geometry_expression, transbase),
             **({"WITH_Z": True} if ranked else {}),
         )
         check = self._open(transformed, "check")
@@ -1912,7 +1931,7 @@ class RulesExporter:
         # geometrybyexpression: OUTPUT_GEOMETRY 0 = polygon, 1 = line
         out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
                                  OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
-                                 EXPRESSION=grp.pre_generator)
+                                 EXPRESSION=self._lean_generator(grp.pre_generator, source))
         out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
         out = self._thin_dense(out)
         out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
