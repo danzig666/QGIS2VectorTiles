@@ -8,6 +8,27 @@
 import { ViewerError, checkRelative, registerPmtiles, resolveUrl } from "./transport.mjs";
 
 export const SOURCE_ID = "q2vt_basemap";
+const ORIGIN = 20037508.342789244;
+
+// The URL of the web basemap tile under [lng, lat] at ``zoom`` (kept within
+// the basemap's zooms): the switcher's thumbnail of that basemap. Handles
+// {z}/{x}/{y}, TMS (scheme "tms") and WMS {bbox-epsg-3857} templates.
+export function tileUrl(entry, lng, lat, zoom) {
+  const template = entry && Array.isArray(entry.tiles) ? entry.tiles[0] : null;
+  if (typeof template !== "string") return null;
+  const z = Math.max(entry.minzoom ?? 0, Math.min(entry.maxzoom ?? 19, Math.round(zoom)));
+  const n = 2 ** z;
+  const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat));
+  const x = Math.min(n - 1, Math.max(0, Math.floor(((lng + 180) / 360) * n)));
+  const rad = (clampedLat * Math.PI) / 180;
+  const y = Math.min(n - 1, Math.max(0, Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n)));
+  const size = (2 * ORIGIN) / n;
+  const bbox = [x * size - ORIGIN, ORIGIN - (y + 1) * size, (x + 1) * size - ORIGIN, ORIGIN - y * size]
+    .map((v) => v.toFixed(2)).join(",");
+  return template.replaceAll("{z}", String(z)).replaceAll("{x}", String(x))
+    .replaceAll("{y}", String(entry.scheme === "tms" ? n - 1 - y : y))
+    .replaceAll("{bbox-epsg-3857}", bbox);
+}
 const LAYER_PREFIX = "q2vt-bm-";
 const ALLOWED_TYPES = new Set(["background", "fill", "line", "symbol", "circle", "fill-extrusion"]);
 
@@ -30,6 +51,22 @@ export class Basemap {
   options() { return [...this.flavors.values(), ...this.xyz.values()]; }
 
   option(id) { return this.flavors.get(id) || this.xyz.get(id) || null; }
+
+  // The project's own background colour (shown with no basemap).
+  projectBackground() {
+    const layer = (this.map.getStyle()?.layers || []).find((l) => l.type === "background" && !l.id.startsWith(LAYER_PREFIX));
+    const color = layer && layer.paint && layer.paint["background-color"];
+    return typeof color === "string" ? color : null;
+  }
+
+  // The switcher's thumbnail of a web basemap: its tile at the map's centre,
+  // two zooms further out (a recognisable piece of it).
+  thumbnail(id) {
+    const entry = this.xyz.get(id);
+    if (!entry) return null;
+    const centre = this.map.getCenter();
+    return tileUrl(entry, centre.lng, centre.lat, this.map.getZoom() - 2);
+  }
 
   attribution(id) {
     if (this.xyz.has(id)) return this.xyz.get(id).attribution || "";

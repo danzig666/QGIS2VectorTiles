@@ -204,13 +204,9 @@ class BasemapControl {
       node.setAttribute("role", "menuitemradio");
       const thumb = el("span", "q2vt-basemap-thumb");
       if (option.id === "none") {
-        const blank = el("span", "q2vt-basemap-none");
-        blank.append(icon("close", 18));
-        thumb.append(blank);
-      } else if (option.tiles) {  // a web basemap (XYZ tiles)
-        const web = el("span", "q2vt-basemap-none");
-        web.append(icon("image", 20));
-        thumb.append(web);
+        thumb.append(this.noneThumb(18));
+      } else if (option.tiles) {  // a web basemap: a tile of it once the menu opens (refresh)
+        thumb.append(this.webThumb(option.id, false));
       } else {
         thumb.append(preview(option.colors || {}));
       }
@@ -224,6 +220,7 @@ class BasemapControl {
       menu.append(node);
     }
     toggleButton.addEventListener("click", () => {
+      if (menu.hidden) this.refresh();  // thumbnails of the place now shown
       menu.hidden = !menu.hidden;
       toggleButton.setAttribute("aria-expanded", String(!menu.hidden));
     });
@@ -233,22 +230,58 @@ class BasemapControl {
     this.toggleButton = toggleButton;
     root.append(menu, toggleButton);
     this.sync(this.state.value.basemap);
+    // A web basemap's button shows the place on the map now.
+    this.onMoveEnd = () => { if (this.basemap.option(this.state.value.basemap)?.tiles) this.sync(this.state.value.basemap); };
+    this.basemap.map.on("moveend", this.onMoveEnd);
     return root;
+  }
+
+  // "No basemap": the project's own background colour.
+  noneThumb(size) {
+    const blank = el("span", "q2vt-basemap-none q2vt-basemap-plain");
+    const color = this.basemap.projectBackground();
+    if (color) blank.style.background = color;
+    blank.append(icon("close", size));
+    return blank;
+  }
+
+  // A web basemap: one of its tiles (an icon until it loads, or if it fails).
+  // Its server is contacted only when the visitor opens the menu or uses
+  // that basemap, never just because the page opened.
+  webThumb(id, load = true) {
+    const box = el("span", "q2vt-basemap-none q2vt-basemap-web");
+    box.dataset.basemap = id;
+    box.append(icon("image", 20));
+    const url = load ? this.basemap.thumbnail(id) : null;
+    if (url) {
+      const img = new Image();
+      img.alt = "";
+      img.decoding = "async";
+      img.referrerPolicy = "strict-origin-when-cross-origin";
+      img.addEventListener("load", () => box.replaceChildren(img));
+      img.src = url;
+    }
+    return box;
+  }
+
+  refresh() {
+    for (const [id, node] of this.optionButtons) {
+      const thumb = node.querySelector(".q2vt-basemap-thumb");
+      if (id === "none") thumb.replaceChildren(this.noneThumb(18));
+      else if (this.basemap.option(id)?.tiles) thumb.replaceChildren(this.webThumb(id));
+    }
   }
 
   sync(active) {
     const flavor = this.basemap.option(active);
-    this.toggleButton.replaceChildren(flavor && !flavor.tiles ? preview(flavor.colors || {}) : (() => {
-      const blank = el("span", "q2vt-basemap-none");
-      blank.append(icon(flavor ? "image" : "map", 22));
-      return blank;
-    })(), el("span", "q2vt-basemap-caption", t("basemap.title")));
+    this.toggleButton.replaceChildren(flavor && !flavor.tiles ? preview(flavor.colors || {})
+      : flavor ? this.webThumb(active) : this.noneThumb(22), el("span", "q2vt-basemap-caption", t("basemap.title")));
     this.toggleButton.setAttribute("aria-label", `${t("basemap.title")}: ${flavor ? flavor.title : t("basemap.none")}`);
     this.toggleButton.title = this.toggleButton.getAttribute("aria-label");
     for (const [id, node] of this.optionButtons) node.setAttribute("aria-pressed", String(id === active));
   }
 
-  onRemove() {}
+  onRemove() { if (this.onMoveEnd) this.basemap.map.off("moveend", this.onMoveEnd); }
 }
 
 // Attribution as plain text (never HTML from the manifest).

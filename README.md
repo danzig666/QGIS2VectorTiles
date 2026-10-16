@@ -500,7 +500,11 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.42.3**. Newest first:
+This README describes QWebMap **4.42.4**. Newest first:
+
+**4.42.4** — overview map and basemap switcher
+- The overview map follows every layer switch, theme and basemap change of the main map (changes made while it was loading tiles were lost), and shows a wider area (6 zoom levels out instead of 4).
+- Basemap switcher: web basemaps show a real image of the current place (loaded when the menu is opened), *no basemap* shows the project's own background colour.
 
 **4.42.3** — online tiled layers as sharp as their service
 - Raster layers from XYZ/WMTS services (e.g. an XYZ layer with `zmax=18`) get image tiles down to the service's own max zoom by default, not only to the vector tiles' maximum zoom, so they stay sharp when zoomed in further.
