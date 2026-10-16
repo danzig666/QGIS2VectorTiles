@@ -42,7 +42,7 @@ ORIGIN = (2110000.0, 6030000.0)
 COLUMNS = 16
 EARTH = 40075016.68557849
 _APP = None
-RENDER_TIMEOUT_S = 120   # per QGIS reference render
+RENDER_TIMEOUT_S = 30    # per QGIS reference render
 TIMED_OUT = set()        # view ids whose QGIS render was given up
 
 

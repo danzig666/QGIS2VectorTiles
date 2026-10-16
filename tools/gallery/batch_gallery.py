@@ -98,7 +98,7 @@ def main():
     parser.add_argument("--qml", nargs="*")
     parser.add_argument("--names", default="")
     parser.add_argument("--batch-size", type=int, default=50)
-    parser.add_argument("--timeout-min", type=float, default=20)
+    parser.add_argument("--timeout-min", type=float, default=6)
     parser.add_argument("--port", type=int, default=9200)
     args, extra = parser.parse_known_args()
     for flag, value in (("--style-db", args.style_db), ("--tags", args.tags), ("--names", args.names)):
