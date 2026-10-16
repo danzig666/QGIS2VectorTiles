@@ -122,14 +122,64 @@ only the masked symbol layers (exact over a plain background; reported).
 <br><sub>Close-ups from the same project, each pair QGIS | QWebMap.</sub>
 </p>
 
-Not everything has a browser equivalent yet (for example the blur effect and other paint effects
-on fills, Qt brush styles other than solid, label shadows, and blend modes on vector
-layers). **Every export writes a fidelity report** that lists the components that were
-approximated or left out, with their layer (and rule or symbol layer when known) and usually a
-suggested fix (label shadows are not in it, and blend modes on vector layers only get
-a warning in the Publish window), and a *Strict* mode refuses to publish when the report has an error or a warning
-about an unsupported or approximated component. The generated table of each symbol layer type's
-strategy and constraints is in [`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
+### What doesn't work (yet)
+
+Most QGIS styling carries over (see above), but not all of it. **Every export writes a fidelity
+report** that lists what was approximated or left out in *your* project, with the layer (and the
+rule or symbol layer when known) and usually a suggested fix. A *Strict* mode refuses to publish
+when the report has an error, or a warning about an unsupported or approximated component. The
+generated table of every symbol layer type's strategy and limits is in
+[`docs/fidelity/CAPABILITIES.md`](docs/fidelity/CAPABILITIES.md).
+
+**Not drawn on the web map**
+
+- **2.5D renderer and embedded-symbol renderer** (styles stored inside KML, DWG and similar files):
+  the layer is not drawn, and the report does not mention it yet. For buildings, the viewer has its
+  own optional 3D buildings.
+- **Label shadows:** left out, and not in the report.
+- **Paint effects on fills and other lines:** blur, colorise, transform, glows and shadows are
+  ignored (reported). Exceptions: outer glow and drop shadow on simple lines; inner shadow and
+  inner glow on solid simple lines with a screen-unit width; markers, which QGIS renders into images
+  with their effects included.
+- **Blend modes on vector layers and features** (multiply, overlay, darken and so on): drawn as
+  normal, with a warning in the Publish window. Raster layers in *Multiply* or *Screen* mode are
+  converted to an equivalent image; other raster blend modes are drawn as normal (warning).
+- **Linear referencing line** (QGIS 3.40+) and **symbol layers from plugins:** left out (reported).
+- **Data-defined properties with no browser equivalent:** the static value is used (reported).
+- **Diagram details:** data-defined diagram settings other than *Show*, the histogram axis, the
+  distance of an *Around* placement, and text-diagram shapes other than the ellipse.
+- **Map content that isn't a vector or raster layer:** mesh, point cloud, vector tile and
+  annotation layers, and map decorations such as the grid, title and copyright, are not published.
+  Time-based layers are published as one snapshot, with no time slider.
+
+**Drawn, but only approximately**
+
+- **Selective masks:** a label's mask becomes its halo, and a mask marker its shape, both in the
+  map's background colour. They cover everything beneath them, not only the masked symbol layers,
+  so the result is exact only over a plain background (reported).
+- **Random marker fills:** the same number and density of markers, but at different random
+  positions.
+- **Map-unit pattern fills:** markers on the polygon edge are drawn whole instead of clipped,
+  rotated map-unit point patterns are not rotated, and in a rotated map-unit SVG fill each tile is
+  turned but the grid is not (reported).
+- **Label callouts:** callouts of labels with data-defined positions are straight leaders to the
+  label's anchor (reported). Callouts of labels that QGIS places itself are left out, without a
+  report entry.
+- **Label placement:** close to QGIS's, but the browser places labels itself, so in crowded areas
+  other labels can win.
+- **Feature order across rules:** overlapping features of different rules keep QGIS's order up to
+  5,000 re-ordered features and 8 levels of overlap per layer, in layers of up to 100,000 features;
+  beyond that, rule by rule (reported).
+- **ELSE rules** whose sibling rules have children of their own: the ELSE condition looks only at
+  its direct siblings (reported).
+- **Layer opacity:** QGIS fades the layer as one image, the browser each style layer, so overlaps
+  come out a little darker.
+- **Inner shadow and inner glow on lines:** computed for straight lines, so they can differ where
+  lines overlap or nearly touch.
+- **Heatmaps:** the colours can scale differently from QGIS unless the renderer has a fixed
+  maximum value (reported).
+- **Point clusters and point displacement:** grouped with QGIS's method, but QGIS groups only the
+  points in view, so some groups differ (reported).
 
 ## Fidelity report
 
