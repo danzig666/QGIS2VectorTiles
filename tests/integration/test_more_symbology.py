@@ -518,12 +518,22 @@ def test_hatch_of_markers_is_qgis_brush_tile(plugin):
     markers = QgsMarkerLineSymbolLayer(True, 3.2)
     markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "arrowhead", "size": "3"}))
     hatch.setSubSymbol(QgsLineSymbol([markers]))
+    pencil = hatch.clone()
     exporter._convert_symbol(QgsFillSymbol([hatch]), "s", "src", "q2vt", 14, 24)
     image = exporter.pattern_images[exporter.style["layers"][0]["paint"]["fill-pattern"]].img_1x
     spacing = 3.2 * 96 / 25.4
     side = int(spacing / _math.sin(_math.radians(45)))
     assert image.size == (side, side)
     assert image.getchannel("A").getextrema()[1] > 200
+    # A line symbol with data-defined properties (a pencil hatch's random
+    # dots) is drawn line by line, at the exact spacing (startRender).
+    from qgis.core import QgsProperty, QgsSymbolLayer
+    pencil.subSymbol().symbolLayer(0).subSymbol().symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyFillColor, QgsProperty.fromExpression("'red'"))
+    exporter.style["layers"] = []
+    exporter._convert_symbol(QgsFillSymbol([pencil]), "s", "src", "q2vt", 14, 24)
+    image = exporter.pattern_images[exporter.style["layers"][0]["paint"]["fill-pattern"]].img_1x
+    assert image.size != (side, side)
 
 
 def test_dense_marker_line_is_a_line_pattern(plugin):

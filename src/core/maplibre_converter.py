@@ -2831,8 +2831,7 @@ class QgisMapLibreStyleExporter:
             color_rgba=(color.red(), color.green(), color.blue(), color.alpha()),
             offset_px=screen_px(symbol_layer.offset(), symbol_layer.offsetUnit(), "offset"),
         )
-        if self._exact_screen_texture and \
-                _enum_int(symbol_layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly):
+        if self._exact_screen_texture and self._qgis_hatch_image(symbol_layer):
             angle, spacing = qgis_image_hatch(spec.angle_deg, spec.spacing_px)
             spec = dataclasses.replace(spec, angle_deg=angle, spacing_px=spacing)
         cell = solve_periodic_cell(spec, self.profile)
@@ -2900,7 +2899,7 @@ class QgisMapLibreStyleExporter:
         if repeat < 1 or repeat > 512 or spacing > 512:
             return None
         per_mm = self._texture_px(1.0, Qgis.RenderUnit.Millimeters)
-        if _enum_int(layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly):
+        if self._qgis_hatch_image(layer):
             cells = [self._qgis_hatch_brush(layer, per_mm * ratio) for ratio in (1, 2)]
             if all(cell is not None for cell in cells):
                 return self._textures(cells[0], cells[1], 0.0, "Hatch")
@@ -2943,6 +2942,18 @@ class QgisMapLibreStyleExporter:
         if lattice is not None:
             error = max(error, lattice[4])
         return self._textures(cells[0], cells[1], error, "Hatch")
+
+    @staticmethod
+    def _qgis_hatch_image(layer) -> bool:
+        """Whether QGIS fills with its pixel-rounded pattern image rather than
+        drawing each line (QgsLinePatternFillSymbolLayer::startRender): only
+        when clipped by the painter, with no data-defined clipping and a line
+        symbol without data-defined properties (a pencil hatch with random
+        dots is drawn line by line, at the exact spacing)."""
+        sub = layer.subSymbol()
+        return _enum_int(layer.clipMode()) == _enum_int(Qgis.LineClipMode.ClipPainterOnly) \
+            and not layer.dataDefinedProperties().isActive(QgsSymbolLayer.Property.PropertyLineClipping) \
+            and not (sub is not None and sub.hasDataDefinedProperties())
 
     @staticmethod
     def _qgis_hatch_brush(layer, px_per_mm: float):
