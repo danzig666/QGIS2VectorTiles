@@ -500,7 +500,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.42.2**. Newest first:
+This README describes QWebMap **4.42.3**. Newest first:
+
+**4.42.3** — online tiled layers as sharp as their service
+- Raster layers from XYZ/WMTS services (e.g. an XYZ layer with `zmax=18`) get image tiles down to the service's own max zoom by default, not only to the vector tiles' maximum zoom, so they stay sharp when zoomed in further.
 
 **4.42.2** — measuring keys; full regulation texts always printed
 - Measuring: right-click finishes (a right-button drag still rotates), Backspace removes the last point.
