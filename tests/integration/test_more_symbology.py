@@ -453,3 +453,50 @@ def test_marker_line_with_map_unit_details_gets_a_sprite_per_zoom(plugin):
         request = exporter.marker_symbols[layers[f"s_z{zoom}"]["layout"]["icon-image"]]
         assert request.map_units_per_pixel == pytest.approx(
             1.0 / PropertyExtractor.static_pixels(1.0, "map", zoom), rel=1e-6)
+
+
+def test_embedded_raster_line_image_is_a_line_pattern(plugin, tmp_path):
+    """A raster line with its image embedded in the style (base64:) is the
+    image along the line like a file's; QImageReader took it for a missing
+    file and the line was a faint symbol preview (Shoe Prints)."""
+    import base64
+    from PIL import Image
+    from qgis.core import QgsLineSymbol, QgsRasterLineSymbolLayer
+    path = tmp_path / "prints.png"
+    Image.new("RGBA", (40, 10), (0, 0, 0, 255)).save(path)
+    exporter = _converter()
+    raster = QgsRasterLineSymbolLayer("base64:" + base64.b64encode(path.read_bytes()).decode())
+    raster.setWidth(4)
+    exporter._convert_symbol(QgsLineSymbol([raster]), "s", "src", "q2vt", 14, 24)
+    paint = exporter.style["layers"][0]["paint"]
+    one = exporter.pattern_images[paint["line-pattern"]].img_1x
+    assert one.width / one.height == pytest.approx(4, rel=0.01)
+    assert not exporter.context.diagnostics.by_code("Q2VT_PATTERN_APPROXIMATE")
+
+
+def test_hatch_of_zero_width_lines_is_a_hairline(plugin):
+    """A hatch line of width 0 is QGIS's one-pixel hairline: the texture was
+    fully transparent (geo_e5 lost its blue hatch)."""
+    from qgis.core import QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsLineSymbol
+    exporter = _converter()
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setDistance(1.6)
+    hatch.setLineAngle(0)
+    hatch.setSubSymbol(QgsLineSymbol.createSimple({"color": "0,170,255", "width": "0"}))
+    exporter._convert_symbol(QgsFillSymbol([hatch]), "s", "src", "q2vt", 14, 24)
+    name = exporter.style["layers"][0]["paint"]["fill-pattern"]
+    alpha = exporter.pattern_images[name].img_1x.getchannel("A")
+    assert alpha.getextrema()[1] > 100  # was 0
+
+
+def test_unused_offset_unit_does_not_mix_a_metre_marker(plugin):
+    """A marker sized in metres with an offset of 0 mm is all in map units
+    (Course End was reported as mixing units)."""
+    from qgis.core import QgsSimpleMarkerSymbolLayer
+    exporter = _converter()
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 90)
+    marker.setSizeUnit(Qgis.RenderUnit.MetersInMapUnits)
+    marker.setStrokeWidthUnit(Qgis.RenderUnit.MetersInMapUnits)
+    marker.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+    exporter._convert_symbol(QgsMarkerSymbol([marker]), "s", "src", "q2vt", 14, 24)
+    assert not exporter.context.diagnostics.by_code("Q2VT_MIXED_UNITS")

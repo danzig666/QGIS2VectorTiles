@@ -311,3 +311,17 @@ def test_filled_marker_outline_is_not_cut_off(sg):
     img = sg.SymbolImage(QgsMarkerSymbol([ring]), "m", 1, True, 0.04).img
     left, top, right, bottom = img.getbbox()
     assert right - left == pytest.approx(145, abs=3) and bottom - top == pytest.approx(145, abs=3)
+
+
+def test_marker_is_drawn_where_its_ink_is_when_its_bounds_are_too_large(sg, monkeypatch):
+    """QGIS's bounds of a rotated, anchored SVG marker (SVG_wedge_gradient_fill)
+    can lie hundreds of pixels from its ink: past the largest canvas they
+    left the marker out. The ink decides; a marker whose ink is too large
+    is still refused."""
+    monkeypatch.setattr(sg, "_MAX_CANVAS_PX", 40)
+    monkeypatch.setattr(sg, "_PROBE_CANVAS_PX", 40)
+    img = sg.SymbolImage(_marker(size=5), "m", 1).img  # bounds ask for 51 px
+    left, top, right, bottom = img.getbbox()
+    assert right - left == pytest.approx(19, abs=2) and bottom - top == pytest.approx(19, abs=2)
+    with pytest.raises(sg.SpriteRenderError, match="px wide"):
+        sg.SymbolImage(_marker(size=30), "big", 1)

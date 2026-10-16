@@ -957,7 +957,7 @@ class IconPropertyExtractor:
                              1e-12)
             return icon_size, mupp, context.sprite_oversampling or float(_SPRITE_QUALITY)
         # (screen-size markers do not grow with the zoom)
-        layer_units = {normalize_unit(symbol.symbolLayer(i).outputUnit())
+        layer_units = {IconPropertyExtractor._unit_of_lengths(symbol.symbolLayer(i))
                        for i in range(symbol.symbolLayerCount())} if symbol else set()
         if layer_units - {"map", "m"}:
             PropertyExtractor.context.report(
@@ -1000,6 +1000,18 @@ class IconPropertyExtractor:
             oversampling = min(context.sprite_oversampling, 256.0 / sprite_px)
         return ex.clamp(ex.mul(px, 1.0 / sprite_px), 0, None), \
             map_units_per_pixel, oversampling
+
+    @staticmethod
+    def _unit_of_lengths(layer) -> str:
+        """A symbol layer's output unit, a zero offset's unit left out (a
+        metre-sized marker with an unused millimetre offset is not mixed)."""
+        offset = getattr(layer, "offset", None)
+        if callable(offset) and hasattr(layer, "setOffsetUnit") and hasattr(layer, "sizeUnit"):
+            value = offset()
+            if (value.isNull() if hasattr(value, "isNull") else value == 0):
+                layer = layer.clone()
+                layer.setOffsetUnit(layer.sizeUnit())
+        return normalize_unit(layer.outputUnit())
 
     @staticmethod
     def uses_map_units(symbol: QgsSymbol) -> bool:
@@ -2787,7 +2799,9 @@ class QgisMapLibreStyleExporter:
         spec = LinePatternSpec(
             angle_deg=float(symbol_layer.lineAngle()),
             spacing_px=screen_px(symbol_layer.distance(), symbol_layer.distanceUnit(), "spacing"),
-            line_width_px=screen_px(line.width(), line.widthUnit(), "width"),
+            # A zero width is QGIS's one-pixel hairline (a geology hatch
+            # with width 0 was a fully transparent texture).
+            line_width_px=hairline(screen_px(line.width(), line.widthUnit(), "width")),
             color_rgba=(color.red(), color.green(), color.blue(), color.alpha()),
             offset_px=screen_px(symbol_layer.offset(), symbol_layer.offsetUnit(), "offset"),
         )
@@ -3746,11 +3760,12 @@ class QgisMapLibreStyleExporter:
         least 64 px), which MapLibre needs for a seamless repeat."""
         from qgis.core import QgsApplication  # pylint: disable=import-outside-toplevel
         from qgis.PyQt.QtCore import QSize  # pylint: disable=import-outside-toplevel
-        from qgis.PyQt.QtGui import QImageReader  # pylint: disable=import-outside-toplevel
         from PIL import Image  # pylint: disable=import-outside-toplevel
         from .sprite_generator import SymbolImage  # pylint: disable=import-outside-toplevel
         path = layer.path()
-        source = QImageReader(path).size() if path else None
+        # The image cache also reads embedded (base64:) images and URLs,
+        # which QImageReader took for missing files.
+        source = QgsApplication.imageCache().originalSize(path, True) if path else None
         if not path or source is None or source.isEmpty():
             return None
         line_px = max(1.0, PropertyExtractor.static_pixels(layer.width(), layer.widthUnit()))

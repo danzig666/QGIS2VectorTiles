@@ -768,8 +768,10 @@ def test_a_scale_expression_reading_a_render_variable_keeps_its_zoom_pieces(flat
     """A fill fading in with the scale ('set_color_part(@symbol_color,
     'alpha', ...)') reads a variable set only while rendering: valued NULL
     at every zoom, all zooms looked alike and merged into one piece bound
-    at zoom 0, so the fill was transparent at every zoom."""
-    from qgis.core import QgsProperty, QgsSymbolLayer
+    at zoom 0, so the fill was transparent at every zoom. It is the
+    symbol's colour (bind_symbol_color)."""
+    from qgis.core import QgsExpressionContext, QgsExpressionContextScope, QgsProperty, QgsSymbolLayer
+    from qgis.PyQt.QtGui import QColor
     layer = rule_based(zoning_layer(), [("w", "", 0, 0, True, "255,0,0")])
     layer.renderer().rootRule().children()[0].symbol().symbolLayer(0).setDataDefinedProperty(
         QgsSymbolLayer.Property.PropertyFillColor,
@@ -780,7 +782,18 @@ def test_a_scale_expression_reading_a_render_variable_keeps_its_zoom_pieces(flat
     fills = [r for r in rules if r.get_attr("c") == 2]
     for zoom in (0.5, 12.5, 16.5, 22.5):
         assert len([r for r in fills if r.visibility.contains(zoom)]) == 1
-    assert len({r.visibility.min_zoom for r in fills}) > 16
+
+    def alpha(zoom):
+        rule = next(r for r in fills if r.visibility.contains(zoom))
+        prop = rule.rule.symbol().symbolLayer(0).dataDefinedProperties().property(
+            QgsSymbolLayer.Property.PropertyFillColor)
+        scope = QgsExpressionContextScope()
+        scope.setVariable("map_scale", zm.zoom_to_scale(rule.evaluation_zoom()))
+        color, _ = prop.valueAsColor(QgsExpressionContext([scope]), QColor())
+        return color.alpha()
+    # Bound to the symbol's colour (red), each zoom is valued at its scale:
+    # transparent far out (zooms 0-7 alike, one piece), opaque near.
+    assert alpha(0.5) == 0 and 20 < alpha(12.5) < 40 and alpha(16.5) > 200
 
 
 def test_a_line_shown_beyond_the_last_tile_zoom_does_not_widen_the_tile_buffer(plugin):
@@ -1361,3 +1374,44 @@ def test_map_unit_labels_hidden_where_too_small_or_too_large_on_screen(flattener
     shown = label_range(min_label_px=6)
     assert shown.min_zoom == pytest.approx(zm.scale_to_zoom(per_px / 8))
     assert shown.max_zoom == pytest.approx(zm.scale_to_zoom(per_px / 40))
+
+
+def test_symbol_color_is_the_drawn_symbols(flattener):
+    """@symbol_color is the colour of the symbol QGIS draws: a marker inside a
+    marker line reads its line symbol's colour, a geometry generator's
+    sub-symbol its own. Bound after the split, each one-layer piece read its
+    own (Air Corridor's black letters were red)."""
+    from qgis.core import (QgsFeature, QgsGeometry, QgsGeometryGeneratorSymbolLayer, QgsLineSymbol,
+                           QgsMarkerLineSymbolLayer, QgsMarkerSymbol, QgsProperty,
+                           QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
+                           QgsSingleSymbolRenderer, QgsSymbolLayer, QgsVectorLayer)
+    from qgis.PyQt.QtGui import QColor
+    layer = QgsVectorLayer("LineString?crs=EPSG:3857&field=id:integer", "line", "memory")
+    feature = QgsFeature(layer.fields())
+    feature.setAttributes([1])
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(0 0, 400 0)"))
+    layer.dataProvider().addFeatures([feature])
+
+    def markers():
+        marker = QgsSimpleMarkerSymbolLayer()
+        marker.setColor(QColor("red"))
+        marker.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyFillColor,
+                                      QgsProperty.fromExpression("@symbol_color"))
+        line = QgsMarkerLineSymbolLayer()
+        line.setSubSymbol(QgsMarkerSymbol([marker]))
+        return line
+    generator = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "$geometry",
+                                                        "SymbolType": "Line"})
+    generator.setSubSymbol(QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("green")), markers()]))
+    layer.setRenderer(QgsSingleSymbolRenderer(
+        QgsLineSymbol([QgsSimpleLineSymbolLayer(QColor("blue")), markers(), generator])))
+    reset_project(layer)
+    rules, _ = flattener(14, 16)
+    colors = set()
+    for rule in rules:
+        line = rule.rule.symbol().symbolLayer(0)
+        if line.layerType() == "MarkerLine":
+            prop = line.subSymbol().symbolLayer(0).dataDefinedProperties().property(
+                QgsSymbolLayer.Property.PropertyFillColor)
+            colors.add((bool(rule.pre_generator), prop.expressionString()))
+    assert colors == {(False, "'0,0,255,255'"), (True, "'0,128,0,255'")}

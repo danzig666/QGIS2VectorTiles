@@ -3291,6 +3291,16 @@ class RulesExporter:
                 wrapped = f"try({cast}({expression}\n))" if cast else f"try({expression}\n)"
                 return {**field, "expression": wrapped}
             params["FIELDS_MAPPING"] = [safe(field) for field in params.get("FIELDS_MAPPING") or []]
+        scope_layer = None
+        if key and _uses_aggregates(params[key]) and params.get("INPUT"):
+            # Aggregates (collect($geometry), sum("pop")...) need a layer
+            # scope: without one Processing fails ("Cannot use aggregate
+            # function in this context") and try() left every geometry
+            # NULL. They run over the step's input, the rule's features.
+            scope_layer = self._open(params["INPUT"], "aggregate")
+            expression_context = context.expressionContext()
+            expression_context.appendScope(QgsExpressionContextUtils.layerScope(scope_layer))
+            context.setExpressionContext(expression_context)
         if self._memory_active:
             return self._run_in_memory(full_name, params, context, feedback)
 
@@ -4213,6 +4223,23 @@ class RulesExporter:
 # and moves the outline about a quarter as much as the pass before, so
 # beyond this it changes nothing a web map shows.
 MAX_SMOOTH_ITERATIONS = 5
+
+
+_AGGREGATE_FUNCTIONS: Optional[frozenset] = None
+
+
+def _uses_aggregates(expression: str) -> bool:
+    """Whether an expression calls a QGIS aggregate function (collect,
+    sum, count... the Aggregates group)."""
+    global _AGGREGATE_FUNCTIONS  # pylint: disable=global-statement
+    if _AGGREGATE_FUNCTIONS is None:
+        _AGGREGATE_FUNCTIONS = frozenset(
+            function.name().lower() for function in QgsExpression.Functions()
+            if "Aggregates" in function.groups())
+    if not re.search(r"\b(" + "|".join(_AGGREGATE_FUNCTIONS) + r")\s*\(", expression, re.IGNORECASE):
+        return False
+    return any(name.lower() in _AGGREGATE_FUNCTIONS
+               for name in QgsExpression(expression).referencedFunctions())
 
 
 def _capped_smoothing(expression: str) -> str:

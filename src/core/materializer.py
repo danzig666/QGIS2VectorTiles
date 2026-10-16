@@ -126,6 +126,79 @@ def _to_mm(value: float, unit) -> Optional[float]:
     return value * factor / physical_factor(MM)
 
 
+# Oversampling of a hash drawn as an image (_hash_image_marker) and the
+# largest side of that image.
+_HASH_IMAGE_PX_PER_MM = 96.0 / 25.4 * 8
+_HASH_IMAGE_MAX_PX = 2048
+
+
+def _hash_image_marker(layer, hash_symbol):
+    """A hash whose line sub-symbol is not one plain line (an arrow, a
+    double or dashed line) as a raster marker of that sub-symbol drawn once.
+    At hash angle 0 QGIS draws the hash from the left of the line to its
+    right, rotating it clockwise with the angle like a marker (the "line"
+    marker shape of a plain hash is the same upright stroke). None for a
+    map-unit or data-defined length, or a data-defined sub-symbol."""
+    # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsExpressionContext, QgsRasterMarkerSymbolLayer, QgsRenderContext
+    from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice
+    from qgis.PyQt.QtGui import QImage, QPainter, QPolygonF
+    from PIL import Image
+    length_mm = _to_mm(layer.hashLength(), layer.hashLengthUnit())
+    props = layer.dataDefinedProperties()
+    if hash_symbol is None or not length_mm or length_mm <= 0 or (
+            props is not None and props.isActive(QgsSymbolLayer.Property.PropertyLineDistance)):
+        return None
+    for sub_layer in hash_symbol.symbolLayers():
+        sub_props = sub_layer.dataDefinedProperties()
+        if sub_props is not None and sub_props.hasActiveProperties():
+            return None
+    # Room for heads, caps and offsets around the hash.
+    span_mm = 3 * length_mm + 20
+    px_per_mm = min(_HASH_IMAGE_PX_PER_MM, _HASH_IMAGE_MAX_PX / span_mm)
+    size = int(math.ceil(span_mm * px_per_mm))
+    centre = size / 2.0
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    try:
+        context = with_map_distances(QgsRenderContext.fromQPainter(painter))
+        context.setScaleFactor(px_per_mm)
+        context.setFlag(Qgis.RenderContextFlag.Antialiasing, True)
+        context.setExpressionContext(QgsExpressionContext())
+        symbol = hash_symbol.clone()
+        symbol.setOpacity(1.0)  # the marker symbol carries it
+        half = length_mm * px_per_mm / 2.0
+        symbol.startRender(context)
+        symbol.renderPolyline(QPolygonF([QPointF(centre, centre - half),
+                                         QPointF(centre, centre + half)]), None, context)
+        symbol.stopRender(context)
+    finally:
+        painter.end()
+    bbox = Image.frombuffer("RGBA", (size, size), image.constBits().asstring(size * size * 4),
+                            "raw", "BGRA", 0, 1).getchannel("A").getbbox()
+    if bbox is None:
+        return None
+    # Cropped symmetrically: the image centre stays the hash's middle.
+    half_w = max(centre - bbox[0], bbox[2] - centre)
+    half_h = max(centre - bbox[1], bbox[3] - centre)
+    left, top = int(math.floor(centre - half_w)), int(math.floor(centre - half_h))
+    width, height = size - 2 * left, size - 2 * top
+    crop = image.copy(left, top, width, height)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    crop.save(buffer, "PNG")
+    buffer.close()
+    marker = QgsRasterMarkerSymbolLayer("base64:" + bytes(data.toBase64()).decode("ascii"))
+    marker.setSize(width / px_per_mm)
+    marker.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    marker.setFixedAspectRatio(height / width)
+    marker.setAngle(layer.hashAngle())
+    return marker
+
+
 def _limited(scale) -> bool:
     """Whether a QgsMapUnitScale limits its map-unit length (min/max size in
     mm or a scale range)."""
@@ -2765,6 +2838,8 @@ class SymbolMaterializer:
                         QgsSymbolLayer.Property.PropertyStrokeWidth):
                 if line_props.isActive(key):
                     marker.setDataDefinedProperty(key, QgsProperty(line_props.property(key)))
+        elif (image := _hash_image_marker(layer, hash_symbol)) is not None:
+            marker = image
         else:
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
                          "Hash sub-symbol is not a simple line; drawn as a thin line.", flat_rule)

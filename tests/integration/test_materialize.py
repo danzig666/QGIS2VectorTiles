@@ -3232,3 +3232,52 @@ def test_first_and_last_vertex_markers_move_along_the_line_like_qgis(plugin, tmp
         assert not reference and not ours
         return
     assert reference and mask_difference(reference, ours) < 0.05
+
+
+@pytest.mark.parametrize("angle", [0, 90, 35])
+def test_hash_of_arrows_matches_qgis(plugin, tmp_path, angle):
+    """A hash drawn with an arrow (any line sub-symbol that is not one plain
+    line) is the sub-symbol drawn once, as an image marker turned like the
+    hash: a single head points the way QGIS draws it (Bi-Directional, a
+    double-headed arrow along the line, was a thin line)."""
+    from qgis.core import QgsArrowSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "ha.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    arrow.setHeadType(QgsArrowSymbolLayer.HeadType.HeadSingle)
+    arrow.setIsCurved(False)
+    for setter in (arrow.setArrowWidth, arrow.setArrowStartWidth):
+        setter(0.4)
+    arrow.setHeadLength(1.6)
+    arrow.setHeadThickness(1.4)
+    arrow.subSymbol().setColor(QColor("black"))
+    hashes = QgsHashedLineSymbolLayer(True, 20)
+    hashes.setPlacements(Qgis.MarkerLinePlacement.SegmentCenter)
+    hashes.setHashLength(6)
+    hashes.setHashAngle(angle)
+    hashes.setSubSymbol(QgsLineSymbol([arrow]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([hashes])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    symbol = rules[0].rule.symbol()
+    marker = symbol.symbolLayer(0).subSymbol() or symbol  # points: the marker itself
+    assert marker.symbolLayer(0).layerType() == "RasterMarker"
+    assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.1
+
+
+def test_generator_of_an_aggregate_matches_qgis(plugin, tmp_path):
+    """An aggregate in a geometry generator (buffer(collect($geometry), 0):
+    the outline of all features) runs over the layer: Processing evaluated
+    it without a layer and every generated geometry was NULL (arrow 02
+    drew nothing)."""
+    from qgis.core import QgsGeometryGeneratorSymbolLayer
+    layer = _layer("Polygon", INSIDE_POLYGONS, str(tmp_path / "agg.gpkg"))
+    outline = QgsGeometryGeneratorSymbolLayer.create({
+        "geometryModifier": "buffer(collect($geometry), 0)", "SymbolType": "Line"})
+    outline.setSubSymbol(QgsLineSymbol.createSimple({"color": "black", "width": "0.8"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([outline])))
+    reference = ink_mask(render([layer], EXTENT, (240, 240)))
+    outputs, _, _ = _export(plugin, layer, tmp_path)
+    ours = ink_mask(render(outputs, EXTENT, (240, 240)))
+    # The shared edge of the two squares is inside the union: not drawn.
+    assert ours and mask_difference(reference, ours) < 0.05
