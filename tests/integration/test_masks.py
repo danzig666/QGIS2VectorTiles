@@ -7,7 +7,7 @@ import os
 import sys
 
 import pytest
-from qgis.core import (QgsMarkerSymbol, QgsMaskMarkerSymbolLayer, QgsPalLayerSettings,
+from qgis.core import (Qgis, QgsMarkerSymbol, QgsMaskMarkerSymbolLayer, QgsPalLayerSettings,
                        QgsSingleSymbolRenderer, QgsSymbolLayerReference, QgsTextFormat,
                        QgsVectorLayerSimpleLabeling)
 from qgis.PyQt.QtGui import QColor
@@ -146,3 +146,21 @@ def test_marker_sized_in_meters_at_scale_is_drawn(export, tmp_path):  # noqa: F8
     exporter, result = _run(export, layer)
     assert not exporter.diagnostics.by_code("Q2VT_SPRITE_TRANSPARENT")
     assert [l for l in _style(result)["layers"] if l.get("type") == "symbol" and "icon-image" in l.get("layout", {})]
+
+
+def test_pattern_marker_too_large_for_a_sprite_does_not_stop_the_export(export, tmp_path):  # noqa: F811
+    """A random marker fill whose marker is sized in map units and is
+    kilometres wide (QGIS Hub "Mondriaan"): too large for a sprite even at
+    the lowest zoom. The pattern is reported and left out; the export
+    finishes (it stopped with "Sprite 'pattern-marker' would be 51519 px
+    wide")."""
+    from qgis.core import QgsFillSymbol, QgsRandomMarkerFillSymbolLayer  # pylint: disable=import-outside-toplevel
+    layer = zoning_layer(path=str(tmp_path / "zones.gpkg"))
+    fill = QgsRandomMarkerFillSymbolLayer(10, Qgis.PointCountMethod.DensityBased, 250000.0)
+    fill.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "square", "size": "200000",
+                                                    "size_unit": "MapUnit"}))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    exporter, result = _run(export, layer)
+    assert result and os.path.exists(os.path.join(result, "style", "style.json"))
+    assert any("RandomMarkerFill left out" in d.message
+               for d in exporter.diagnostics.by_code("Q2VT_SPRITE_RENDER_FAILED"))

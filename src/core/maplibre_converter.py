@@ -4758,27 +4758,34 @@ class QgisMapLibreStyleExporter:
                 return None
             map_units = self._pattern_uses_map_units(symbol_layer)
             viewport = pattern_in_viewport(symbol_layer)
-            if map_units and not self._pattern_spacing_in_map_units(symbol_layer):
-                # Screen-unit spacing, map-unit marker or line: exact spacing.
-                pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, True)
-                if pattern_name is not None:
-                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
-            elif map_units:
-                pattern_name = self._per_zoom_pattern(
-                    register, min_zoom, max_zoom,
-                    screen_lengths=self._pattern_has_screen_lengths(symbol_layer))
-                if pattern_name is not None:
-                    # Above its last texture the pattern scales with the map.
-                    layer_def.setdefault("metadata", {})[self.PATTERN_ZOOM_FLAG] = \
-                        self._last_pattern_zoom
-            else:
-                self._exact_screen_texture = True
-                try:
-                    pattern_name = register()
-                finally:
-                    self._exact_screen_texture = False
-                if pattern_name is not None:
-                    layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+            try:
+                if map_units and not self._pattern_spacing_in_map_units(symbol_layer):
+                    # Screen-unit spacing, map-unit marker or line: exact spacing.
+                    pattern_name = self._per_zoom_pattern(register, min_zoom, max_zoom, True)
+                    if pattern_name is not None:
+                        layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+                elif map_units:
+                    pattern_name = self._per_zoom_pattern(
+                        register, min_zoom, max_zoom,
+                        screen_lengths=self._pattern_has_screen_lengths(symbol_layer))
+                    if pattern_name is not None:
+                        # Above its last texture the pattern scales with the map.
+                        layer_def.setdefault("metadata", {})[self.PATTERN_ZOOM_FLAG] = \
+                            self._last_pattern_zoom
+                else:
+                    self._exact_screen_texture = True
+                    try:
+                        pattern_name = register()
+                    finally:
+                        self._exact_screen_texture = False
+                    if pattern_name is not None:
+                        layer_def.setdefault("metadata", {})[self.SCREEN_PATTERN_FLAG] = True
+            except SpriteRenderError as error:
+                # A marker too large for the sprite renderer even at the
+                # lowest zoom (a "meters at scale" marker hundreds of metres
+                # wide) costs this pattern, not the whole export.
+                self.context.report("Q2VT_SPRITE_RENDER_FAILED", f"{kind} left out: {error}")
+                pattern_name = None
             if viewport:
                 # Starts at the corner of the view, as in QGIS (patched
                 # MapLibre); otherwise patterns are anchored to the map.
