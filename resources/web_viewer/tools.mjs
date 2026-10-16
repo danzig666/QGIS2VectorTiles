@@ -180,9 +180,28 @@ export class Tools {
       if (e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]")) return;
       if (e.key === "Escape") this.stop(true);
       if (e.key === "Enter") this.finish();
+      if (e.key === "Backspace") {  // the last point back (not the browser's Back)
+        e.preventDefault();
+        this.undo();
+      }
+    };
+    // Right click finishes, like QGIS (a right-button drag still rotates the map).
+    this.onRightDown = (e) => {
+      if (this.mode && e.button === 2) this.rightDown = [e.clientX, e.clientY];
+    };
+    this.onContextMenu = (e) => {
+      if (!this.mode) return;
+      e.preventDefault();
+      const down = this.rightDown;
+      this.rightDown = null;
+      if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;  // was a rotation
+      this.finish();
     };
     this.map.on("click", this.onClick);
     this.map.on("dblclick", this.onDblClick);
+    const area = this.map.getCanvasContainer();
+    area.addEventListener("mousedown", this.onRightDown, true);
+    area.addEventListener("contextmenu", this.onContextMenu, true);
     document.addEventListener("keydown", this.onKey);
   }
 
@@ -230,6 +249,13 @@ export class Tools {
     this.map.doubleClickZoom.disable();
     this.map.getCanvas().style.cursor = "crosshair";
     for (const [name, node] of Object.entries(this.modeButtons || {})) node.setAttribute("aria-pressed", String(name === mode));
+    this.draw();
+  }
+
+  // Removes the last point (Backspace while measuring).
+  undo() {
+    if (!this.mode || !this.points.length) return;
+    this.points.pop();
     this.draw();
   }
 
@@ -346,6 +372,8 @@ export class Tools {
     if (this.onClick) this.map.off("click", this.onClick);
     if (this.onMeasureMove) this.map.off("mousemove", this.onMeasureMove);
     if (this.onDblClick) this.map.off("dblclick", this.onDblClick);
+    if (this.onRightDown) this.map.getCanvasContainer().removeEventListener("mousedown", this.onRightDown, true);
+    if (this.onContextMenu) this.map.getCanvasContainer().removeEventListener("contextmenu", this.onContextMenu, true);
     if (this.onKey) document.removeEventListener("keydown", this.onKey);
   }
 }
