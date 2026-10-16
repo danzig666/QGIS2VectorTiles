@@ -32,6 +32,7 @@ from qgis.core import NULL, Qgis, QgsFontUtils, QgsSymbolLayerUtils, QgsFillSymb
 from qgis.utils import iface
 from .glyphs_generator import GlyphGenerator
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .sprite_generator import SpriteGenerator, SpriteRequest, PatternImages, SpriteRenderError
 from .fidelity import expressions as ex
 from .fidelity import feature_order
@@ -1030,7 +1031,7 @@ class IconPropertyExtractor:
             image = QImage(1, 1, QImage.Format.Format_ARGB32)
             painter = QPainter(image)
             try:
-                context = QgsRenderContext.fromQPainter(painter)
+                context = with_map_distances(QgsRenderContext.fromQPainter(painter))
                 context.setScaleFactor(96.0 / 25.4)
                 context.setMapToPixel(QgsMapToPixel(mupp))
                 probe = symbol.clone()

@@ -39,6 +39,7 @@ from qgis.PyQt.QtCore import qVersion
 from .fidelity.assets import AtlasEntry, pack, symmetric_crop_box
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .fidelity.diagnostics import DiagnosticCollector
 
 _QT_VERSION = int(qVersion()[0])
@@ -239,7 +240,7 @@ class SymbolImage:
         return canvas
 
     def _context(self, painter):
-        context = QgsRenderContext.fromQPainter(painter)
+        context = with_map_distances(QgsRenderContext.fromQPainter(painter))
         context.setScaleFactor(_PX_PER_MM * self.scale_factor)
         context.setMapToPixel(QgsMapToPixel(self.map_units_per_pixel / self.scale_factor))
         # Left at 1, a scale range of a map-unit size (QgsMapUnitScale::

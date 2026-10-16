@@ -3192,3 +3192,16 @@ def test_smooth_passes_are_capped_in_exported_generators(plugin, expression, cap
         return
     passes = [int(p) for p in __import__("re").findall(r"smooth\(.*?, (\d+), 0\.3|, (\d+), 0\.25", out) for p in p if p]
     assert passes and max(passes) == MAX_SMOOTH_ITERATIONS
+
+
+def test_meters_at_scale_line_offset_is_the_offset_line(plugin, tmp_path):
+    """A line offset in "meters at scale" (military symbols: +-350 m beside
+    the axis) is the mitred offset line QGIS draws, like a map-unit offset:
+    MapLibre's line-offset looped at every bend wider than the offset."""
+    layer = _layer("LineString", ["LINESTRING(-90 -60, -20 50, 10 -40, 60 40)"], str(tmp_path / "axis.gpkg"))
+    line = QgsLineSymbol.createSimple({"color": "black", "width": "3", "width_unit": "RenderMetersInMapUnits",
+                                       "offset": "8", "offset_unit": "RenderMetersInMapUnits"})
+    layer.setRenderer(QgsSingleSymbolRenderer(line))
+    _outputs, rules, _diags = _export(plugin, layer, tmp_path)
+    assert any(rule.recipe is not None and rule.recipe.kind == "line_offset"
+               and dict(rule.recipe.params).get("offset") == pytest.approx(8.0) for rule in rules)

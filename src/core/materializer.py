@@ -49,6 +49,7 @@ from ..utils.zoom_levels import ZoomLevels
 from .fidelity.model import MAX_STYLE_ZOOM, ZoomInterval
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
+from .fidelity.render_context import with_map_distances
 from .fidelity.qgis_expr import SCALE_VARIABLES, enclosed, uses_map_scale
 from .fidelity import materialize as mat
 from .fidelity.diagnostics import DiagnosticCollector, Severity
@@ -286,7 +287,7 @@ class SymbolMaterializer:
             if dashes is not None:
                 return dashes
             if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
-                    and normalize_unit(layer.offsetUnit()) == "map":
+                    and self._offset_in_map_units(layer) is not None:
                 return self._offset_line(flat_rule, layer)
             if flat_rule.get_attr("g") == 1 and abs(layer.offset()) > 1e-9 \
                     and _to_mm(layer.offset(), layer.offsetUnit()) is not None:
@@ -1292,9 +1293,25 @@ class SymbolMaterializer:
         rule = flat_rule.derive()
         rule.rule.symbol().symbolLayer(0).setOffset(0.0)
         rule.recipe = mat.Recipe("line_offset", params=(
-            ("offset", float(layer.offset())), ("crs", crs)))
+            ("offset", self._offset_in_map_units(layer)), ("crs", crs)))
         rule.set_attr("m", 1)
         return [rule]
+
+    def _offset_in_map_units(self, layer) -> Optional[float]:
+        """A line layer's offset in project map units when it scales with the
+        map: map units as they are, "meters at scale" (military symbols:
+        +-350 m) in a projected CRS's units; None for screen units or metres
+        in a geographic CRS (left to the screen-unit paths)."""
+        unit = normalize_unit(layer.offsetUnit())
+        if unit == "map":
+            return float(layer.offset())
+        if unit != "m":
+            return None
+        from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes  # pylint: disable=import-outside-toplevel
+        crs = QgsCoordinateReferenceSystem(self.project_crs) if self.project_crs else QgsProject.instance().crs()
+        if not crs.isValid() or crs.isGeographic():
+            return None
+        return float(layer.offset()) * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
 
     # Vertices whose offset loops are tolerated before an offset is drawn
     # natively (MapLibre line-offset) at a zoom.
@@ -3553,7 +3570,7 @@ class SymbolMaterializer:
         from qgis.core import QgsMapToPixel, QgsRenderContext, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
         zoom = float(self._zoom_range(flat_rule)[1])
         per_px = self._map_units_per_mm(flat_rule, zoom) * 25.4 / 96.0
-        context = QgsRenderContext()
+        context = with_map_distances(QgsRenderContext())
         context.setScaleFactor(96.0 / 25.4)
         context.setMapToPixel(QgsMapToPixel(per_px))
         context.setRendererScale(ZoomLevels.zoom_to_scale(int(zoom)) or 0.0)

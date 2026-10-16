@@ -124,3 +124,25 @@ def test_unsupported_renderer_is_reported(export, tmp_path):  # noqa: F811
     exporter, _ = _run(export, layer)
     found = exporter.diagnostics.by_code("Q2VT_UNSUPPORTED_RENDERER")
     assert found and "25dRenderer" in found[0].message and found[0].layer_id == layer.id()
+
+
+def test_marker_sized_in_meters_at_scale_is_drawn(export, tmp_path):  # noqa: F811
+    """A marker sized in "meters at scale" (QGIS Hub military symbols: a
+    300 m square with a 40 m outline): the sprite's render context had no
+    CRS for distances, QGIS drew it a thousandth of a pixel wide and every
+    per-zoom sprite was empty."""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer  # pylint: disable=import-outside-toplevel
+    from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
+    layer = QgsVectorLayer("Point?crs=EPSG:3857", "points", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("POINT(2121000 6021000)"))
+    layer.dataProvider().addFeatures([feature])
+    layer = to_geopackage(layer, str(tmp_path / "points.gpkg"))
+    symbol = QgsMarkerSymbol.createSimple({"name": "square", "color": "0,0,0,0", "outline_color": "0,0,0",
+                                           "size": "300", "size_unit": "RenderMetersInMapUnits",
+                                           "outline_width": "40",
+                                           "outline_width_unit": "RenderMetersInMapUnits"})
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    exporter, result = _run(export, layer)
+    assert not exporter.diagnostics.by_code("Q2VT_SPRITE_TRANSPARENT")
+    assert [l for l in _style(result)["layers"] if l.get("type") == "symbol" and "icon-image" in l.get("layout", {})]
