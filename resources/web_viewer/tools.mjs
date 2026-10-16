@@ -3,6 +3,7 @@
 // area measurement on user-drawn temporary geometry, print of the current
 // view. Measurement geometry is an in-memory GeoJSON source (allowed
 // runtime helper); it is never saved or published.
+import { BackEntry } from "./backstack.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 import { lineLength, polygonArea, wgs84ToEov } from "./geo.mjs";
 import { button as iconButton, el } from "./icons.mjs";
@@ -224,6 +225,8 @@ export class Tools {
     if (this.profileBox) this.profileBox.replaceChildren();
     if (this.profileButton) this.profileButton.hidden = true;
     this.viewer.measuring = true;
+    this.back ??= new BackEntry(() => this.stop(false));
+    this.back.open();
     this.map.doubleClickZoom.disable();
     this.map.getCanvas().style.cursor = "crosshair";
     for (const [name, node] of Object.entries(this.modeButtons || {})) node.setAttribute("aria-pressed", String(name === mode));
@@ -231,6 +234,7 @@ export class Tools {
   }
 
   finish() {
+    this.back?.closed();
     this.mode = null;
     this.cursor = null;
     this.showSnap(null);

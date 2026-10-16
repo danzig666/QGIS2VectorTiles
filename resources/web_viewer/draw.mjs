@@ -3,6 +3,7 @@
 // drawing travels in the shared link (#…&d=, compact polyline coordinates)
 // and can be saved as GeoJSON or KML. Text is a DOM marker (no glyphs
 // needed) and is never interpreted as HTML.
+import { BackEntry } from "./backstack.mjs";
 import { t } from "./i18n.mjs";
 import { button as iconButton, el } from "./icons.mjs";
 
@@ -264,6 +265,8 @@ export class Draw {
     this.mode = kind;
     this.points = [];
     this.viewer.drawing = true;
+    this.back ??= new BackEntry(() => this.cancel());
+    this.back.open();
     this.map.doubleClickZoom.disable();
     this.map.getCanvas().style.cursor = "crosshair";
     for (const [name, node] of Object.entries(this.modeButtons)) node.setAttribute("aria-pressed", String(name === kind));
@@ -274,6 +277,7 @@ export class Draw {
   }
 
   cancel() {
+    this.back?.closed();
     this.mode = null;
     this.points = [];
     this.viewer.drawing = false;

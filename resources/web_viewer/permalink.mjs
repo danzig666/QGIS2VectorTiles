@@ -4,6 +4,8 @@
 // to configured fields/values, sizes are capped; nothing from the URL is
 // evaluated as code or as a style expression.
 
+import { replaceUrl } from "./backstack.mjs";
+
 const MAX_HASH = 24000;  // a drawing (d=) can be long
 const RELEASE_PATH = /\/releases\/r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\/(index\.html)?$/;
 
@@ -113,7 +115,7 @@ export class Permalink {
   schedule() {
     if (!this.enabled) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => history.replaceState(null, "", `#${this.hash()}`), 300);
+    this.timer = setTimeout(() => replaceUrl(`#${this.hash()}`), 300);
   }
 
   // Links: the exact release (versioned) and the stable entry (follows the

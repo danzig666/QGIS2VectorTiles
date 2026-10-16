@@ -3,6 +3,7 @@
 // text alone printed or saved as an HTML file. The content is the cleaned
 // text of rich_text.mjs (no scripts, no attributes but table spans); it is
 // copied, never parsed again from strings.
+import { BackEntry } from "./backstack.mjs";
 import { t } from "./i18n.mjs";
 import { button, el } from "./icons.mjs";
 
@@ -122,7 +123,9 @@ export function openReader({ title, subtitle, content, lang }) {
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
+  const back = new BackEntry(() => finish());
   function finish() {
+    back.closed();
     document.removeEventListener("keydown", onKey, true);
     backdrop.remove();
     document.body.classList.remove("q2vt-reading");
@@ -134,6 +137,7 @@ export function openReader({ title, subtitle, content, lang }) {
   document.addEventListener("keydown", onKey, true);
   document.body.append(backdrop);
   document.body.classList.add("q2vt-reading");
+  back.open();
   body.tabIndex = 0;  // scrollable with the keyboard
   close.focus();
   open = { close: finish, dialog };
