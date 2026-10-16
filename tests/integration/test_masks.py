@@ -113,3 +113,14 @@ def test_mask_marker_exports_as_a_knockout(export, tmp_path):  # noqa: F811
     assert exporter.diagnostics.by_code("Q2VT_MASK_APPROXIMATE")
     assert layer.renderer().symbol().symbolLayer(0).layerType() == "MaskMarker"  # project unchanged
     assert [l for l in _style(result)["layers"] if l.get("source-layer") and l["type"] in ("symbol", "circle")]
+
+
+def test_unsupported_renderer_is_reported(export, tmp_path):  # noqa: F811
+    """A renderer QGIS cannot turn into rules (here 2.5D) drew nothing and
+    was not in the report."""
+    from qgis.core import Qgs25DRenderer  # pylint: disable=import-outside-toplevel
+    layer = zoning_layer(path=str(tmp_path / "blocks.gpkg"))
+    layer.setRenderer(Qgs25DRenderer())
+    exporter, _ = _run(export, layer)
+    found = exporter.diagnostics.by_code("Q2VT_UNSUPPORTED_RENDERER")
+    assert found and "25dRenderer" in found[0].message and found[0].layer_id == layer.id()

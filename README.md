@@ -134,8 +134,7 @@ generated table of every symbol layer type's strategy and limits is in
 **Not drawn on the web map**
 
 - **2.5D renderer and embedded-symbol renderer** (styles stored inside KML, DWG and similar files):
-  the layer is not drawn, and the report does not mention it yet. For buildings, the viewer has its
-  own optional 3D buildings.
+  the layer is not drawn (reported). For buildings, the viewer has its own optional 3D buildings.
 - **Label shadows:** left out, and not in the report.
 - **Paint effects on fills and other lines:** blur, colorise, transform, glows and shadows are
   ignored (reported). Exceptions: outer glow and drop shadow on simple lines; inner shadow and
@@ -493,7 +492,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.40.2**. Newest first:
+This README describes QWebMap **4.40.3**. Newest first:
+
+**4.40.3** — unsupported renderers are reported
+- A layer with a renderer the web map cannot draw (2.5D, embedded symbols) is now listed in the fidelity report instead of silently missing.
 
 **4.40.2** — the browser's Back button closes what is open
 - Back closes the newest open thing on the map (a popup, the reading window, the panel on phones, Street View, measuring or drawing) instead of leaving the page; with nothing open it leaves as usual.
