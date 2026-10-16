@@ -135,7 +135,7 @@ generated table of every symbol layer type's strategy and limits is in
 
 - **2.5D renderer and embedded-symbol renderer** (styles stored inside KML, DWG and similar files):
   the layer is not drawn (reported). For buildings, the viewer has its own optional 3D buildings.
-- **Label shadows of point labels and of background shapes:** not drawn (reported).
+- **Label shadows of background shapes:** not drawn (reported).
 - **Paint effects on fills and other lines:** blur, colorise, transform, glows and shadows are
   ignored (reported). Exceptions: outer glow and drop shadow on simple lines; inner shadow and
   inner glow on solid simple lines with a screen-unit width; markers, which QGIS renders into images
@@ -175,8 +175,8 @@ generated table of every symbol layer type's strategy and limits is in
   come out a little darker.
 - **Inner shadow and inner glow on lines:** computed for straight lines, so they can differ where
   lines overlap or nearly touch.
-- **Label shadows of polygon and line labels:** a soft copy of the label (or its buffer) in the
-  shadow colour at the shadow's offset. The blur is capped at about a pixel, and a shadow's scale
+- **Label shadows:** a soft copy of the label (or its buffer) in the shadow colour at the
+  shadow's offset (a point label's shadow appears with its label, a moment after it is placed). The blur is capped at about a pixel, and a shadow's scale
   and an offset turned with the label are not reproduced (reported).
 - **Heatmaps:** the colours can scale differently from QGIS unless the renderer has a fixed
   maximum value (reported).
@@ -297,7 +297,11 @@ into a public, self-contained web map. The window title shows the plugin version
 
 ### Publishing and hosting
 
-- **Export locally** builds the release on this computer. **Preview** (after an export) serves it
+- **Export locally** builds the web map on this computer, in `<output folder>/<name>/`: one site
+  with its own `index.html`, ready to copy to any web server. Each export replaces the previous
+  one there (only files an earlier export wrote are removed; your other files stay). Tick *Keep
+  earlier versions in the local folder* (*Output* tab) to keep each export as a version in
+  `releases/` instead, with rollback. **Preview** (after an export) serves it
   on `127.0.0.1` with byte ranges and opens your browser. Neither needs an account or an upload.
   They work offline unless the export reads OpenStreetMap data from the Protomaps build (the
   basemap, or, without a basemap, street-name search and house-number search without a street
@@ -495,7 +499,11 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.41.0**. Newest first:
+This README describes QWebMap **4.42.0**. Newest first:
+
+**4.42.0** — point label shadows; local exports without versions
+- Point labels get their QGIS shadow too; it appears with its label (no shadow is left where a label was hidden).
+- *Export locally* now writes one site straight into `<output folder>/<name>/`, replaced by each export; *Keep earlier versions in the local folder* (Output tab) brings back the `releases/` versions with rollback.
 
 **4.41.0** — label shadows
 - Polygon and line labels with a QGIS shadow get a soft shadow on the web map, at QGIS's offset and colour. Point labels and the shadows of background shapes are reported instead.

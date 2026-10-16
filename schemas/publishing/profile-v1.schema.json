@@ -210,6 +210,9 @@
         "reuseUnchanged": {
           "type": "boolean"
         },
+        "localVersions": {
+          "type": "boolean"
+        },
         "fastMarkers": {
           "type": "boolean"
         },

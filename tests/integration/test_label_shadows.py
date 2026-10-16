@@ -1,6 +1,7 @@
 """QGIS label shadows: polygon and line labels (placed by the viewer) get a
 copy under them in the shadow colour, moved by the shadow's offset and
-softened by its blur; point labels and background shapes are reported."""
+softened by its blur; point labels too, shown with their label (the viewer
+syncs them); background shapes are reported."""
 
 import json
 import math
@@ -68,18 +69,49 @@ def test_polygon_label_gets_a_shadow_copy_under_it(export, tmp_path):  # noqa: F
     assert found and all(d.severity.value == "info" for d in found)
 
 
-def test_point_labels_and_shapes_are_reported(export, tmp_path):  # noqa: F811
+def _towns(tmp_path, names=("Town",), spacing=0):
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer  # pylint: disable=import-outside-toplevel
     from qgis.PyQt.QtCore import QVariant  # pylint: disable=import-outside-toplevel
     from q2vt_fixtures import to_geopackage  # pylint: disable=import-outside-toplevel
     points = QgsVectorLayer("Point?crs=EPSG:3857", "towns", "memory")
     points.dataProvider().addAttributes([QgsField("zone", QVariant.String)])
     points.updateFields()
-    feature = QgsFeature(points.fields())
-    feature.setAttributes(["Town"])
-    feature.setGeometry(QgsGeometry.fromWkt("POINT(2121000 6021000)"))
-    points.dataProvider().addFeatures([feature])
-    points = _labelled(to_geopackage(points, str(tmp_path / "towns.gpkg")))
-    exporter, result = export(points)
+    for i, name in enumerate(names):
+        feature = QgsFeature(points.fields())
+        feature.setAttributes([name])
+        feature.setGeometry(QgsGeometry.fromWkt(f"POINT({2121000 + i * spacing} 6021000)"))
+        points.dataProvider().addFeatures([feature])
+    return _labelled(to_geopackage(points, str(tmp_path / "towns.gpkg")))
+
+
+def test_point_label_shadow_waits_for_its_label(export, tmp_path):  # noqa: F811
+    """A point label's shadow is drawn wherever its feature is, transparent
+    until the viewer finds the label shown (feature state)."""
+    exporter, result = export(_towns(tmp_path))
+    layers = _style(result)["layers"]
+    shadows = [l for l in layers if (l.get("metadata") or {}).get("q2vt:shadow-of")]
+    assert shadows
+    for shadow in shadows:
+        state = shadow["metadata"]["q2vt:shadow-state"]
+        assert shadow["layout"]["text-allow-overlap"] and shadow["layout"]["text-ignore-placement"]
+        opacity = json.dumps(shadow["paint"]["text-opacity"])
+        assert '["feature-state", "%s"]' % state in opacity
+    assert not [d for d in exporter.diagnostics.by_code("Q2VT_LABEL_SHADOW") if d.severity.value != "info"]
+
+
+def test_background_shape_shadows_are_reported(export, tmp_path):  # noqa: F811
+    layer = _labelled(zoning_layer(path=str(tmp_path / "zones.gpkg")),
+                      placement=QgsTextShadowSettings.ShadowPlacement.ShadowShape)
+    exporter, result = export(layer)
     assert not [l for l in _style(result)["layers"] if (l.get("metadata") or {}).get("q2vt:shadow-of")]
-    assert any("point label" in d.message for d in exporter.diagnostics.by_code("Q2VT_LABEL_SHADOW"))
+    assert any("background shape" in d.message for d in exporter.diagnostics.by_code("Q2VT_LABEL_SHADOW"))
+
+
+def test_zoom_curve_opacity_keeps_its_stops():
+    from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter as E  # pylint: disable=import-error
+    curve = ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1]
+    out = E._when_state(curve, "s")
+    assert out[:4] == curve[:4] and out[5] == 14
+    assert out[4] == ["case", ["boolean", ["feature-state", "s"], False], 0.5, 0]
+    step = E._when_state(["step", ["zoom"], 0, 12, 1], "s")
+    assert step[2][0] == "case" and step[3] == 12 and step[4][0] == "case"

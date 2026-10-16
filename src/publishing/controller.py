@@ -27,6 +27,8 @@ from .feature_index import build_feature_index
 from .models import PublicationProfile, ReleaseState
 from .progress import Progress
 from .search_index import build_search_index
+from .bundle import walk_files
+from .validation import safe_relative_path
 from .web_builder import ReleaseResult, build_release, write_zip
 
 STAGES = ["PLAN", "EXPORT_MVT", "RECORDS", "LEGEND", "PARCELS", "RASTER", "BASEMAP", "STREETS", "TILES",
@@ -500,10 +502,13 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         progress.check()
 
         stage("BUILD_RELEASE")
+        # A local site without versions: built as a release, then moved into
+        # the folder (flatten_release); no stable entry or pointer of its own.
+        flat = profile.destination.kind == "local" and not profile.output.local_versions
         release = build_release(
-            bundle, profile, publication_dir, transport="pmtiles", activate=activate,
+            bundle, profile, publication_dir, transport="pmtiles", activate=activate and not flat,
             feedback=progress, canaries=canaries, extra_files=extra_files, extra_builders=[indexes],
-            extra_validators=[disclosure], manifest_extra={
+            extra_validators=[disclosure], stable_entry=not flat, manifest_extra={
                 "themes": themes, "ui": {"accent": profile.accent_color}, "parcelInfo": parcel_manifest})
         result = LocalResult(ReleaseState.LOCAL_READY, release, publication_dir, exporter.output_path,
                              records.path, dict(records.counts), list(release.warnings))
@@ -514,12 +519,71 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         if profile.output.zip:
             result.zip_path = write_zip(release.release_dir, os.path.join(
                 os.path.dirname(publication_dir), f"{profile.slug}-{release.release_id}.zip"))
+        if flat:
+            flatten_release(release, publication_dir, progress)
         for warning in bundle.warnings:
             result.warnings.append(warning)
         return result
     finally:
         exporter.abort_tiles()  # cancelled or failed before the tiles were finished
         _copy_logs(exporter.export_folder, profile, base_dir)
+
+
+FLAT_STATE = ".q2vt-files.json"
+
+
+def flatten_release(release, publication_dir: str, progress=None) -> None:
+    """Local output without versions: the release's site (a whole site with
+    its own index.html, as in the offline ZIP) moves straight into
+    ``publication_dir``, replacing the previous export's files. Only files
+    listed in the folder's state file (written by an earlier export) are
+    removed; anything else there stays, earlier ``releases/`` versions too."""
+    site = release.release_dir
+    files = walk_files(site)
+    state_path = os.path.join(publication_dir, FLAT_STATE)
+    try:
+        with open(state_path, encoding="utf-8") as handle:
+            previous = set(json.load(handle).get("files", []))
+    except (OSError, ValueError, AttributeError):
+        previous = set()
+    entry = "index.html"
+    for rel in sorted(files, key=lambda r: r == entry):  # the entry page last
+        target = os.path.join(publication_dir, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.replace(os.path.join(site, *rel.split("/")), target)
+    stale = sorted(previous - set(files))
+    for rel in stale:
+        try:
+            safe_relative_path(rel)
+        except PublishingError:
+            continue
+        try:
+            os.remove(os.path.join(publication_dir, *rel.split("/")))
+        except OSError:
+            pass
+    for rel in stale:  # folders left empty by the removed files
+        folder = os.path.dirname(os.path.join(publication_dir, *rel.split("/")))
+        while os.path.abspath(folder) != os.path.abspath(publication_dir):
+            try:
+                os.rmdir(folder)
+            except OSError:
+                break
+            folder = os.path.dirname(folder)
+    tmp = state_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump({"format": "qwebmap-local-files", "release": release.release_id, "files": files}, handle)
+    os.replace(tmp, state_path)
+    shutil.rmtree(site, ignore_errors=True)
+    releases = os.path.join(publication_dir, "releases")
+    try:
+        os.rmdir(releases)  # only when no earlier version is there
+    except OSError:
+        if progress is not None and os.path.isdir(releases):
+            progress.info("Earlier versions are still in the releases folder; delete it if they "
+                          "are not needed (the map no longer uses them).")
+    release.release_dir = publication_dir
+    release.entry = entry
+    release.publication_dir = publication_dir
 
 
 def _plan_rasters(project, profile, configs, extent_3857) -> Dict[str, object]:

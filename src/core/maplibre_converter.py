@@ -5060,10 +5060,11 @@ class QgisMapLibreStyleExporter:
         shadow = text_format.shadow()
         if not shadow.enabled():
             return []
-        if not all((d.get("metadata") or {}).get("q2vt:visible-polygons") for d in defs):
-            self.context.report("Q2VT_LABEL_SHADOW",
-                                "A point label's shadow is not drawn (only polygon and line labels).")
-            return []
+        # Point labels are placed by MapLibre, each style layer on its own:
+        # the copy is drawn wherever its feature is (never hidden) but shown
+        # only where the viewer finds its label shown (feature state, see
+        # resources/web_viewer/label_shadows.mjs).
+        synced = not all((d.get("metadata") or {}).get("q2vt:visible-polygons") for d in defs)
         what = shadow.shadowPlacement()
         if what == QgsTextShadowSettings.ShadowPlacement.ShadowLowest:
             what = (QgsTextShadowSettings.ShadowPlacement.ShadowShape if text_format.background().enabled()
@@ -5116,12 +5117,33 @@ class QgisMapLibreStyleExporter:
             paint["text-halo-blur"] = soft
             copy["paint"] = paint
             copy["metadata"] = {**copy.get("metadata", {}), "q2vt:shadow-of": label["id"]}
+            if synced:
+                self._shadow_states = getattr(self, "_shadow_states", 0) + 1
+                state = f"shadow{self._shadow_states}"
+                copy["layout"]["text-allow-overlap"] = True
+                copy["layout"]["text-ignore-placement"] = True
+                copy["paint"]["text-opacity"] = self._when_state(paint.get("text-opacity", 1), state)
+                copy["metadata"]["q2vt:shadow-state"] = state
             out.append(copy)
         self.context.report("Q2VT_LABEL_SHADOW",
                             "A label shadow is drawn as a blurred copy of the label"
                             + (f" (not reproduced: {', '.join(notes)})" if notes else "") + ".",
                             severity=Severity.INFO)
         return out
+
+    @classmethod
+    def _when_state(cls, value, state: str):
+        """``value`` where the feature state ``state`` is true, else 0 (a
+        zoom curve keeps its stops, each one wrapped)."""
+        if isinstance(value, list) and value and value[0] in ("interpolate", "step") \
+                and value[2 if value[0] == "interpolate" else 1] == ["zoom"]:
+            out = list(value)
+            if value[0] == "step":  # ["step", ["zoom"], v0, z1, v1, ...]
+                out[2] = cls._when_state(value[2], state)
+            for i in range(4, len(out), 2):  # the outputs after each stop zoom
+                out[i] = cls._when_state(out[i], state)
+            return out
+        return ["case", ["boolean", ["feature-state", state], False], value, 0]
 
     # MapLibre checks that a line label fits along its line with the
     # text-size evaluated at zoom 18 (symbol_layout.ts, textMaxSize), whatever

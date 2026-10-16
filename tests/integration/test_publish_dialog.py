@@ -162,7 +162,12 @@ def test_export_preview_and_local_publish(project, messages, tmp_path):
     dialog.preview()
     url = dialog.preview_server.url("arlo-terv/index.html")
     with urllib.request.urlopen(url) as response:
-        assert response.status == 200 and b"bootstrap" in response.read()
+        # No versions by default: the site itself is in the folder (no
+        # releases/<id>/ behind a bootstrap entry page).
+        assert response.status == 200 and b"assets/app.mjs" in response.read()
+    folder = dialog.local_result.publication_dir
+    assert not os.path.exists(os.path.join(folder, "releases"))
+    assert os.path.exists(os.path.join(folder, "manifest.json"))
     dialog.preview_server.stop()
     dialog.publish()  # local destination: export + local link
     assert dialog.public_url.startswith("file:")
