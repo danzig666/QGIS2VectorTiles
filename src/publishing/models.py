@@ -304,6 +304,9 @@ class OutputConfig:
     polygon_labels_base: int = 2
     include_all_fields: bool = False   # False = required fields only (+ approved fields)
     reuse_unchanged: bool = True       # export cache: layers unchanged since the last export are reused
+    # Local output folder: keep each export as a version (releases/<id>/,
+    # rollback) instead of one site written straight into the folder.
+    local_versions: bool = False
     # Screen-size interval marker lines placed by the browser instead of at
     # QGIS's positions per zoom: a faster export, approximate markers.
     fast_markers: bool = False

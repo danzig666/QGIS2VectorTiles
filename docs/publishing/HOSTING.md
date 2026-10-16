@@ -13,7 +13,10 @@ a few hundred files to upload, not tens of thousands.
 ```
 
 An SSH / SFTP server gets no such layout: the release's own files go straight into one folder
-(see [below](#ssh--sftp-server-one-folder-not-versioned)).
+(see [below](#ssh--sftp-server-one-folder-not-versioned)). Neither does a local export by
+default: `<output folder>/<name>/` is the site itself, replaced by each export (a
+`.q2vt-files.json` lists the files it wrote, and only those are removed by the next export).
+Tick *Keep earlier versions in the local folder* (*Output* tab) for the versioned layout above.
 
 Share `…/<publication>/index.html` for "always the current map", or
 `…/releases/<id>/index.html` for "exactly this version". Object storage does not turn

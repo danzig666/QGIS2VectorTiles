@@ -414,7 +414,8 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
                   manifest_extra: Optional[dict] = None,
                   connect_origins: Iterable[str] = (),
                   pmtiles_path: Optional[str] = None,
-                  extra_validators: Optional[List[Callable[[str, dict], None]]] = None) -> ReleaseResult:
+                  extra_validators: Optional[List[Callable[[str, dict], None]]] = None,
+                  stable_entry: bool = True) -> ReleaseResult:
     """Build, validate and (optionally) activate one immutable local release.
 
     ``extra_files``: ``{release path: local file}`` (legend swatches, ...).
@@ -423,7 +424,9 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
     ``pmtiles_path``: an already built and validated archive to copy instead
     of converting ``bundle.mbtiles_path`` again (retry/reuse).
     ``extra_validators``: callables ``(staging_dir, manifest)`` raising
-    PublishingError; they run before the release is renamed into place."""
+    PublishingError; they run before the release is renamed into place.
+    ``stable_entry``: False for a release that is moved out as a whole site
+    (unversioned local output): no entry page at the publication root."""
     if transport not in ("pmtiles", "xyz"):
         raise ValueError(transport)
     progress = feedback if isinstance(feedback, Progress) else Progress(feedback)
@@ -467,7 +470,8 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        _write_stable_entry(publication_dir, profile.title)
+        if stable_entry:
+            _write_stable_entry(publication_dir, profile.title)
         activated = False
         if activate:
             activate_release(publication_dir, profile.publication_id, release_id)

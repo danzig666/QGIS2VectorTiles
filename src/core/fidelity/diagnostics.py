@@ -170,8 +170,8 @@ CODES: Dict[str, CodeInfo] = {
         "its shape, both in the map's background colour, covering everything below them."),
     "Q2VT_LABEL_SHADOW": CodeInfo(
         Severity.WARNING, "Label shadow not drawn or approximated",
-        "The web map draws shadows of polygon and line labels as a blurred copy of the text or "
-        "buffer; point labels and background shapes get none."),
+        "The web map draws label shadows as a softened copy of the text or buffer; shadows of "
+        "background shapes and shadows sized in map units are not drawn."),
     "Q2VT_CALLOUT_APPROX": CodeInfo(
         Severity.WARNING, "Label callout exported as an approximate straight leader"),
     "Q2VT_FEATURE_ORDER_ACROSS_RULES": CodeInfo(

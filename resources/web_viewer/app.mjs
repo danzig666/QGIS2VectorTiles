@@ -12,6 +12,7 @@ import { RASTER_TILE_TYPES, ViewerError, bindStyle, checkRelative, openArchives,
 import { loadLocale, t } from "./i18n.mjs";
 import { fetchChecked, notice, showError, state as diagnostics, warn } from "./diagnostics.mjs";
 import { installDiagrams } from "./diagrams.mjs";
+import { installShadows, prepareShadows } from "./label_shadows.mjs";
 
 export const EXPECTED_MAPLIBRE = "6.11.2";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
@@ -203,6 +204,7 @@ async function start() {
     const styleUrl = resolveUrl(manifest.style, manifestUrl);
     const style = bindStyle(await fetchChecked(styleUrl), manifest, manifestUrl, styleUrl);
     viewer.style = style;
+    prepareShadows(style);  // feature ids for point label shadows
     const view = manifest.view;
     const stay = view.limitToExtent && extentLimit(view, maplibregl);
     const map = new maplibregl.Map({
@@ -232,6 +234,7 @@ async function start() {
     map.touchZoomRotate.disableRotation();
     viewer.map = map;
     viewer.diagrams = installDiagrams(map, style);
+    viewer.labelShadows = installShadows(map, style);
     if (stay) stay.attach(map);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.FullscreenControl(), "top-right");

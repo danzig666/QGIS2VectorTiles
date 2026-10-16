@@ -2039,6 +2039,12 @@ class PublishDialog(QDialog):
         cache_row.addWidget(clear_cache)
         form.addRow(tr("Archive"), self.o_archive)
         form.addRow(tr("Local output folder"), dir_row)
+        self.o_versions = QCheckBox(tr("Keep earlier versions in the local folder (releases, rollback)"))
+        self.o_versions.setToolTip(tr("Off: each export replaces the map in <folder>/<name>/ (one site, "
+                                      "ready to copy to any web server). On: each export is kept as a "
+                                      "version in releases/ and the folder's index.html opens the "
+                                      "current one, with rollback. Only for the local destination."))
+        form.addRow("", self.o_versions)
         form.addRow("", self.o_xyz)
         form.addRow("", self.o_zip)
         form.addRow(tr("CPU limit (%)"), self.o_cpu)
@@ -2352,6 +2358,7 @@ class PublishDialog(QDialog):
         if profile.output.min_label_px > 0:
             self.o_small_label_px.setValue(profile.output.min_label_px)
         self.o_reuse.setChecked(profile.output.reuse_unchanged)
+        self.o_versions.setChecked(profile.output.local_versions)
         dest = profile.destination
         self._dest_family, self._dest_other = None, {}  # the profile's own values, no swap
         self.d_kind.setCurrentIndex(max(0, self.d_kind.findData(dest.kind)))
@@ -2636,6 +2643,7 @@ class PublishDialog(QDialog):
         out.thin_hairlines = self.o_thin_hairlines.isChecked()
         out.min_label_px = self.o_small_label_px.value() if self.o_small_labels.isChecked() else 0.0
         out.reuse_unchanged = self.o_reuse.isChecked()
+        out.local_versions = self.o_versions.isChecked()
         dest = profile.destination
         dest.kind = self.d_kind.currentData()
         dest.account_id = self.d_account.text().strip()
