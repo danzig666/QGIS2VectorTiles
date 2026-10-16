@@ -7,6 +7,7 @@ tree and collects all active data-defined properties, returning
 """
 
 import re
+from typing import Optional
 
 from qgis.core import (Qgis, QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSymbol,
                        QgsSymbolLayerUtils)
@@ -34,28 +35,78 @@ _TEXTURE_PATTERNS = ("QgsPointPatternFillSymbolLayer", "QgsRandomMarkerFillSymbo
 _SCREEN_MM = {"Millimeters": 1.0, "Points": 25.4 / 72.0, "Inches": 25.4, "Pixels": 25.4 / 96.0}
 
 
+def marker_length_mm(marker) -> Optional[float]:
+    """Inked extent (mm) of a marker along the line it is placed on (x:
+    QGIS turns markers with the line), the largest of a few draws when
+    random values size it. Drawn and measured: QGIS's bounds are the size's
+    square whatever the shape (QgsSimpleMarkerSymbolLayerBase::bounds), a
+    hash's thin stroke as long as its length. None when not measurable."""
+    # pylint: disable=import-outside-toplevel
+    from PIL import Image
+    from qgis.core import QgsExpressionContext, QgsRenderContext
+    from qgis.PyQt.QtCore import QPointF
+    from qgis.PyQt.QtGui import QImage, QPainter
+    per_mm = 8.0
+    symbol = marker.clone()
+    probe = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(probe)
+    try:
+        context = QgsRenderContext.fromQPainter(painter)
+        context.setScaleFactor(per_mm)
+        context.setExpressionContext(QgsExpressionContext())
+        symbol.startRender(context)
+        bounds = [symbol.bounds(QPointF(0, 0), context) for _ in range(16)]
+        symbol.stopRender(context)
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+    finally:
+        painter.end()
+    reach = max(max(abs(b.left()), abs(b.right()), abs(b.top()), abs(b.bottom())) for b in bounds)
+    size = min(2048, int(2 * reach) + 8)
+    longest = 0.0
+    for _ in range(4):  # random sizes: a few draws
+        image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        try:
+            context = QgsRenderContext.fromQPainter(painter)
+            context.setScaleFactor(per_mm)
+            context.setExpressionContext(QgsExpressionContext())
+            symbol.startRender(context)
+            symbol.renderPoint(QPointF(size / 2.0, size / 2.0), None, context)
+            symbol.stopRender(context)
+        finally:
+            painter.end()
+        box = Image.frombuffer("RGBA", (size, size), image.constBits().asstring(size * size * 4),
+                               "raw", "BGRA", 0, 1).getchannel("A").getbbox()
+        if box is not None:
+            longest = max(longest, 2.0 * max(size / 2.0 - box[0], box[2] - size / 2.0) / per_mm)
+    return longest
+
+
 def dense_marker_line(layer) -> bool:
-    """A marker line whose markers stand closer than 4/3 of their size
-    (screen units, along an interval, turned with the line), where MapLibre
-    would widen the spacing to the icon's length plus a quarter of it:
-    MapLibreConverter._dense_marker_line draws it as a line pattern, by
-    QGIS, so a random value is drawn per marker there (as in a texture)."""
+    """A marker line whose markers stand closer than 4/3 of their length
+    along the line (screen units, along an interval, turned with the line),
+    where MapLibre would widen the spacing to the icon's length plus a
+    quarter of it: MapLibreConverter._dense_marker_line draws it as a line
+    pattern, by QGIS, so a random value is drawn per marker there (as in a
+    texture). A hash across the line is only its stroke's width long."""
     if type(layer).__name__ != "QgsMarkerLineSymbolLayer":
         return False
     try:
         flags = int(getattr(layer.placements(), "value", layer.placements()))
         interval_flag = int(getattr(Qgis.MarkerLinePlacement.Interval, "value",
                                     Qgis.MarkerLinePlacement.Interval))
+        name = getattr(layer.intervalUnit(), "name", None)
+        interval = layer.interval() * _SCREEN_MM[name] if name in _SCREEN_MM else None
         marker = layer.subSymbol()
-        def mm(value, unit):
-            name = getattr(unit, "name", None)
-            return value * _SCREEN_MM[name] if name in _SCREEN_MM else None
-        interval = mm(layer.interval(), layer.intervalUnit())
-        size = mm(marker.size(), marker.sizeUnit()) if marker is not None else None
-    except (AttributeError, RuntimeError, TypeError, ValueError, KeyError):
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         return False
-    return flags == interval_flag and layer.rotateSymbols() and interval is not None and \
-        size is not None and 0 < interval < 4.0 / 3.0 * size and not layer.offsetAlongLine()
+    if flags != interval_flag or not layer.rotateSymbols() or interval is None or \
+            interval <= 0 or marker is None or marker.usesMapUnits() or layer.offsetAlongLine():
+        return False
+    length = marker_length_mm(marker)
+    return length is not None and interval < 4.0 / 3.0 * length
 
 
 def is_random_only(expression: str) -> bool:

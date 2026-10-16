@@ -613,8 +613,11 @@ def test_random_values_of_dense_marker_lines_stay_with_qgis(plugin):
     markers = QgsMarkerLineSymbolLayer(True, 0.3)
     markers.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "circle", "size": "0.375"}))
     assert dense_marker_line(markers)
-    markers.setInterval(0.6)
+    markers.setInterval(1.0)
     assert not dense_marker_line(markers)  # MapLibre spaces them right
+    hashes = QgsMarkerLineSymbolLayer(True, 3.0)  # strokes across the line
+    hashes.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "line", "size": "3"}))
+    assert not dense_marker_line(hashes)
     markers.setInterval(0.3)
     markers.setRotateSymbols(False)
     assert not dense_marker_line(markers)
