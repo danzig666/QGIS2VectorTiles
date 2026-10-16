@@ -1866,6 +1866,8 @@ class SymbolMaterializer:
 
     # Interval markers along a line are few per tile even when close together.
     INTERVAL_MIN_SPACING_PX = 2.0
+    # Bands per zoom of screen-spaced interval markers, finest first within the budget.
+    INTERVAL_BAND_STEPS = (8, 4, 2)
 
     # Budget of generated pattern features per rule (markers, dashes, line
     # work): past it the pattern is a texture at every zoom (reported), so
@@ -2540,7 +2542,8 @@ class SymbolMaterializer:
                                              1e-9) for zoom in range(low, high + 1))
         # Positions in eighths of a zoom (spacing within +-4 % of QGIS's;
         # fewer bands when the markers would exceed the output budget).
-        steps = next((n for n in (8, 4, 2) if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
+        steps = next((n for n in self.INTERVAL_BAND_STEPS
+                      if per_zoom_elements * n <= self.MAX_PATTERN_ELEMENTS), 1)
         if self._over_budget(native, per_zoom_elements * steps, "Marker line"):
             return None
         symbol = self._marker_points_symbol(sub, layer.rotateSymbols(), 0.0, 0.0,

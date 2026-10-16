@@ -10,7 +10,7 @@ import pytest
 from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsMapSettings, QgsMarkerSymbol,
                        QgsProcessingFeedback, QgsPointClusterRenderer,
                        QgsPointDisplacementRenderer, QgsRectangle, QgsSingleSymbolRenderer)
-from qgis.PyQt.QtCore import QSize
+from qgis.PyQt.QtCore import QPointF, QSize
 
 from q2vt_render import ink_mask, mask_difference, render
 
@@ -628,6 +628,13 @@ def test_random_values_of_dense_marker_lines_stay_with_qgis(plugin):
     hashes = QgsMarkerLineSymbolLayer(True, 3.0)  # strokes across the line
     hashes.setSubSymbol(QgsMarkerSymbol.createSimple({"name": "line", "size": "3"}))
     assert not dense_marker_line(hashes)
+    # A marker made long by an offset part (a bike symbol's wheels 10 mm
+    # ahead), 12.5 mm apart: placed one by one, not bent around corners.
+    bike = QgsMarkerSymbol.createSimple({"name": "circle", "size": "2"})
+    bike.symbolLayer(0).setOffset(QPointF(10.0, 0.0))
+    long_markers = QgsMarkerLineSymbolLayer(True, 12.5)
+    long_markers.setSubSymbol(bike)
+    assert not dense_marker_line(long_markers)
     markers.setInterval(0.3)
     markers.setRotateSymbols(False)
     assert not dense_marker_line(markers)
