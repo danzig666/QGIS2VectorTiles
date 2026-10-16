@@ -24,7 +24,7 @@ from qgis.core import (
     QgsExpression,
     QgsProperty,
     QgsSymbolLayer,
-    QgsTextBufferSettings, QgsTextFormat,
+    QgsTextBufferSettings, QgsTextFormat, QgsTextShadowSettings,
     QgsProject,
     QgsTextBackgroundSettings,
 )
@@ -39,7 +39,7 @@ from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .fidelity import zoom as fidelity_zoom
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
-from .fidelity.diagnostics import DiagnosticCollector
+from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
 from .fidelity.validation import drop_unloadable_layers
 from .materializer import pattern_anchor_kind, pattern_in_viewport
@@ -5042,7 +5042,86 @@ class QgisMapLibreStyleExporter:
                 # ("t_felirat") is up to a fifth shorter than the mean says,
                 # which decides whether it fits in its polygon.
                 layer_def["metadata"]["q2vt:font"] = font
-        self.style["layers"].extend(self._line_label_zoom_split(layer_def))
+        defs = self._line_label_zoom_split(layer_def)
+        self.style["layers"].extend(self._label_shadows(defs, text_format) + defs)
+
+    # A label shadow is a copy of the label under it (same id + this suffix).
+    SHADOW_SUFFIX = "_q2vt_shadow"
+    SHADOW_SOFT_PX = 1.0
+
+    def _label_shadows(self, defs, text_format) -> list:
+        """QGIS label shadows as a copy of each label style layer drawn under
+        it: the text (or its buffer) in the shadow colour, moved by the
+        shadow's offset, softened by its blur. Only for labels the viewer
+        places itself (q2vt:visible-polygons: polygon and line labels), so
+        the copy lands exactly under its label; MapLibre places point labels
+        each layer on its own, and a copy could stay where its label was
+        hidden."""
+        shadow = text_format.shadow()
+        if not shadow.enabled():
+            return []
+        if not all((d.get("metadata") or {}).get("q2vt:visible-polygons") for d in defs):
+            self.context.report("Q2VT_LABEL_SHADOW",
+                                "A point label's shadow is not drawn (only polygon and line labels).")
+            return []
+        what = shadow.shadowPlacement()
+        if what == QgsTextShadowSettings.ShadowPlacement.ShadowLowest:
+            what = (QgsTextShadowSettings.ShadowPlacement.ShadowShape if text_format.background().enabled()
+                    else QgsTextShadowSettings.ShadowPlacement.ShadowBuffer if text_format.buffer().enabled()
+                    else QgsTextShadowSettings.ShadowPlacement.ShadowText)
+        if what == QgsTextShadowSettings.ShadowPlacement.ShadowShape:
+            self.context.report("Q2VT_LABEL_SHADOW",
+                                "The shadow of a label's background shape is not drawn.")
+            return []
+        distance = PropertyExtractor.length(shadow.offsetDistance(), shadow.offsetUnit(), None,
+                                            shadow.offsetMapUnitScale())
+        blur = PropertyExtractor.length(shadow.blurRadius(), shadow.blurRadiusUnit(), None,
+                                        shadow.blurRadiusMapUnitScale())
+        if not ex.is_number(distance) or not ex.is_number(blur):
+            self.context.report("Q2VT_LABEL_SHADOW",
+                                "A label shadow sized in map units is not drawn.")
+            return []
+        # QGIS: the angle clockwise from north (135: down and to the right).
+        angle = math.radians(shadow.offsetAngle())
+        dx, dy = distance * math.sin(angle), -distance * math.cos(angle)
+        colour = QColor(shadow.color())
+        colour.setAlphaF(colour.alphaF() * max(0.0, min(1.0, float(shadow.opacity()))))
+        css = PropertyExtractor.convert_qcolor_to_maplibre(colour)
+        notes = []
+        if shadow.scale() != 100:
+            notes.append("its scale")
+        if not shadow.offsetGlobal():
+            notes.append("an offset turned with the label")
+        out = []
+        for label in defs:
+            copy = json.loads(json.dumps(label))
+            copy["id"] = label["id"] + self.SHADOW_SUFFIX
+            copy["layout"] = {k: v for k, v in copy["layout"].items() if not k.startswith("icon-")}
+            paint = {k: v for k, v in copy.get("paint", {}).items() if not k.startswith("icon-")}
+            translate = paint.get("text-translate") or [0, 0]
+            if not (isinstance(translate, list) and len(translate) == 2 and all(ex.is_number(v) for v in translate)):
+                translate = [0, 0]
+            paint["text-translate"] = [round(translate[0] + dx, 2), round(translate[1] + dy, 2)]
+            paint["text-color"] = css
+            # The blur as a soft halo, at most SHADOW_SOFT_PX: a glyph's SDF
+            # reaches only a few pixels, and a larger halo turns into a box.
+            soft = round(min(blur / 2.0, self.SHADOW_SOFT_PX), 2)
+            if what == QgsTextShadowSettings.ShadowPlacement.ShadowBuffer and text_format.buffer().enabled():
+                # The buffer's outline in the shadow colour, a little softer.
+                width = paint.get("text-halo-width", 0)
+                paint["text-halo-width"] = ex.add(width, soft) if soft else width
+            else:
+                paint["text-halo-width"] = soft
+            paint["text-halo-color"] = css
+            paint["text-halo-blur"] = soft
+            copy["paint"] = paint
+            copy["metadata"] = {**copy.get("metadata", {}), "q2vt:shadow-of": label["id"]}
+            out.append(copy)
+        self.context.report("Q2VT_LABEL_SHADOW",
+                            "A label shadow is drawn as a blurred copy of the label"
+                            + (f" (not reproduced: {', '.join(notes)})" if notes else "") + ".",
+                            severity=Severity.INFO)
+        return out
 
     # MapLibre checks that a line label fits along its line with the
     # text-size evaluated at zoom 18 (symbol_layout.ts, textMaxSize), whatever
