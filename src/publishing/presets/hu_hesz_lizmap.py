@@ -159,10 +159,12 @@ def collect(project, zoning, code_field: str) -> Tuple[Optional[object], Dict[st
     variants: Dict[str, set] = {}
     missing_files = set()
     for feature in zoning.getFeatures():
-        code = feature[code_field]
-        if code is None or str(code).strip() == "" or str(code) == "NULL":
+        # The key the viewer looks the zone up by (12.0 -> "12").
+        from ..parcel_report import zone_key  # pylint: disable=import-outside-toplevel
+        from ..qgis_model import json_value  # pylint: disable=import-outside-toplevel
+        code = zone_key(json_value(feature[code_field]))
+        if code == "" or code == "NULL":
             continue
-        code = str(code).strip()
         # Empty text as NULL: the Lizmap layer's fields are NULL where the
         # zoning layer's are "" ("if(csak_szab is null, szerk_ov, csak_szab)").
         attributes = feature.attributes()

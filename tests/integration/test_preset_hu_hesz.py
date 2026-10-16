@@ -41,6 +41,9 @@ def _plan(project):
         "contours": _layer(project, "Szintvonal", "LineString", ["MAGASSAG:double"], line),
         "labels": _layer(project, "Alrészlet feliratok", "Polygon", ["hrsz:string"], square),
         "admin": _layer(project, "Közigazgatási határ", "Polygon", ["hrsz:string"], square),
+        "buildings": _layer(project, "Épületek", "Polygon", ["azon:string"], square),
+        "monuments": _layer(project, "Műemlék épületek", "Polygon", ["azon:string"], square),
+        "own": _layer(project, "Saját réteg", "Polygon", ["azon:string"], square),
     }
     from qgis.core import QgsNullSymbolRenderer  # the code layer only carries labels
     layers["codes"].setRenderer(QgsNullSymbolRenderer())
@@ -59,7 +62,8 @@ def test_preset_fills_the_parcel_report(plugin):
     layers = _plan(project)
     profile = PublicationProfile()
     # A restriction the user already described keeps its text.
-    profile.parcel_info.restrictions = [RestrictionConfig(layers["natura"].id(), "Saját cím", "Saját megjegyzés")]
+    profile.parcel_info.restrictions = [RestrictionConfig(layers["natura"].id(), "Saját cím", "Saját megjegyzés"),
+                                        RestrictionConfig(layers["own"].id(), "Kézzel", "Kézzel felvett")]
     notes = _preset(plugin).apply(project, profile)
     info = profile.parcel_info
     assert info.enabled and profile.locale == "hu"
@@ -71,7 +75,10 @@ def test_preset_fills_the_parcel_report(plugin):
     assert [(c.layer_id, c.title) for c in info.cut_lines] == [
         (layers["reg"].id(), "Szabályozási vonal"), (layers["zone"].id(), "Övezethatár")]
     by_layer = {r.layer_id: r for r in info.restrictions}
-    assert set(by_layer) == {layers[k].id() for k in ("natura", "lap", "kv", "tajertek", "monument_env")}
+    # Buildings are not restrictions, protected ones are; hand-added ones stay.
+    assert set(by_layer) == {layers[k].id() for k in ("natura", "lap", "kv", "tajertek", "monument_env",
+                                                      "monuments", "own")}
+    assert by_layer[layers["own"].id()].note == "Kézzel felvett"
     assert by_layer[layers["natura"].id()].title == "Saját cím"
     assert by_layer[layers["natura"].id()].note == "Saját megjegyzés"
     assert "Kötv." in by_layer[layers["monument_env"].id()].reference

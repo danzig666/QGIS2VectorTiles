@@ -299,15 +299,23 @@ def kibont(tartalom, lanc=()):
             hibak.append(f"körkörös vagy túl mély beillesztés: {azon}")
             return ""
         hasznalt.add(azon)
-        return kibont(kozos[azon], lanc + (azon,))
+        beillesztett = kibont(kozos[azon], lanc + (azon,))
+        # <hr> körülötte: a nyomtatás így ismeri fel a több övezetnél ismétlődő részt
+        return beillesztett if lanc else f"\n<hr>\n{beillesztett}\n<hr>\n"
     return re.sub(r"<!--\s*BEILLESZT:\s*(.+?)\s*-->", csere, tartalom)
+
+
+def tisztit(html):
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    html = re.sub(r"(<hr\s*/?>\s*)+", "<hr>\n", html)  # egymás utáni elválasztók egybe
+    return re.sub(r"^\s*(<hr>\s*)+|(\s*<hr>)+\s*$", "", html.strip()).strip()
 
 
 # string(0): korlátlan hosszú szöveg (a „string” 255 karakternél levágná, illetve eldobná)
 reteg = QgsVectorLayer("None?field=szab_ov:string(0)&field=eloiras_html:string(0)", NEV, "memory")
-elemek = []
+elemek, kesz = [], {}
 for jel, tartalom in ovezetek.items():
-    html = re.sub(r"<!--.*?-->", "", kibont(tartalom), flags=re.S).strip()
+    html = kesz[jel] = tisztit(kibont(tartalom))
     elem = QgsFeature(reteg.fields())
     elem.setAttributes([jel, html])
     elemek.append(elem)
@@ -335,9 +343,9 @@ for regi in QgsProject.instance().mapLayersByName(NEV):
 uj = QgsVectorLayer(f"{CEL}|layername={NEV}", NEV, "ogr")
 QgsProject.instance().addMapLayer(uj)
 print(f"Kész: {len(elemek)} övezet, {len(kozos)} közös blokk → {CEL}")
-for jel, tartalom in ovezetek.items():
-    print(f"  {jel}: {len(kibont(tartalom)) // 1000} ezer karakter")
-for hiba in hibak:
+for jel, html in kesz.items():
+    print(f"  {jel}: {len(html) // 1000} ezer karakter")
+for hiba in dict.fromkeys(hibak):  # egy hiba egyszer
     print("HIBA:", hiba)
 ```
 

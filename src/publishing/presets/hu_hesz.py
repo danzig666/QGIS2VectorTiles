@@ -152,7 +152,7 @@ CATALOGUE: Tuple[Tuple[Tuple[str, ...], str, str, float], ...] = (
 )
 
 # Layers that never are restrictions even if a keyword matches.
-NOT_RESTRICTIONS = ("felirat", "szintvonal", "hazszam", "epulet", "alreszlet", "kozigazgatasi",
+NOT_RESTRICTIONS = ("felirat", "szintvonal", "hazszam", "alreszlet", "kozigazgatasi",
                     "telepulesek", "belterulet", "kerekpar", "szabalyozas szin", "szabalyozas ovezet")
 
 
@@ -280,6 +280,9 @@ def _catalogue_entry(name: str):
     text = plain(name)
     if any(word in text for word in NOT_RESTRICTIONS):
         return None
+    # Buildings are not restrictions, protected ones are ("Műemlék épületek").
+    if "epulet" in text and not any(word in text for word in ("muemlek", "vedett", "vedelem")):
+        return None
     for keywords, note, reference, buffer_m in CATALOGUE:
         for keyword in keywords:
             # "kv" and "lap" only as whole words ("132 kV-os", "Ex lege védett láp").
@@ -318,6 +321,10 @@ def apply(project, profile) -> List[str]:
     layers = _vector_layers(project)
     info = profile.parcel_info
     profile.locale = "hu"
+    # Found again on every run: a table removed from the project since is not kept.
+    info.text_layer_id = info.text_code_field = info.text_field = ""
+    info.regulation_layer_id = info.regulation_code_field = ""
+    info.regulation_fields = []
 
     parcels = _find_parcels(layers)
     if parcels is None:
@@ -384,15 +391,16 @@ def apply(project, profile) -> List[str]:
         info.regulation_fields = _regulation_fields(regulations, info.regulation_code_field)
         notes.append(f"Övezeti előírások: „{regulations.name()}” ({info.regulation_code_field} szerint), "
                      f"{len(info.regulation_fields)} mező; az övezetre kattintva is megjelennek.")
-        zoning_config = profile.layer(zoning.id())
-        if zoning_config is not None and not any(
-                p.field == info.zoning_code_field for p in zoning_config.popup_fields):
-            # The zone popup needs the code to find its regulations (also when
-            # the zone layer is ticked for publishing later).
-            zoning_config.popup_fields.insert(0, PopupField(info.zoning_code_field, "Övezet"))
     else:
         notes.append("Nem található övezeti előírás tábla (pl. „HÉSZ övezeti előírások” szab_ov mezővel): "
                      "az övezeti értékek a szab_ov réteg mezőiből jönnek.")
+
+    zoning_config = profile.layer(zoning.id())
+    if (info.regulation_layer_id or info.text_layer_id) and zoning_config is not None and not any(
+            p.field == info.zoning_code_field for p in zoning_config.popup_fields):
+        # The zone popup needs the code to find its regulations and texts (also
+        # when the zone layer is ticked for publishing later).
+        zoning_config.popup_fields.insert(0, PopupField(info.zoning_code_field, "Övezet"))
 
     cut_lines = _find_cut_lines(layers)
     info.cut_lines = [CutLineConfig(layer.id(), title) for layer, title in cut_lines]
@@ -422,6 +430,11 @@ def apply(project, profile) -> List[str]:
             layer_id=layer.id(), title=layer.name().replace("*", " ").replace("  ", " "),
             note=note, reference=reference, name_field=_field(layer, NAME_FIELDS),
             buffer_m=buffer_m if _geometry(layer) in ("line", "point") else 0.0))
+    # Restrictions added by hand (on layers the catalogue does not know) stay.
+    found = {item.layer_id for item in restrictions}
+    restrictions.extend(item for item in info.restrictions
+                        if item.layer_id not in found and item.layer_id not in used
+                        and project.mapLayer(item.layer_id) is not None)
     info.restrictions = restrictions
     if restrictions:
         notes.append(f"{len(restrictions)} korlátozó réteg: "
