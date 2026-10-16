@@ -416,3 +416,40 @@ def vertex_markers(xs: Sequence[float], ys: Sequence[float],
     else:
         indices = list(range(count - 1 if ring else count))
     return [(i, (90.0 + math.degrees(angle(i))) % 360.0) for i in indices]
+
+
+def along_vertex_marker(xs: Sequence[float], ys: Sequence[float], placement: str,
+                        along: float) -> Optional[Tuple[float, float, float]]:
+    """(x, y, azimuth in degrees) of a "FirstVertex" / "LastVertex" marker
+    moved ``along`` map units along its line part, or None where QGIS draws
+    none (QgsTemplatedLineSymbolLayerBase::renderOffsetVertexAlongLine,
+    checked against QGIS renders): the first vertex's marker walks forward,
+    the last vertex's backward, across vertices; one walking past the other
+    end of the line is not drawn; a negative distance leaves it on its
+    vertex. The marker turns to the segment it lands on, in the walking
+    direction."""
+    count = len(xs)
+    if not count or placement not in ("FirstVertex", "LastVertex"):
+        return None
+    forward = placement == "FirstVertex"
+    vertex = 0 if forward else count - 1
+    if along <= 0:
+        found = vertex_markers(xs, ys, placement)
+        return (xs[vertex], ys[vertex], found[0][1]) if found else None
+    step = 1 if forward else -1
+    left = float(along)
+    px, py = xs[vertex], ys[vertex]
+    i = vertex + step
+    while 0 <= i < count:
+        x, y = xs[i], ys[i]
+        if (x, y) != (px, py):
+            length = math.hypot(x - px, y - py)
+            if left < length:
+                t = left / length
+                # Screen y points down (as in vertex_markers' screen_angle).
+                angle = math.atan2(py - y, x - px)
+                return px + (x - px) * t, py + (y - py) * t, (90.0 + math.degrees(angle)) % 360.0
+            left -= length
+            px, py = x, y
+        i += step
+    return None

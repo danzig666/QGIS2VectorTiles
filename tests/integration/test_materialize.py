@@ -3205,3 +3205,30 @@ def test_meters_at_scale_line_offset_is_the_offset_line(plugin, tmp_path):
     _outputs, rules, _diags = _export(plugin, layer, tmp_path)
     assert any(rule.recipe is not None and rule.recipe.kind == "line_offset"
                and dict(rule.recipe.params).get("offset") == pytest.approx(8.0) for rule in rules)
+
+
+@pytest.mark.parametrize("placements,along", [
+    (Qgis.MarkerLinePlacement.FirstVertex, 30),     # across the first bend
+    (Qgis.MarkerLinePlacement.LastVertex, 50),      # backwards from the end
+    (Qgis.MarkerLinePlacement.FirstVertex, 1300),   # longer than both lines: none drawn
+])
+def test_first_and_last_vertex_markers_move_along_the_line_like_qgis(plugin, tmp_path, placements, along):
+    """Offset along the line (map units) moves the first vertex marker
+    forward and the last one backward, turned to the segment it lands on;
+    past the other end QGIS draws none (QGIS Hub "Enemy Main Attack": the
+    "ENY" letters 1300 m along a short line)."""
+    layer = _layer("LineString", LINES, str(tmp_path / "l.gpkg"))
+    ml = QgsMarkerLineSymbolLayer()
+    ml.setPlacements(placements)
+    ml.setSubSymbol(_marker())
+    ml.setOffsetAlongLine(along)
+    ml.setOffsetAlongLineUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([ml])))
+    reference = ink_mask(render([layer], EXTENT))
+    outputs, rules, diags = _export(plugin, layer, tmp_path)
+    assert not diags.by_code("Q2VT_MARKER_PLACEMENT_APPROX")
+    ours = ink_mask(render(outputs, EXTENT)) if outputs else set()
+    if along > 1000:
+        assert not reference and not ours
+        return
+    assert reference and mask_difference(reference, ours) < 0.05

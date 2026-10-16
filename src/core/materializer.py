@@ -1297,21 +1297,30 @@ class SymbolMaterializer:
         rule.set_attr("m", 1)
         return [rule]
 
-    def _offset_in_map_units(self, layer) -> Optional[float]:
-        """A line layer's offset in project map units when it scales with the
-        map: map units as they are, "meters at scale" (military symbols:
-        +-350 m) in a projected CRS's units; None for screen units or metres
-        in a geographic CRS (left to the screen-unit paths)."""
-        unit = normalize_unit(layer.offsetUnit())
-        if unit == "map":
-            return float(layer.offset())
-        if unit != "m":
+    def _along_in_map_units(self, layer) -> Optional[float]:
+        """A marker line's offset along the line in project map units when
+        it scales with the map (map units, "meters at scale" in a projected
+        CRS); None for screen units."""
+        return self._scaled_map_distance(float(layer.offsetAlongLine()), layer.offsetAlongLineUnit())
+
+    def _scaled_map_distance(self, value: float, unit) -> Optional[float]:
+        name = normalize_unit(unit)
+        if name == "map":
+            return value
+        if name != "m":
             return None
         from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes  # pylint: disable=import-outside-toplevel
         crs = QgsCoordinateReferenceSystem(self.project_crs) if self.project_crs else QgsProject.instance().crs()
         if not crs.isValid() or crs.isGeographic():
             return None
-        return float(layer.offset()) * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
+        return value * QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, crs.mapUnits())
+
+    def _offset_in_map_units(self, layer) -> Optional[float]:
+        """A line layer's offset in project map units when it scales with the
+        map: map units as they are, "meters at scale" (military symbols:
+        +-350 m) in a projected CRS's units; None for screen units or metres
+        in a geographic CRS (left to the screen-unit paths)."""
+        return self._scaled_map_distance(float(layer.offset()), layer.offsetUnit())
 
     # Vertices whose offset loops are tolerated before an offset is drawn
     # natively (MapLibre line-offset) at a zoom.
@@ -2661,13 +2670,17 @@ class SymbolMaterializer:
                 along = float(layer.offsetAlongLine())
             except AttributeError:
                 along = 0.0
-            if along and points - {"Interval"}:
+            # QGIS moves only the first / last vertex markers along the line
+            # (checked against its renders); other placements ignore it.
+            along_map = self._along_in_map_units(layer) if along else 0.0
+            if along and points & {"FirstVertex", "LastVertex"} and along_map is None:
                 self._report("Q2VT_MARKER_PLACEMENT_APPROX",
-                             "Offset along the line is not applied to vertex/centre markers.",
-                             flat_rule)
+                             "A screen-size offset along the line is not applied to first/last "
+                             "vertex markers.", flat_rule)
+                along_map = 0.0
             def placed(rule, line_offset, marker=None, rings=None):
                 rings = _ring_filter(layer) if rings is None else rings
-                recipe = mat.marker_points(points, offset=line_offset, crs=crs)
+                recipe = mat.marker_points(points, offset=line_offset, crs=crs, along=along_map)
                 if rings:
                     recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
                         ("ring_filter", rings), ("crs", crs)))

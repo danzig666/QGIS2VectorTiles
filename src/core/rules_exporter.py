@@ -2925,7 +2925,7 @@ class RulesExporter:
         outputs = []
         vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
         if vertex_placements:
-            outputs.append(self._vertex_points(lines, vertex_placements))
+            outputs.append(self._vertex_points(lines, vertex_placements, recipe.param("along") or 0.0))
         if "Interval" in recipe.placements and self._memory_active:
             outputs.append(self._interval_points_direct(lines, recipe))
         elif "Interval" in recipe.placements:
@@ -3413,7 +3413,7 @@ class RulesExporter:
             self._group_tokens.append(token)
         return token
 
-    def _vertex_points(self, lines: str, placements: List[str]) -> str:
+    def _vertex_points(self, lines: str, placements: List[str], along: float = 0.0) -> str:
         """Worker: the vertex markers of ``lines`` (marker_points.
         vertex_markers) as points with the line's fields and ``ANGLE_FIELD``:
         QGIS turns them towards the nearest neighbours that differ from the
@@ -3448,6 +3448,15 @@ class RulesExporter:
                 ys = [line.yAt(i) for i in range(line.numPoints())]
                 drawn = set()
                 for placement in placements:
+                    if along and placement in ("FirstVertex", "LastVertex"):
+                        # Moved along the line; none where the line is shorter.
+                        moved = marker_points.along_vertex_marker(xs, ys, placement, along)
+                        if moved is not None:
+                            point = QgsFeature(fields)
+                            point.setAttributes(attributes + [moved[2]])
+                            point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(moved[0], moved[1])))
+                            writer.addFeature(point)
+                        continue
                     for index, angle in marker_points.vertex_markers(xs, ys, placement):
                         if (index, angle) in drawn:
                             continue  # the same marker of two placements
