@@ -159,3 +159,51 @@ def test_zone_text_opens_in_a_large_window_to_print_or_save(site, tmp_path):
     assert "<h4>15. § (3)</h4>" in page and "<script" not in page.split("</style>")[1]
     assert out["printed"] == out["title"]  # the frame loaded the page (allowed by the CSP)
     assert out["framed"] and out["closed"] and "q2vt-rich-open" in out["focus"]
+
+
+BACK = """
+  window.q2vtSamePage = 1;  // gone if Back left or reloaded the page
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const back = async () => { history.back(); await sleep(500); };
+  const state = () => ({ panel: !document.getElementById('q2vt-panel').hidden,
+                         reader: !!document.querySelector('.q2vt-reader') });
+  const steps = [];
+  steps.push(state());                                   // the parcel report on the phone sheet
+  const block = document.querySelector('#q2vt-pane-parcel details.q2vt-rich-block');
+  block.open = true;
+  await sleep(600);
+  block.querySelector('.q2vt-rich-open').click();
+  await sleep(100);
+  steps.push(state());                                   // + the reading window
+  q2vtViewer.map.jumpTo({ center: q2vtViewer.map.getCenter(), zoom: q2vtViewer.map.getZoom() + 0.5 });
+  await sleep(900);                                      // the permalink rewrites the hash
+  const hash = location.hash;
+  await back();
+  steps.push(state());                                   // Back: the reading window closes
+  await back();
+  steps.push(state());                                   // Back: the sheet closes
+  // Closed with its own button: Back then has nothing of it left to close.
+  document.getElementById('q2vt-menu').click();
+  await sleep(100);
+  steps.push(state());
+  document.getElementById('q2vt-menu').click();
+  await sleep(300);
+  steps.push(state());
+  return { steps, same: window.q2vtSamePage === 1, hashKept: location.hash === hash,
+           atBase: !(history.state && history.state.q2vtBack) };  // the next Back leaves
+"""
+
+
+def test_back_closes_what_is_open_instead_of_leaving(site, tmp_path):
+    out = _run(site["url"], [
+        {"eval": "q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;" % json.dumps(site["parcel"])},
+        {"idle": True}, {"clickLngLat": site["parcel"]}, {"wait": 900}, {"eval": BACK},
+        {"eval": "return [window.q2vtSamePage === 1, history.length];"},
+    ], tmp_path, width=390, height=800)
+    result = out[1]
+    assert result["steps"] == [
+        {"panel": True, "reader": False}, {"panel": True, "reader": True},
+        {"panel": True, "reader": False}, {"panel": False, "reader": False},
+        {"panel": True, "reader": False}, {"panel": False, "reader": False}]
+    assert result["same"] and result["hashKept"]  # no reload, today's view kept
+    assert result["atBase"]  # no leftover entries: Back with nothing open leaves, as usual

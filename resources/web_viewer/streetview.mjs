@@ -8,6 +8,7 @@
 // phones: the top half of the screen (map below), or full screen.
 //
 // Google's code and imagery load only when the mode is first used.
+import { BackEntry } from "./backstack.mjs";
 import { el, icon } from "./icons.mjs";
 import { t } from "./i18n.mjs";
 
@@ -98,6 +99,8 @@ export class StreetView {
     if (this.viewer.draw?.mode) this.viewer.draw.cancel();  // nor drawing
     this.active = true;
     this.viewer.streetView = true;
+    this.back ??= new BackEntry(() => this.stop());
+    this.back.open();
     // Phones: the panorama takes the top of the screen; the panel sheet goes.
     if (window.matchMedia("(max-width: 760px)").matches) this.viewer.controls?.panel?.setOpen?.(false);
     this.button.setAttribute("aria-pressed", "true");
@@ -123,6 +126,7 @@ export class StreetView {
 
   stop() {
     if (!this.active) return;
+    this.back?.closed();
     this.active = false;
     this.viewer.streetView = false;
     this.button?.setAttribute("aria-pressed", "false");

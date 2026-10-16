@@ -8,6 +8,7 @@
 // URLs only with http(s)/mailto and noopener. Highlights are overlay layers
 // filtered by the feature key (all tile-clipped copies), never a change of
 // the base symbols.
+import { BackEntry } from "./backstack.mjs";
 import { t, formatNumber } from "./i18n.mjs";
 import { matchesFilters } from "./style_control.mjs";
 
@@ -56,7 +57,9 @@ export class Identify {
     Object.assign(this, ctx); // map, manifest, maplibregl, control, state, lookup, viewer
     this.layers = new Map(this.manifest.layers.map((l) => [l.id, l]));
     this.popup = new this.maplibregl.Popup({ maxWidth: "380px", focusAfterOpen: true, closeOnClick: false });
-    this.popup.on("close", () => this.select(null));
+    // Back closes the popup (backstack.mjs).
+    this.back = new BackEntry(() => this.popup.remove());
+    this.popup.on("close", () => { this.back.closed(); this.select(null); });
     this.overlays = new Set();
     // No hover highlight (owner's choice): only a click selects and marks.
     this.onClick = (event) => this.click(event);
@@ -168,6 +171,7 @@ export class Identify {
     }
     const where = lngLat || (record && record.p) || this.map.getCenter();
     this.popup.setLngLat(where).setDOMContent(box).addTo(this.map);
+    this.back.open();
     this.select({ layerId, key });
   }
 

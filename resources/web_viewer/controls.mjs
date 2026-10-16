@@ -2,6 +2,7 @@
 // once the map and the visible-polygon label helper are ready): the panel
 // (layers, legend, filters, tools, share), theme presets, the basemap
 // switcher, attribution and the light/dark switch.
+import { BackEntry, isOwnTraversal } from "./backstack.mjs";
 import { t } from "./i18n.mjs";
 import { ViewerState, defaults as defaultState, presetMatches, presets, sanitizeFilters } from "./state.mjs";
 import { StyleControl } from "./style_control.mjs";
@@ -86,7 +87,11 @@ function buildPanel(manifest) {
   const panel = document.getElementById("q2vt-panel");
   const menu = document.getElementById("q2vt-menu");
   menu.replaceChildren(icon("menu", 22));
+  // On phones the panel sheet covers the map: Back closes it.
+  const back = new BackEntry(() => setOpen(false));
   const setOpen = (open) => {
+    if (open && isMobile()) back.open();
+    else if (!open) back.closed();
     panel.hidden = !open;
     menu.setAttribute("aria-expanded", String(open));
     menu.replaceChildren(icon(open && isMobile() ? "close" : "menu", 22));
@@ -346,7 +351,8 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   if (!fromUrl) state.load();
   // A link pasted into this tab changes only the hash (the viewer itself
   // rewrites it with replaceState, which fires nothing): open it afresh.
-  window.addEventListener("hashchange", () => location.reload());
+  // (A Back that only closed a popup lands on an older hash: not a link.)
+  window.addEventListener("hashchange", () => { if (!isOwnTraversal()) location.reload(); });
   if (fromUrl) {
     state.merge({ ...fromUrl, filters: fromUrl.filters ? sanitizeFilters(manifest, fromUrl.filters) : undefined });
     if (fromUrl.camera) map.jumpTo({ center: [fromUrl.camera.lng, fromUrl.camera.lat], zoom: fromUrl.camera.zoom });

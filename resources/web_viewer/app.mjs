@@ -5,6 +5,7 @@
 // XYZ MVT), loads the exported MapLibre style unchanged except for transport
 // URLs, creates the map and the existing visible-polygon label helper, then
 // mounts the interactive controls described by the manifest.
+import { replaceUrl } from "./backstack.mjs";
 import * as maplibregl from "./maplibre-gl.mjs";
 import { enableVisibleLabels } from "./visible_labels.mjs";
 import { RASTER_TILE_TYPES, ViewerError, bindStyle, checkRelative, openArchives, resolveUrl } from "./transport.mjs";
@@ -159,7 +160,7 @@ function showEntryAddress(releasePage) {
   const base = document.createElement("base");
   base.href = releasePage.href;
   document.head.prepend(base);
-  history.replaceState(history.state, "", entry.entry + location.search + location.hash);
+  replaceUrl(entry.entry + location.search + location.hash);
 }
 
 async function start() {
