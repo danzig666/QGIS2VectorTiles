@@ -414,7 +414,8 @@ Always there:
 Off by default (turn them on on *Interaction → Viewer*):
 
 - **Measurement** (*Tools* tab): distances and areas, snapping to the corners or edges of the
-  layers you chose (hold Alt for a free point). With terrain, a measured line gives an
+  layers you chose (hold Alt for a free point); right-click, double-click or Enter finishes,
+  Backspace removes the last point. With terrain, a measured line gives an
   **elevation profile** (lowest and highest point, climb and descent).
 - **Search street names (OpenStreetMap)** inside the map's area.
 - **Overview map (inset)**: a small map in the corner with the current view; it can be folded
@@ -499,7 +500,11 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.42.1**. Newest first:
+This README describes QWebMap **4.42.2**. Newest first:
+
+**4.42.2** — measuring keys; full regulation texts always printed
+- Measuring: right-click finishes (a right-button drag still rotates), Backspace removes the last point.
+- The parcel report's print includes every zone's full regulation text, also those not opened in the panel.
 
 **4.42.1** — fixes from a full code review
 - Browser Back closes popups and panels reliably (also several steps, Forward and pasted links); slow lookups no longer show an outdated popup or report.

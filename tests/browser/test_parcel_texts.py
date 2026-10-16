@@ -48,6 +48,7 @@ def site(tmp_path_factory):
     profile = PublicationProfile(title="Szövegek", slug="szovegek", locale="hu")
     profile.view.min_zoom, profile.view.max_zoom = 14, 15
     profile.output.local_directory = str(base / "out")
+    profile.interaction.measure = True
     profile.layers = [LayerConfig(parcels.id()), LayerConfig(zoning.id())]
     info = profile.parcel_info
     info.enabled, info.parcel_layer_id, info.key_field = True, parcels.id(), "hrsz"
@@ -207,3 +208,54 @@ def test_back_closes_what_is_open_instead_of_leaving(site, tmp_path):
         {"panel": True, "reader": False}, {"panel": False, "reader": False}]
     assert result["same"] and result["hashKept"]  # no reload, today's view kept
     assert result["atBase"]  # no leftover entries: Back with nothing open leaves, as usual
+
+
+def test_print_includes_the_zone_texts_not_opened(site, tmp_path):
+    """The parcel report's print carries every zone's full text, also when
+    it was not opened in the panel (loaded for the print)."""
+    out = _run(site["url"], [
+        {"eval": "window.print = () => {}; q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;"
+                 % json.dumps(site["parcel"])},
+        {"idle": True}, {"clickLngLat": site["parcel"]}, {"wait": 900},
+        {"eval": """
+          const pane = document.getElementById('q2vt-pane-parcel');
+          const block = pane.querySelector('details.q2vt-rich-block');
+          const closed = !block.open && !block.querySelector('.q2vt-rich');
+          await q2vtViewer.parcel.onPrint();
+          const flow = document.getElementById('q2vt-print-flow');
+          return { closed, stillClosed: !block.open,
+                   printed: [...flow.querySelectorAll('h3, h4')].map((h) => h.textContent) };
+        """},
+    ], tmp_path)[1]
+    assert out["closed"] and out["stillClosed"]  # the panel is left as it was
+    assert out["printed"] == ["Az övezet saját előírásai", "15. § (3)"]
+
+
+def test_measuring_right_click_finishes_backspace_undoes(site, tmp_path):
+    out = _run(site["url"], [
+        {"eval": "q2vtViewer.map.jumpTo({ center: %s, zoom: 18 }); return 1;" % json.dumps(site["parcel"])},
+        {"idle": True},
+        {"eval": """
+          const v = q2vtViewer, tools = v.controls.tools, canvas = v.map.getCanvas();
+          const rect = canvas.getBoundingClientRect();
+          const mouse = (type, x, y, button = 0) => canvas.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, button, buttons: button === 2 ? 2 : 1,
+            clientX: rect.left + x, clientY: rect.top + y }));
+          const click = (x, y) => { mouse('mousedown', x, y); mouse('mouseup', x, y); mouse('click', x, y); };
+          const key = (k) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+          tools.start('distance');
+          click(300, 300); click(400, 300); click(400, 400);
+          const three = tools.points.length;
+          key('Backspace');
+          const two = tools.points.length;
+          // A right-button drag rotates the map: measuring goes on.
+          mouse('mousedown', 500, 300, 2); mouse('contextmenu', 560, 300, 2);
+          const afterDrag = tools.mode;
+          mouse('mousedown', 500, 300, 2); mouse('contextmenu', 500, 300, 2);
+          return { three, two, afterDrag, mode: tools.mode, kept: tools.points.length,
+                   result: tools.result.textContent };
+        """},
+    ], tmp_path)[1]
+    assert out["three"] == 3 and out["two"] == 2
+    assert out["afterDrag"] == "distance"
+    assert out["mode"] is None and out["kept"] == 2 and out["result"]  # finished, measurement shown

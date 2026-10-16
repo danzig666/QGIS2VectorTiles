@@ -67,7 +67,7 @@
   "tools.measure": "Mérés",
   "tools.distance": "Távolság",
   "tools.area": "Terület",
-  "tools.measureHelp": "Kattintson pontokra a térképen; dupla kattintás vagy Enter: befejezés, Escape: megszakítás.",
+  "tools.measureHelp": "Kattintson pontokra a térképen; jobb kattintás, dupla kattintás vagy Enter: befejezés, Backspace: utolsó pont törlése, Escape: megszakítás.",
   "tools.measureMethod": "Geodéziai számítás (WGS 84 ellipszoid közelítés); nem földmérési pontosságú.",
   "tools.clear": "Törlés",
   "tools.print": "Nyomtatás",

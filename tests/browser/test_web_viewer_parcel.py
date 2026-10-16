@@ -237,7 +237,7 @@ LONG_TEXT = """const card = document.querySelector('#q2vt-pane-parcel article.q2
   };
   for (const code of ['Lke-1', 'Gksz']) {
     const block = document.createElement('details');
-    block.className = 'q2vt-rich-block'; block.open = true; block.dataset.zone = code;
+    block.className = 'q2vt-rich-block'; block.open = code === 'Lke-1'; block.dataset.zone = code;  // Gksz closed
     const summary = document.createElement('summary'); summary.textContent = `A(z) ${code} övezet teljes előírásai`;
     const rich = document.createElement('div'); rich.className = 'q2vt-rich';
     section(rich, `${code} övezet`, code, 40);
@@ -265,9 +265,10 @@ FLOW_STATE = """const flow = document.getElementById('q2vt-print-flow'), sheet =
 
 def test_print_lays_texts_out_across_the_page_once(site, tmp_path):
     """Beside the map: the parcel, its parts and its restrictions. After it,
-    across the whole width in columns without page breaks: the opened full
-    texts (closed ones left out), the general rules shared by two zones
-    printed once, with a line pointing to them at the second zone."""
+    across the whole width in columns without page breaks: the full texts,
+    also those closed in the panel (a zone without text left out), the
+    general rules shared by two zones printed once, with a line pointing to
+    them at the second zone."""
     anchor = site["records"]["100/1"]["p"][0]["x"]
     pdf = tmp_path / "parcel.pdf"
     results = _run(site["url"], [

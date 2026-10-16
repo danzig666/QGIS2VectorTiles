@@ -421,7 +421,12 @@ export async function mount({ map, manifest, manifestUrl, pageUrl, assetsUrl, ma
   parts.printer = new Printer({ map, manifest, threeD: viewer.threeD, animator, content: (mode) =>
     (mode === "parcel" && parts.parcel ? parts.parcel.printCard() : null) || parts.legend.printList() });
   viewer.printer = parts.printer;
-  if (parts.parcel) parts.parcel.onPrint = () => parts.printer.print("parcel", parts.parcel.bounds());
+  if (parts.parcel) {
+    parts.parcel.onPrint = async () => {
+      await parts.parcel.loadTexts();  // the zone regulations, also the closed ones
+      return parts.printer.print("parcel", parts.parcel.bounds());
+    };
+  }
   if (panel.panes.filters) parts.filters = new Filters({ manifest, state, container: panel.panes.filters });
   if (panel.panes.tools) {
     parts.tools = new Tools({ map, manifest, container: panel.panes.tools, viewer });

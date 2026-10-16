@@ -61,10 +61,19 @@ export class ParcelReport {
   // [west, south, east, north] of the shown parcel (the print zooms on it).
   bounds() { return (this.record && this.record.bb) || null; }
 
+  // Before a print: every zone's full regulations of the shown report
+  // loaded, also those not opened in the panel.
+  async loadTexts() {
+    const card = this.container && this.container.querySelector("article.q2vt-pr");
+    if (!card) return;
+    await Promise.all([...card.querySelectorAll("details.q2vt-rich-block")]
+      .map((block) => (block.q2vtLoad ? block.q2vtLoad() : null)));
+  }
+
   // The shown report for the print sheet (without its buttons): the parcel,
-  // its parts and restrictions beside the map. The opened full regulations
-  // are marked to flow after the first page across the whole width (see
-  // Printer.fill); closed ones are left out, and a section shared by several
+  // its parts and restrictions beside the map. The full regulations (opened
+  // or not, see loadTexts) are marked to flow after the first page across
+  // the whole width (see Printer.fill), and a section shared by several
   // zones (between <hr>s: the general rules) is printed once, with a line
   // pointing to it at the others.
   printCard() {
@@ -76,11 +85,12 @@ export class ParcelReport {
     if (!texts) return copy;
     const printed = new Map();  // section text -> the zone it was printed at
     for (const block of texts.querySelectorAll("details.q2vt-rich-block")) {
-      const rich = block.open && block.querySelector(".q2vt-rich");
+      const rich = block.querySelector(".q2vt-rich");
       if (!rich) {
         block.remove();
         continue;
       }
+      block.open = true;
       block.dataset.printFlow = "";
       const sections = [[]];
       for (const node of [...rich.childNodes]) {
@@ -142,10 +152,13 @@ export class ParcelReport {
     const block = el("details", "q2vt-rich-block");
     block.dataset.zone = zoneKey(code);
     block.append(el("summary", "", t("parcel.fullText", { code: zoneKey(code) })));
-    let loaded = false;
-    block.addEventListener("toggle", async () => {
-      if (!block.open || loaded) return;
-      loaded = true;
+    let loading = null;
+    // Loads the text into the block once (on opening it, and before a print).
+    const load = () => {
+      loading ??= fill().catch(() => { loading = null; });
+      return loading;
+    };
+    const fill = async () => {
       const wait = el("p", "q2vt-muted", t("parcel.textLoading"));
       block.append(wait);
       try {
@@ -166,11 +179,13 @@ export class ParcelReport {
           lang: locale,
         }));
         wait.replaceWith(bigger, text);
-      } catch {
-        loaded = false;
+      } catch (error) {
         wait.replaceWith(el("p", "q2vt-muted", t("parcel.textMissing")));
+        throw error;  // tried again on the next opening
       }
-    });
+    };
+    block.q2vtLoad = load;
+    block.addEventListener("toggle", () => { if (block.open) load(); });
     return block;
   }
 

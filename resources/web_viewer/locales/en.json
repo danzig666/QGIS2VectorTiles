@@ -67,7 +67,7 @@
   "tools.measure": "Measure",
   "tools.distance": "Distance",
   "tools.area": "Area",
-  "tools.measureHelp": "Click points on the map; double-click or press Enter to finish, Escape to cancel.",
+  "tools.measureHelp": "Click points on the map; right-click, double-click or Enter finishes, Backspace removes the last point, Escape cancels.",
   "tools.measureMethod": "Geodesic (WGS 84 ellipsoid approximation); not survey accuracy.",
   "tools.clear": "Clear",
   "tools.print": "Print",
