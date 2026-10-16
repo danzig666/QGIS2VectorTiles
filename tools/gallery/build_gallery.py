@@ -93,6 +93,8 @@ def load_items(args):
     wanted = [n.strip().lower() for n in (getattr(args, "names", "") or "").split(",") if n.strip()]
     if wanted:
         items = [i for i in items if any(w in i["name"].lower() for w in wanted)]
+    if getattr(args, "offset", 0):
+        items = items[args.offset:]
     if args.limit:
         items = items[: args.limit]
     return items
@@ -457,6 +459,8 @@ def main():
     parser.add_argument("--zoom", type=float, default=16.25)
     parser.add_argument("--size", type=int, default=400)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--offset", type=int, default=0,
+                        help="skip this many styles first (batch_gallery.py runs slices)")
     parser.add_argument("--names", default="",
                         help="only styles whose name contains one of these (comma-separated)")
     parser.add_argument("--port", type=int, default=9000)
