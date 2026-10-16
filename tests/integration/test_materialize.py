@@ -3281,3 +3281,45 @@ def test_generator_of_an_aggregate_matches_qgis(plugin, tmp_path):
     ours = ink_mask(render(outputs, EXTENT, (240, 240)))
     # The shared edge of the two squares is inside the union: not drawn.
     assert ours and mask_difference(reference, ours) < 0.05
+
+
+def test_marker_values_read_the_whole_line(plugin, tmp_path):
+    """A marker's data-defined text reading the feature's geometry (a measure
+    line's format_number($length)) is evaluated on the line, as QGIS does,
+    not on the marker point it becomes: the label was NULL ("00.00 m")."""
+    from qgis.core import QgsFontMarkerSymbolLayer, QgsProperty, QgsSymbolLayer
+    layer = _layer("LineString", LINES, str(tmp_path / "measure.gpkg"))
+    text = QgsFontMarkerSymbolLayer()
+    text.setCharacter("00.00 m")
+    text.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyCharacter,
+                                QgsProperty.fromExpression("format_number($length, 0)"))
+    label = QgsMarkerLineSymbolLayer()
+    label.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    label.setSubSymbol(QgsMarkerSymbol([text]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([label])))
+    outputs, _, _ = _export(plugin, layer, tmp_path)
+    values = sorted(f[name] for out in outputs for f in out.getFeatures()
+                    for name in out.fields().names() if "property_char" in name)
+    lengths = sorted(format(round(QgsGeometry.fromWkt(w).length()), ",") for w in LINES)
+    assert values == lengths
+
+
+def test_arrow_drop_shadow_is_a_shifted_fill(plugin, tmp_path):
+    """An arrow's drop shadow (drawn under it) is a fill of the shadow's
+    colour under the arrow, shifted as QGIS shifts it: it was dropped."""
+    from qgis.core import QgsArrowSymbolLayer, QgsDropShadowEffect, QgsEffectStack, QgsDrawSourceEffect
+    layer = _layer("LineString", LINES, str(tmp_path / "shadow.gpkg"))
+    arrow = QgsArrowSymbolLayer()
+    shadow = QgsDropShadowEffect()
+    shadow.setColor(QColor(0, 0, 0))
+    shadow.setOpacity(0.5)
+    stack = QgsEffectStack(shadow)
+    stack.appendEffect(QgsDrawSourceEffect())
+    arrow.setPaintEffect(stack)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
+    _, rules, diags = _export(plugin, layer, tmp_path)
+    fills = [r for r in rules if r.rule.symbol().type() == Qgis.SymbolType.Fill]
+    colors = {(r.rule.symbol().symbolLayer(0).color().alpha(), r.translate is not None)
+              for r in fills}
+    assert (128, True) in colors or (127, True) in colors
+    assert diags.by_code("Q2VT_UNSUPPORTED_EFFECT")

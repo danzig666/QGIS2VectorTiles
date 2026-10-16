@@ -2978,6 +2978,38 @@ class SymbolMaterializer:
     # within +-4.5 % of QGIS's), fewer bands when over the output budget.
     ARROW_BAND_STEPS = (8, 4, 2, 1)
 
+    def _arrow_shadow(self, layer, flat_rule: FlattenedRule):
+        """An arrow's drop shadow (paint effect drawn under it) as a fill of
+        the shadow's colour and opacity under the arrow, shifted as QGIS
+        shifts it (QgsShadowEffect: 0° up, 90° right, y down); not blurred."""
+        from qgis.core import QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        effect = layer.paintEffect()
+        if effect is None or not effect.enabled():
+            return None
+        effects = effect.effectList() if type(effect).__name__ == "QgsEffectStack" else [effect]
+        for item in effects:
+            if not item.enabled():
+                continue
+            name = type(item).__name__
+            if name == "QgsDrawSourceEffect":
+                return None  # only an effect drawn before the arrow lies under it
+            if name != "QgsDropShadowEffect" or _enum_value(item.drawMode()) == 1:
+                continue
+            color = QColor(item.color())
+            color.setAlphaF(color.alphaF() * item.opacity())
+            shadow = QgsSimpleFillSymbolLayer(color, Qt.BrushStyle.SolidPattern, QColor(0, 0, 0, 0),
+                                              Qt.PenStyle.NoPen)
+            angle = math.radians(item.offsetAngle())
+            distance = item.offsetDistance()
+            shadow.setOffset(QPointF(-distance * math.cos(angle + math.pi / 2),
+                                     -distance * math.sin(angle + math.pi / 2)))
+            shadow.setOffsetUnit(item.offsetUnit())
+            shadow.setOffsetMapUnitScale(item.offsetMapUnitScale())
+            self._report("Q2VT_UNSUPPORTED_EFFECT",
+                         "Arrow drop shadow drawn as an unblurred shifted fill.", flat_rule)
+            return shadow
+        return None
+
     def _arrow(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A QGIS arrow as the polygons QGIS fills (fidelity/arrows.py, built
         by the exporter in painter pixels at the band's zoom), drawn with
@@ -2991,6 +3023,9 @@ class SymbolMaterializer:
                        if fill.symbolLayer(i).enabled()]
         if not fill_layers:
             return []
+        shadow = self._arrow_shadow(layer, flat_rule)
+        if shadow is not None:
+            fill_layers.insert(0, shadow)
         props = layer.dataDefinedProperties()
         if props is not None and props.hasActiveProperties():
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",

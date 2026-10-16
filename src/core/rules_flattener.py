@@ -1937,6 +1937,10 @@ class RulesFlattener:
             prop = fill_layer.dataDefinedProperties().property(key)
             if prop is not None and prop.isActive():
                 line_layer.setDataDefinedProperty(key, QgsProperty(prop))
+        # The fill's paint effect (a blur, a glow) is drawn on its outline too.
+        effect = fill_layer.paintEffect()
+        if effect is not None and effect.enabled():
+            line_layer.setPaintEffect(effect.clone())
 
         new_symbol.changeSymbolLayer(0, line_layer)
 

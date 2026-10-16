@@ -1415,3 +1415,22 @@ def test_symbol_color_is_the_drawn_symbols(flattener):
                 QgsSymbolLayer.Property.PropertyFillColor)
             colors.add((bool(rule.pre_generator), prop.expressionString()))
     assert colors == {(False, "'0,0,255,255'"), (True, "'0,128,0,255'")}
+
+
+def test_a_fill_effect_stays_on_its_split_outline(flattener):
+    """A simple fill's outline is split into a line rule; the fill's paint
+    effect (a firefly blur) is drawn on it too: it was lost."""
+    from qgis.core import (QgsBlurEffect, QgsEffectStack, QgsFillSymbol, QgsSimpleFillSymbolLayer,
+                           QgsSingleSymbolRenderer)
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtGui import QColor
+    layer = zoning_layer()
+    fill = QgsSimpleFillSymbolLayer(QColor("white"), Qt.BrushStyle.NoBrush, QColor("red"))
+    fill.setStrokeWidth(1.8)
+    fill.setPaintEffect(QgsEffectStack(QgsBlurEffect()))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([fill])))
+    reset_project(layer)
+    rules, _ = flattener(14, 16)
+    lines = [r.rule.symbol().symbolLayer(0) for r in rules if r.get_attr("c") == 1]
+    assert lines and all(type(l.paintEffect()).__name__ == "QgsEffectStack" and
+                         l.paintEffect().effectList()[0].type() == "blur" for l in lines)

@@ -1768,6 +1768,7 @@ class RulesExporter:
         # line azimuth) from the complete original lines before any field
         # expressions or tiling.
         if grp.recipe is not None and grp.recipe.kind == "marker_points":
+            current_input, grp = self._line_geometry_fields(current_input, grp)
             current_input = self._materialize_marker_points(
                 current_input, grp.recipe, grp.source_geometry)
             check = self._open(current_input, "check")
@@ -2954,6 +2955,33 @@ class RulesExporter:
         if len(outputs) == 1:
             return outputs[0]
         return self._run_alg_safe("mergevectorlayers", "native", LAYERS=outputs)
+
+    # QVariant type of an expression field -> fieldcalculator FIELD_TYPE
+    # (0 decimal, 1 integer, 2 text).
+    _CALCULATOR_TYPES = {6: 0, 2: 1, 4: 1, 1: 1, 10: 2}
+
+    def _line_geometry_fields(self, current_input: str, grp: _RuleGroupSnapshot):
+        """Data-defined values that read the feature's geometry ($length,
+        start_point($geometry): a measure label, a marker turned with the
+        line), computed on the lines before they become marker points, as
+        QGIS evaluates them on the feature it draws: on the points $length
+        was 0 and the label NULL. Returns the input and the group with those
+        fields read back by name."""
+        fields = list(grp.expression_fields)
+        changed = False
+        for index, (field_type, expression, name) in enumerate(fields):
+            parsed = QgsExpression(expression)
+            if not parsed.needsGeometry() or field_type not in self._CALCULATOR_TYPES or \
+                    any(column.startswith(f"{_FIELD_PREFIX}_mat_")
+                        for column in parsed.referencedColumns()):
+                continue
+            current_input = self._run_alg_safe(
+                "fieldcalculator", "native", INPUT=current_input, FIELD_NAME=name,
+                FIELD_TYPE=self._CALCULATOR_TYPES[field_type], FIELD_LENGTH=0,
+                FIELD_PRECISION=0, FORMULA=expression)
+            fields[index] = (field_type, QgsExpression.quotedColumnRef(name), name)
+            changed = True
+        return current_input, (dataclasses.replace(grp, expression_fields=fields) if changed else grp)
 
     def _build_field_mapping(
         self, grp: _RuleGroupSnapshot, current_input: str

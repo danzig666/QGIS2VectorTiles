@@ -549,7 +549,21 @@ def main():
             qgis_render(layer, center, zoom, args.size,
                         os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"))
             views.append({"id": view_id(item, k), "lon": point.x(), "lat": point.y(),
-                          "zoom": zoom, "width": args.size, "height": args.size})
+                          "zoom": zoom, "width": args.size, "height": args.size,
+                          "layer": layer.name()})
+    # Each view shows only its own layer's style layers (as QGIS renders
+    # only that layer): a neighbour's metre-wide line bled into the image.
+    owner = {}
+    with open(os.path.join(export_dir, "export_log.txt"), encoding="utf-8") as handle:
+        for line in handle:
+            match = re.search(r"Rule group (\S+): '\{layer: (.*?),type:", line)
+            if match:
+                owner[match.group(1)] = match.group(2)
+    with open(os.path.join(export_dir, "style", "style.json"), encoding="utf-8") as handle:
+        style_layers = json.load(handle)["layers"]
+    for view in views:
+        view["only"] = [l["id"] for l in style_layers
+                        if owner.get(l.get("source-layer") or "") == view["layer"]]
     with open(os.path.join(out, "views.json"), "w", encoding="utf-8") as f:
         json.dump(views, f)
 

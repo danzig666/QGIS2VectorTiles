@@ -8,7 +8,7 @@ tree and collects all active data-defined properties, returning
 
 import re
 
-from qgis.core import (QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSymbol,
+from qgis.core import (Qgis, QgsExpression, QgsProperty, QgsPropertyDefinition, QgsSymbol,
                        QgsSymbolLayerUtils)
 
 from ..utils.config import QVariant
@@ -30,6 +30,32 @@ def _to_color_hex_expr(inner_expr: str) -> str:
 _RANDOM_FUNCTIONS = frozenset({"rand", "randf"})
 # Symbol layers whose sub-symbol markers become one repeated texture.
 _TEXTURE_PATTERNS = ("QgsPointPatternFillSymbolLayer", "QgsRandomMarkerFillSymbolLayer")
+# Millimetres per screen unit (QgsUnitTypes.RenderUnit name), 96 dpi pixels.
+_SCREEN_MM = {"Millimeters": 1.0, "Points": 25.4 / 72.0, "Inches": 25.4, "Pixels": 25.4 / 96.0}
+
+
+def dense_marker_line(layer) -> bool:
+    """A marker line whose markers stand closer than 4/3 of their size
+    (screen units, along an interval, turned with the line), where MapLibre
+    would widen the spacing to the icon's length plus a quarter of it:
+    MapLibreConverter._dense_marker_line draws it as a line pattern, by
+    QGIS, so a random value is drawn per marker there (as in a texture)."""
+    if type(layer).__name__ != "QgsMarkerLineSymbolLayer":
+        return False
+    try:
+        flags = int(getattr(layer.placements(), "value", layer.placements()))
+        interval_flag = int(getattr(Qgis.MarkerLinePlacement.Interval, "value",
+                                    Qgis.MarkerLinePlacement.Interval))
+        marker = layer.subSymbol()
+        def mm(value, unit):
+            name = getattr(unit, "name", None)
+            return value * _SCREEN_MM[name] if name in _SCREEN_MM else None
+        interval = mm(layer.interval(), layer.intervalUnit())
+        size = mm(marker.size(), marker.sizeUnit()) if marker is not None else None
+    except (AttributeError, RuntimeError, TypeError, ValueError, KeyError):
+        return False
+    return flags == interval_flag and layer.rotateSymbols() and interval is not None and \
+        size is not None and 0 < interval < 4.0 / 3.0 * size and not layer.offsetAlongLine()
 
 
 def is_random_only(expression: str) -> bool:
@@ -87,7 +113,7 @@ class DataDefinedPropertiesFetcher:
 
     def _walk(self, obj):
         """Recursively introspect obj's QGIS sub-objects for data-defined properties."""
-        texture = type(obj).__name__ in _TEXTURE_PATTERNS
+        texture = type(obj).__name__ in _TEXTURE_PATTERNS or dense_marker_line(obj)
         self._in_texture += texture
         try:
             if isinstance(obj, QgsSymbol):
