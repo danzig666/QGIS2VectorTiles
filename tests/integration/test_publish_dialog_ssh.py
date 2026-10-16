@@ -278,6 +278,7 @@ def test_test_connection_and_publish_through_the_window(project, messages, tmp_p
         dialog.test_connection()
         assert messages and messages[-1][0] == "information", messages
         assert messages[-1][1].count("✔") == 3 and remote.is_dir(), messages[-1][1]
+        dialog.refresh_review()
         dialog.approve.setChecked(True)
         dialog.publish()
         _wait_task(dialog)

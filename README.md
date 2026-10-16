@@ -499,7 +499,13 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.42.0**. Newest first:
+This README describes QWebMap **4.42.1**. Newest first:
+
+**4.42.1** — fixes from a full code review
+- Browser Back closes popups and panels reliably (also several steps, Forward and pasted links); slow lookups no longer show an outdated popup or report.
+- Drop shadows point the right way; label shadows follow zoom-dependent offsets; a few smaller style conversion fixes.
+- Publish window: publishing needs a review of the current settings; closing the project while the window is open is handled; the local preview only answers on localhost.
+- Safer exports and uploads (temporary files cleaned up after cancel, S3 retries after a conflict).
 
 **4.42.0** — point label shadows; local exports without versions
 - Point labels get their QGIS shadow too; it appears with its label (no shadow is left where a label was hidden).

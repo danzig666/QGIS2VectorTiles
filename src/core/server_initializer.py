@@ -39,13 +39,14 @@ class ServerInitializer:
 
     LINUX_ACTIVATOR = r'''
 #!/bin/bash
-lsof -ti :18111991 | xargs kill -9 2>/dev/null
+# Only the process listening on the port (not browsers connected to it).
+lsof -t -iTCP:18111991 -sTCP:LISTEN | xargs kill 2>/dev/null
 cd "$(dirname "$0")"
 echo "Starting MBTiles server..."
 _Q2VT_PYTHON _Q2VT_UTILS --port 18111991 &
 sleep 2
 URL="http://localhost:18111991/viewer/viewer.html?v=10031993"
-command -v xdg-open &>/dev/null && xdg-open "$URL" || command -v open &>/dev/null && open "$URL"
+if command -v xdg-open &>/dev/null; then xdg-open "$URL"; elif command -v open &>/dev/null; then open "$URL"; fi
 '''
     WINDOWS_ACTIVATOR = r'''
 @echo off

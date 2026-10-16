@@ -1905,11 +1905,8 @@ class TextPropertyExtractor:
 
     @staticmethod
     def get_text_max_width(label_settings: QgsPalLayerSettings) -> float:
-        """Return ``text-max-width`` in ems.
-
-        Uses ``autoWrapLength`` when set; otherwise a very large value to
-        effectively disable wrapping.
-        """
+        """The QGIS wrap length in characters (``autoWrapLength``), or a very
+        large value without one (the converter turns characters into ems)."""
         if label_settings.autoWrapLength > 0:
             return label_settings.autoWrapLength
         return 999
@@ -2333,6 +2330,9 @@ class QgisMapLibreStyleExporter:
             paint = layer_def.setdefault("paint", {})
             for prop in self._OPACITY_PAINT.get(layer_def.get("type"), ()):
                 paint[prop] = ex.mul(paint.get(prop, 1), float(opacity))
+            frame = layer_def.get("metadata", {}).get("q2vt:frame")
+            if frame:  # the viewer animates icon-opacity from this value
+                frame["opacity"] = ex.mul(frame.get("opacity", 1), float(opacity))
             layer_def.setdefault("metadata", {})["q2vt:layer-opacity"] = float(opacity)
 
     def _convert_style_layers(self, style, bounds, first: int) -> None:
@@ -2355,6 +2355,10 @@ class QgisMapLibreStyleExporter:
                 suffix = layer_def["id"][len(base):] if layer_def["id"].startswith(base) \
                     else f"_{layer_def['id']}"
                 layer_def["id"] = style.styleName() + suffix
+                frame = (layer_def.get("metadata") or {}).get("q2vt:frame")
+                if frame and str(frame.get("group", "")).startswith(base):
+                    # The copy's frames are an animation of their own.
+                    frame["group"] = style.styleName() + frame["group"][len(base):]
                 self.style["layers"].append(layer_def)
             self._apply_feature_filter(self.style["layers"][first:], feature_filter)
             return
@@ -4661,9 +4665,10 @@ class QgisMapLibreStyleExporter:
             else:
                 angle = math.radians(effect.offsetAngle())
                 distance = PropertyExtractor.static_pixels(effect.offsetDistance(), effect.offsetUnit())
-                # QgsShadowEffect::draw: offset (-d sin(a + 90°), -d cos(a + 90°)), y down.
-                paint["line-translate"] = [round(-distance * math.sin(angle + math.pi / 2), 3),
-                                           round(-distance * math.cos(angle + math.pi / 2), 3)]
+                # QgsShadowEffect::draw: offset (-d cos(a + 90°), -d sin(a + 90°)), y down:
+                # 0° up, 90° right, 135° (QGIS's default) down-right.
+                paint["line-translate"] = [round(-distance * math.cos(angle + math.pi / 2), 3),
+                                           round(-distance * math.sin(angle + math.pi / 2), 3)]
                 paint["line-translate-anchor"] = "viewport"
                 paint["line-color"] = effect.color().name()
                 paint["line-blur"] = blur
@@ -4857,7 +4862,10 @@ class QgisMapLibreStyleExporter:
             "text-line-height": TextPropertyExtractor.get_text_line_height(),
             "text-letter-spacing": TextPropertyExtractor.get_text_letter_spacing(text_format),
             "text-transform": TextPropertyExtractor.get_text_transform(label_settings),
-            "text-max-width": TextPropertyExtractor.get_text_max_width(label_settings),
+            # QGIS wraps at a number of characters, MapLibre at a width in ems.
+            "text-max-width": round(TextPropertyExtractor.get_text_max_width(label_settings)
+                                    * (self._char_width(label_settings) or 0.6), 2)
+            if label_settings.autoWrapLength > 0 else 999,
             "text-max-angle": TextPropertyExtractor.get_text_max_angle(label_settings),
             "text-keep-upright": TextPropertyExtractor.get_text_keep_upright(),
             "text-rotate": TextPropertyExtractor.get_text_rotate(label_settings),
@@ -5065,6 +5073,13 @@ class QgisMapLibreStyleExporter:
         # only where the viewer finds its label shown (feature state, see
         # resources/web_viewer/label_shadows.mjs).
         synced = not all((d.get("metadata") or {}).get("q2vt:visible-polygons") for d in defs)
+        if synced and any("text-variable-anchor" in d.get("layout", {}) for d in defs):
+            # MapLibre picks the label's position among several candidates to
+            # avoid other labels; a copy cannot follow that choice.
+            self.context.report("Q2VT_LABEL_SHADOW",
+                                "The shadow of a point label with several candidate positions "
+                                "(around point, cartographic) is not drawn.")
+            return []
         what = shadow.shadowPlacement()
         if what == QgsTextShadowSettings.ShadowPlacement.ShadowLowest:
             what = (QgsTextShadowSettings.ShadowPlacement.ShadowShape if text_format.background().enabled()
@@ -5100,9 +5115,17 @@ class QgisMapLibreStyleExporter:
             copy["layout"] = {k: v for k, v in copy["layout"].items() if not k.startswith("icon-")}
             paint = {k: v for k, v in copy.get("paint", {}).items() if not k.startswith("icon-")}
             translate = paint.get("text-translate") or [0, 0]
-            if not (isinstance(translate, list) and len(translate) == 2 and all(ex.is_number(v) for v in translate)):
-                translate = [0, 0]
-            paint["text-translate"] = [round(translate[0] + dx, 2), round(translate[1] + dy, 2)]
+            if ex.is_zoom_curve(translate):
+                # The label's own offset per zoom (stops: zoom, ["literal", [x, y]]).
+                paint["text-translate"] = translate[:3] + [
+                    item if index % 2 == 0 else
+                    ["literal", [round(item[1][0] + dx, 2), round(item[1][1] + dy, 2)]]
+                    for index, item in enumerate(translate[3:])]
+            else:
+                if not (isinstance(translate, list) and len(translate) == 2
+                        and all(ex.is_number(v) for v in translate)):
+                    translate = [0, 0]
+                paint["text-translate"] = [round(translate[0] + dx, 2), round(translate[1] + dy, 2)]
             paint["text-color"] = css
             # The blur as a soft halo, at most SHADOW_SOFT_PX: a glyph's SDF
             # reaches only a few pixels, and a larger halo turns into a box.
@@ -5432,9 +5455,10 @@ class QgisMapLibreStyleExporter:
         cases = []
         for hali in ("Left", "Center", "Right"):
             for vali in ("Bottom", "Base", "Half", "Cap", "Top"):
-                cases += [f"{hali}|{vali}", self._anchor_name(hali, vali)]
-        key = ["concat"] + [p if isinstance(p, str) else ["to-string", p] for p in
-                            (parts[0], "|", parts[1])]
+                cases += [f"{hali}|{vali}".lower(), self._anchor_name(hali, vali)]
+        # QGIS compares the values without case ("center" = "Center").
+        key = ["downcase", ["concat"] + [p if isinstance(p, str) else ["to-string", p] for p in
+                                         (parts[0], "|", parts[1])]]
         return ["match", key] + cases + ["bottom-left"]
 
     def _background_image(self, background, stroke_px: Optional[float] = None,

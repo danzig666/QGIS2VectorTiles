@@ -57,8 +57,11 @@ class DeploymentHistoryDialog(QDialog):
                               "working.").format(len(releases), self.provider.prefix))
 
     def refresh(self):
-        pointer, _ = self.provider.read_pointer()
-        self.fill(self.provider.list_releases(), pointer.get("releaseId") if pointer else None)
+        try:
+            pointer, _ = self.provider.read_pointer()
+            self.fill(self.provider.list_releases(), pointer.get("releaseId") if pointer else None)
+        except PublishingError as error:  # network or permissions: said, not a Python error
+            QMessageBox.warning(self, tr("Releases"), error.message)
 
     def activate(self):
         item = self.list.currentItem()
@@ -108,7 +111,16 @@ class DeploymentHistoryDialog(QDialog):
                 != QMessageBox.StandardButton.Yes:
             return
         prefix = self.provider.prefix + "/"
+        aborted, failed = 0, []
         for upload in uploads:
             if upload["key"].startswith(prefix):
-                self.provider.abort_upload(upload["key"][len(prefix):], upload["uploadId"])
-        QMessageBox.information(self, tr("Uploads"), tr("Aborted."))
+                try:
+                    self.provider.abort_upload(upload["key"][len(prefix):], upload["uploadId"])
+                    aborted += 1
+                except PublishingError as error:
+                    failed.append(f"{upload['key']}: {error.message}")
+        if failed:
+            QMessageBox.warning(self, tr("Uploads"), tr("{} aborted, {} not:").format(aborted, len(failed))
+                                + "\n" + "\n".join(failed[:10]))
+        else:
+            QMessageBox.information(self, tr("Uploads"), tr("Aborted."))

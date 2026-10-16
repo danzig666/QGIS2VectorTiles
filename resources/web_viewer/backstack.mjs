@@ -5,15 +5,19 @@
 // lands on the entry below and closes the newest thing. Closed some other
 // way (its ✕, Escape), the thing takes its entry back with history.back().
 //
-// The viewer keeps the address current with replaceUrl (the permalink
-// hash), so a Back that lands on an older entry gets today's address again
-// and is not taken for a pasted link (see isOwnTraversal).
+// Each entry records how many things were open there (its depth), so Back
+// closes what is above it, Forward onto a closed thing's entry is undone, and
+// a pasted link (an entry without a depth) is left to the hash handler. The
+// viewer keeps the address current with replaceUrl (the permalink hash), so a
+// Back that lands on an older entry gets today's address again and is not
+// taken for a pasted link (see isOwnTraversal).
 
-const MARK = "q2vtBack";
+const MARK = "q2vtBack";  // history state: how many things were open at this entry
 const stack = [];  // [{ close }] newest last, one history entry each
-let skips = 0;     // history.back() calls of our own still to arrive
 let latest = null; // the address the viewer last set
 let ownUntil = 0;  // hashchange events before this time are our traversals
+
+const depthOf = (state) => (state && Number.isInteger(state[MARK]) ? state[MARK] : null);
 
 function restoreUrl() {
   if (latest && location.href !== latest) {
@@ -24,25 +28,26 @@ function restoreUrl() {
 
 // (Only in a browser: the pure helpers that import this also run in Node.)
 globalThis.window?.addEventListener("popstate", (event) => {
+  const depth = depthOf(event.state);
+  if (depth === null) {
+    // An entry the viewer did not make (a link pasted into the address
+    // bar): the hash handler opens it.
+    ownUntil = 0;
+    return;
+  }
   ownUntil = performance.now() + 1000;
-  if (skips > 0) {
-    skips -= 1;
-    restoreUrl();
+  if (depth > stack.length) {
+    // Forward onto the entry of something already closed (or an entry left
+    // from before a reload): go back to where the open things are.
+    history.go(stack.length - depth);
     return;
   }
-  const top = stack.pop();
-  if (top) {
-    restoreUrl();
+  restoreUrl();
+  // Back (one step or several): close what was opened after this entry.
+  while (stack.length > depth) {
+    const top = stack.pop();
     try { top.close(); } catch (error) { console.warn("back:", error); }  // eslint-disable-line no-console
-    return;
   }
-  // An entry left from before a reload: nothing open belongs to it.
-  if (event.state && event.state[MARK]) {
-    skips += 1;
-    history.back();
-    return;
-  }
-  ownUntil = 0;  // a real navigation inside the page: the hash handler decides
 });
 
 // The viewer's own address updates (keeps this entry's state).
@@ -61,13 +66,16 @@ export function isOwnTraversal() {
 export function onBack(close) {
   const entry = { close };
   latest = latest || location.href;
-  history.pushState({ [MARK]: true }, "", location.href);
+  if (!stack.length && depthOf(history.state) !== 0) {
+    history.replaceState({ ...(history.state || {}), [MARK]: 0 }, "", location.href);
+  }
   stack.push(entry);
+  history.pushState({ [MARK]: stack.length }, "", location.href);
   return () => {
     const index = stack.indexOf(entry);
     if (index < 0) return;  // closed by Back: its entry is gone already
     stack.splice(index, 1);
-    skips += 1;
+    // One entry fewer: the Back lands on depth stack.length, nothing to close.
     history.back();
   };
 }

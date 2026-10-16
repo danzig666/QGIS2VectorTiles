@@ -222,6 +222,9 @@ class RulesFlattener:
         for rule_type, type_name in self.RULE_TYPES.items():
             rule_system = self._get_or_convert_rule_system(layer, rule_type)
             if not rule_system:
+                if rule_type == 0:  # "No symbols" (or not drawable): its diagrams still are
+                    self._child_base = {}
+                    self._add_diagram_rules(layer, layer_idx)
                 continue
             self._legend_keys = self._legend_key_map(layer, rule_system, rule_type)
             self._apply_reference_scale(layer, rule_system, rule_type)
@@ -284,7 +287,9 @@ class RulesFlattener:
             diagrams.placeholder_symbol(spec, layer.geometryType()), int(most_in), int(most_out),
             spec["show"], "Diagram"))
         before = len(self.flattened_rules)
-        self._child_base = {}
+        # Numbered after the layer's renderer rules (the renderer pass left
+        # their count in _child_base): a dataset name of its own.
+        self._child_base = getattr(self, "_child_base", None) or {}
         self._flatten_rule(layer, layer_idx, root, 0, 0, 0)
         for flat_rule in self.flattened_rules[before:]:
             flat_rule.diagram = spec
@@ -842,7 +847,7 @@ class RulesFlattener:
         if system.type() in self.POINT_GROUP_MODES and system.embeddedRenderer() is not None:
             return self._point_group_rules(system)
         rules = self._as_rule_renderer(system)
-        if rules is None:
+        if rules is None and system.type() != "nullSymbol":
             # QGIS cannot express it as rules (2.5D, embedded symbols, plugin
             # renderers): the layer draws nothing on the web map.
             self.diagnostics.add(
@@ -1103,7 +1108,9 @@ class RulesFlattener:
             # A sibling without a filter matches every feature.
             return "FALSE"
         if filters:
-            return f'NOT ({" OR ".join(enclosed(f) for f in filters)}) IS 1'
+            # "OR FALSE" turns a single sibling's value into a boolean as the
+            # OR of several does: a truthy 5 or strpos() result is not "IS 1".
+            return f'NOT ({" OR ".join(enclosed(f) for f in filters)} OR FALSE) IS 1'
         return ""
 
     @staticmethod
@@ -2364,6 +2371,8 @@ class RulesFlattener:
                 continue
             if renderer_rule.recipe is not None and renderer_rule.recipe.kind == "callout":
                 continue
+            if renderer_rule.diagram is not None:
+                continue  # diagrams are drawn for features QGIS may not draw a symbol for
             filter_id = (renderer_rule.get_attr("r"), renderer_rule.get_attr("d"),
                          renderer_rule.renderer_filter())
             groups.setdefault(filter_id, []).append(renderer_rule)

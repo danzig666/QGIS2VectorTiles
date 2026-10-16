@@ -1363,6 +1363,12 @@ class RulesExporter:
             return True
         for lid in self._run_on_workers(tasks, handle):
             left[lid] = sources[lid]
+            # A worker that stopped may have left its files half written: an
+            # existing file counts as done further on.
+            read = join(self.utils_dir, f"materialized_{lid}.{_TEMP_LAYER_FORMAT}")
+            for path in [targets[lid]] + ([read] if lid not in materialized else []):
+                if exists(path):
+                    os.remove(path)
         if left and not self._is_cancelled():
             read = {lid: materialized[lid] for lid in left if lid in materialized}
             read.update(self._materialize_sources_serial(
@@ -1436,7 +1442,12 @@ class RulesExporter:
             return False
         left = self._run_on_workers([(task[0], task[1]) for task in tasks], handle)
         reported = set(outputs)
-        here += [grp for grp in left if grp.output_dataset not in reported and grp not in here]
+        lost = [grp for grp in left if grp.output_dataset not in reported and grp not in here]
+        for grp in lost:  # a stopped worker's half-written dataset is not a result
+            path = join(self.utils_dir, f"{grp.output_dataset}.{_TEMP_RULE_FORMAT}")
+            if exists(path):
+                os.remove(path)
+        here += lost
         self._order_diagnostics(before, rule_groups)
         order = {grp.output_dataset: index for index, grp in enumerate(rule_groups)}
         return sorted(here, key=lambda grp: order[grp.output_dataset])
@@ -1541,6 +1552,9 @@ class RulesExporter:
     def _dataset_key_parts(self, src: _SourceSnapshot, grp: _RuleGroupSnapshot):
         group = {f.name: getattr(grp, f.name) for f in dataclasses.fields(grp)
                  if f.name not in ("flat_rules", "output_dataset", "layer_name")}
+        # Worked out from the live label / centroid settings ("label every
+        # part", "on every part"), not stored in the snapshot yet.
+        group["keep_biggest_part"] = self._keep_biggest_part(grp)
         if grp.recipe is None or grp.recipe.kind != "color_bands":
             # Only colour bands depend on the first zoom (bands under a pixel
             # there are merged); other datasets are reused under a new range.
@@ -3446,6 +3460,7 @@ class RulesExporter:
         self._group_tokens = []
 
     def _release_all_layers(self) -> None:
+        self._point_group_cache.clear()  # open base layers and their features
         self._mem.clear()
         self._shared.clear()
         self._shared_tokens.clear()

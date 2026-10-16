@@ -146,6 +146,7 @@ export class Search {
   }
 
   close() {
+    this.seq += 1;  // a query still running must not reopen the list
     this.list.hidden = true;
     this.input.setAttribute("aria-expanded", "false");
     this.input.removeAttribute("aria-activedescendant");

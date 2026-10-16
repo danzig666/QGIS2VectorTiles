@@ -17,6 +17,7 @@ import itertools
 import json
 import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -532,6 +533,36 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
 FLAT_STATE = ".q2vt-files.json"
 
 
+def _fs_name(rel: str) -> str:
+    name = rel
+    if os.name == "nt":
+        name = "/".join(part.rstrip(". ") for part in name.split("/"))
+    return os.path.normcase(name).lower() if os.name == "nt" or sys.platform == "darwin" else name
+
+
+def _flat_state(path: str) -> set:
+    """The files an earlier unversioned export wrote (its state file), only
+    safe relative paths outside releases/; anything unreadable: none."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    files = state.get("files") if isinstance(state, dict) and state.get("format") == "qwebmap-local-files" \
+        else None
+    if not isinstance(files, list):
+        return set()
+    out = set()
+    for rel in files:
+        if not isinstance(rel, str) or rel == FLAT_STATE or rel.split("/")[0] == "releases":
+            continue
+        try:
+            out.add(safe_relative_path(rel))
+        except PublishingError:
+            continue
+    return out
+
+
 def flatten_release(release, publication_dir: str, progress=None) -> None:
     """Local output without versions: the release's site (a whole site with
     its own index.html, as in the offline ZIP) moves straight into
@@ -541,22 +572,17 @@ def flatten_release(release, publication_dir: str, progress=None) -> None:
     site = release.release_dir
     files = walk_files(site)
     state_path = os.path.join(publication_dir, FLAT_STATE)
-    try:
-        with open(state_path, encoding="utf-8") as handle:
-            previous = set(json.load(handle).get("files", []))
-    except (OSError, ValueError, AttributeError):
-        previous = set()
+    previous = _flat_state(state_path)
     entry = "index.html"
     for rel in sorted(files, key=lambda r: r == entry):  # the entry page last
         target = os.path.join(publication_dir, *rel.split("/"))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         os.replace(os.path.join(site, *rel.split("/")), target)
-    stale = sorted(previous - set(files))
+    # Compared as the file system does (Windows, macOS: no case; Windows:
+    # no trailing dots or spaces): never the file just written.
+    written = {_fs_name(rel) for rel in files}
+    stale = sorted(rel for rel in previous if _fs_name(rel) not in written)
     for rel in stale:
-        try:
-            safe_relative_path(rel)
-        except PublishingError:
-            continue
         try:
             os.remove(os.path.join(publication_dir, *rel.split("/")))
         except OSError:

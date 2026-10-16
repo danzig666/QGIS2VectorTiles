@@ -198,8 +198,10 @@ export class ParcelReport {
   }
 
   async show(key) {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
     let record = null;
     try { record = await this.get(key); } catch { record = null; }
+    if (ticket !== this.ticket) return null;  // another parcel was clicked meanwhile
     this.clearMarkers();
     this.container.replaceChildren();
     if (this.panel) { this.panel.select("parcel"); this.panel.setOpen(true); }

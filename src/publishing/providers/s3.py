@@ -202,8 +202,26 @@ class S3Provider(Provider):
             params["IfMatch"] = if_match
         if if_none_match and self.conditional_writes:
             params["IfNoneMatch"] = "*"
-        response = self._call("put_object", **params)
+        try:
+            response = self._call("put_object", **params)
+        except PublishingError as error:
+            same = self._already_there(error, relative, sha256, len(data)) if if_none_match else None
+            if same is None:
+                raise
+            return same
         return response.get("ETag", "")
+
+    def _already_there(self, error, relative: str, sha256: str, size: int) -> Optional[str]:
+        """After a precondition failure on a create: the object's ETag when it
+        is this very content (a retry of a write whose answer was lost: the
+        first attempt stored it), else None."""
+        if error.code != "Q2VT_PUB_ACTIVATION_CONFLICT" or not sha256:
+            return None
+        existing = self.head(relative)
+        if existing and (existing.get("metadata") or {}).get("sha256") == sha256 \
+                and existing.get("size") == size:
+            return existing.get("etag") or ""
+        return None
 
     def put_entry_aliases(self, index_html: bytes, cache_control: str) -> bool:
         """Object storage has no directory index: ``/maps/arlo/`` and
@@ -309,7 +327,13 @@ class S3Provider(Provider):
                   "MultipartUpload": {"Parts": [{"PartNumber": n, "ETag": parts[n]} for n in sorted(parts)]}}
         if self.conditional_writes:
             params["IfNoneMatch"] = "*"
-        response = self._call("complete_multipart_upload", **params)
+        try:
+            response = self._call("complete_multipart_upload", **params)
+        except PublishingError as error:
+            same = self._already_there(error, relative, sha256, size)
+            if same is None:
+                raise
+            response = {"ETag": same}
         if journal is not None:
             journal.update(relative, {"completed": True})
         return response.get("ETag", "")
@@ -351,9 +375,19 @@ class S3Provider(Provider):
             response = self._call("list_objects_v2", **params)
             keys = [{"Key": o["Key"]} for o in response.get("Contents", []) if o["Key"].startswith(prefix)]
             for start in range(0, len(keys), 1000):
-                self._call("delete_objects", Bucket=self.bucket,
-                           Delete={"Objects": keys[start:start + 1000], "Quiet": True})
-                deleted += len(keys[start:start + 1000])
+                batch = keys[start:start + 1000]
+                result = self._call("delete_objects", Bucket=self.bucket,
+                                    Delete={"Objects": batch, "Quiet": True}) or {}
+                # A 200 answer can still list keys it could not delete.
+                errors = result.get("Errors") or []
+                deleted += len(batch) - len(errors)
+                if errors:
+                    first = errors[0]
+                    raise ProviderError(
+                        "Q2VT_PUB_UPLOAD", f"{len(errors)} object(s) of release {release_id} could not "
+                        f"be deleted ({first.get('Code', '')}: {first.get('Key', '')}).",
+                        detail="\n".join(f"{e.get('Key')}: {e.get('Code')} {e.get('Message', '')}"
+                                         for e in errors[:50]))
             if not response.get("IsTruncated"):
                 return deleted
             token = response.get("NextContinuationToken")

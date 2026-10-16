@@ -95,7 +95,9 @@ export class Basemap {
   async set(id) {
     if (!this.available) return;
     if (id !== "none" && !this.flavors.has(id) && !this.xyz.has(id)) id = "none";
+    const token = (this.token = (this.token || 0) + 1);
     const layers = id === "none" ? [] : this.xyz.has(id) ? this.xyzLayers(id) : await this.layers(id);
+    if (token !== this.token) return;  // another basemap was chosen while this one loaded
     for (const layerId of this.layerIds) if (this.map.getLayer(layerId)) this.map.removeLayer(layerId);
     this.layerIds = [];
     const before = this.beforeId();

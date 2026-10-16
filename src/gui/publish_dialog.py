@@ -18,6 +18,7 @@ kept in the QGIS authentication database or only for this session.
   Review tab.
 """
 
+import copy
 import datetime as _dt
 import os
 import traceback
@@ -201,6 +202,23 @@ class PublishDialog(QDialog):
         self.profile = self._load_profile()
         self._build()
         self._populate(self.profile)
+        self._review_fp = None        # disclosure fingerprint shown on the Review tab
+        self._project_gone = False    # the project was closed (File > Open, New)
+        self._saved_json = self._profile_json()
+        # Another project opened while the window is open: it must not save
+        # this project's settings into the new one.
+        self.project.cleared.connect(self._on_project_cleared)
+
+    def _profile_json(self):
+        try:
+            return store.dumps_profile(self.collect())
+        except Exception:  # noqa: BLE001 - only a comparison
+            return None
+
+    def _on_project_cleared(self):
+        self._project_gone = True
+        if self.task is None and self.feedback is None:
+            self.close()
 
     # ------------------------------------------------------------------ profile
     def _default_profile(self) -> PublicationProfile:
@@ -1857,20 +1875,19 @@ class PublishDialog(QDialog):
                 combo.setLayer(project_layer(layer_id))
             elif combo in (self.p_regulation, self.p_text):
                 combo.setLayer(None)
-        if info.text_code_field:
-            self.p_text_code.setField(info.text_code_field)
-        if info.text_field:
-            self.p_text_field.setField(info.text_field)
+            elif info.enabled:  # these two have no empty choice: say so, not a silent other layer
+                self.log(tr("Parcel report: a layer of these settings is not in this project; "
+                            "check the Parcel report tab."))
+        # Fields as in these settings (empty ones too: not the previous settings' choice).
+        self.p_text_code.setField(info.text_code_field or "")
+        self.p_text_field.setField(info.text_field or "")
         self._fill_fields_table(self.p_fields, self.p_layer.currentLayer(), info.fields)
         self._fill_fields_table(self.p_zone_fields, self.p_zoning.currentLayer(), info.zoning_fields)
         self._fill_fields_table(self.p_regulation_fields, self.p_regulation.currentLayer(), info.regulation_fields)
-        if info.key_field:
-            self.p_key.setField(info.key_field)
-        if info.zoning_code_field:
-            self.p_code.setField(info.zoning_code_field)
+        self.p_key.setField(info.key_field or "")
+        self.p_code.setField(info.zoning_code_field or "")
         self._guess_zone_code(self.p_zoning.currentLayer())  # an id field saved before: the real code
-        if info.regulation_code_field:
-            self.p_regulation_code.setField(info.regulation_code_field)
+        self.p_regulation_code.setField(info.regulation_code_field or "")
         cuts = {c.layer_id: c for c in info.cut_lines}
         restrictions = {r.layer_id: r for r in info.restrictions}
         self.p_cuts.clear()
@@ -2691,6 +2708,11 @@ class PublishDialog(QDialog):
         """``quiet`` (closing the window): no message, and settings with
         problems are not saved, so the last valid ones stay (an invalid
         profile would not load next time)."""
+        if self._project_gone:
+            if not quiet:
+                QMessageBox.warning(self, tr("Settings"), tr("The project these settings belong to was "
+                                                             "closed; they are not saved."))
+            return False
         profile = self.collect()
         self._save_xyz_connections()
         problems = validate(profile)
@@ -2699,6 +2721,7 @@ class PublishDialog(QDialog):
                 QMessageBox.warning(self, tr("Settings"), "\n".join(problems[:12]))
             return False
         store.save_profile(self.project, profile)
+        self._saved_json = store.dumps_profile(profile)
         self.status.setText(tr("Settings saved in the project (save the project file to keep them)."))
         return True
 
@@ -2818,6 +2841,10 @@ class PublishDialog(QDialog):
     def _busy(self, busy: bool):
         for button in (self.btn_save, self.btn_export, self.btn_publish, self.btn_close):
             button.setEnabled(not busy)
+        # The settings stay as the export / upload read them: no editing,
+        # importing or presets meanwhile.
+        self.tabs.setEnabled(not busy)
+        self.btn_settings_file.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
 
     def cancel(self):
@@ -2873,8 +2900,10 @@ class PublishDialog(QDialog):
             return
         from ..publishing.preview_server import PreviewServer  # pylint: disable=import-outside-toplevel
         if self.preview_server is None:
-            self.preview_server = PreviewServer(os.path.dirname(self.local_result.publication_dir)).start()
-        url = self.preview_server.url(f"{os.path.basename(self.local_result.publication_dir)}/index.html")
+            # The publication folder only: not the work files, the cache or
+            # other maps next to it.
+            self.preview_server = PreviewServer(self.local_result.publication_dir).start()
+        url = self.preview_server.url("index.html")
         self.log(tr("Preview: {}").format(url))
         QDesktopServices.openUrl(QUrl(url))
 
@@ -3136,6 +3165,7 @@ class PublishDialog(QDialog):
         box.exec()
 
     def show_history(self):
+        self.collect()  # the destination as now on the tab, not as last saved
         try:
             provider = self._provider()
             releases = provider.list_releases()
@@ -3254,6 +3284,7 @@ class PublishDialog(QDialog):
                   if review else tr("Approved earlier for this exact data scope.")]
         self.review.setPlainText("\n".join(lines))
         self.approve.setChecked(not review)
+        self._review_fp = disclosure_fingerprint(profile)
 
     @staticmethod
     def _target_url(profile):
@@ -3272,7 +3303,10 @@ class PublishDialog(QDialog):
                 self.public_url = QUrl.fromLocalFile(self.local_result.entry_path).toString()
                 self.btn_open.setEnabled(True)
             return
-        if needs_review(profile) and not self.approve.isChecked():
+        # Approved only for what the Review tab showed: a field made public
+        # since then needs the review again.
+        if needs_review(profile) and (not self.approve.isChecked()
+                                      or self._review_fp != disclosure_fingerprint(profile)):
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
             self.refresh_review()
             QMessageBox.information(self, tr("Review"), tr("Review what becomes public and tick the "
@@ -3293,7 +3327,8 @@ class PublishDialog(QDialog):
             return
         from ..publishing.controller import publication_dirs  # pylint: disable=import-outside-toplevel
         _, work_dir = publication_dirs(profile)
-        self.task = UploadTask(self.local_result.release, profile, provider, work_dir,
+        # A copy: the worker thread must not see edits made meanwhile.
+        self.task = UploadTask(self.local_result.release, copy.deepcopy(profile), provider, work_dir,
                                credentials.secrets() if credentials is not None else [])
         self.task.progressChanged.connect(lambda value: self.progress.setValue(int(value)))
         self.task.message.connect(self.log)
@@ -3312,11 +3347,15 @@ class PublishDialog(QDialog):
             self._fail("ERROR", tr("Publishing failed."), task.error)
             return
         result = task.result
+        if result is None:  # cancelled before it started
+            self.status.setText(tr("Publishing cancelled."))
+            return
         for check in result.checks.checks:
             self.log(f"{'✔' if check.ok else '✖'} {check.name}: {check.detail}")
         if result.state == ReleaseState.PUBLISHED:
             self.public_url = result.stable_url
-            store.save_profile(self.project, self.profile)
+            if not self._project_gone:  # never into another project
+                store.save_profile(self.project, self.profile)
             self.btn_open.setEnabled(bool(self.public_url))
             self.btn_copy.setEnabled(bool(self.public_url))
             if result.versioned_url:
@@ -3359,18 +3398,33 @@ class PublishDialog(QDialog):
         super().showEvent(event)
         self._give_up_drawing()  # opened again (Web menu) while drawing
 
-    def done(self, result):  # Escape / reject() close without a closeEvent
-        self._save_geometry()
+    def done(self, result):  # every close of a shown window: Close, title bar ✕ and Escape
+        if self.feedback is not None:
+            return  # a local export is running (its Cancel button stops it)
+        self._closing()
         super().done(result)
 
-    def closeEvent(self, event):  # noqa: N802
-        self._give_up_drawing()  # closed (plugin unloaded) while drawing
+    def _closing(self):
+        """Settings and window geometry saved, project link ended: on every
+        close (done(), or closeEvent for a hidden window)."""
+        self._give_up_drawing()
         self._save_geometry()
         if self.task is not None:
             QMessageBox.information(self, tr("Web map"), tr("Publishing is still running in the "
                                                             "background; see the task bar."))
+        if not self._project_gone:
+            try:
+                # Saved only when changed: closing must not mark the project modified.
+                if self._profile_json() != self._saved_json:
+                    self.save_settings(quiet=True)
+            except Exception:  # noqa: BLE001 - closing must not fail
+                pass
         try:
-            self.save_settings(quiet=True)
-        except Exception:  # noqa: BLE001 - closing must not fail
+            self.project.cleared.disconnect(self._on_project_cleared)
+        except (TypeError, RuntimeError):
             pass
-        super().closeEvent(event)
+
+    def closeEvent(self, event):  # noqa: N802
+        if not self.isVisible():  # hidden (drawing the extent, or never shown): no done()
+            self._closing()
+        super().closeEvent(event)  # a shown window: reject() -> done()

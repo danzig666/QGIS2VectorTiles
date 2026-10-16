@@ -66,6 +66,8 @@ def detail_zoom(layers: Iterable[LayerDetail], min_zoom: int, max_zoom: int) -> 
     """The lowest zoom whose grid resolves every layer's finest detail."""
     zoom = min_zoom
     for layer in layers:
+        if (layer.detail is None or layer.detail <= 0) and not (layer.features or layer.points):
+            continue  # nothing in the extent: no say in the zoom
         if layer.detail is None or layer.detail <= 0:
             return max_zoom  # unknown: keep every zoom
         step = layer.detail / DETAIL_STEPS
@@ -152,8 +154,17 @@ def measure_layer(layer, extent_3857, transform_context, sample: int = SAMPLE) -
         detail.detail = _point_spacing(points, QgsSpatialIndex)
     else:
         detail.detail = percentile(segments, 0.01)
-    # A sample of a larger layer: scale its amounts to the whole.
-    total = layer.featureCount()
+    # A sample of a larger layer: scale its amounts to the features in the
+    # extent (not the whole layer: a national layer in a town's extent).
+    total = read
+    if read >= sample:
+        try:
+            within = QgsFeatureRequest().setNoAttributes().setFlags(QgsFeatureRequest.NoGeometry)
+            within.setDestinationCrs(request.destinationCrs(), transform_context)
+            within.setFilterRect(extent_3857)
+            total = sum(1 for _ in layer.getFeatures(within))
+        except Exception:  # pylint: disable=broad-except
+            total = layer.featureCount()
     if read >= sample and total > read:
         factor = total / read
         detail.area *= factor

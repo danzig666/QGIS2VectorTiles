@@ -13,6 +13,8 @@ servers are not enough. This server:
 * sends the content types of ``content_types.py`` and ``no-cache``;
 * refuses paths outside the served folder (``..``, absolute, symlinks
   leading out) and never serves directory listings;
+* answers only requests addressed to it (Host 127.0.0.1 / localhost) and
+  sends no CORS headers unless asked, so other web pages cannot read it;
 * records requests (path, status, bytes sent) for tests and diagnostics.
 
 ``PreviewServer`` runs in a daemon thread; ``stop()`` (or plugin unload via
@@ -80,7 +82,17 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return real if os.path.isfile(real) else ""
 
+    def _host_ok(self) -> bool:
+        """Only requests addressed to this loopback server (a page elsewhere
+        cannot reach it through a DNS name pointed at 127.0.0.1)."""
+        port = self.server.server_address[1]  # type: ignore[attr-defined]
+        host = (self.headers.get("Host") or "").strip().lower()
+        return host in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
     def _send(self, head_only: bool):
+        if not self._host_ok():
+            self._error(HTTPStatus.FORBIDDEN)
+            return
         target = self._resolve()
         if target is None:
             self._error(HTTPStatus.FORBIDDEN)
@@ -131,9 +143,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Expose-Headers",
-                         "Accept-Ranges, Content-Range, Content-Length, ETag")
+        if self.server.cors:  # type: ignore[attr-defined]
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Expose-Headers",
+                             "Accept-Ranges, Content-Range, Content-Length, ETag")
 
     def _error(self, status: HTTPStatus):
         body = f"{status.value} {status.phrase}".encode()
@@ -158,6 +171,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(head_only=True)
 
     def do_OPTIONS(self):  # noqa: N802
+        if not self.server.cors:  # type: ignore[attr-defined]
+            self._error(HTTPStatus.METHOD_NOT_ALLOWED)
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD")
@@ -169,10 +185,13 @@ class _Handler(BaseHTTPRequestHandler):
 class PreviewServer:
     """``with PreviewServer(folder) as server: open(server.url("index.html"))``."""
 
-    def __init__(self, root: str, port: int = 0, host: str = "127.0.0.1"):
+    def __init__(self, root: str, port: int = 0, host: str = "127.0.0.1", cors: bool = False):
         if host not in ("127.0.0.1", "::1", "localhost"):
             raise ValueError("The preview server only binds the loopback interface.")
         self.root = os.path.realpath(root)
+        # Off: other web pages open in the browser cannot read the files
+        # (the viewer is on the same origin and needs no CORS).
+        self.cors = cors
         self.host = host
         self.port = port
         self.httpd: Optional[ThreadingHTTPServer] = None
@@ -182,6 +201,7 @@ class PreviewServer:
         httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
         httpd.daemon_threads = True
         httpd.root = self.root  # type: ignore[attr-defined]
+        httpd.cors = self.cors  # type: ignore[attr-defined]
         httpd.requests = []  # type: ignore[attr-defined]
         httpd.lock = threading.Lock()  # type: ignore[attr-defined]
         self.httpd = httpd

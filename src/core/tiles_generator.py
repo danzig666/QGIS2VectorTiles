@@ -17,6 +17,8 @@ format.
   user cancels.
 """
 
+import collections
+import contextlib
 import heapq
 import itertools
 import json
@@ -27,6 +29,7 @@ import sqlite3
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 import zlib
@@ -155,12 +158,21 @@ class _OutputReader(threading.Thread):
         self.text = ""
 
     def run(self) -> None:
+        if not self.progress:  # the error text: read by lines, the last 20000 characters kept
+            tail, size = collections.deque(), 0
+            try:
+                for line in self.stream:
+                    tail.append(line)
+                    size += len(line)
+                    while size - len(tail[0]) >= 20000:
+                        size -= len(tail.popleft())
+            except (OSError, ValueError):
+                pass
+            self.text = "".join(tail)[-20000:]
+            return
         number, dots, last = "", 0, 0
         try:
             for char in iter(lambda: self.stream.read(1), ""):
-                if not self.progress:
-                    self.text = (self.text + char)[-20000:]
-                    continue
                 if char.isdigit():
                     number += char
                     continue
@@ -468,8 +480,11 @@ class GDALTilesGenerator:
             startupinfo.wShowWindow = 0
 
         tracker = TileProgress([self._job_cost(self.layers)])
-        with subprocess.Popen(
-            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # stderr to a file, not a pipe nobody reads while ogr2ogr runs: more
+        # than a pipe's worth of GDAL warnings blocked it for ever.
+        errors_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        with errors_file, subprocess.Popen(
+            cmd, env=env, stdout=subprocess.DEVNULL, stderr=errors_file, text=True,
             startupinfo=startupinfo, creationflags=creationflags,
         ) as proc:
             started = last_message = last_report = time.monotonic()
@@ -495,7 +510,9 @@ class GDALTilesGenerator:
                     raise TilesGenerationCancelled("Tile generation cancelled")
                 time.sleep(0.1)
                 main_thread.keep_responsive()
-            _, stderr = proc.communicate()
+            proc.wait()
+            errors_file.seek(0)
+            stderr = errors_file.read()
             if proc.returncode != 0:
                 error_msg = f"ogr2ogr failed.\nError: {stderr}"
                 if self.feedback:
@@ -623,16 +640,26 @@ class GDALTilesGenerator:
                                                     top_simplification=top, buffer=buffer,
                                                     simplification=simplification)
                     jobs.append((index, piece, command, cost * len(part) / max(1, len(inside)), owner))
-        self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
-        for index, (key, target, *_rest) in enumerate(groups):
-            pieces = [job for job in jobs if job[0] == index]
-            if len(pieces) > 1:  # a tile of one piece is copied as it is
-                merge_mbtiles([job[1] for job in pieces], target, min_zoom, max_zoom, workers=cpu)
-        stored = {target: self.cache.put_tiles(key, target)
-                  for key, target, *_ in groups if key and self.cache is not None}
-        merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom,
-                      workers=cpu)
-        shutil.rmtree(work, ignore_errors=True)  # kept in the cache; not needed here
+        try:
+            self._run_parallel([job[2] for job in jobs], [job[3] for job in jobs], [job[4] for job in jobs])
+            for index, (key, target, *_rest) in enumerate(groups):
+                pieces = [job for job in jobs if job[0] == index]
+                if len(pieces) > 1:  # a tile of one piece is copied as it is
+                    self._check_cancelled()
+                    merge_mbtiles([job[1] for job in pieces], target, min_zoom, max_zoom, workers=cpu)
+            self._check_cancelled()
+            stored = {target: self.cache.put_tiles(key, target)
+                      for key, target, *_ in groups if key and self.cache is not None}
+            merge_mbtiles([stored.get(path, path) for path in parts], output, min_zoom, max_zoom,
+                          workers=cpu)
+        finally:
+            # Kept in the cache; not needed here (nor the pieces of a failed
+            # or cancelled run).
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _check_cancelled(self) -> None:
+        if self.feedback is not None and self.feedback.isCanceled():
+            raise TilesGenerationCancelled("Tile generation cancelled")
 
     def _zoom_costs(self, members: List[QgsVectorLayer]) -> Dict[int, float]:
         """TileProgress cost of each zoom level of a layer's datasets."""
@@ -707,6 +734,8 @@ class GDALTilesGenerator:
                     del running[job]
                     progress.join(timeout=5)
                     errors.join(timeout=5)
+                    proc.stdout.close()
+                    proc.stderr.close()
                     now = time.monotonic()
                     if labels and job < len(labels):
                         self.layer_seconds[labels[job]] = \
@@ -752,12 +781,17 @@ class GDALTilesGenerator:
                 main_thread.keep_responsive()
             self._report(1.0)
         finally:
-            for proc, *_readers in running.values():
+            for proc, *readers in running.values():
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    proc.wait()
+                for reader in readers:
+                    reader.join(timeout=5)
+                proc.stdout.close()
+                proc.stderr.close()
 
     def _prune_tiles_outside_extent(self, output: str):
         """Drop tiles that do not intersect the requested extent.
@@ -770,7 +804,7 @@ class GDALTilesGenerator:
         if extent is None or extent.isEmpty() or not os.path.exists(output):
             return
         half = 20037508.342789244
-        with sqlite3.connect(output) as conn:
+        with contextlib.closing(sqlite3.connect(output)) as conn, conn:
             zooms = [row[0] for row in conn.execute("SELECT DISTINCT zoom_level FROM tiles")]
             for zoom in zooms:
                 n = 2 ** zoom
@@ -787,7 +821,7 @@ class GDALTilesGenerator:
                     "tile_column > ? OR tile_row < ? OR tile_row > ?)",
                     (zoom, x0, x1, tms[0], tms[1]))
             conn.commit()
-        with sqlite3.connect(output) as conn:
+        with contextlib.closing(sqlite3.connect(output)) as conn, conn:
             conn.execute("VACUUM")
 
     # --- Helpers ---
@@ -852,7 +886,7 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,
     if os.path.exists(output):
         os.remove(output)
     vector_layers, stats, bounds = [], [], None
-    with sqlite3.connect(output) as out:
+    with contextlib.closing(sqlite3.connect(output)) as out, out:
         out.execute("CREATE TABLE metadata (name text, value text)")
         out.execute("CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, "
                     "tile_data blob, UNIQUE (zoom_level, tile_column, tile_row))")
@@ -864,7 +898,7 @@ def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,
             out.execute("DETACH DATABASE part")
             return
         for path in parts:
-            with sqlite3.connect(path) as part:
+            with contextlib.closing(sqlite3.connect(path)) as part, part:
                 meta = dict(part.execute("SELECT name, value FROM metadata"))
             try:
                 info = json.loads(meta.get("json") or "{}")
