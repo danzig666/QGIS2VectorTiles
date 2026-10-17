@@ -13,6 +13,7 @@ import { loadLocale, t } from "./i18n.mjs";
 import { fetchChecked, notice, showError, state as diagnostics, warn } from "./diagnostics.mjs";
 import { installDiagrams } from "./diagrams.mjs";
 import { installShadows, prepareShadows } from "./label_shadows.mjs";
+import { styleLayers } from "./style_control.mjs";
 
 export const EXPECTED_MAPLIBRE = "6.14.0";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
@@ -324,8 +325,8 @@ export function followScreen(map, cap) {
 // in low memory: again when the window moves to another screen).
 export function screenHairlines(map) {
   const exported = new Map();
-  for (const layer of map.getStyle().layers || []) {
-    if (layer.metadata?.["q2vt:hairline"]) exported.set(layer.id, layer.paint?.["line-width"]);
+  for (const layer of styleLayers(map)) {
+    if (layer.metadata?.["q2vt:hairline"]) exported.set(layer.id, map.getPaintProperty(layer.id, "line-width"));
   }
   if (!exported.size) return;
   const scaled = (value, ratio) => (typeof value === "number" ? value / ratio

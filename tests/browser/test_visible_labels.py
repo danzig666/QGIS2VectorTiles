@@ -88,7 +88,10 @@ def test_overlap_if_required_uses_cooperative_overlap():
               "{ id: 'c', type: 'symbol', metadata: { 'q2vt:overlap': 'if-required' },"
               "  layout: { 'text-field': 'x', 'text-overlap': 'always' } },"
               "{ id: 'd', type: 'symbol', layout: { 'text-field': 'x' } }];"
-              "const map = { getStyle: () => ({ layers }), setLayoutProperty: (...a) => set.push(a),"
+              "const map = { getLayersOrder: () => layers.map((l) => l.id),"
+              "  getLayer: (id) => layers.find((l) => l.id === id),"
+              "  getLayoutProperty: (id, name) => layers.find((l) => l.id === id).layout[name],"
+              "  setLayoutProperty: (...a) => set.push(a),"
               "  addLayer: (l) => added.push(l), on: () => {} };"
               "const out = enableOverlapFallback(map);"
               "console.log(JSON.stringify({ set, added: added.length, layers: out.layers }));")
@@ -166,8 +169,14 @@ console.log(JSON.stringify([at([0, 0, 1, 1], false), at([0.49, 0.49, 1, 1], true
     assert stopped[0] > 0.6                     # stopped: moved onto the visible part
 
 
+# A stub map of plain layer definitions, as renderedLabelBoxes reads it.
+STUB = ("const stub = (layers) => ({getLayersOrder: () => layers.map((l) => l.id),"
+        " getLayer: (id) => layers.find((l) => l.id === id),"
+        " getLayoutProperty: (id, name) => (layers.find((l) => l.id === id).layout || {})[name]});")
+
+
 def _js(expression):
-    script = (f"import * as m from {json.dumps('file://' + MODULE)};"
+    script = (f"import * as m from {json.dumps('file://' + MODULE)};{STUB}"
               f"console.log(JSON.stringify({expression}));")
     run = subprocess.run(["node", "--input-type=module", "-e", script],
                          capture_output=True, text=True, check=True)
@@ -911,7 +920,7 @@ def test_rendered_label_boxes_follow_text_offset():
     expr = """(() => {
       const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 20,
                                                           'text-offset': [0, -0.75]}};
-      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+      const map = {...stub([town]), queryRenderedFeatures: () => [
         {layer: town, properties: {t: 'ABCD'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}}]};
       const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
       return m.renderedLabelBoxes(map, maplibregl, new Map(), 15, 0.001);
@@ -968,6 +977,7 @@ def test_pole_label_moves_off_a_maplibre_label_inside_its_polygon():
       const parkName = 'Greenfield Nature Reserve', placeName = 'Greenfield Visitor Centre and Shop';
       const map = {
         getStyle: () => ({sources, layers: layers.slice()}), getLayer: (id) => layers.find((l) => l.id === id),
+        getLayersOrder: () => layers.map((l) => l.id),
         addLayer: (l, before) => {
           const i = layers.findIndex((x) => x.id === before);
           if (i < 0) layers.push(l); else layers.splice(i, 0, l);
@@ -1014,7 +1024,7 @@ def test_rendered_labels_of_any_expression_are_measured():
         'text-field': ['format', ['get', 'a'], {}, ['get', 'b'], {'font-scale': 0.8}], 'text-size': 10}};
       const evaluated = (layer, t) => ({...layer, layout: {...layer.layout,
         'text-field': {sections: [{text: t}], toString() { return t; }}}});
-      const map = {getStyle: () => ({layers: [town, html]}), queryRenderedFeatures: () => [
+      const map = {...stub([town, html]), queryRenderedFeatures: () => [
         {layer: evaluated(town, 'Suburb'), properties: {name: 'Suburb'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
         {layer: evaluated(html, 'AB12'), properties: {a: 'AB', b: '12'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
       const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
@@ -1033,7 +1043,7 @@ def test_rendered_label_boxes_measure_each_label_with_its_own_text():
       const town = {id: 'town', type: 'symbol', layout: {'text-field': ['get', 't'], 'text-size': 10}};
       const evaluated = (t) => ({...town, layout: {...town.layout,
         'text-field': {sections: [{text: t}], toString() { return t; }}}});
-      const map = {getStyle: () => ({layers: [town]}), queryRenderedFeatures: () => [
+      const map = {...stub([town]), queryRenderedFeatures: () => [
         {layer: evaluated('ABCDEFGHIJ'), properties: {t: 'ABCDEFGHIJ'}, geometry: {type: 'Point', coordinates: [0.5, 0.5]}},
         {layer: evaluated('AB'), properties: {t: 'AB'}, geometry: {type: 'Point', coordinates: [0.2, 0.2]}}]};
       const maplibregl = {MercatorCoordinate: {fromLngLat: ([x, y]) => ({x, y})}};
@@ -1583,6 +1593,7 @@ def test_curved_line_layer_is_bent_by_maplibre_and_keeps_its_side():
       const layers = [road], sources = {t: {type: 'vector', minzoom: 0, maxzoom: 14}};
       const map = {
         getStyle: () => ({sources, layers: layers.slice()}), getLayer: (id) => layers.find((l) => l.id === id),
+        getLayersOrder: () => layers.map((l) => l.id),
         addLayer: (l) => layers.push(l), removeLayer: (id) => layers.splice(layers.findIndex((l) => l.id === id), 1),
         addSource: (id, spec) => { sources[id] = spec; }, getSource: () => ({setData: () => {}}),
         getLayoutProperty: () => 'visible', setLayoutProperty: () => {}, on: () => {}, off: () => {},

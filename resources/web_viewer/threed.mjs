@@ -6,6 +6,7 @@
 // above the basemap in 2D) and the elevations of profiles need no 3D view.
 import { t } from "./i18n.mjs";
 import { button } from "./icons.mjs";
+import { styleLayers } from "./style_control.mjs";
 import { resolveUrl, checkRelative } from "./transport.mjs";
 
 export const TERRAIN = "q2vt_terrain";
@@ -95,12 +96,15 @@ export class ThreeD {
   }
 
   addExtrusions() {
-    for (const layer of extrusionLayers(this.map.getStyle(), this.manifest)) {
+    // Only the fill layers are copied (not the whole style).
+    const fills = { layers: styleLayers(this.map).filter((l) => l.type === "fill")
+      .map((l) => JSON.parse(JSON.stringify(l.serialize()))) };
+    for (const layer of extrusionLayers(fills, this.manifest)) {
       const parent = layer.metadata["q2vt:3d-of"];
       // Right above its flat fill (the order of the QGIS layers is kept).
-      const layers = this.map.getStyle().layers;
-      const index = layers.findIndex((l) => l.id === parent);
-      const next = index >= 0 && index + 1 < layers.length ? layers[index + 1].id : undefined;
+      const order = this.map.getLayersOrder();
+      const index = order.indexOf(parent);
+      const next = index >= 0 && index + 1 < order.length ? order[index + 1] : undefined;
       this.map.addLayer(layer, next);
       this.extrusions.push(layer);
     }

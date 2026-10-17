@@ -94,3 +94,39 @@ def test_low_memory_caps_the_pixel_ratio(site, tmp_path, monkeypatch):
     for (width, device), (later, _) in zip(before, after):
         assert device == 3
         assert json.loads(width)[4] == pytest.approx(0.35 / 2) and json.loads(later)[4] == pytest.approx(0.35)
+
+
+def test_moving_and_switching_layers_do_not_copy_the_style(site, tmp_path):
+    """map.getStyle() copies every style layer (823 of them in a city's
+    map): the viewer reads MapLibre's own layers instead while the map is
+    moved, layers are switched and features clicked, for the boxes of
+    MapLibre's own labels (every label update of line and "around point"
+    labels) and the original paint of the layer switches."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    (out,) = _run(site, [{"eval": """const v = q2vtViewer, m = v.map, s = v.controls.state;
+      const asset = (name) => import(new URL(`assets/${name}`, v.releaseUrl).href);
+      const [labels, styles, maplibregl] = await Promise.all(
+        ['visible_labels.mjs', 'style_control.mjs', 'maplibre-gl.mjs'].map(asset));
+      let copies = 0;
+      const own = m.getStyle;
+      m.getStyle = function (...args) { copies += 1; return own.apply(this, args); };
+      const settle = () => new Promise((r) => setTimeout(r, 700));
+      const id = v.manifest.layers[0].id, styleId = v.manifest.components[0].styleLayerIds[0];
+      const original = new styles.StyleControl(m, v.manifest).originals.get(styleId);
+      labels.renderedLabelBoxes(m, maplibregl, new Map(), m.getZoom(), 1e-6);
+      m.jumpTo({ center: m.getCenter(), zoom: m.getZoom() + 1 }); await settle();
+      s.setIn('layers', id, false); await settle();
+      const hidden = m.getLayoutProperty(styleId, 'visibility');
+      s.setIn('layers', id, true); await settle();
+      s.setIn('opacity', id, 0.5); await settle();
+      m.panBy([150, 80], { duration: 0 }); await settle();
+      m.fire('click', { point: m.project(m.getCenter()), lngLat: m.getCenter(), originalEvent: new MouseEvent('click') });
+      await settle();
+      m.getStyle = own;
+      const def = m.getStyle().layers.find((l) => l.id === styleId);
+      return { copies, hidden, type: original.type === def.type,
+               zooms: [original.minzoom, original.maxzoom], filter: JSON.stringify(original.filter ?? null) };"""}],
+                  tmp_path)
+    assert out["copies"] == 0 and out["hidden"] == "none" and out["type"], out
+    assert out["zooms"][0] < out["zooms"][1] and out["filter"] != "", out

@@ -18,6 +18,13 @@ const OPACITY = {
 const RUNTIME_SUFFIXES = ["_q2vt_overlap"];
 export const LOADER_PREFIX = "q2vt_visible_loader_";
 
+// MapLibre's own style layers in drawing order (id, type, source, metadata,
+// minzoom, maxzoom, filter; paint and layout by map.getPaintProperty and
+// map.getLayoutProperty): map.getStyle() copies the whole style each call.
+export function styleLayers(map) {
+  return map.getLayersOrder().map((id) => map.getLayer(id)).filter((layer) => layer && layer.type !== "custom");
+}
+
 export function scaleValue(value, factor) {
   if (factor === 1) return value;
   if (value === undefined || value === null) return factor;
@@ -80,22 +87,20 @@ export class StyleControl {
     this.components = new Map(manifest.components.map((c) => [c.id, c]));
     this.owner = new Map(); // style layer id -> component
     this.originals = new Map(); // style layer id -> {filter, paint: {prop: value}}
-    const style = map.getStyle();
-    const ids = new Set(style.layers.map((l) => l.id));
     for (const component of manifest.components) {
       for (const id of component.styleLayerIds) {
         for (const styleId of [id, ...RUNTIME_SUFFIXES.map((s) => id + s)]) {
-          if (!ids.has(styleId)) continue;
+          const def = map.getLayer(styleId);
+          if (!def || def.type === "custom") continue;
           this.owner.set(styleId, component);
-          const def = style.layers.find((l) => l.id === styleId);
           const paint = {};
-          for (const prop of OPACITY[def.type] || []) paint[prop] = def.paint ? def.paint[prop] : undefined;
+          for (const prop of OPACITY[def.type] || []) paint[prop] = map.getPaintProperty(styleId, prop);
           // An animated marker's frames: the Animator owns their icon-opacity.
           if (def.metadata && def.metadata["q2vt:frame"]) delete paint["icon-opacity"];
           // The zooms it draws its data in (q2vt:zooms: before its range was
           // widened to bridge tile loading, see bridge_zoom_bands).
           const [low, high] = (def.metadata && def.metadata["q2vt:zooms"]) || [def.minzoom, def.maxzoom];
-          this.originals.set(styleId, { filter: def.filter, paint, minzoom: low ?? 0, maxzoom: high ?? 24, type: def.type });
+          this.originals.set(styleId, { filter: map.getFilter(styleId), paint, minzoom: low ?? 0, maxzoom: high ?? 24, type: def.type });
         }
       }
     }
