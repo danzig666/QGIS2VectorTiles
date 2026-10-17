@@ -179,8 +179,12 @@ def test_one_search_box_finds_fields_and_streets(site, tmp_path):
         {"type": ["#q2vt-search", "fő utca"]}, {"wait": 1500},
         {"eval": """return [...document.querySelectorAll('#q2vt-results li[role=option]')].map((li) =>
           [li.querySelector('.q2vt-result-label').textContent, li.querySelector('.q2vt-layer-name').textContent]);"""},
-        {"press": "Enter"}, {"wait": 2500},
-        {"eval": """const m = q2vtViewer.map, c = m.getCenter();
+        {"press": "Enter"}, {"wait": 500},
+        # The marker once the map has flown there (2-3 s on a loaded machine).
+        {"eval": """const m = q2vtViewer.map;
+          const marked = () => m.getSource('q2vt_search_marker')?.serialize().data.features.length;
+          for (let i = 0; i < 100 && !(marked() && !m.isMoving()); i++) await new Promise((r) => setTimeout(r, 100));
+          const c = m.getCenter();
           return { popups: document.querySelectorAll('.maplibregl-popup').length,
             marker: m.getSource('q2vt_search_marker').serialize().data.features.length, zoom: m.getZoom(), lat: c.lat,
             value: document.getElementById('q2vt-search').value };"""},
