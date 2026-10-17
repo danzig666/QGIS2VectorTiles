@@ -502,7 +502,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.48.0**. Newest first:
+This README describes QWebMap **4.48.1**. Newest first:
+
+**4.48.1** — fixes
+- A polygon outline no longer draws a line where the export extent cuts the polygons (since 4.47.0); thin hairlines are no longer half as wide in the overview map; marker images per zoom kept for data-defined markers; cached tiles redone when an outline gets wider.
 
 **4.48.0** — still less browser memory
 - *Lighter tiles when zoomed out* (on by default): features under half a pixel are left out of the lower zooms' tiles, which are also simplified a little more; map-unit markers no longer get a style layer per zoom (a city map: 809 → 473 layers); in low memory the map draws at most at pixel ratio 2, releases out-of-view tiles when the tab is hidden or the map is idle, and the overview map draws only plain fills and lines.
