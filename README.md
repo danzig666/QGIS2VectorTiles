@@ -233,10 +233,12 @@ into a public, self-contained web map. The window title shows the plugin version
   subtitle), viewer language (English or Hungarian), attribution, logo and accent colour.
 - **Zoom range** (*Map* tab): minimum and maximum tile zoom, and how far visitors can zoom in
   beyond the last tiles.
-- **Published area** (*Map* tab → *Extent*): a layer's extent (follows the layer's data), the
-  current map canvas (*Map canvas*), or a rectangle drawn on the QGIS map (*Draw…*: click two
-  opposite corners; right click or Esc cancels). *Keep the web map on the extent* (on by
-  default) stops visitors from panning away.
+- **Published area** (*Map* tab → *Extent*): *Current map view* (what the QGIS map shows at each
+  export; the window asks before every such export, with the area's size and tile count, and can
+  be told not to ask again for the project), *Extent of a layer* (follows the layer's data), or a
+  *Fixed area*: drawn on the QGIS map (*Draw…*: click two opposite corners; right click or Esc
+  cancels) or the view frozen (*Freeze view*). *Show on map* outlines the area on the QGIS map.
+  *Keep the web map on the extent* (on by default) stops visitors from panning away.
 - **Layers** (*Map* tab): per layer or group, *Publish*, *At start* (visible when the map opens)
   and *Switchable* (untick it to make a layer or group always shown); per layer, *Legend*.
   Publishing never changes the project's own layer visibility.

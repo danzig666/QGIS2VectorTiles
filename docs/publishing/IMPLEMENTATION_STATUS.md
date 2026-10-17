@@ -311,7 +311,7 @@ export and import settings to and from file in the gui".
 
 | Change | Detail |
 |---|---|
-| Extent | layer combo (any layer; empty entry = fixed extent) + *Map canvas* button; `view.extentLayer` (schema) - the layer's extent is recomputed at every export; a removed layer keeps its last extent, fixed; summary "Layer extent: about 13.2 × 10.2 km / E … / N …" instead of EPSG:3857 numbers |
+| Extent | `view.extentMode` (4.46): *Current map view* (`canvas`, the default: the map canvas at each export, confirmed before it with size and tile count unless `view.confirmCanvasExtent` is off), *Extent of a layer* (`layer`, `view.extentLayer`, recomputed at every export), *Fixed area* (`fixed`: drawn, or frozen with *Freeze view*); *Show on map* flashes it on the canvas; a removed layer keeps its last extent, fixed; profiles saved before 4.46 without a layer take the map view (their stored extent was mostly the view when the window first opened); summary "Layer extent: about 13.2 × 10.2 km / E … / N …" instead of EPSG:3857 numbers |
 | Interaction tab | the field note did not wrap (≈2000 px minimum width) and squeezed the layer list; it wraps now; the list has a 220 px minimum, wraps names, shows layer icons and tooltips; the splitter cannot collapse it |
 | Settings file | *Settings file…* menu: export (`.q2vt.json`: profile + names of the layers it refers to) and import (bare profiles too); layers matched by id, else unique name; unmatched left out and reported; same web map or a new one |
 

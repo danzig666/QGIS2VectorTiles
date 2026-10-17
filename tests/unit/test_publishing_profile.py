@@ -188,3 +188,21 @@ def test_new_settings_fail_clearly(change, message):
     with pytest.raises(PublishingError) as error:
         load_profile(data)
     assert message in error.value.message
+
+
+def test_profiles_saved_before_the_extent_mode_take_the_map_view():
+    """Saved by 4.45 and older: a stored extent without a layer was mostly
+    the map view when the window first opened, kept for good. Such
+    profiles take the map view at each export now; a layer's stays."""
+    data = json.loads(dumps(_profile()))
+    for key in ("extentMode", "confirmCanvasExtent"):
+        data["view"].pop(key)
+    data["view"]["extent"] = [2119000, 6019000, 2123000, 6023000]
+    view = load_profile(json.dumps(data)).view
+    assert view.extent_mode == "canvas" and view.extent is None and view.confirm_canvas_extent
+    data["view"]["extentLayer"] = "parcels_1"
+    view = load_profile(json.dumps(data)).view
+    assert view.extent_mode == "layer" and view.extent == [2119000, 6019000, 2123000, 6023000]
+    data["view"]["extentMode"] = "elsewhere"
+    with pytest.raises(PublishingError):
+        load_profile(json.dumps(data))

@@ -52,7 +52,7 @@ def test_streets_inside_the_extent_layer_join_the_search(tmp_path):
     area = _area(project)
     planet = protomaps_planet(str(tmp_path / "planet.pmtiles"))
     profile.basemap.kind, profile.basemap.source, profile.basemap.max_zoom = "protomaps", planet, 14
-    profile.view.extent_layer = area.id()
+    profile.view.extent_mode, profile.view.extent_layer = "layer", area.id()
     profile.interaction.street_search = True
     result = export_local(project, profile, EXTENT)
     manifest, entries = _search(result)

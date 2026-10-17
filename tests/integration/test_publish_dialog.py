@@ -384,7 +384,8 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
     w.back()
     expected = w.map_extent(100, 50, 200, 110)
     assert [round(v) for v in dialog.profile.view.extent] == expected
-    assert dialog.profile.view.extent_layer == "" and "Fixed extent" in dialog.extent_label.text()
+    assert dialog.profile.view.extent_layer == "" and "Fixed area" in dialog.extent_label.text()
+    assert dialog.profile.view.extent_mode == "fixed"
     dialog._draw_extent()  # pylint: disable=protected-access
     w.click(150, 80)
     w.esc()
@@ -412,6 +413,58 @@ def test_the_extent_is_drawn_on_the_map(project, messages):
     w.esc()
     assert canvas.mapTool() is pan
     w.back()
+    dialog.close()
+
+
+def test_the_extent_is_the_map_view_at_export_unless_chosen(project, messages, monkeypatch):
+    """Not chosen (a new project), the published area is what the map shows
+    at each export, not the view when the window first opened; before such
+    an export the window asks (size, tiles) and can be cancelled, or told
+    not to ask again for the project. "Freeze view" fixes the view."""
+    from qgis.core import QgsRectangle
+    from qgis.PyQt.QtWidgets import QMessageBox
+    w = _window_on_a_canvas()
+    dialog, canvas = w.dialog, w.canvas
+    view = dialog.profile.view
+    assert view.extent_mode == "canvas" and dialog.e_extent_mode.currentData() == "canvas"
+    assert not dialog.e_extent_layer.isEnabled()
+    first = dialog._extent()  # pylint: disable=protected-access
+    canvas.setExtent(QgsRectangle(2200000, 6100000, 2204000, 6103000))
+    moved = dialog._extent()  # pylint: disable=protected-access
+    assert moved.xMinimum() > first.xMaximum()  # the view now, not the first one
+    assert dialog.extent_label.text().startswith("Current map view")
+
+    asked = []
+
+    def answer(button_text, again=False):
+        def run(box):
+            asked.append(box.text())
+            box.checkBox().setChecked(again)
+            box._answer = next((b for b in box.buttons() if b.text() == button_text), None)
+        monkeypatch.setattr(QMessageBox, "exec", run)
+        monkeypatch.setattr(QMessageBox, "clickedButton", lambda box: box._answer)
+    answer("Cancel")
+    assert not dialog._confirm_extent()  # pylint: disable=protected-access
+    assert "current map view" in asked[-1] and " km" in asked[-1] and "tiles" in asked[-1]
+    answer("Export this view")
+    assert dialog._confirm_extent() and view.confirm_canvas_extent  # pylint: disable=protected-access
+    answer("Export this view", again=True)
+    assert dialog._confirm_extent() and not view.confirm_canvas_extent  # pylint: disable=protected-access
+    count = len(asked)
+    assert dialog._confirm_extent() and len(asked) == count  # not asked again
+
+    # Frozen: fixed from then on, nothing asked.
+    view.confirm_canvas_extent = True
+    dialog._use_canvas_extent()  # pylint: disable=protected-access
+    assert view.extent_mode == "fixed" and dialog.e_extent_mode.currentData() == "fixed"
+    frozen = dialog._extent()  # pylint: disable=protected-access
+    canvas.setExtent(QgsRectangle(2300000, 6200000, 2304000, 6203000))
+    assert dialog._extent() == frozen and dialog._confirm_extent()  # pylint: disable=protected-access
+    assert len(asked) == count
+    # The mode chosen again in the list: the map view at export again.
+    dialog.e_extent_mode.setCurrentIndex(dialog.e_extent_mode.findData("canvas"))
+    assert view.extent_mode == "canvas" and dialog._extent().xMinimum() > 2290000  # pylint: disable=protected-access
+    dialog._flash_extent()  # pylint: disable=protected-access
     dialog.close()
 
 

@@ -25,7 +25,7 @@ import traceback
 from urllib.parse import urlparse
 
 from qgis.core import (Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsCsException, QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer,
+                       QgsCsException, QgsGeometry, QgsIconUtils, QgsLayerTreeGroup, QgsLayerTreeLayer,
                        QgsMessageLog, QgsProcessingFeedback, QgsProject, QgsRasterLayer, QgsRectangle,
                        QgsSettings, QgsTask, QgsVectorLayer, QgsWkbTypes)
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer, QUrl, pyqtSignal
@@ -230,8 +230,6 @@ class PublishDialog(QDialog):
             if publishable(layer):
                 profile.layers.append(LayerConfig(layer.id(), included=node.isVisible(),
                                                   initially_visible=node.isVisible()))
-        if self.iface is not None:
-            profile.view.extent = self._canvas_extent_3857()
         profile.output.local_directory = self._default_local_directory()
         return profile
 
@@ -395,17 +393,36 @@ class PublishDialog(QDialog):
         form.addRow(tr("Maximum tile zoom"), self.e_max_zoom)
         form.addRow(tr("Maximum browser zoom (overzoom)"), self.e_max_view)
         self.e_limit_extent = QCheckBox(tr("Keep the web map on the extent (no panning or zooming away)"))
-        # Extent: a layer's extent (follows the layer) or a fixed one taken
-        # from the map canvas; summarized in words, not raw coordinates.
+        # Extent: the map view at each export (asked before it), a layer's
+        # extent (follows the layer) or a fixed area (drawn, or the view
+        # frozen); summarized in words, not raw coordinates.
         extent_box = QVBoxLayout()
+        mode_row = QHBoxLayout()
+        self.e_extent_mode = QComboBox()
+        for mode, text in (("canvas", tr("Current map view (at each export)")),
+                           ("layer", tr("Extent of a layer")),
+                           ("fixed", tr("Fixed area (drawn or frozen)"))):
+            self.e_extent_mode.addItem(text, mode)
+        self.e_extent_mode.setToolTip(tr(
+            "The published area. Current map view: what the QGIS map shows when you export "
+            "(you are asked each time). Extent of a layer: follows the layer when its data "
+            "changes. Fixed area: drawn on the map, or the map view frozen with “Freeze view”."))
+        self.e_extent_mode.currentIndexChanged.connect(self._extent_mode_changed)
+        show_button = QPushButton(tr("Show on map"))
+        show_button.setToolTip(tr("Outline the area that will be published on the QGIS map."))
+        show_button.clicked.connect(self._flash_extent)
+        show_button.setEnabled(self.iface is not None)
+        mode_row.addWidget(self.e_extent_mode, 1)
+        mode_row.addWidget(show_button)
+        extent_box.addLayout(mode_row)
         extent_row = QHBoxLayout()
         self.e_extent_layer = self._layer_combo(any_layer=True, allow_empty=True,
-                                                empty_text=tr("Fixed extent (from the map canvas)"))
-        self.e_extent_layer.setToolTip(tr("The published area: the extent of a layer (follows the "
-                                          "layer when its data changes), or a fixed area."))
+                                                empty_text=tr("(choose a layer)"))
+        self.e_extent_layer.setToolTip(tr("The published area is this layer's extent; it follows "
+                                          "the layer when its data changes."))
         self.e_extent_layer.layerChanged.connect(self._extent_layer_changed)
-        extent_button = QPushButton(tr("Map canvas"))
-        extent_button.setToolTip(tr("Fix the published area to what the QGIS map canvas shows now."))
+        extent_button = QPushButton(tr("Freeze view"))
+        extent_button.setToolTip(tr("Fix the published area to what the QGIS map shows now."))
         extent_button.clicked.connect(lambda: self._use_canvas_extent())
         extent_button.setEnabled(self.iface is not None)
         draw_button = QPushButton(tr("Draw…"))
@@ -831,7 +848,7 @@ class PublishDialog(QDialog):
         self.e_extent_layer.blockSignals(True)
         self.e_extent_layer.setLayer(None)
         self.e_extent_layer.blockSignals(False)
-        self._show_extent()
+        self._set_extent_mode("fixed")
 
     def _draw_extent(self):
         """The published area drawn on the map: this window steps aside
@@ -905,9 +922,40 @@ class PublishDialog(QDialog):
         self.profile.view.extent_layer = layer.id() if layer is not None else ""
         if layer is not None:
             self.profile.view.extent = self._layer_extent_3857(layer)
-        elif not self.profile.view.extent and self.iface is not None:
-            self.profile.view.extent = self._canvas_extent_3857()
+            self._set_extent_mode("layer")
+        elif self.profile.view.extent_mode == "layer":  # no layer: its last extent, fixed
+            self._set_extent_mode("fixed" if self.profile.view.extent else "canvas")
+        else:
+            self._show_extent()
+
+    def _set_extent_mode(self, mode):
+        """Shows ``mode`` in the window (without its side effects) and sets it."""
+        self.e_extent_mode.blockSignals(True)
+        self.e_extent_mode.setCurrentIndex(max(0, self.e_extent_mode.findData(mode)))
+        self.e_extent_mode.blockSignals(False)
+        self.profile.view.extent_mode = mode
+        self.e_extent_layer.setEnabled(mode == "layer")
         self._show_extent()
+
+    def _extent_mode_changed(self, _index=None):
+        mode = self.e_extent_mode.currentData() or "canvas"
+        if mode == "fixed" and not self.profile.view.extent and self.iface is not None:
+            self._use_canvas_extent()  # nothing fixed yet: the view now, frozen
+            return
+        if mode == "layer" and self.e_extent_layer.currentLayer() is not None:
+            self.profile.view.extent_layer = self.e_extent_layer.currentLayer().id()
+            self.profile.view.extent = self._layer_extent_3857(self.e_extent_layer.currentLayer())
+        self._set_extent_mode(mode)
+
+    def _flash_extent(self):
+        """The area that will be published, outlined on the QGIS map."""
+        extent = self._current_extent_3857()
+        if not extent or self.iface is None:
+            return
+        canvas = self.iface.mapCanvas()
+        geometry = QgsGeometry.fromRect(QgsRectangle(*extent))
+        canvas.flashGeometries([geometry], QgsCoordinateReferenceSystem("EPSG:3857"),
+                               flashes=4, duration=600)
 
     def _layer_extent_3857(self, layer):
         transform = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:3857"),
@@ -918,36 +966,91 @@ class PublishDialog(QDialog):
         return [box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()]
 
     def _current_extent_3857(self):
-        """The extent setting now: the chosen layer's extent (refreshed), else
-        the fixed extent, else the map canvas."""
-        layer = self.project.mapLayer(self.profile.view.extent_layer) \
-            if self.profile.view.extent_layer else None
+        """The extent setting now: the map canvas (current map view mode),
+        the chosen layer's extent (refreshed) or the fixed extent; a mode
+        without its layer or area falls back to the map canvas."""
+        view = self.profile.view
+        layer = self.project.mapLayer(view.extent_layer) \
+            if view.extent_mode == "layer" and view.extent_layer else None
         if layer is not None:
-            self.profile.view.extent = self._layer_extent_3857(layer)
-        return self.profile.view.extent or (self._canvas_extent_3857() if self.iface else None)
+            view.extent = self._layer_extent_3857(layer)
+        elif view.extent_mode == "canvas" or not view.extent:
+            if self.iface is None:
+                return view.extent
+            try:
+                # Kept as the one last used (an export of another view differs).
+                view.extent = self._canvas_extent_3857()
+            except QgsCsException:
+                return None
+        return view.extent
 
     def _show_extent(self):
-        extent = self.profile.view.extent
-        layer = self.project.mapLayer(self.profile.view.extent_layer) \
-            if self.profile.view.extent_layer else None
+        view = self.profile.view
+        layer = self.project.mapLayer(view.extent_layer) \
+            if view.extent_mode == "layer" and view.extent_layer else None
+        extent = self._current_extent_3857()
         if not extent:
-            self.extent_label.setText(tr("The map canvas extent\nat the time of export."))
+            self.extent_label.setText(tr("The map view at the time of export.")
+                                      if view.extent_mode == "canvas" else tr("Choose a layer."))
+            self.extent_label.setToolTip("")
             return
-        transform = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
-                                           QgsCoordinateReferenceSystem("EPSG:4326"), self.project)
-        box = transform.transformBoundingBox(QgsRectangle(*extent))
-        # Ground size: Web Mercator units shrink by cos(latitude).
-        import math  # pylint: disable=import-outside-toplevel
-        scale = math.cos(math.radians((box.yMinimum() + box.yMaximum()) / 2))
-        width = (extent[2] - extent[0]) * scale / 1000
-        height = (extent[3] - extent[1]) * scale / 1000
-        source = tr("Layer extent") if layer is not None else tr("Fixed extent")
+        width, height, box = self._extent_size_km(extent)
+        source = {"canvas": tr("Current map view"), "layer": tr("Layer extent")}.get(
+            view.extent_mode if view.extent_mode != "layer" or layer is not None else "canvas",
+            tr("Fixed area"))
         self.extent_label.setText(tr("{source}: about {w:.1f} × {h:.1f} km\n"
                                      "E {w0:.4f}° – {e0:.4f}°\nN {s0:.4f}° – {n0:.4f}°").format(
             source=source, w=width, h=height, w0=box.xMinimum(), e0=box.xMaximum(),
             s0=box.yMinimum(), n0=box.yMaximum()))
+        tips = {"canvas": tr("What the QGIS map shows when you export; you are asked before each "
+                             "export (set a layer or draw the area to publish the same area each time)."),
+                "fixed": tr("Drawn on the map, or the map view frozen with “Freeze view”.")}
         self.extent_label.setToolTip(tr("Extent of “{}”").format(layer.name()) if layer is not None
-                                     else tr("Fixed with “Map canvas”"))
+                                     else tips.get(view.extent_mode, tips["canvas"]))
+
+    def _extent_size_km(self, extent):
+        """(width km, height km, EPSG:4326 box) of an EPSG:3857 extent."""
+        import math  # pylint: disable=import-outside-toplevel
+        transform = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:3857"),
+                                           QgsCoordinateReferenceSystem("EPSG:4326"), self.project)
+        box = transform.transformBoundingBox(QgsRectangle(*extent))
+        # Ground size: Web Mercator units shrink by cos(latitude).
+        scale = math.cos(math.radians((box.yMinimum() + box.yMaximum()) / 2))
+        return (extent[2] - extent[0]) * scale / 1000, (extent[3] - extent[1]) * scale / 1000, box
+
+    def _confirm_extent(self) -> bool:
+        """Before an export of the current map view (no layer, no drawn
+        area): says so, with the area's size and tile count, and lets the
+        export be cancelled; "Don't ask again" is kept with the project."""
+        view = self.profile.view
+        if view.extent_mode != "canvas" or not view.confirm_canvas_extent or self.iface is None:
+            return True
+        extent = self._current_extent_3857()
+        if not extent:
+            return True
+        width, height, _ = self._extent_size_km(extent)
+        from ..publishing.raster_tiles import count_tiles  # pylint: disable=import-outside-toplevel
+        tiles = count_tiles(extent, view.min_zoom, view.max_zoom)
+        box = QMessageBox(QMessageBox.Icon.Warning, tr("Published area"), tr(
+            "The published area is the current map view: about {w:.1f} × {h:.1f} km, "
+            "{tiles} tiles from zoom {z0} to {z1}.").format(
+                w=width, h=height, tiles=f"{tiles:,}".replace(",", "\u202f"), z0=view.min_zoom,
+                z1=view.max_zoom),
+            QMessageBox.StandardButton.Cancel, self)
+        box.setInformativeText(tr(
+            "To publish the same area every time, choose “Extent of a layer” or draw the area "
+            "(Map tab, Extent). “Show on map” outlines it."))
+        export = box.addButton(tr("Export this view"), QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        again = QCheckBox(tr("Don't ask again for this project"))
+        box.setCheckBox(again)
+        self._flash_extent()
+        box.exec()
+        if box.clickedButton() is not export:
+            return False
+        if again.isChecked():
+            view.confirm_canvas_extent = False
+        return True
 
     def _fill_tree(self, profile):
         self.tree.blockSignals(True)
@@ -2307,8 +2410,9 @@ class PublishDialog(QDialog):
         self.e_extent_layer.blockSignals(False)
         if profile.view.extent_layer and self.e_extent_layer.currentLayer() is None:
             profile.view.extent_layer = ""  # the layer is gone: keep its last extent, fixed
-        self._current_extent_3857()
-        self._show_extent()
+            if profile.view.extent_mode == "layer":
+                profile.view.extent_mode = "fixed" if profile.view.extent else "canvas"
+        self._set_extent_mode(profile.view.extent_mode)
         self._fill_tree(profile)  # extent label refreshed by _use_canvas_extent
         if hasattr(self.e_accent, "setColor"):
             from qgis.PyQt.QtGui import QColor  # pylint: disable=import-outside-toplevel
@@ -2863,6 +2967,8 @@ class PublishDialog(QDialog):
         return QgsRectangle(*extent)
 
     def export_locally(self) -> bool:
+        if not self._confirm_extent():
+            return False
         if not self.save_settings():
             return False
         from ..publishing.controller import export_local  # pylint: disable=import-outside-toplevel
