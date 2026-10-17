@@ -272,6 +272,7 @@ async function start() {
     }
     viewer.labels = enableVisibleLabels(map, maplibregl, sourceId, {
       always,
+      minTextPx: Number(manifest.view.minLabelPx) || 0,
       onUnsupported: (reason) => warn("error.labels", reason),
     });
     // Interactive controls (layer tree, legend, popups, search, filters,

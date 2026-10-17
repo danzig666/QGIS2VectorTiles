@@ -371,7 +371,7 @@ def test_line_label_tries_other_visible_stretches():
     assert y == pytest.approx(0.75)
 
 
-def _free(polygons, view, box, always=False, extra=None):
+def _free(polygons, view, box, always=False, extra=None, min_scale=None):
     """labelPoints of polygons [(id, [[x, y], ...] in z0 tile units)] with QGIS
     Free placement: {id: (x, y, rotation in degrees, label scale)}."""
     script = f"""
@@ -386,7 +386,8 @@ const features = {json.dumps(polygons)}.map(([id, ring]) => ({{
 const box = {json.dumps(box)};
 const out = labelPoints(features, {json.dumps(view)}, maplibregl, {{ state: newLabelState(),
   anchor: "pole", orient: "free", rotationField: "rot", labelBox: () => box, precision: 0.0005,
-  always: {json.dumps(bool(always))} }});
+  always: {json.dumps(bool(always))},
+  minScale: {json.dumps(min_scale)} === null ? null : () => {json.dumps(min_scale)} }});
 console.log(JSON.stringify(out.features.map((f) => [f.properties.q2vt_orig_id, ...f.geometry.coordinates,
   f.properties.rot, f.properties.q2vt_label_scale ?? 1])));
 """
@@ -718,6 +719,21 @@ def test_always_label_uses_the_precomputed_spot_without_a_search():
     on = _free([(2, _band(1000, 2000, 1600, 30))], [0, 0, 1, 1], [0.03, 0.012], always=True, extra=extra)
     assert on[2][0] == pytest.approx(1000 / 4096) and on[2][1] == pytest.approx(2000 / 4096)
     assert on[2][2] == pytest.approx(0) and on[2][3] == pytest.approx(0.5)
+
+
+def test_always_label_shrinks_no_smaller_than_the_least_readable_size():
+    """With "Hide labels smaller than" at 80 % of the text: no step below it,
+    the precomputed spot included (the label sticks out instead)."""
+    box = [0.03, 0.012]
+    polygons = [(1, _band(1000, 1000, 1600, 70)), (2, _band(1000, 2000, 1600, 30))]
+    on = _free(polygons, [0, 0, 1, 1], box, always=True, min_scale=0.8)
+    assert on[1][3] == pytest.approx(0.8) and on[2][3] == pytest.approx(0.8)
+    size = 2 * 20037508.342789244
+    x, y = (1000 / 4096 - 0.5) * size, (0.5 - 2000 / 4096) * size
+    extra = {2: {"q2vt_pole_x": x, "q2vt_pole_y": y, "q2vt_pole_r": 0.006 * size, "q2vt_pole_a": 90}}
+    on = _free([(2, _band(1000, 2000, 1600, 30))], [0, 0, 1, 1], box, always=True, extra=extra,
+               min_scale=0.8)
+    assert on[2][3] == pytest.approx(0.8)
 
 
 def test_scaled_text_size_keeps_a_dense_zoom_curve():

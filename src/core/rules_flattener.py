@@ -1286,34 +1286,44 @@ class RulesFlattener:
         """Hide labels sized in map units where their text is too small (or,
         with QGIS's "Pixel size-based visibility", too large) on screen.
 
-        Only a static size: data-defined sizes and sizes with their own
+        A data-defined size is limited per feature (a @map_scale condition
+        in the rule's filter, split into zooms later). Sizes with their own
         scale limits are left alone."""
         text = settings.format()
         unit = int(getattr(text.sizeUnit(), "value", text.sizeUnit()))
         map_units = int(getattr(Qgis.RenderUnit.MapUnits, "value", Qgis.RenderUnit.MapUnits))
         metres_unit = int(getattr(Qgis.RenderUnit.MetersInMapUnits, "value",
                                   Qgis.RenderUnit.MetersInMapUnits))
-        if unit not in (map_units, metres_unit) or text.size() <= 0:
+        if unit not in (map_units, metres_unit):
             return
         size_prop = settings.dataDefinedProperties().property(QgsPalLayerSettings.Property.Size)
+        varying = size_prop is not None and size_prop.isActive()
         limits = text.sizeMapUnitScale()
-        if (size_prop is not None and size_prop.isActive()) or limits.minScale or limits.maxScale:
+        if (text.size() <= 0 and not varying) or limits.minScale or limits.maxScale:
             return
         if unit == metres_unit:
-            metres = text.size()
+            factor = 1.0
         else:
             project_crs = QgsProject.instance().crs()
             crs = project_crs if project_crs.isValid() else layer.crs()
             if not crs.isValid() or crs.isGeographic():
                 return
-            metres = text.size() * QgsUnitTypes.fromUnitToUnitFactor(
-                crs.mapUnits(), Qgis.DistanceUnit.Meters)
+            factor = QgsUnitTypes.fromUnitToUnitFactor(crs.mapUnits(), Qgis.DistanceUnit.Meters)
         smallest, largest = self.min_label_px, 0.0
         if settings.fontLimitPixelSize:
             smallest = max(smallest, float(settings.fontMinPixelSize))
             largest = float(settings.fontMaxPixelSize)
+        if varying:
+            # QGIS falls back to the static size where the value is NULL.
+            size = f"coalesce(to_real({enclosed(size_prop.asExpression())}), {float(text.size())!r})"
+            per_px = f"({size} * {factor * 96.0 / 0.0254!r})"
+            conditions = ([f"@map_scale <= {per_px} / {smallest!r}"] if smallest > 0 else []) \
+                + ([f"@map_scale >= {per_px} / {largest!r}"] if largest > 0 else [])
+            if conditions:
+                rule.setFilterExpression(and_filters(rule.filterExpression(), " AND ".join(conditions)))
+            return
         # On-screen px of the text at 1:scale (96 dpi): metres * 96 / 0.0254 / scale.
-        per_px = metres * 96.0 / 0.0254
+        per_px = text.size() * factor * 96.0 / 0.0254
         low = per_px / smallest if smallest > 0 else 0.0
         high = per_px / largest if largest > 0 else 0.0
         if low or high:

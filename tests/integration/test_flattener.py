@@ -1434,3 +1434,32 @@ def test_a_fill_effect_stays_on_its_split_outline(flattener):
     lines = [r.rule.symbol().symbolLayer(0) for r in rules if r.get_attr("c") == 1]
     assert lines and all(type(l.paintEffect()).__name__ == "QgsEffectStack" and
                          l.paintEffect().effectList()[0].type() == "blur" for l in lines)
+
+
+def test_data_defined_map_unit_labels_hidden_where_too_small(flattener):
+    """A data-defined size (e.g. ``if("fekves" = 2, 6, 4)``): each feature's
+    label is hidden where its own text is below min_label_px."""
+    from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsMarkerSymbol, QgsPalLayerSettings,
+                           QgsProject, QgsProperty, QgsSingleSymbolRenderer, QgsVectorLayerSimpleLabeling)
+    layer = _points()   # v: 0, 1, 0, 1
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "id"
+    text = settings.format()
+    text.setSize(10)
+    text.setSizeUnit(Qgis.RenderUnit.MetersInMapUnits)
+    settings.setFormat(text)
+    settings.dataDefinedProperties().setProperty(
+        QgsPalLayerSettings.Property.Size, QgsProperty.fromExpression('if("v" = 1, 20, 10)'))
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+    layer.setLabelsEnabled(True)
+    reset_project(layer)
+    QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    rules, _ = flattener(0, 20, min_label_px=6)
+    labels = [r for r in rules if r.get_attr("t") == 1]
+    # 10 m text is 6 px at 1:6299, 20 m text at 1:12598: one zoom earlier
+    # (the condition is taken per whole zoom).
+    small = min(r.visibility.min_zoom for r in labels if "P0" in _matching_ids(layer, r.rule.filterExpression()))
+    large = min(r.visibility.min_zoom for r in labels if "P1" in _matching_ids(layer, r.rule.filterExpression()))
+    assert abs(small - zm.scale_to_zoom(10 * 96 / 0.0254 / 6)) <= 1
+    assert small - large == 1

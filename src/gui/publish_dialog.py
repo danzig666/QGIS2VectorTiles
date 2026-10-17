@@ -2034,9 +2034,10 @@ class PublishDialog(QDialog):
         self.o_small_labels = QCheckBox(tr("Hide labels smaller than"))
         self.o_small_labels.setToolTip(tr(
             "Labels whose text size is set in map units (metres) shrink as the map zooms out. Hide them "
-            "where their text is smaller than this on screen, too small to read. Labels sized in points, "
-            "millimetres or pixels and data-defined sizes are not affected. QGIS's own pixel size-based "
-            "visibility of a label (Rendering tab) is always honoured."))
+            "where their text is smaller than this on screen, too small to read (a data-defined size: "
+            "each label by its own size). Labels sized in points, millimetres or pixels are not affected. "
+            "\"Label every feature\" shrinks a label to fit no smaller than this either. QGIS's own pixel "
+            "size-based visibility of a label (Rendering tab) is always honoured."))
         self.o_small_label_px = QDoubleSpinBox()
         self.o_small_label_px.setRange(1.0, 48.0)
         self.o_small_label_px.setDecimals(1)

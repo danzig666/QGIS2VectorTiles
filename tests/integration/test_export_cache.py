@@ -377,3 +377,22 @@ def test_only_variables_the_rules_use_count(plugin, tmp_path):
     assert "Helyrajzi szám: ".encode() in b"".join(
         value for layers in _tiles(edited).values() for features in layers.values()
         for _, _, props in features for _, value in props if isinstance(value, bytes))
+
+
+def test_a_new_layer_keeps_the_others_cached(plugin, tmp_path):
+    """Owner report (log): one layer added, "Redone (export settings changed
+    (view))" for every other layer: the starting view's layer list
+    (@map_layer_ids) was part of every key though no rule read it."""
+    def counts(log):
+        line = log.cache_line()
+        return tuple(int(v) for v in line.split("cache: ")[1].split(" datasets")[0].split(" of "))
+
+    project, profile, parcels, zones = _setup(tmp_path)
+    profile.layers = profile.layers[:1]   # the parcels only
+    export_local(project, profile, EXTENT, Log())
+    profile.layers.append(LayerConfig(zones.id(), key_fields=["hrsz"], popup_fields=[PopupField("hrsz")]))
+    log = Log()
+    export_local(project, profile, EXTENT, log)
+    hits, total = counts(log)
+    assert 0 < hits < total, [l for l in log.lines if "Redone (" in l]
+    assert not any("(view)" in l for l in log.lines if "Redone (" in l), log.lines
