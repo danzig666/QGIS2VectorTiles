@@ -75,3 +75,22 @@ def test_low_memory_is_the_default(site, tmp_path):
     from test_web_viewer_views import _run  # pylint: disable=import-error
     (levels,) = _run(site, [{"eval": "return q2vtViewer.map._maxTileCacheZoomLevels;"}], tmp_path)
     assert levels == 1
+
+
+def test_low_memory_caps_the_pixel_ratio(site, tmp_path, monkeypatch):
+    """A 3x screen: the map draws at 2 device pixels per CSS pixel (its
+    drawing buffer 4/9 of the screen's) and the hairlines follow the map's
+    ratio (half of one of its pixels), again when that ratio changes."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    monkeypatch.setenv("Q2VT_DSF", "3")
+    out = _run(site, [{"eval": "const m = q2vtViewer.map; return [m.getPixelRatio(), m.getCanvas().width];"},
+                      {"eval": WIDTHS},
+                      {"eval": "q2vtViewer.map.setPixelRatio(1); return q2vtViewer.map.getCanvas().width;"},
+                      {"eval": WIDTHS}], tmp_path)
+    (ratio, canvas), before, canvas_1x, after = out
+    assert ratio == 2 and canvas == 1200 * 2 and canvas_1x == 1200
+    assert before and len(before) == len(after)
+    for (width, device), (later, _) in zip(before, after):
+        assert device == 3
+        assert json.loads(width)[4] == pytest.approx(0.35 / 2) and json.loads(later)[4] == pytest.approx(0.35)
