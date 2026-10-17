@@ -130,3 +130,31 @@ def test_moving_and_switching_layers_do_not_copy_the_style(site, tmp_path):
                   tmp_path)
     assert out["copies"] == 0 and out["hidden"] == "none" and out["type"], out
     assert out["zooms"][0] < out["zooms"][1] and out["filter"] != "", out
+
+
+CACHED = """const cached = () => Object.values(q2vtViewer.map.style.tileManagers)
+  .reduce((n, manager) => n + manager._outOfViewCache.order.length, 0);"""
+
+
+def test_tiles_out_of_view_are_released_when_the_page_is_hidden(site, tmp_path):
+    """Low memory: the tiles MapLibre keeps out of view are let go while the
+    page is hidden (and after a minute without moving the map); the map
+    still draws when it comes back."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    out = _run(site, [
+        {"eval": CACHED + """const m = q2vtViewer.map, start = { center: m.getCenter(), zoom: m.getZoom() };
+          const idle = () => new Promise((r) => { m.once('idle', r); m.triggerRepaint(); });
+          for (const zoom of [start.zoom + 1, start.zoom + 2, start.zoom]) { m.jumpTo({ zoom }); await idle(); }
+          m.jumpTo({ center: [start.center.lng + 0.01, start.center.lat], zoom: start.zoom + 2 }); await idle();
+          const before = cached();
+          Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+          document.dispatchEvent(new Event('visibilitychange'));
+          const hidden = cached();
+          delete document.visibilityState;
+          m.jumpTo(start); await idle();
+          return { before, hidden, release: typeof q2vtViewer.releaseTiles,
+                   loaded: m.loaded(), shown: m.queryRenderedFeatures().length > 0 };"""},
+    ], tmp_path)
+    assert out[0]["before"] > 0 and out[0]["hidden"] == 0, out
+    assert out[0]["release"] == "function" and out[0]["loaded"] and out[0]["shown"], out

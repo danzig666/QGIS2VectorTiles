@@ -23,6 +23,9 @@ const MAX_VIEW_ZOOM = 23.99;
 // Low memory: the map draws at most 2 device pixels per CSS pixel (a 3x
 // phone or a scaled 4K screen: 2.25x the pixels of 2x in every buffer).
 const MAX_PIXEL_RATIO = 2;
+// Low memory: the tiles kept out of view are let go after a minute without
+// moving the map (and while the page is hidden).
+const IDLE_RELEASE_MS = 60000;
 
 function validateManifest(manifest) {
   if (!manifest || typeof manifest !== "object") throw new ViewerError("Q2VT_PUB_MANIFEST", "manifest is not an object");
@@ -268,7 +271,10 @@ async function start() {
       map.once("load", () => { map.off("error", failed); resolve(); });
     });
     document.body.classList.add("q2vt-loaded");
-    if (view.lowMemory) followScreen(map, MAX_PIXEL_RATIO);
+    if (view.lowMemory) {
+      followScreen(map, MAX_PIXEL_RATIO);
+      viewer.releaseTiles = releaseIdleTiles(map, IDLE_RELEASE_MS);
+    }
     screenHairlines(map);
     const sourceId = manifest.sources[0].id;
     // Layers whose every feature keeps its label (shrunk where it does not fit).
@@ -316,6 +322,36 @@ export function followScreen(map, cap) {
       watch();
     }, { once: true });
   watch();
+}
+
+// Releases the tiles MapLibre keeps out of view (to show again when the map
+// comes back) while the page is hidden and after ``idle`` ms without moving
+// the map; coming back fetches them again (HTTP cache). MapLibre has no
+// public way: its tile managers' out-of-view cache (6.14), checked, so a
+// MapLibre without it keeps its tiles. Returns the release (tiles let go).
+export function releaseIdleTiles(map, idle) {
+  const release = () => {
+    let released = 0;
+    for (const manager of Object.values(map.style?.tileManagers || {})) {
+      const cache = manager && manager._outOfViewCache;
+      if (!cache || typeof cache.reset !== "function" || !Array.isArray(cache.order)) continue;
+      released += cache.order.length;
+      cache.reset();
+    }
+    return released;
+  };
+  let timer = null;
+  const wait = () => {
+    clearTimeout(timer);
+    timer = setTimeout(release, idle);
+  };
+  map.on("movestart", () => clearTimeout(timer));
+  map.on("moveend", wait);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") release();
+  });
+  wait();
+  return release;
 }
 
 // "Thin hairlines" (style metadata q2vt:hairline): the exported width is in
