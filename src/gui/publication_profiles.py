@@ -159,6 +159,8 @@ def import_document(text: str, project: QgsProject) -> Tuple[PublicationProfile,
     profile.layers = kept
     if profile.view.extent_layer and profile.view.extent_layer not in here:
         profile.view.extent_layer = ""
+        if profile.view.extent_mode == "layer":  # its last extent, fixed
+            profile.view.extent_mode = "fixed" if profile.view.extent else "canvas"
     if dropped or missing:
         notes.append(f"{max(dropped, len(missing))} layer(s) not found in this project and left out"
                      + (": " + ", ".join(sorted(set(missing))[:8]) if missing else "") + ".")

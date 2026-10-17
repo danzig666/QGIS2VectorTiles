@@ -758,7 +758,8 @@ def _street_area(project, profile, extent_3857):
     from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsGeometry,  # pylint: disable=import-outside-toplevel
                            QgsRectangle, QgsVectorLayer, QgsWkbTypes)
     wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
-    layer = project.mapLayer(profile.view.extent_layer) if profile.view.extent_layer else None
+    layer = project.mapLayer(profile.view.extent_layer) \
+        if profile.view.extent_mode == "layer" and profile.view.extent_layer else None
     if isinstance(layer, QgsVectorLayer) and layer.geometryType() == QgsWkbTypes.PolygonGeometry:
         to_wgs84 = QgsCoordinateTransform(layer.crs(), wgs84, project)
         parts = []

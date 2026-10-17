@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from .errors import PublishingError
 from .models import (XyzBasemap, CutLineConfig, DocumentConfig, InfoConfig, ParcelInfoConfig, RestrictionConfig,
                      TerrainConfig,
-                     DOCUMENT_EXTENSIONS,
+                     DOCUMENT_EXTENSIONS, EXTENT_MODES,
                      ARCHIVE_FORMATS, BASEMAP_FLAVORS, BASEMAP_KINDS, DESTINATION_KINDS,
                      FIELD_TYPES, FILTER_KINDS, LOCALES, PROFILE_SCHEMA_VERSION, RASTER_FORMATS,
                      SECRET_KEYS, SLUG, Approval, BasemapConfig, DestinationConfig, FilterField,
@@ -53,6 +53,16 @@ def migrate(data: dict) -> dict:
             "Q2VT_PUB_SCHEMA_UNSUPPORTED",
             f"This profile was saved by a newer plugin (schema {version}); "
             f"this version reads schema {PROFILE_SCHEMA_VERSION}. Update the plugin.")
+    view = data.get("view")
+    if isinstance(view, dict) and "extentMode" not in view and "extent_mode" not in view:
+        # Saved before the extent had a mode (4.45.x and older): a stored
+        # extent without a layer was mostly the map view when the window first
+        # opened, kept for good; such profiles take the map view at export.
+        layer = view.get("extentLayer", view.get("extent_layer"))
+        view = dict(view, extentMode="layer" if layer else "canvas")
+        if not layer:
+            view["extent"] = None
+        data = dict(data, view=view)
     return data  # version 1 is current
 
 
@@ -293,6 +303,8 @@ def validate(profile: PublicationProfile) -> List[str]:
         errors.append("view: 0 <= minZoom <= maxZoom <= 22")
     if not view.max_zoom <= view.max_view_zoom <= 24:
         errors.append("view.maxViewZoom: between maxZoom and 24")
+    if view.extent_mode not in EXTENT_MODES:
+        errors.append(f"view.extentMode: one of {', '.join(EXTENT_MODES)}")
     if view.extent is not None and (len(view.extent) != 4 or view.extent[0] >= view.extent[2]
                                     or view.extent[1] >= view.extent[3]):
         errors.append("view.extent: [xmin, ymin, xmax, ymax] with xmin < xmax, ymin < ymax")

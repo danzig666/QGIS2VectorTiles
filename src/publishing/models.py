@@ -26,6 +26,7 @@ LOCALES = ("en", "hu")
 FILTER_KINDS = ("values", "range", "text")
 FIELD_TYPES = ("string", "integer", "number", "boolean", "date", "url")
 RASTER_FORMATS = ("png", "jpeg", "webp")
+EXTENT_MODES = ("canvas", "layer", "fixed")
 # Documents published with the map (never HTML/SVG: they would run in the map's own site).
 DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".png", ".jpg", ".jpeg", ".webp")
 BASEMAP_KINDS = ("none", "protomaps")
@@ -243,8 +244,15 @@ class TerrainConfig:
 
 @dataclass
 class ViewConfig:
-    extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857; None = canvas
+    # Where the published area comes from (EXTENT_MODES): "canvas" the QGIS
+    # map view at each export (``extent`` then only the one last used),
+    # "layer" the extent of ``extent_layer`` (followed when it changes),
+    # "fixed" ``extent`` (drawn, or a map view frozen).
+    extent_mode: str = "canvas"
+    extent: Optional[List[float]] = None   # [xmin, ymin, xmax, ymax] EPSG:3857
     extent_layer: str = ""                # layer id: the extent follows that layer's extent
+    # Ask before an export of the current map view (the extent never chosen).
+    confirm_canvas_extent: bool = True
     min_zoom: int = 0
     max_zoom: int = 16
     max_view_zoom: int = 22               # browser zoom limit (overzoom)

@@ -93,6 +93,12 @@
         "extentLayer": {
           "type": "string"
         },
+        "extentMode": {
+          "enum": ["canvas", "layer", "fixed"]
+        },
+        "confirmCanvasExtent": {
+          "type": "boolean"
+        },
         "limitToExtent": {
           "type": "boolean"
         }

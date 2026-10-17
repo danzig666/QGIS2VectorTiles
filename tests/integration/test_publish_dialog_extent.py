@@ -32,7 +32,7 @@ def _dialog(plugin, monkeypatch, tmp_path):
 def test_extent_from_a_layer_follows_it(plugin, monkeypatch, tmp_path):
     dialog, parcels = _dialog(plugin, monkeypatch, tmp_path)
     assert dialog.e_extent_layer.currentLayer() is None
-    assert "canvas" in dialog.extent_label.text()
+    assert dialog.profile.view.extent_mode == "canvas" and "map view" in dialog.extent_label.text()
     dialog.e_extent_layer.setLayer(parcels)
     view = dialog.collect().view
     assert view.extent_layer == parcels.id()
@@ -62,7 +62,8 @@ def test_fixed_extent_and_a_removed_layer(plugin, monkeypatch, tmp_path):
     dialog.e_extent_layer.setLayer(parcels)
     dialog.e_extent_layer.setLayer(None)            # back to the fixed extent
     assert dialog.profile.view.extent_layer == ""
-    assert dialog.extent_label.text().startswith("Fixed extent")
+    assert dialog.extent_label.text().startswith("Fixed area")
+    assert dialog.profile.view.extent_mode == "fixed"
     dialog.e_extent_layer.setLayer(parcels)
     profile = dialog.collect()
     from qgis.core import QgsProject  # pylint: disable=import-outside-toplevel
