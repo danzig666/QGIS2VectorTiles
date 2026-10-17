@@ -168,19 +168,26 @@ export function installDiagrams(map, style) {
   if (!specs.size) return null;
   const ratio = Math.min(Math.max(Math.ceil(window.devicePixelRatio || 1), 1), 3);
   const drawn = new Set();
-  const onMissing = (event) => {
-    const parsed = parseName(event.id);
+  const draw = (id) => {
+    const parsed = parseName(id);
     const spec = parsed && specs.get(parsed.id);
-    if (!spec || drawn.has(event.id) || map.hasImage(event.id)) return;
+    if (!spec || drawn.has(id) || map.hasImage(id)) return;
     try {
       const image = renderDiagram(spec, parsed.size, parsed.values, ratio);
-      map.addImage(event.id, { width: image.width, height: image.height, data: image.data },
+      map.addImage(id, { width: image.width, height: image.height, data: image.data },
         { pixelRatio: image.pixelRatio });
-      drawn.add(event.id);
+      drawn.add(id);
     } catch (error) {
-      console.warn("q2vt: diagram", event.id, error); // eslint-disable-line no-console
+      console.warn("q2vt: diagram", id, error); // eslint-disable-line no-console
     }
   };
-  map.on("styleimagemissing", onMissing);
+  // The resolver (MapLibre 6.12+) answers the tile's request with the image;
+  // the styleimagemissing event comes after the request was answered without
+  // it (a console warning, the diagram drawn only with a later tile).
+  if (typeof map.setMissingStyleImageResolver === "function") {
+    map.setMissingStyleImageResolver((id) => draw(id));
+  } else {
+    map.on("styleimagemissing", (event) => draw(event.id));
+  }
   return { specs, count: () => drawn.size };
 }

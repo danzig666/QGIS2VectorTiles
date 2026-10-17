@@ -209,7 +209,16 @@ export function goTo(map, record) {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, 10000);
     // The movement starts on the next frame: wait for its end, then tiles.
-    map.once("moveend", () => map.once("idle", () => { clearTimeout(timer); resolve(); }));
+    // Animated markers repaint every frame, so "idle" never comes while they
+    // play (it fell back after 10 s): a frame drawn with every tile of the
+    // new view loaded will do (a frame updates the tiles before "render").
+    map.once("moveend", () => {
+      const done = () => { clearTimeout(timer); map.off("idle", done); map.off("render", drawn); resolve(); };
+      const drawn = () => { if (map.areTilesLoaded()) done(); };
+      map.once("idle", done);
+      map.on("render", drawn);
+      map.triggerRepaint();
+    });
     if (bounds && bounds[0] !== bounds[2]) {
       map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
         { padding: 60, maxZoom, animate: !reduce, maxDuration: 2500 });
