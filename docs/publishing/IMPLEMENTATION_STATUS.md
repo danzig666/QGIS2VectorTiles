@@ -1952,3 +1952,13 @@ style had 809 layers, 445 of them per-zoom copies of map-unit marker layers.
   popup fields kept out of the tiles, patterns on demand and pattern textures at low zooms each
   concern a few MB of the 36 MB the start tiles hold.
 - `tools/bench`: tile buffer / raw data sizes, `--repeat`.
+
+## 4.48.1 — review fixes
+
+- A fill's shared dataset (4.47.0) is not cut at the export extent: the outline drawn on its
+  polygons stroked the cut. Polygons reaching into the extent are kept whole
+  (`RulesExporter._clip_to_extent(cut=False)` when a rule of the dataset `shares_dataset`).
+- Tile cache key: the datasets that leave out small features (`_drawn_small` depends on the
+  style, which the dataset keys do not cover).
+- `layer_merge`: pieces with data-driven `icon-image` (sprite variants) join only when equal.
+- Overview map: thin hairlines multiplied back by the main map's pixel ratio.

@@ -41,3 +41,7 @@ def test_pieces_that_differ_otherwise_stay_apart():
     assert len(join_zoom_split_layers([_marker(1), other])) == 2
     data_defined = _marker(2, ["get", "img"])
     assert len(join_zoom_split_layers([_marker(1), data_defined])) == 2
+    # Data-defined images (sprite variants) join only when they are the same.
+    variants = lambda zoom, suffix: _marker(zoom, ["match", ["get", "c"], "a", f"m_a{suffix}", f"m{suffix}"])
+    assert len(join_zoom_split_layers([variants(1, "_1"), variants(2, "_2")])) == 2
+    assert len(join_zoom_split_layers([variants(1, "_1"), variants(2, "_1")])) == 1

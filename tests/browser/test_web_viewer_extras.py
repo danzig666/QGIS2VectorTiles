@@ -220,6 +220,22 @@ def test_overview_map_draws_only_cheap_layers(site, tmp_path):
     assert out["loaders"] == 0 and out["patterns"] == 0 and out["plain"] and out["dropped"] > 0, out
 
 
+def test_overview_hairlines_are_drawn_at_its_own_pixel_ratio(site, tmp_path):
+    """Thin hairlines are divided by the main map's pixel ratio; the overview
+    draws at ratio 1, so it multiplies them back (they were half as wide)."""
+    out = _run(site["url"], [{"eval": """
+      const m = q2vtViewer.map;
+      const { overviewStyle } = await import(new URL('assets/overview.mjs', q2vtViewer.releaseUrl).href);
+      const line = m.getLayersOrder().map((id) => m.getLayer(id)).find((l) => l.type === 'line' && m.getSource(l.source)?.type === 'vector');
+      line.metadata = { ...(line.metadata || {}), 'q2vt:hairline': true };
+      m.setPaintProperty(line.id, 'line-width', 0.25);
+      m.setPixelRatio(2);
+      const def = overviewStyle(m).layers.find((l) => l.id === line.id);
+      return { width: def.paint['line-width'], ratio: m.getPixelRatio() };
+    """}], tmp_path)[0]
+    assert out == {"width": 0.5, "ratio": 2}, out
+
+
 def test_drawing_travels_in_the_link_and_exports(site, tmp_path):
     out = _run(site["url"], [
         {"eval": """

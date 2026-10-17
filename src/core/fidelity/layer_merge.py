@@ -58,9 +58,12 @@ def _joinable(a: dict, b: dict) -> bool:
     if not _same_except(a, b):
         return False
     ia, ib = _image_steps(a), _image_steps(b)
+    if ia is None or ib is None:  # data-driven: only the very same images
+        return json.dumps((a.get("layout") or {}).get("icon-image"), sort_keys=True) == \
+            json.dumps((b.get("layout") or {}).get("icon-image"), sort_keys=True)
     if ia == ib:
         return True
-    if ia is None or ib is None or len(ib) != 1:
+    if len(ib) != 1:
         return False
     return float(b["minzoom"]).is_integer()  # a step only at a whole (tile) zoom
 

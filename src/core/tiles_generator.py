@@ -24,6 +24,7 @@ import itertools
 import json
 import math
 import os
+import pathlib
 import re
 import sqlite3
 import shutil
@@ -363,7 +364,8 @@ class GDALTilesGenerator:
     @staticmethod
     def _geometry_column(path: str) -> Optional[str]:
         try:
-            with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            uri = pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=ro"
+            with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
                 row = conn.execute("SELECT column_name FROM gpkg_geometry_columns").fetchone()
         except sqlite3.Error:
             return None
@@ -694,9 +696,17 @@ class GDALTilesGenerator:
     def _small_key(self, members: List[QgsVectorLayer]) -> list:
         """The part of a tile group's cache key for leaving out small
         features: nothing (keys as before) when none can be."""
-        names = sorted(self._layer_name(m) for m in members
-                       if self._layer_name(m) in self.small_datasets)
-        return [self.min_feature_px, names] if names and self.min_feature_px > 0 else []
+        if self.min_feature_px <= 0:
+            return []
+        # Which are filtered depends on their style too (a wider line is not
+        # left out), which the datasets' keys do not cover.
+        names = []
+        for member in members:
+            name = self._layer_name(member)
+            low, high = self._layer_zoom_range(member)
+            if name in self.small_datasets and self._drawn_small(name, max(low, high - 1)):
+                names.append(name)
+        return [self.min_feature_px, sorted(names)] if names else []
 
     # SIMPLIFICATION (tile units, 8 a CSS px) of lighter tiles (with
     # ``min_feature_px``): a quarter pixel at the tile's zoom, fewer points
@@ -1001,8 +1011,9 @@ class GDALTilesGenerator:
 
     def _layer_zoom_range(self, layer: QgsVectorLayer) -> Tuple[int, int]:
         name = self._layer_name(layer)
-        if name in self._zoom_override:
-            return self._zoom_override[name]
+        override = getattr(self, "_zoom_override", {})  # set in __init__
+        if name in override:
+            return override[name]
         if name in self.layer_zooms:
             low, high = self.layer_zooms[name]
         else:

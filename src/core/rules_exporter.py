@@ -740,7 +740,10 @@ class RulesExporter:
                     in_layer_crs(label_text, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar))
 
             # Compute geometry transformation tuple.
-            transformation = self._get_geometry_transformation(primary)
+            # An outline drawn on these polygons (shares_dataset) would stroke
+            # a cut along the export extent: they are kept whole.
+            transformation = self._get_geometry_transformation(
+                primary, cut=not any(r.shares_dataset for r in flat_rules))
             if transformation is None:
                 # No geometry transformation → cannot be exported.
                 continue
@@ -3934,7 +3937,7 @@ class RulesExporter:
         return expression
 
     def _get_geometry_transformation(
-        self, flat_rule: FlattenedRule
+        self, flat_rule: FlattenedRule, cut: bool = True
     ) -> Optional[Tuple[int, str]]:
         rule_type = flat_rule.get_attr("t")
         if rule_type == 0 and flat_rule.rule.symbol():
@@ -3947,7 +3950,7 @@ class RulesExporter:
             return None
         if rule_type == 0 and getattr(flat_rule, "shift", None):
             transformation[1] = self._shifted(transformation[1], *flat_rule.shift)
-        transformation[1] = self._clip_to_extent(transformation[1])
+        transformation[1] = self._clip_to_extent(transformation[1], cut)
         return tuple(transformation)
 
     def _shifted(self, expression: str, dx: float, dy: float) -> str:
@@ -3959,12 +3962,18 @@ class RulesExporter:
         return (f"transform(translate(transform({enclosed(expression)}, '{export_crs}', "
                 f"'{self._map_crs}'), {dx!r}, {dy!r}), '{self._map_crs}', '{export_crs}')")
 
-    def _clip_to_extent(self, expression: str) -> str:
+    def _clip_to_extent(self, expression: str, cut: bool = True) -> str:
         """``expression`` cut to the export extent. Geometries inside it are
         kept as they are: intersection() nodes a self-crossing line into
         pieces (a label then sits on a fragment) and can move a ring's start
-        vertex."""
+        vertex. ``cut`` False: those that reach into it are kept whole (an
+        outline drawn on the polygons would stroke the cut)."""
         extent_wkt = self.extent.asWktPolygon()
+        if not cut:
+            return (
+                f"with_variable('q2vt_t', {enclosed(expression)}, "
+                f"if(intersects(@q2vt_t, geom_from_wkt('{extent_wkt}')), @q2vt_t, NULL))"
+            )
         return (
             f"with_variable('q2vt_t', {enclosed(expression)}, "
             f"with_variable('q2vt_ext', geom_from_wkt('{extent_wkt}'), "
