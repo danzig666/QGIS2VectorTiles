@@ -58,7 +58,16 @@ for (const action of actions) {
       return [rect.left + p.x, rect.top + p.y];
     }, action.clickLngLat);
     await page.mouse.click(point[0], point[1]);
-  } else if (action.type) await page.fill(action.type[0], action.type[1]);
+  } else if (action.type) {
+    // The search field is behind its magnifier until opened.
+    await page.evaluate((selector) => {
+      const target = document.querySelector(selector);
+      if (target && target.closest("#q2vt-searchbox") && !target.offsetParent) {
+        document.querySelector(".q2vt-search-toggle")?.click();
+      }
+    }, action.type[0]);
+    await page.fill(action.type[0], action.type[1]);
+  }
   else if (action.press) await page.keyboard.press(action.press);
   else if (action.wait) await page.waitForTimeout(action.wait);
   else if (action.idle) await idle();
