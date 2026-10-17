@@ -500,7 +500,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.45.0**. Newest first:
+This README describes QWebMap **4.45.1**. Newest first:
+
+**4.45.1** — fixes
+- No false "polygon labels on the visible part are not available" warning; "Hide labels smaller than" also hides data-defined map-unit labels, and "Label every feature" shrinks no smaller than it; adding a layer no longer redoes every other layer of a cached export.
 
 **4.45.0** — more QGIS styles drawn as in QGIS
 - Trimmed lines, values computed per vertex or per generated part (course control numbers, measures at nodes), soft glows, drop shadows and arrow shadows without dark corners, dashed hatch lines with a solid line style, and blurred shapeburst fills are drawn as QGIS draws them. Map-unit pattern fills stay sharp between whole zooms.
