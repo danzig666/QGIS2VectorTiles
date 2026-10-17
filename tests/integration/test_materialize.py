@@ -3166,6 +3166,26 @@ def test_a_large_map_unit_marker_is_drawn_as_its_shape(plugin, tmp_path):
     assert sprites and all(r.visibility.max_zoom == start for r in sprites)
 
 
+def test_a_large_marker_reaching_its_shape_zoom_past_the_tiles_stays_drawn(plugin, tmp_path):
+    """A 30 m circle is 128 px only from zoom 18, past the archive's last
+    zoom (16): the sprite is shown up to 18, so the zoom-16 tiles must carry
+    it (they ended at 15: nothing was drawn from zoom 16 to 18)."""
+    from qgis.core import QgsSimpleMarkerSymbolLayer, QgsSingleSymbolRenderer
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from fidelity.diagnostics import DiagnosticCollector
+    marker = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 30)
+    marker.setSizeUnit(Qgis.RenderUnit.MapUnits)
+    layer = _layer("Point", ["POINT(0 0)"], str(tmp_path / "pt.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([marker])))
+    reset_project(layer)
+    rules = RulesFlattener(0, 16, str(tmp_path), QgsProcessingFeedback(), DiagnosticCollector(),
+                           overzoom_to=22).flatten_all_rules()
+    sprites = [r for r in rules if r.recipe is None]
+    shapes = [r for r in rules if r.recipe is not None and r.recipe.kind == "glyph"]
+    assert shapes and all(r.visibility.min_zoom > 16 for r in shapes)
+    assert sprites and all(r.get_attr("i") == 16 and r.visibility.max_zoom > 16 for r in sprites)
+
+
 def test_screen_offset_line_from_a_polygon_generator_exports(plugin, tmp_path):
     """A fill symbol whose geometry generator draws the outline as lines,
     offset in screen units (QGIS Hub styles): the corner check walked the

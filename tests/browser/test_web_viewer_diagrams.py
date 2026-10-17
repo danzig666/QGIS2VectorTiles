@@ -55,8 +55,13 @@ def test_pies_are_drawn_in_the_category_colours(site, tmp_path):
     sys.path.insert(0, HERE)
     from test_web_viewer_views import _run  # pylint: disable=import-error
     shot = tmp_path / "map.png"
-    images, histogram = _run(site, [{"wait": 1500}, {"eval": IMAGES}, {"eval": HISTOGRAM},
-                                    {"screenshot": str(shot)}], tmp_path)
+    images, histogram, resolver = _run(site, [
+        {"wait": 1500}, {"eval": IMAGES}, {"eval": HISTOGRAM},
+        {"eval": "return typeof q2vtViewer.map._missingStyleImageResolver;"},
+        {"screenshot": str(shot)}], tmp_path)
+    # Drawn when a tile asks (MapLibre's resolver), not after the request
+    # was answered without them (styleimagemissing: a warning, drawn late).
+    assert resolver == "function"
     names = [name.split("|", 2)[2] for name, _ in images]
     assert names == ["20.0|10;20;40", "20.0|5;5;0"], images
     for _, width in images:  # 20 mm, a pen and a margin

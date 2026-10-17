@@ -1457,9 +1457,10 @@ def test_data_defined_map_unit_labels_hidden_where_too_small(flattener):
     QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
     rules, _ = flattener(0, 20, min_label_px=6)
     labels = [r for r in rules if r.get_attr("t") == 1]
-    # 10 m text is 6 px at 1:6299, 20 m text at 1:12598: one zoom earlier
-    # (the condition is taken per whole zoom).
+    # 10 m text is 6 px at 1:6299, 20 m text at 1:12598: one zoom earlier,
+    # cut at those scales exactly (no piece per zoom).
     small = min(r.visibility.min_zoom for r in labels if "P0" in _matching_ids(layer, r.rule.filterExpression()))
     large = min(r.visibility.min_zoom for r in labels if "P1" in _matching_ids(layer, r.rule.filterExpression()))
-    assert abs(small - zm.scale_to_zoom(10 * 96 / 0.0254 / 6)) <= 1
-    assert small - large == 1
+    assert small == pytest.approx(zm.scale_to_zoom(10 * 96 / 0.0254 / 6), abs=1e-6)
+    assert small - large == pytest.approx(1, abs=1e-6)
+    assert len(labels) <= 3

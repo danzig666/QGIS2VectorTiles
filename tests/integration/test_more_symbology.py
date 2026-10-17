@@ -713,3 +713,41 @@ def test_vertex_markers_and_generator_parts_take_their_own_numbers(plugin, tmp_p
     texts = sorted(str(v) for values in _feature_values(layers)
                    for name, v in values.items() if name.startswith("q2vt_property_char"))
     assert texts == sorted(["1", "2", "0", "100", "200", "250"])
+
+
+@pytest.mark.parametrize("unit", [Qgis.RenderUnit.MapUnits, Qgis.RenderUnit.MetersInMapUnits])
+def test_offset_along_line_is_in_the_project_crs(plugin, tmp_path, unit):
+    """A first-vertex marker moved 100 m along a line of an EOV project
+    (EPSG:23700): walked in EPSG:3857 it landed 67.7 m along (cos 47.5°)."""
+    from qgis.core import (QgsCoordinateTransform, QgsFeature, QgsGeometry, QgsLineSymbol,
+                           QgsMarkerLineSymbolLayer, QgsProject, QgsSimpleMarkerSymbolLayer,
+                           QgsVectorLayer)
+    from q2vt_fixtures import reset_project, to_geopackage
+    from q2vt_plugin.src.core.rules_flattener import RulesFlattener
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter
+    from fidelity.diagnostics import DiagnosticCollector
+    eov, mercator = QgsCoordinateReferenceSystem("EPSG:23700"), QgsCoordinateReferenceSystem("EPSG:3857")
+    memory = QgsVectorLayer("LineString?crs=EPSG:23700&field=id:integer", "line", "memory")
+    feature = QgsFeature(memory.fields())
+    feature.setAttributes([1])
+    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING(650000 240000, 651000 240000)"))
+    memory.dataProvider().addFeatures([feature])
+    layer = to_geopackage(memory, str(tmp_path / "line.gpkg"))
+    markers = QgsMarkerLineSymbolLayer()
+    markers.setPlacements(Qgis.MarkerLinePlacement.FirstVertex)
+    markers.setSubSymbol(QgsMarkerSymbol([QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 3)]))
+    markers.setOffsetAlongLine(100)
+    markers.setOffsetAlongLineUnit(unit)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([markers])))
+    reset_project(layer)
+    QgsProject.instance().setCrs(eov)
+    extent = QgsCoordinateTransform(eov, mercator, QgsProject.instance()).transformBoundingBox(
+        QgsRectangle(649500, 239500, 651500, 240500))
+    diags = DiagnosticCollector()
+    rules = RulesFlattener(10, 16, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
+    (tmp_path / "utils").mkdir()
+    layers, _ = RulesExporter(rules, extent, 10, 16, str(tmp_path / "utils"), 0, QgsProcessingFeedback(),
+                              diagnostics=diags).export()
+    back = QgsCoordinateTransform(mercator, eov, QgsProject.instance())
+    found = [back.transform(f.geometry().asPoint()) for out in layers for f in out.getFeatures()]
+    assert found and all(abs(p.x() - 650100) < 1 and abs(p.y() - 240000) < 1 for p in found)

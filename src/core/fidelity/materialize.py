@@ -76,7 +76,7 @@ def marker_points(placements, offset: float = 0.0, crs: str = "", along: float =
     (map units) moves the first / last vertex markers along the line."""
     params = (("offset", float(offset)), ("crs", crs)) if abs(offset) > 1e-9 else ()
     if abs(along) > 1e-9:
-        params += (("along", float(along)),)
+        params += (("along", float(along)),) + ((("crs", crs),) if not params else ())
     return Recipe("marker_points", tuple(sorted(set(placements) & POINT_PLACEMENTS)), params)
 
 

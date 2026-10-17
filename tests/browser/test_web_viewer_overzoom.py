@@ -125,16 +125,26 @@ def test_label_points_keep_sub_pixel_precision_in_overzoom(site, tmp_path):
             xy = (X0 + t * math.cos(ANGLE), Y0 + t * math.sin(ANGLE))
             actions += [{"eval": f"q2vtViewer.map.jumpTo({{center: {json.dumps(_lnglat(*xy))}, zoom: {zoom}}}); return 1;"},
                         {"wait": 400}, {"idle": True}, {"eval": """
-const v = q2vtViewer, m = v.map, out = { zoom: m.getZoom(), pairs: [] };
-const exact = new Map();
-for (const features of v.labels.snapshot().values()) {
-  for (const f of features) exact.set(f.id, m.project(f.geometry.coordinates));
-}
-for (const group of v.labels.groups.values()) {
-  for (const f of m.querySourceFeatures(group.source)) {
-    const want = exact.get(f.id), got = m.project(f.geometry.coordinates);
-    if (want) out.pairs.push(Math.hypot(got.x - want.x, got.y - want.y));
+const v = q2vtViewer, m = v.map;
+const measure = () => {
+  const out = { zoom: m.getZoom(), pairs: [] }, exact = new Map();
+  for (const features of v.labels.snapshot().values()) {
+    for (const f of features) exact.set(f.id, m.project(f.geometry.coordinates));
   }
+  for (const group of v.labels.groups.values()) {
+    for (const f of m.querySourceFeatures(group.source)) {
+      const want = exact.get(f.id), got = m.project(f.geometry.coordinates);
+      if (want) out.pairs.push(Math.hypot(got.x - want.x, got.y - want.y));
+    }
+  }
+  return out;
+};
+// The label points are written once the tiles are in (a loaded machine:
+// later than the map's idle).
+let out = measure();
+for (let i = 0; i < 50 && !out.pairs.length; i++) {
+  await new Promise((r) => setTimeout(r, 100));
+  out = measure();
 }
 return out;"""}]
     results = [r for r in _run(site["url"], actions, tmp_path) if r != 1]

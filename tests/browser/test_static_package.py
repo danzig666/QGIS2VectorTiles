@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
 
@@ -31,7 +32,9 @@ def test_static_package_renders_from_a_subdirectory(tmp_path):
     assert all("localhost" not in json.dumps(v) for v in (style["sources"], style.get("sprite"),
                                                           style.get("glyphs")))
     assert not [n for n in os.listdir(export_dir) if ".tmp-" in n]  # atomic
-    port = 9311
+    with socket.socket() as probe:  # a free port: suites may run side by side
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
     server = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind",
                                "127.0.0.1", "--directory", str(tmp_path / "site")],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

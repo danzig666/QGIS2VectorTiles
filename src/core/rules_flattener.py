@@ -1314,13 +1314,8 @@ class RulesFlattener:
             smallest = max(smallest, float(settings.fontMinPixelSize))
             largest = float(settings.fontMaxPixelSize)
         if varying:
-            # QGIS falls back to the static size where the value is NULL.
-            size = f"coalesce(to_real({enclosed(size_prop.asExpression())}), {float(text.size())!r})"
-            per_px = f"({size} * {factor * 96.0 / 0.0254!r})"
-            conditions = ([f"@map_scale <= {per_px} / {smallest!r}"] if smallest > 0 else []) \
-                + ([f"@map_scale >= {per_px} / {largest!r}"] if largest > 0 else [])
-            if conditions:
-                rule.setFilterExpression(and_filters(rule.filterExpression(), " AND ".join(conditions)))
+            self._limit_varying_label_size(rule, layer, size_prop.asExpression(), float(text.size()),
+                                           factor * 96.0 / 0.0254, smallest, largest)
             return
         # On-screen px of the text at 1:scale (96 dpi): metres * 96 / 0.0254 / scale.
         per_px = text.size() * factor * 96.0 / 0.0254
@@ -1328,6 +1323,62 @@ class RulesFlattener:
         high = per_px / largest if largest > 0 else 0.0
         if low or high:
             self._intersect_scale_range(rule, low, high)
+
+    # Size levels of a data-defined label size: each feature is shown from
+    # the threshold of the largest level it reaches (exact for up to this
+    # many distinct sizes, a little late in between otherwise).
+    MAX_LABEL_SIZE_LEVELS = 16
+
+    def _limit_varying_label_size(self, rule, layer, expression: str, static: float,
+                                  px_scale: float, smallest: float, largest: float) -> None:
+        """The pixel limits of a data-defined label size (``px_scale``: the
+        scale denominator at which one size unit is one pixel). The sizes
+        the layer's features take are compared with fixed scales, so the
+        rule is cut at those scales only (one piece per zoom, up to the
+        overzoom top, made a copy of the labels per zoom)."""
+        if (smallest <= 0 and largest <= 0) or uses_map_scale(expression):
+            return
+        size = f"coalesce(to_real({enclosed(expression)}), {static!r})"
+        levels = self._label_size_levels(layer, size)
+        if not levels:
+            return
+        conditions = []
+        if smallest > 0:
+            conditions.append(" OR ".join(f"({size} >= {v!r} AND @map_scale <= {v * px_scale / smallest!r})"
+                                          for v in levels))
+        if largest > 0:
+            conditions.append(" OR ".join(f"({size} <= {v!r} AND @map_scale >= {v * px_scale / largest!r})"
+                                          for v in levels))
+        rule.setFilterExpression(and_filters(rule.filterExpression(),
+                                             " AND ".join(f"({c})" for c in conditions)))
+
+    def _label_size_levels(self, layer, size: str) -> List[float]:
+        """The positive values ``size`` takes on the layer's features, or
+        MAX_LABEL_SIZE_LEVELS levels spread (geometrically) between their
+        least and greatest value (each value rounded down to one)."""
+        from qgis.core import QgsExpressionContext, QgsExpressionContextUtils, QgsFeatureRequest  # pylint: disable=import-outside-toplevel
+        expression = QgsExpression(size)
+        context = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(layer)
+                                       + [map_view.scope()])
+        expression.prepare(context)
+        request = QgsFeatureRequest()
+        if not expression.needsGeometry():
+            request.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+        values = set()
+        for feature in layer.getFeatures(request):
+            context.setFeature(feature)
+            value = expression.evaluate(context)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and math.isfinite(value):
+                values.add(value)
+        if len(values) <= self.MAX_LABEL_SIZE_LEVELS:
+            return sorted(values)
+        low, high = min(values), max(values)
+        steps = self.MAX_LABEL_SIZE_LEVELS - 1
+        return [low * (high / low) ** (k / steps) for k in range(steps + 1)]
 
     def _apply_label_scale_visibility(self, rule, layer) -> None:
         """Apply the label settings' scale visibility (Rendering tab) to the rule.

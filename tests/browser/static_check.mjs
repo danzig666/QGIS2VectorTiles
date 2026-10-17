@@ -10,7 +10,9 @@ const failed = [];
 page.on("requestfailed", (r) => failed.push(r.url()));
 page.on("response", (r) => { if (r.status() >= 400) failed.push(`${r.status()} ${r.url()}`); });
 await page.goto(url);
-await page.waitForFunction(() => window.map && window.map.loaded() && window.map.areTilesLoaded(), null, { timeout: 60000 });
+// Until the page has made the map, window.map is the <div id="map"> element.
+await page.waitForFunction(() => typeof window.map?.loaded === "function" && window.map.loaded()
+  && window.map.areTilesLoaded(), null, { timeout: 60000 });
 await page.waitForTimeout(500);
 const result = await page.evaluate(() => ({
   rendered: window.map.queryRenderedFeatures().length,
