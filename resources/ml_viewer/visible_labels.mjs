@@ -67,8 +67,6 @@
 
 const SOURCE_PREFIX = "q2vt_visible_";
 export const LOADER_PREFIX = "q2vt_visible_loader_";
-// A source layer no tile has (see the loaders below).
-const LOADER_SOURCE_LAYER = "q2vt_loader_none";
 export const OVERLAP_SUFFIX = "_q2vt_overlap";
 const FREE_ROTATION = "q2vt_free_rotation";
 // "Always label" layers: a label that does not fit is drawn smaller (this
@@ -193,13 +191,15 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   const firstLayer = style.layers.length ? style.layers[0].id : undefined;
   for (const [polygons, group] of groups) {
     // MapLibre loads a source's tiles only for visible layers: an invisible
-    // fill keeps the polygons loaded whatever else is shown. It reads no
-    // source layer that is in the tiles: querySourceFeatures reads any of a
-    // tile's layers, and a fill of the polygons themselves would build
-    // their triangles in every tile (memory) only to draw nothing.
+    // fill keeps the polygons loaded whatever else is shown. Its filter
+    // takes no feature: querySourceFeatures reads the tile's data, and a
+    // fill of the polygons themselves would build their triangles in every
+    // tile (memory) only to draw nothing. (A source layer no tile has lost
+    // the polygons of overzoomed tiles.)
     const zooms = group.layers.map(({ def }) => [def.minzoom ?? 0, def.maxzoom ?? 24]);
     map.addLayer({
-      id: LOADER_PREFIX + polygons, type: "fill", source: sourceId, "source-layer": LOADER_SOURCE_LAYER,
+      id: LOADER_PREFIX + polygons, type: "fill", source: sourceId, "source-layer": polygons,
+      filter: ["==", ["literal", 1], 0],
       minzoom: Math.min(...zooms.map((z) => z[0])), maxzoom: Math.max(...zooms.map((z) => z[1])),
       paint: { "fill-opacity": 0 },
     }, firstLayer);
