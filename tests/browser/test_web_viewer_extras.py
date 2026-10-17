@@ -184,6 +184,42 @@ def test_overview_map_follows_layers_and_basemap_while_loading(site, tmp_path):
     assert set(out["mini"]) == {"none"} and out["basemap"], out
 
 
+def test_overview_map_draws_only_cheap_layers(site, tmp_path):
+    """The overview is a second map: it draws the background, the basemap,
+    raster layers and the plain fills and lines of the published layers -
+    no labels, points, patterns, 3D, terrain or the viewer's GeoJSON
+    overlays - at one pixel per CSS pixel, and follows the main map
+    without copying its whole style."""
+    out = _run(site["url"], [{"eval": """
+      const o = q2vtViewer.controls.overview, v = q2vtViewer, m = v.map;
+      await new Promise((r) => (o.mini.loaded() ? r() : o.mini.once('load', r)));
+      v.controls.state.set({ basemap: 'xyz-1' }, 'basemap');
+      await new Promise((r) => setTimeout(r, 1500));
+      let copies = 0;
+      const own = m.getStyle;
+      m.getStyle = function (...args) { copies += 1; return own.apply(this, args); };
+      o.restyle();
+      m.getStyle = own;
+      const main = m.getStyle(), mini = o.mini.getStyle();
+      const ours = ['q2vt_overview_extent', 'q2vt_overview_view'];
+      const sourceType = (style, l) => l.source && style.sources[l.source].type;
+      return { copies, ratio: o.mini.getPixelRatio(), sprite: 'sprite' in mini,
+               types: [...new Set(mini.layers.filter((l) => !ours.some((id) => l.id.startsWith(id))).map((l) => l.type))].sort(),
+               geojson: mini.layers.filter((l) => sourceType(mini, l) === 'geojson').map((l) => l.id).sort(),
+               loaders: mini.layers.filter((l) => l.id.startsWith('q2vt_visible_')).length,
+               patterns: mini.layers.filter((l) => l.paint && (l.paint['fill-pattern'] || l.paint['line-pattern'])).length,
+               plain: main.layers.filter((l) => ['fill', 'line'].includes(l.type) && sourceType(main, l) === 'vector'
+                 && !l.id.startsWith('q2vt_visible_') && !(l.paint || {})['fill-pattern'] && !(l.paint || {})['line-pattern'])
+                 .every((l) => mini.layers.some((k) => k.id === l.id)),
+               dropped: main.layers.filter((l) => ['symbol', 'fill-extrusion', 'hillshade'].includes(l.type)).length,
+               raster: mini.layers.some((l) => l.type === 'raster') };
+    """}], tmp_path)[0]
+    assert out["copies"] == 0 and out["ratio"] == 1 and not out["sprite"], out
+    assert set(out["types"]) <= {"background", "fill", "line", "raster"} and out["raster"], out
+    assert out["geojson"] == ["q2vt_overview_extent", "q2vt_overview_view", "q2vt_overview_view-fill"], out
+    assert out["loaders"] == 0 and out["patterns"] == 0 and out["plain"] and out["dropped"] > 0, out
+
+
 def test_drawing_travels_in_the_link_and_exports(site, tmp_path):
     out = _run(site["url"], [
         {"eval": """

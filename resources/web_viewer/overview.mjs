@@ -1,24 +1,46 @@
 // Overview map: a small second map in the bottom-right corner, a few zoom
 // levels further out, with the main map's view marked and the publication
-// extent outlined. A click there moves the main map. It draws the main map's
-// own style without labels (sources are shared through the pmtiles://
-// protocol), refreshed after the main style changes (layers, basemap).
+// extent outlined. A click there moves the main map. It draws the cheap
+// layers of the main map's own style (sources are shared through the
+// pmtiles:// protocol), refreshed after the main style changes (layers,
+// basemap).
+import { SOURCE_ID as BASEMAP_SOURCE } from "./basemap.mjs";
 import { t } from "./i18n.mjs";
 import { button, el } from "./icons.mjs";
+import { LOADER_PREFIX, styleLayers } from "./style_control.mjs";
 
 const KEY = "q2vt:overview";
 const VIEW = "q2vt_overview_view";
 const EXTENT = "q2vt_overview_extent";
 const ZOOM_OUT = 6;  // zoom levels further out than the main map (64× the area)
 
-// The main style for the overview: no labels, icons, 3D or terrain.
-export function overviewStyle(style) {
-  // Not the runtime overlays (measuring, drawing, highlights: GeoJSON sources).
-  const keep = (layer) => !["symbol", "fill-extrusion", "hillshade", "heatmap"].includes(layer.type)
-    && !(layer.source && style.sources[layer.source] && style.sources[layer.source].type === "geojson");
-  const out = { version: 8, sources: {}, layers: (style.layers || []).filter(keep) };
-  if (style.sprite) out.sprite = style.sprite;  // fill patterns
-  for (const layer of out.layers) if (layer.source && style.sources[layer.source]) out.sources[layer.source] = style.sources[layer.source];
+const PATTERNS = { background: "background-pattern", fill: "fill-pattern", line: "line-pattern" };
+
+// A layer of the main map the overview draws (cheap ones): the background,
+// raster layers, the basemap's fills, lines and points, and the fills and
+// lines of the published layers. No labels, icons, patterns, 3D or terrain,
+// not the runtime overlays (measuring, drawing, highlights, the visible-label
+// points: GeoJSON sources) nor the label helper's tile loaders.
+export function overviewLayer(map, layer) {
+  if (layer.type === "raster") return true;
+  if (PATTERNS[layer.type] && map.getPaintProperty(layer.id, PATTERNS[layer.type]) !== undefined) return false;
+  if (layer.type === "background") return true;
+  const source = layer.source && map.getSource(layer.source);
+  if (!source || source.type !== "vector" || layer.id.startsWith(LOADER_PREFIX)) return false;
+  return ["fill", "line"].includes(layer.type) || (layer.source === BASEMAP_SOURCE && layer.type === "circle");
+}
+
+// The main style for the overview: its overview layers and their sources,
+// each copied (not the whole style: map.getStyle()).
+export function overviewStyle(map) {
+  const out = { version: 8, sources: {}, layers: [] };
+  for (const layer of styleLayers(map)) {
+    if (!overviewLayer(map, layer)) continue;
+    out.layers.push(JSON.parse(JSON.stringify(layer.serialize())));
+    if (layer.source && !out.sources[layer.source]) {
+      out.sources[layer.source] = JSON.parse(JSON.stringify(map.getSource(layer.source).serialize()));
+    }
+  }
   return out;
 }
 
@@ -63,8 +85,9 @@ export class OverviewControl {
   create() {
     const { map, maplibregl } = this;
     this.mini = new maplibregl.Map({
-      container: this.box, style: overviewStyle(map.getStyle()), interactive: false,
+      container: this.box, style: overviewStyle(map), interactive: false,
       attributionControl: false, renderWorldCopies: false, fadeDuration: 0, maxTileCacheZoomLevels: 1,
+      pixelRatio: 1,  // a small inset: its buffers at one pixel per CSS pixel
       center: map.getCenter(), zoom: Math.max(0, map.getZoom() - ZOOM_OUT),
     });
     this.mini.on("load", () => {
@@ -121,9 +144,9 @@ export class OverviewControl {
   // overview's own first style, which applies it on load.
   restyle() {
     if (!this.mini || !this.ready) return;
-    const style = overviewStyle(this.map.getStyle());
-    for (const id of [EXTENT, VIEW]) if (this.mini.getSource(id)) style.sources[id] = this.mini.getStyle().sources[id];
-    style.layers.push(...this.mini.getStyle().layers.filter((l) => [EXTENT, `${VIEW}-fill`, VIEW].includes(l.id)));
+    const style = overviewStyle(this.map);
+    for (const id of [EXTENT, VIEW]) if (this.mini.getSource(id)) style.sources[id] = this.mini.getSource(id).serialize();
+    for (const id of [EXTENT, `${VIEW}-fill`, VIEW]) if (this.mini.getLayer(id)) style.layers.push(this.mini.getLayer(id).serialize());
     this.mini.setStyle(style, { diff: true });
   }
 
