@@ -500,7 +500,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.45.1**. Newest first:
+This README describes QWebMap **4.45.2**. Newest first:
+
+**4.45.2** — fixes
+- Map-unit labels with a data-defined size are hidden at their exact scales (no copy per zoom); large map-unit markers no longer vanish before turning into shapes; "offset along line" of first/last vertex markers is measured in the project CRS; framed labels with a shadow are placed by their framed size; diagrams appear at once; search is quick with animated markers.
 
 **4.45.1** — fixes
 - No false "polygon labels on the visible part are not available" warning; "Hide labels smaller than" also hides data-defined map-unit labels, and "Label every feature" shrinks no smaller than it; adding a layer no longer redoes every other layer of a cached export.
