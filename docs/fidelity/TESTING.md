@@ -88,8 +88,11 @@ The mismatch is the share of ink (either image) with no ink of the other image w
 match after sliding along the line, by the best shift of each 128 px stretch (at most
 24 px). A marker or dash pattern that sits a few pixels further along the line, as the
 web map's spacing steps allow, then scores as equal, while a missing, extra or misspaced
-marker in the stretch still counts. Line ends, sharp vertices and everything further from
-the line are compared in place; the strict figure is shown next to it. After a change to
+marker in the stretch still counts. Inside a polygon (its outline's inner half included)
+the fill may match after the best 2D shift of each 96 px square (at most 12 px each way):
+a pattern laid out from another origin scores as equal, one of another spacing, size or
+density does not. Line ends, sharp vertices and everything further from the line and
+outside polygons are compared in place; the strict figure is shown next to it. After a change to
 the scoring, `python3 tools/gallery/rescore.py /tmp/gallery` scores an existing run (or a
 `batch_gallery.py` folder) again without exporting or rendering.
 

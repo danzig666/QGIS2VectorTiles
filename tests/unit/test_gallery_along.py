@@ -55,3 +55,19 @@ def test_missing_or_misspaced_markers_still_count():
     assert along_ > 0.04 and along_ <= strict
     strict, along_ = _scores(qgis, _draw(22, 0))     # 10 % too far apart
     assert along_ > 0.04 and along_ <= strict
+
+
+def _dots(spacing, phase, size=3):
+    """A square of dots ``spacing`` px apart from ``phase`` (x and y)."""
+    yy, xx = np.mgrid[0:400, 0:400]
+    on = (((xx - phase) % spacing) < size) & (((yy - phase) % spacing) < size)
+    return on & (xx > 50) & (xx < 350) & (yy > 50) & (yy < 350)
+
+
+def test_fill_patterns_shifted_are_forgiven():
+    ring = [[(50, 50), (350, 50), (350, 350), (50, 350), (50, 50)], True]
+    qgis = _dots(12, 0)
+    shifted = along.along_score(qgis, _dots(12, 5), [ring], "Polygon")
+    denser = along.along_score(qgis, _dots(9, 0), [ring], "Polygon")
+    assert shifted < 0.02
+    assert denser > 0.15

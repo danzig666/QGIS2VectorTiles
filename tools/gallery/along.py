@@ -11,10 +11,15 @@ by the best shift of each stretch of ``window`` px (at most ``max_shift``
 px). Within a stretch everything slides together, so dashes against
 markers, the spacing, and anything missing or extra still count.
 
-Kept strict (compared in place): ink further from the line, within
-``end_margin`` px of an open line's ends (first and last vertex markers,
-the first interval marker), within ``bend_margin`` px of a sharp vertex
-(where "along the line" is ambiguous), and points.
+Inside a polygon (its rings' inner half included), a fill pattern may sit
+at another origin: that ink is compared after the best 2D shift of each ``FILL_WINDOW``
+px square (at most ``FILL_MAX_SHIFT`` px each way): a pattern of another
+spacing, size or density still counts.
+
+Kept strict (compared in place): ink further from the line and outside a
+polygon, within ``end_margin`` px of an open line's ends (first and last
+vertex markers, the first interval marker), within ``bend_margin`` px of a
+sharp vertex (where "along the line" is ambiguous), and points.
 
 Pure numpy; paths in image pixels (x right, y down).
 """
@@ -30,6 +35,8 @@ WINDOW = 128            # px of line sharing one shift
 END_MARGIN = 12         # px at each end of an open line, compared in place
 BEND_MARGIN = 8         # px around a sharp vertex, compared in place
 SHARP_DEG = 20.0        # a vertex turning more than this is sharp
+FILL_WINDOW = 96        # px square of a fill sharing one 2D shift
+FILL_MAX_SHIFT = 12     # px, either way, x and y
 
 
 def grow(mask):
@@ -118,9 +125,66 @@ def _project(px, paths, half_width):
     return which, s_out, t_out
 
 
-def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window=WINDOW):
+def polygon_mask(shape, rings):
+    """Pixels inside the polygons whose rings (closed paths, image pixels)
+    are given: even-odd, so holes stay out."""
+    from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel
+    h, w = shape
+    mask = np.zeros(shape, dtype=bool)
+    for points, closed in rings:
+        if not closed or len(points) < 3:
+            continue
+        image = Image.new("1", (w, h), 0)
+        ImageDraw.Draw(image).polygon([(x - 0.5, y - 0.5) for x, y in points], fill=1)
+        mask ^= np.asarray(image, dtype=bool)
+    return mask
+
+
+def _shifted(mask, dx, dy):
+    """``mask`` moved by (dx, dy) pixels (x right, y down), False shifted in:
+    out[y, x] = mask[y - dy, x - dx]."""
+    h, w = mask.shape
+    out = np.zeros_like(mask)
+    ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
+    xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
+    out[yd, xd] = mask[ys, xs]
+    return out
+
+
+def unmatched_fill(ink_a, ink_b, grow_a, grow_b, region, window=FILL_WINDOW,
+                   max_shift=FILL_MAX_SHIFT):
+    """Unmatched ink pixels within ``region`` (a fill's inside), the browser
+    image moved by the best shift of each ``window`` px square (at most
+    ``max_shift`` px each way): a pattern laid out from another origin
+    matches, one of another spacing, size or density does not."""
+    a, b = ink_a & region, ink_b & region
+    if not a.any() and not b.any():
+        return 0
+    h, w = region.shape
+    rows, cols = -(-h // window), -(-w // window)
+
+    def window_sums(mask):
+        padded = np.zeros((rows * window, cols * window), dtype=np.int32)
+        padded[:h, :w] = mask
+        return padded.reshape(rows, window, cols, window).sum(axis=(1, 3))
+    best = window_sums((a & ~grow_b) | (b & ~grow_a))  # unshifted (strict)
+    for dy in range(-max_shift, max_shift + 1):
+        for dx in range(-max_shift, max_shift + 1):
+            if dx == 0 and dy == 0:
+                continue
+            # QGIS ink looks for browser ink (dx, dy) away; browser ink back.
+            misses = (a & ~_shifted(grow_b, -dx, -dy)) | (b & ~_shifted(grow_a, dx, dy))
+            np.minimum(best, window_sums(misses), out=best)
+    return int(best.sum())
+
+
+def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window=WINDOW,
+                    fill=None):
     """Unmatched ink pixels of both images (int) and their total, with the
-    ink near ``paths`` [(points, closed), ...] compared along the line."""
+    ink near ``paths`` [(points, closed), ...] compared along the line and
+    the ink in ``fill`` (a polygon's inside, image mask)
+    compared with the pattern's best 2D shift (unmatched_fill), its
+    rings' inner half included."""
     grow_a, grow_b = grow(ink_a), grow(ink_b)
     total = int(ink_a.sum() + ink_b.sum())
     paths = [_Path(pts, closed) for pts, closed in paths if len(pts) >= 2]
@@ -130,10 +194,26 @@ def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window
     centres = np.concatenate([np.stack([xa, ya], 1), np.stack([xb, yb], 1)]).astype(float) + 0.5
     side = np.concatenate([np.zeros(len(xa), dtype=bool), np.ones(len(xb), dtype=bool)])
     strict_hit = np.concatenate([grow_b[ya, xa], grow_a[yb, xb]])
-    if not paths or not len(centres):
-        return int((~strict_hit).sum()), total
-    which, s, t = _project(centres, paths, half_width)
-    unmatched = int((~strict_hit[which < 0]).sum())
+    if not len(centres):
+        return 0, total
+    if paths:
+        which, s, t = _project(centres, paths, half_width)
+    else:
+        which, s, t = np.full(len(centres), -1), None, None
+    if fill is not None:
+        # Ink inside the fill, its rings' inner half included: by windows
+        # (below); the rings' outer half along them.
+        xi, yi = centres[:, 0].astype(int), centres[:, 1].astype(int)
+        in_fill = fill[yi, xi]
+        which = np.where(in_fill, -1, which)
+    rest = which < 0
+    if fill is not None:
+        rest &= ~in_fill
+        region = np.zeros_like(fill)
+        region[yi[in_fill], xi[in_fill]] = True
+    unmatched = int((~strict_hit[rest]).sum())
+    if fill is not None:
+        unmatched += unmatched_fill(ink_a, ink_b, grow_a, grow_b, region)
     h, w = ink_a.shape
     shifts = np.arange(-max_shift, max_shift + 1)
     shifts = shifts[np.argsort(np.abs(shifts), kind="stable")]  # ties: the smallest shift
@@ -167,7 +247,8 @@ def along_score(ink_a, ink_b, paths, geometry):
     if geometry not in ("LineString", "Polygon"):
         return None
     half = LINE_HALF_WIDTH if geometry == "LineString" else RING_HALF_WIDTH
-    unmatched, total = unmatched_along(ink_a, ink_b, paths, half)
+    fill = polygon_mask(ink_a.shape, paths) if geometry == "Polygon" else None
+    unmatched, total = unmatched_along(ink_a, ink_b, paths, half, fill=fill)
     return round(unmatched / total, 4) if total else 0.0
 
 

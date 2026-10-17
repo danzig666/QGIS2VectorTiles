@@ -1,4 +1,4 @@
-/*! QWebMap patches: 01_line_screen_size, 02_line_pattern_inside, 03_fill_pattern_anchor, 04_fill_bucket_anchors, 05_line_atlas_grow, 06_closed_lines, 07_ring_winding, 08_big_label_collision, 09_label_frames (tools/maplibre) */
+/*! QWebMap patches: 01_line_screen_size, 02_line_pattern_inside, 03_fill_pattern_anchor, 04_fill_bucket_anchors, 05_line_atlas_grow, 06_closed_lines, 07_ring_winding, 08_big_label_collision, 09_label_frames, 10_line_max_blend (tools/maplibre) */
 /**
 * MapLibre GL JS
 * @license 3-Clause BSD. Full text of license: https://github.com/maplibre/maplibre-gl-js/blob/v6.14.0/LICENSE.txt

@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 from qgis.core import (
     Qgis,
+    QgsExpression,
     QgsLineSymbol,
     QgsLineSymbolLayer,
     QgsMarkerLineSymbolLayer,
@@ -349,6 +350,10 @@ class SymbolMaterializer:
                 return large
         if kind == "FontMarker":
             return self._glyph_marker(flat_rule, layer)
+        if kind == "SimpleLine" and (layer.trimDistanceStart() or layer.trimDistanceEnd()):
+            trimmed = self._trim_line(flat_rule, layer)
+            if trimmed is not None:
+                return trimmed
         if kind == "SimpleLine":
             inside = self._inside_polygon(flat_rule, layer)
             if inside is not None:
@@ -1371,6 +1376,70 @@ class SymbolMaterializer:
             ("offset", self._offset_in_map_units(layer)), ("crs", crs)))
         rule.set_attr("m", 1)
         return [rule]
+
+    # A screen-unit trim is converted per this fraction of a zoom (within
+    # +-9 %, a 60 px trim within 5 px).
+    TRIM_BAND_STEPS = 4
+
+    def _trim_line(self, flat_rule: FlattenedRule, layer) -> Optional[List[FlattenedRule]]:
+        """A trimmed simple line (trim distance at start / end) as the
+        trimmed line itself: MapLibre draws the whole line. Map units and
+        "meters at scale" once, a percentage of each line's length once,
+        screen units per quarter of a zoom (at the last zoom's value
+        beyond). Not with an offset, dashes aligned to the line or a
+        data-defined trim (drawn untrimmed, reported)."""
+        P = QgsSymbolLayer.Property
+        props = layer.dataDefinedProperties()
+        if props.isActive(P.PropertyTrimStart) or props.isActive(P.PropertyTrimEnd) or \
+                abs(layer.offset()) > 1e-9 or layer.alignDashPattern() or \
+                layer.tweakDashPatternOnCorners():
+            self._report("Q2VT_DDP_NO_EMITTER",
+                         "SimpleLine: a trimmed line with a data-defined trim, an offset or "
+                         "dashes aligned to the line is drawn untrimmed.", flat_rule)
+            return None
+        crs = self.project_crs or flat_rule.layer.crs().authid()
+        polygon = flat_rule.get_attr("g") == 2
+        ends = []  # (name, map units | None, per cent | None, mm | None)
+        for name, value, unit in (("start", layer.trimDistanceStart(), layer.trimDistanceStartUnit()),
+                                  ("end", layer.trimDistanceEnd(), layer.trimDistanceEndUnit())):
+            value = float(value)
+            if value <= 0:
+                continue
+            if _enum_value(unit) == _enum_value(Qgis.RenderUnit.Percentage):
+                ends.append((name, None, value, None))
+                continue
+            in_map = self._scaled_map_distance(value, unit)
+            mm = None if in_map is not None else _to_mm(value, unit)
+            if in_map is None and mm is None:
+                return None
+            ends.append((name, in_map, None, mm))
+        if not ends:
+            return None
+
+        def trimmed(rule, per_mm=None):
+            derived = rule.derive()
+            clone = derived.rule.symbol().symbolLayer(0)
+            clone.setTrimDistanceStart(0.0)
+            clone.setTrimDistanceEnd(0.0)
+            params = [("crs", crs)] + ([("polygon", True)] if polygon else [])
+            for name, in_map, pct, mm in ends:
+                if pct is not None:
+                    params.append((f"{name}_pct", pct))
+                else:
+                    params.append((name, in_map if in_map is not None else mm * per_mm))
+            derived.recipe = mat.Recipe("line_trim", params=tuple(params))
+            derived.set_attr("m", 3)
+            return derived
+        if all(mm is None for _, _, _, mm in ends):
+            return [trimmed(flat_rule)]
+        rules = []
+        for rule in self._per_zoom(flat_rule):
+            start = float(rule.get_attr("o"))
+            last = rule.visibility is not None and rule.visibility.max_zoom is None
+            for band, zoom in self._sub_zoom_bands(rule, self.TRIM_BAND_STEPS, last):
+                rules.append(trimmed(band, self._map_units_per_mm(flat_rule, zoom)))
+        self.distinguish(rules)
+        return rules
 
     def _along_in_map_units(self, layer) -> Optional[float]:
         """A marker line's offset along the line in project map units when
@@ -2548,6 +2617,47 @@ class SymbolMaterializer:
                                          current.y() + delta * math.cos(own)))
         return symbol
 
+    _VERTEX_VARIABLES = ("geometry_point_num", "geometry_point_count")
+
+    def _vertex_values(self, symbol: QgsMarkerSymbol, rotate: bool, crs: str,
+                       flat_rule: FlattenedRule) -> Tuple:
+        """Recipe params for the data-defined values of vertex markers that
+        QGIS evaluates per vertex (@geometry_point_num, @geometry_point_count:
+        a course's control numbers): computed on every vertex marker by the
+        exporter (rules_exporter._vertex_points) into fields the markers read.
+        A data-defined offset in map units or "meters at scale" of a
+        one-layer marker moves the point itself (the browser has no
+        data-defined offset); an offset in other units stays reported."""
+        fields, offset = [], None
+        single = symbol.symbolLayerCount() == 1
+        for index in range(symbol.symbolLayerCount()):
+            marker = symbol.symbolLayer(index)
+            props = marker.dataDefinedProperties()
+            for key in props.propertyKeys():
+                prop = props.property(key)
+                if not prop.isActive() or not prop.expressionString():
+                    continue
+                expression = prop.expressionString()
+                used = set(QgsExpression(expression).referencedVariables())
+                if not used & set(self._VERTEX_VARIABLES):
+                    continue
+                if key == QgsSymbolLayer.Property.PropertyOffset:
+                    factor = self._scaled_map_distance(1.0, marker.offsetUnit())
+                    if single and factor is not None and crs == "EPSG:3857":
+                        offset = (expression, factor, float(marker.angle()), bool(rotate))
+                        marker.setDataDefinedProperty(key, QgsProperty())
+                        marker.setOffset(QPointF(0.0, 0.0))
+                    continue
+                name = f"{mat.VERTEX_FIELD_PREFIX}{len(fields)}"
+                fields.append((name, expression))
+                marker.setDataDefinedProperty(key, QgsProperty.fromField(name))
+        params = ()
+        if fields:
+            params += (("vertex_fields", tuple(fields)),)
+        if offset is not None:
+            params += (("vertex_offset", offset),)
+        return params
+
     @staticmethod
     def _exact_interval(layer) -> bool:
         """Interval markers whose positions do not depend on the zoom (map-unit
@@ -2841,7 +2951,12 @@ class SymbolMaterializer:
                 if rings:
                     recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + (
                         ("ring_filter", rings), ("crs", crs)))
-                return self._with_symbol(rule, (marker or symbol).clone(), 0, 1, recipe)
+                placed_symbol = (marker or symbol).clone()
+                per_vertex = self._vertex_values(placed_symbol, layer.rotateSymbols(), crs,
+                                                 flat_rule) if points & mat.VERTEX_PLACEMENTS else ()
+                if per_vertex:
+                    recipe = mat.Recipe(recipe.kind, recipe.placements, recipe.params + per_vertex)
+                return self._with_symbol(rule, placed_symbol, 0, 1, recipe)
             if zoom_offset_mm is None:
                 rules.append(placed(flat_rule, line_offset))
             else:
@@ -3063,10 +3178,12 @@ class SymbolMaterializer:
     ARROW_BAND_STEPS = (8, 4, 2, 1)
 
     def _arrow_shadow(self, layer, flat_rule: FlattenedRule):
-        """An arrow's drop shadow (paint effect drawn under it) as a fill of
-        the shadow's colour and opacity under the arrow, shifted as QGIS
-        shifts it (QgsShadowEffect: 0° up, 90° right, y down); not blurred."""
-        from qgis.core import QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
+        """An arrow's drop shadow (paint effect drawn under it) as a blurred
+        line under the arrow, as wide as its body, of the shadow's colour,
+        opacity, blur and shift (the converter's drop shadow of a line; the
+        line itself transparent). QGIS blurs the image of the whole arrow:
+        the heads' shadow is the body's."""
+        from qgis.core import QgsEffectStack  # pylint: disable=import-outside-toplevel
         effect = layer.paintEffect()
         if effect is None or not effect.enabled():
             return None
@@ -3079,19 +3196,19 @@ class SymbolMaterializer:
                 return None  # only an effect drawn before the arrow lies under it
             if name != "QgsDropShadowEffect" or _enum_value(item.drawMode()) == 1:
                 continue
-            color = QColor(item.color())
-            color.setAlphaF(color.alphaF() * item.opacity())
-            shadow = QgsSimpleFillSymbolLayer(color, Qt.BrushStyle.SolidPattern, QColor(0, 0, 0, 0),
-                                              Qt.PenStyle.NoPen)
-            angle = math.radians(item.offsetAngle())
-            distance = item.offsetDistance()
-            shadow.setOffset(QPointF(-distance * math.cos(angle + math.pi / 2),
-                                     -distance * math.sin(angle + math.pi / 2)))
-            shadow.setOffsetUnit(item.offsetUnit())
-            shadow.setOffsetMapUnitScale(item.offsetMapUnitScale())
-            self._report("Q2VT_UNSUPPORTED_EFFECT",
-                         "Arrow drop shadow drawn as an unblurred shifted fill.", flat_rule)
-            return shadow
+            if normalize_unit(layer.arrowWidthUnit()) != normalize_unit(layer.arrowStartWidthUnit()) \
+                    or abs(layer.offset()) > 1e-9:
+                return None
+            line = QgsSimpleLineSymbolLayer(QColor(0, 0, 0, 0),
+                                            (layer.arrowWidth() + layer.arrowStartWidth()) / 2.0)
+            line.setWidthUnit(layer.arrowWidthUnit())
+            line.setWidthMapUnitScale(layer.arrowWidthUnitScale())
+            line.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+            line.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            stack = QgsEffectStack()
+            stack.appendEffect(item.clone())
+            line.setPaintEffect(stack)
+            return line
         return None
 
     def _arrow(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
@@ -3108,8 +3225,6 @@ class SymbolMaterializer:
         if not fill_layers:
             return []
         shadow = self._arrow_shadow(layer, flat_rule)
-        if shadow is not None:
-            fill_layers.insert(0, shadow)
         props = layer.dataDefinedProperties()
         if props is not None and props.hasActiveProperties():
             self._report("Q2VT_MARKER_PLACEMENT_APPROX",
@@ -3223,6 +3338,10 @@ class SymbolMaterializer:
             bands = [(flat_rule, max([low, high] + self._overzoom_zooms(flat_rule)) + 0.5)]
 
         rules = []
+        if shadow is not None:
+            shadow_symbol = QgsLineSymbol([shadow])
+            inherit_opacity(flat_rule.rule.symbol(), shadow_symbol)
+            rules.append(self._with_symbol(flat_rule, shadow_symbol, 1, 0))
         for copy, fill_layer in enumerate(fill_layers):
             fill_layer = fill_layer.clone()
             translate = outline = None

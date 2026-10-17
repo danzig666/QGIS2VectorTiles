@@ -127,7 +127,7 @@ from . import label_lines
 from . import marker_points
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity import feature_order as fo
-from .fidelity.qgis_expr import (bind_geometry, enclosed, in_layer_crs, substitute_geometry,
+from .fidelity.qgis_expr import (bind_geometry, enclosed, in_layer_crs,
                                  uses_map_scale, with_map_scale)
 from .fidelity import zoom as fidelity_zoom
 from .fidelity import map_view
@@ -254,6 +254,26 @@ LABEL_ANCHOR_FIELDS = [
     (6, f"round(distance({_POLE}, boundary($geometry)), 2)", "q2vt_pole_r"),
     (6, "round(main_angle($geometry), 1)", "q2vt_pole_a"),
 ]
+
+
+def _point_value(value) -> Tuple[float, float]:
+    """An offset value as QGIS reads it (QgsSymbolLayerUtils::toPoint):
+    "x,y", an array, a point; (0, 0) otherwise."""
+    from qgis.core import QgsGeometry, QgsSymbolLayerUtils  # pylint: disable=import-outside-toplevel
+    if isinstance(value, QgsGeometry) and not value.isNull():
+        point = value.asPoint()
+        return point.x(), point.y()
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return float(value[0]), float(value[1])
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+    if value is None:
+        return 0.0, 0.0
+    point, ok = QgsSymbolLayerUtils.toPoint(value)
+    return (point.x(), point.y()) if ok else (0.0, 0.0)
+
+
 # ============================================================================
 # Snapshots — pure-Python data, no QObject references
 # ============================================================================
@@ -768,7 +788,8 @@ class RulesExporter:
         read the geometry: QGIS evaluates them on the generated geometry, for
         each part it draws (``length(geometry_n($geometry,
         @geometry_part_num))`` = the length of one generated segment), not on
-        the source feature. They are computed again on every exported part."""
+        the source feature. They are computed again on every exported part
+        (_split_parts)."""
         symbol = flat_rule.rule.symbol() if flat_rule.get_attr("t") == 0 else None
         if symbol is None or not symbol.symbolLayerCount() or (
                 not generated and symbol.symbolLayer(0).layerType() != "GeometryGenerator"):
@@ -777,12 +798,10 @@ class RulesExporter:
         for ftype, expr, name in fields:
             if not expr or not self._GEOMETRY_REFERENCE.search(expr):
                 continue
-            # $geometry: the part as a one-part collection, so geometry_n(..., 1)
-            # and the measures work; in the layer CRS like every expression.
-            per_part = in_layer_crs(substitute_geometry(expr, "collect_geometries(@geometry)"),
-                                    f"EPSG:{_EPSG_CRS}", layer_crs, self._planar)
-            result.append((ftype, "with_variable('geometry_part_num', 1, with_variable("
-                                  f"'geometry_part_count', 1, {enclosed(per_part)}))", name))
+            # Evaluated per part by _split_parts, in the layer CRS like
+            # every expression.
+            result.append((ftype, in_layer_crs(expr, f"EPSG:{_EPSG_CRS}", layer_crs, self._planar),
+                           name))
         return result
 
     @staticmethod
@@ -1916,13 +1935,89 @@ class RulesExporter:
                 INPUT=cleaned,
                 OUTPUT=output_path,
             )
-        out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=cleaned)
-        for index, (ftype, expr, name) in enumerate(grp.part_fields):
-            last = index == len(grp.part_fields) - 1
-            out = self._run_alg_safe(
-                "fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
-                FIELD_TYPE={6: 0, 2: 1, 4: 1}.get(ftype, 2), FIELD_LENGTH=0,
-                FIELD_PRECISION=0, FORMULA=expr, **({"OUTPUT": output_path} if last else {}))
+        del cleaned
+        out = self._split_parts(transbase, grp.part_fields, grp.geometry_expression, geom_target)
+        return self._run_alg_safe("savefeatures", "native", INPUT=out, OUTPUT=output_path)
+
+    # processing geometrybyexpression OUTPUT_GEOMETRY -> geometry type
+    # (0 polygon, 1 line, 2 point; see geom_target).
+    _OUTPUT_GEOMETRY_TYPES = {0: Qgis.GeometryType.Polygon, 1: Qgis.GeometryType.Line,
+                              2: Qgis.GeometryType.Point}
+
+    def _split_parts(self, source: str, part_fields, generator: str, output_geometry: int) -> str:
+        """Worker: the geometry ``generator`` gives each feature of
+        ``source``, one feature per part, with ``part_fields`` evaluated on
+        every part as QGIS evaluates a generator's sub-symbol
+        (QgsGeometryGeneratorSymbolLayer::render, QgsSymbol::renderFeature):
+        $geometry the whole generated geometry, @geometry_part_num the part
+        (from 1) of @geometry_part_count, $currentfeature the source feature
+        (a vertex's distance along the line, ``distance_to_vertex(geometry(
+        $currentfeature), @geometry_part_num - 1)``). Parts of another
+        geometry type than ``output_geometry`` are left out."""
+        from qgis.core import (QgsExpressionContextScope, QgsFeature, QgsField, QgsFields,  # pylint: disable=import-outside-toplevel
+                               QgsVectorFileWriter, QgsWkbTypes)
+        self._check_cancel()
+        layer = self._open(source, "parts_src")
+        fields = QgsFields()
+        names = {name for _, _, name in part_fields}
+        for field in layer.fields():
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() not in names:
+                fields.append(field)
+        kinds = {6: QVariant.Double, 2: QVariant.Int, 4: QVariant.LongLong, 1: QVariant.Bool}
+        for ftype, _, name in part_fields:
+            fields.append(QgsField(name, kinds.get(ftype, QVariant.String)))
+        context = self._worker_expression_context()
+        context.setFields(layer.fields())
+        scope = QgsExpressionContextScope()
+        context.appendScope(scope)
+        generator = QgsExpression(self._lean_generator(generator, source))
+        generator.prepare(context)
+        expressions = [QgsExpression(expr) for _, expr, _ in part_fields]
+        for expression in expressions:
+            expression.prepare(context)
+        wanted = self._OUTPUT_GEOMETRY_TYPES[output_geometry]
+        tolerance = self._simplification_tolerance()
+        if layer.crs().isGeographic():
+            tolerance /= 111320.0
+        out = self._temp_path("parts")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
+        with self._temp_files_lock:
+            self._temp_files.add(out)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "FlatGeobuf"
+        options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
+        single = {Qgis.GeometryType.Polygon: QgsWkbTypes.Polygon,
+                  Qgis.GeometryType.Line: QgsWkbTypes.LineString}.get(wanted, QgsWkbTypes.Point)
+        writer = QgsVectorFileWriter.create(out, fields, single, layer.crs(),
+                                            QgsProject.instance().transformContext(), options)
+        source_names = [f.name() for f in fields if f.name() not in names]
+        for feature in layer.getFeatures():
+            self._check_cancel()
+            context.setFeature(feature)
+            scope.removeVariable("geometry_part_num")
+            scope.removeVariable("geometry_part_count")
+            generated = generator.evaluate(context)
+            if not isinstance(generated, QgsGeometry) or generated.isNull() or generated.isEmpty():
+                continue
+            if generated.constGet().nCoordinates() > self.DENSE_GENERATED_VERTICES:
+                generated = generated.simplify(tolerance)
+            parts = [QgsGeometry(part.clone()) for part in generated.constParts()]
+            attributes = [feature[name] for name in source_names]
+            scope.setGeometry(generated)
+            scope.setVariable("geometry_part_count", len(parts))
+            for number, part in enumerate(parts, 1):
+                if part.type() != wanted or part.isEmpty():
+                    continue
+                scope.setVariable("geometry_part_num", number)
+                values = []
+                for expression in expressions:
+                    value = expression.evaluate(context)
+                    values.append(None if expression.hasEvalError() else value)
+                piece = QgsFeature(fields)
+                piece.setAttributes(attributes + values)
+                piece.setGeometry(part)
+                writer.addFeature(piece)
+            scope.removeGeometry()
+        del writer
         return out
 
     def _generated_lines(self, source: str, grp: _RuleGroupSnapshot) -> Optional[str]:
@@ -1931,17 +2026,16 @@ class RulesExporter:
         on every part), with the geometry-dependent properties evaluated on
         each part."""
         # geometrybyexpression: OUTPUT_GEOMETRY 0 = polygon, 1 = line
-        out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
-                                 OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
-                                 EXPRESSION=self._lean_generator(grp.pre_generator, source))
-        out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
-        out = self._thin_dense(out)
-        out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
-        for ftype, expr, name in grp.generated_fields:
-            out = self._run_alg_safe(
-                "fieldcalculator", "native", INPUT=out, FIELD_NAME=name,
-                FIELD_TYPE={6: 0, 2: 1, 4: 1}.get(ftype, 2), FIELD_LENGTH=0,
-                FIELD_PRECISION=0, FORMULA=expr)
+        if grp.generated_fields:
+            out = self._split_parts(source, grp.generated_fields, grp.pre_generator,
+                                    0 if grp.source_geometry == 2 else 1)
+        else:
+            out = self._run_alg_safe("geometrybyexpression", "native", INPUT=source,
+                                     OUTPUT_GEOMETRY=0 if grp.source_geometry == 2 else 1,
+                                     EXPRESSION=self._lean_generator(grp.pre_generator, source))
+            out = self._run_alg_safe("removenullgeometries", "native", INPUT=out, REMOVE_EMPTY=True)
+            out = self._thin_dense(out)
+            out = self._run_alg_safe("multiparttosingleparts", "native", INPUT=out)
         check = self._open(out, "check")
         if not check.isValid() or check.featureCount() <= 0:
             return None
@@ -1970,7 +2064,7 @@ class RulesExporter:
         recipe = grp.recipe
         if recipe is None:
             return False
-        if recipe.kind in ("marker_points", "inside_band"):
+        if recipe.kind in ("marker_points", "inside_band", "line_trim"):
             # Positions and bands are computed before the extent clip (and
             # an empty result is dropped silently there): only the clip
             # emptied them.
@@ -2926,7 +3020,8 @@ class RulesExporter:
         outputs = []
         vertex_placements = [p for p in recipe.placements if p in mat.VERTEX_PLACEMENTS]
         if vertex_placements:
-            outputs.append(self._vertex_points(lines, vertex_placements, recipe.param("along") or 0.0))
+            outputs.append(self._vertex_points(lines, vertex_placements, recipe.param("along") or 0.0,
+                                               recipe))
         if "Interval" in recipe.placements and self._memory_active:
             outputs.append(self._interval_points_direct(lines, recipe))
         elif "Interval" in recipe.placements:
@@ -3451,21 +3546,67 @@ class RulesExporter:
             self._group_tokens.append(token)
         return token
 
-    def _vertex_points(self, lines: str, placements: List[str], along: float = 0.0) -> str:
+    def _vertex_points(self, lines: str, placements: List[str], along: float = 0.0,
+                       recipe: Optional[Recipe] = None) -> str:
         """Worker: the vertex markers of ``lines`` (marker_points.
         vertex_markers) as points with the line's fields and ``ANGLE_FIELD``:
         QGIS turns them towards the nearest neighbours that differ from the
         vertex, where native:extractvertices' angle takes a repeated
-        vertex's zero-length segment (east)."""
-        from qgis.core import (QgsFeature, QgsField, QgsFields, QgsPointXY,  # pylint: disable=import-outside-toplevel
-                               QgsProject, QgsVectorFileWriter)
+        vertex's zero-length segment (east). The recipe's ``vertex_fields``
+        are evaluated per marker as QGIS evaluates them, on the line with
+        @geometry_point_num (the vertex, from 1) and @geometry_point_count of
+        its part; its ``vertex_offset`` moves each marker."""
+        from qgis.core import (QgsExpressionContextScope, QgsFeature, QgsField, QgsFields,  # pylint: disable=import-outside-toplevel
+                               QgsPointXY, QgsProject, QgsVectorFileWriter)
         self._check_cancel()
         source = self._open(lines, "vertex_lines")
+        vertex_fields = list(recipe.param("vertex_fields", ()) or ()) if recipe is not None else []
+        vertex_offset = recipe.param("vertex_offset") if recipe is not None else None
         fields = QgsFields()
         for field in source.fields():
-            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD:
+            if field.name().lower() not in ("fid", "ogc_fid") and field.name() != mat.ANGLE_FIELD \
+                    and not field.name().startswith(mat.VERTEX_FIELD_PREFIX):
                 fields.append(field)
+        for name, _ in vertex_fields:
+            fields.append(QgsField(name, QVariant.String))
         fields.append(QgsField(mat.ANGLE_FIELD, QVariant.Double))
+        context = expressions = offset_expression = scope = None
+        if vertex_fields or vertex_offset:
+            context = self._worker_expression_context()
+            context.setFields(source.fields())
+            scope = QgsExpressionContextScope()
+            context.appendScope(scope)
+            expressions = [QgsExpression(text) for _, text in vertex_fields]
+            for expression in expressions:
+                expression.prepare(context)
+            if vertex_offset:
+                offset_expression = QgsExpression(vertex_offset[0])
+                offset_expression.prepare(context)
+
+        def per_vertex(feature, number, count, x, y, angle):
+            """The marker's computed values and position."""
+            if context is None:
+                return [], x, y
+            context.setFeature(feature)
+            scope.setVariable("geometry_point_num", number)
+            scope.setVariable("geometry_point_count", count)
+            values = []
+            for expression in expressions:
+                value = expression.evaluate(context)
+                values.append(None if value is None or expression.hasEvalError() else str(value))
+            if offset_expression is not None:
+                ox, oy = _point_value(offset_expression.evaluate(context))
+                factor, base, rotate = vertex_offset[1], vertex_offset[2], vertex_offset[3]
+                ox, oy = ox * factor, oy * factor
+                # QGIS turns a marker's offset with the marker (x right, y down).
+                turn = math.radians(base + (mat_angle_to_marker(angle) if rotate else 0.0))
+                dx = ox * math.cos(turn) - oy * math.sin(turn)
+                dy = ox * math.sin(turn) + oy * math.cos(turn)
+                x, y = x + dx, y - dy
+            return values, x, y
+
+        def mat_angle_to_marker(azimuth):
+            return (azimuth or 0.0) - 90.0
         out = self._temp_path("vertices")[:-len(_TEMP_RULE_FORMAT)] + "fgb"
         with self._temp_files_lock:
             self._temp_files.add(out)
@@ -3479,7 +3620,9 @@ class RulesExporter:
             geometry = feature.geometry()
             if geometry.isNull() or geometry.isEmpty():
                 continue
-            attributes = [feature[field.name()] for field in fields if field.name() != mat.ANGLE_FIELD]
+            attributes = [feature[field.name()] for field in fields
+                          if field.name() != mat.ANGLE_FIELD and field.name() not in
+                          {name for name, _ in vertex_fields}]
             for part in geometry.constParts():
                 line = part.curveToLine() if part.hasCurvedSegments() else part
                 xs = [line.xAt(i) for i in range(line.numPoints())]
@@ -3490,18 +3633,23 @@ class RulesExporter:
                         # Moved along the line; none where the line is shorter.
                         moved = marker_points.along_vertex_marker(xs, ys, placement, along)
                         if moved is not None:
+                            number = 1 if placement == "FirstVertex" else len(xs)
+                            values, x, y = per_vertex(feature, number, len(xs), moved[0], moved[1],
+                                                      moved[2])
                             point = QgsFeature(fields)
-                            point.setAttributes(attributes + [moved[2]])
-                            point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(moved[0], moved[1])))
+                            point.setAttributes(attributes + values + [moved[2]])
+                            point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
                             writer.addFeature(point)
                         continue
                     for index, angle in marker_points.vertex_markers(xs, ys, placement):
                         if (index, angle) in drawn:
                             continue  # the same marker of two placements
                         drawn.add((index, angle))
+                        values, x, y = per_vertex(feature, index + 1, len(xs), xs[index],
+                                                  ys[index], angle)
                         point = QgsFeature(fields)
-                        point.setAttributes(attributes + [angle])
-                        point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(xs[index], ys[index])))
+                        point.setAttributes(attributes + values + [angle])
+                        point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
                         writer.addFeature(point)
         del writer
         return out
@@ -3999,6 +4147,8 @@ class RulesExporter:
             return [2, "@geometry"]  # bands already materialized (_inside_bands)
         if recipe is not None and recipe.kind == "line_offset":
             return [1, mat.offset_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
+        if recipe is not None and recipe.kind == "line_trim":
+            return [1, mat.trim_line_expression(recipe, f"EPSG:{_EPSG_CRS}")]
         if recipe is not None and recipe.kind == "arrow_polygons":
             # Polygons built by _arrow_polygons; the arrow's outline
             # (SymbolMaterializer._arrow, a line rule) is drawn on their rings.
