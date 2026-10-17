@@ -255,3 +255,66 @@ def test_zoom_band_pieces_give_the_tiles_of_one_run(plugin, tmp_path, monkeypatc
     one = tiles(str(tmp_path / "one"), True)
     bands = tiles(str(tmp_path / "bands"), False)
     assert one == bands and any(z == 5 for z, _, _ in one)
+
+
+def test_features_under_half_a_pixel_are_left_out_below_the_last_tile_zoom(tmp_path):
+    """A fill dataset's features smaller than ``min_feature_px`` (CSS px,
+    both sides of their bounding box) are not in the tiles of the zooms
+    where they are that small; at the dataset's last tile zoom (magnified
+    beyond it) every feature is. Datasets that may not drop features (not
+    in ``small_datasets``) keep all."""
+    import random as _random  # pylint: disable=import-outside-toplevel
+    from qgis.core import QgsRectangle  # pylint: disable=import-outside-toplevel
+    from q2vt_plugin.src.core import tiles_generator  # pylint: disable=import-error
+    from q2vt_plugin.src.core.datasets import ExportedDataset  # pylint: disable=import-error
+    from publishing import mvt  # pylint: disable=import-outside-toplevel
+    rng = _random.Random(7)
+    small, kept = "l00t00d01r00g00c00o03i09s00", "l00t00d02r00g00c00o03i09s00"
+    fields = QgsFields()
+    fields.append(QgsField("k", QVariant.Int))
+    sizes = {}
+
+    def dataset(folder, name):
+        rng.seed(7)  # the same features in both
+        path = os.path.join(folder, f"{name}.gpkg")
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        writer = QgsVectorFileWriter.create(path, fields, QgsWkbTypes.Polygon,
+                                            QgsCoordinateReferenceSystem("EPSG:3857"),
+                                            QgsCoordinateTransformContext(), options)
+        features = []
+        for number in range(300):
+            x, y = 2110000 + rng.uniform(0, 30000), 6010000 + rng.uniform(0, 30000)
+            size = rng.uniform(20, 400)
+            sizes[number] = size
+            feature = QgsFeature(fields)
+            feature.setAttributes([number])
+            feature.setGeometry(QgsGeometry.fromWkt(
+                f"POLYGON(({x} {y}, {x + size} {y}, {x + size} {y + size * 0.5}, {x} {y}))"))
+            features.append(feature)
+        writer.addFeatures(features)
+        del writer
+        return ExportedDataset(path, name, 300, None)
+
+    folder = str(tmp_path)
+    layers = [dataset(folder, small), dataset(folder, kept)]
+    style = {"layers": [{"id": n, "type": "fill", "source": "t", "source-layer": n} for n in (small, kept)]}
+    generator = tiles_generator.GDALTilesGenerator(
+        layers, style, folder, QgsRectangle(2110000, 6010000, 2140000, 6040000), 100, None,
+        layer_zooms={small: (3, 9), kept: (3, 9)}, layer_groups={"one": [small, kept]},
+        min_feature_px=0.5, small_datasets={small})
+    generator.generate()
+    found = {}
+    with sqlite3.connect(os.path.join(folder, "tiles.mbtiles")) as conn:
+        for z, _x, _y, data in conn.execute("SELECT * FROM tiles"):
+            for name, layer in mvt.decode(data).items():
+                found.setdefault((name, z), set()).update(f["properties"]["k"] for f in layer["features"])
+    px0 = 40075016.68557849 / 512.0
+    # The same features in both (the writer drops those that collapse to
+    # nothing at the zoom anyway), but under the limit.
+    assert found[(small, 9)] == found[(kept, 9)]
+    for zoom in (7, 8):
+        limit = 0.5 * px0 / 2 ** zoom
+        assert found[(small, zoom)] == {k for k in found[(kept, zoom)] if sizes[k] >= limit}, zoom
+        assert found[(small, zoom)] < found[(kept, zoom)], zoom
+    assert (small, 5) not in found and (kept, 5) in found  # all under the limit there

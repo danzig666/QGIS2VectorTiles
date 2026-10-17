@@ -191,6 +191,7 @@ class QGIS2VectorTiles:
         thin_hairlines: bool = True,
         view_max_zoom: int = 22,
         min_label_px: float = 0.0,
+        min_feature_px: float = 0.0,
         cap_tiles: bool = False,
     ):
         """``cache``: a core.export_cache.ExportCache — datasets and tiles of
@@ -240,6 +241,7 @@ class QGIS2VectorTiles:
         self.fast_markers = fast_markers
         # Map-unit labels smaller than this on screen are hidden (0: off).
         self.min_label_px = min_label_px
+        self.min_feature_px = float(min_feature_px or 0.0)
         # Far too many tiles of coarse data: end them at its detail
         # (fidelity.tile_budget; only while the web map overzooms).
         self.cap_tiles = cap_tiles
@@ -750,9 +752,21 @@ class QGIS2VectorTiles:
             progress_range=(33.0, 97.0),
             exact_datasets={rule.output_dataset for rule in rules or []
                             if materialize.color_bands_disjoint(rule.recipe)},
+            min_feature_px=self.min_feature_px, small_datasets=self._small_datasets(rules or []),
         )
         self.min_zoom = generator._get_global_min_zoom()  # pylint: disable=protected-access
         return generator
+
+    @staticmethod
+    def _small_datasets(rules: List[FlattenedRule]) -> set:
+        """Datasets whose features may be left out where they are smaller
+        than ``min_feature_px``: the features of renderer rules, drawn as they
+        are (no materialized recipe, no inverted polygon), not those of
+        labels (their anchors)."""
+        keep = {rule.output_dataset for rule in rules
+                if rule.get_attr("t") != 0 or rule.recipe is not None or rule.merge == "invert"
+                or rule.heatmap or rule.point_group or rule.diagram}
+        return {rule.output_dataset for rule in rules} - keep
 
     def _tiles_done(self, generator: GDALTilesGenerator, min_zoom: int) -> None:
         if self.cache is not None:

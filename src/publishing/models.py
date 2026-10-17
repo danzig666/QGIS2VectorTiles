@@ -327,6 +327,10 @@ class OutputConfig:
     # Labels with a size in map units are hidden where they are smaller than
     # this on screen (CSS px; 0: shown at every size).
     min_label_px: float = 6.0
+    # Fills and lines smaller than this on screen (CSS px, both sides of
+    # their bounding box) are left out of the tiles of the zoom levels where
+    # they are, except the last tile zoom (magnified beyond it); 0: kept.
+    min_feature_px: float = 0.5
 
 
 @dataclass

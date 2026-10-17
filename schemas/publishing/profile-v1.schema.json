@@ -231,6 +231,10 @@
         "minLabelPx": {
           "type": "number",
           "minimum": 0
+        },
+        "minFeaturePx": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },

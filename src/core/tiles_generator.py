@@ -202,6 +202,8 @@ class GDALTilesGenerator:
         layer_groups: Optional[Dict[str, List[str]]] = None,
         progress_range: Tuple[float, float] = (0.0, 100.0),
         exact_datasets: Optional[set] = None,
+        min_feature_px: float = 0.0,
+        small_datasets: Optional[set] = None,
     ):
         # With a cache: one tile set per QGIS layer (its datasets), reused
         # while the layer's datasets are unchanged, then merged.
@@ -212,6 +214,13 @@ class GDALTilesGenerator:
         # overlap share their edges, which must stay the same in both bands
         # (simplified apart, they open cracks and lose thin rings).
         self.exact_datasets = exact_datasets or set()
+        # Fills and lines of ``small_datasets`` under ``min_feature_px`` CSS
+        # px (both sides of their bounding box) are left out of the tiles of
+        # the zooms where they are that small (see _small_cuts).
+        self.min_feature_px = max(0.0, float(min_feature_px or 0.0))
+        self.small_datasets = small_datasets or set()
+        # Zoom ranges of the datasets' unfiltered tiles (_small_cuts).
+        self._zoom_override: Dict[str, Tuple[int, int]] = {}
         self.layers = layers
         self.style = style
         self.output_dir = output_dir
@@ -319,12 +328,14 @@ class GDALTilesGenerator:
 
     # --- VRT construction ---
 
-    def _build_vrt(self, vrt_path: str, layers: Optional[List[QgsVectorLayer]] = None):
-        """Write an OGR VRT containing one entry per layer with per-zoom configuration."""
+    def _build_vrt(self, vrt_path: str, layers: Optional[List[QgsVectorLayer]] = None,
+                   min_size: float = 0.0):
+        """Write an OGR VRT containing one entry per layer with per-zoom
+        configuration; with ``min_size`` (metres) only the features whose
+        bounding box is that wide or high."""
         root = ET.Element("OGRVRTDataSource")
         for layer in self.layers if layers is None else layers:
             name = self._layer_name(layer)
-            min_zoom, max_zoom = self._layer_zoom_range(layer)
             node = ET.SubElement(root, "OGRVRTLayer", name=name)
             source = layer.source().split("|layername=")[0]
             ET.SubElement(node, "SrcDataSource").text = source
@@ -333,11 +344,114 @@ class GDALTilesGenerator:
             # when only the rule's zoom range changed); without SrcLayer OGR
             # looks for a table named like the tile layer and writes nothing.
             table = self._table_of(source)
-            if table and table != name:
+            column = self._geometry_column(source) if min_size > 0 else None
+            if table and column:
+                ET.SubElement(node, "SrcSQL").text = (
+                    f"SELECT * FROM {_quoted(table)} WHERE {self._size_sql(column)} >= {min_size!r}")
+            elif table and table != name:
                 ET.SubElement(node, "SrcLayer").text = table
             ET.SubElement(node, "LayerSRS").text = f"EPSG:{_EPSG_CRS}"
             ET.SubElement(node, "GeometryType").text = "wkbUnknown"
         ET.ElementTree(root).write(vrt_path, encoding="utf-8", xml_declaration=True)
+
+    @staticmethod
+    def _size_sql(column: str) -> str:
+        """The larger side of a feature's bounding box (GeoPackage SQL)."""
+        geom = _quoted(column)
+        return f"MAX(ST_MaxX({geom}) - ST_MinX({geom}), ST_MaxY({geom}) - ST_MinY({geom}))"
+
+    @staticmethod
+    def _geometry_column(path: str) -> Optional[str]:
+        try:
+            with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+                row = conn.execute("SELECT column_name FROM gpkg_geometry_columns").fetchone()
+        except sqlite3.Error:
+            return None
+        return row[0] if row else None
+
+    # Metres of a CSS px at zoom 0 (512 px tiles, EPSG:3857).
+    _PX0 = 40075016.68557849 / 512.0
+
+    def _size_range(self, layer: QgsVectorLayer) -> Optional[Tuple[float, float]]:
+        """(smallest, largest) bounding box side of the dataset's features
+        (the larger of width and height); None when unknown."""
+        source = layer.source().split("|layername=")[0]
+        column, table = self._geometry_column(source), self._table_of(source)
+        if not column or not table:
+            return None
+        ds = ogr.Open(source)
+        if ds is None:
+            return None
+        try:
+            result = ds.ExecuteSQL(f"SELECT MIN(s), MAX(s) FROM (SELECT {self._size_sql(column)} AS s "
+                                   f"FROM {_quoted(table)} WHERE {_quoted(column)} IS NOT NULL)")
+            if result is None:
+                return None
+            feature = result.GetNextFeature()
+            values = (feature.GetField(0), feature.GetField(1)) if feature is not None else (None, None)
+            ds.ReleaseResultSet(result)
+        finally:
+            ds = None
+        if values[0] is None or values[1] is None:
+            return None
+        return float(values[0]), float(values[1])
+
+    def _drawn_small(self, name: str, zoom: int) -> bool:
+        """Whether the dataset is only drawn as fills and thin lines (at most
+        2 px wide at ``zoom``): a feature smaller than a pixel draws no more
+        than a pixel or two. Not a symbol (its label or icon), circle,
+        extrusion or heatmap."""
+        from .fidelity import expressions as ex  # pylint: disable=import-outside-toplevel
+        if name.endswith(("_vp", "_vl")) or name in self.exact_datasets:
+            return False
+        style = self.style if isinstance(self.style, dict) else {}
+        layers = [layer for layer in style.get("layers", []) if layer.get("source-layer") == name]
+        if not layers:
+            return False
+        for layer in layers:
+            kind = layer.get("type")
+            if kind == "fill":
+                continue
+            if kind != "line":
+                return False
+            paint = layer.get("paint") or {}
+            try:
+                width = sum(float(ex.evaluate_zoom_curve(paint.get(key, default), zoom))
+                            for key, default in (("line-width", 1), ("line-gap-width", 0)))
+            except (ex.ExpressionError, TypeError, IndexError, ValueError):
+                return False  # feature-dependent: unknown
+            if width > 2:
+                return False
+        return True
+
+    def _small_cuts(self, members: List[QgsVectorLayer]) -> Dict[str, Tuple[int, int, float]]:
+        """{dataset: (first, last, largest)}: the zooms (below its last tile
+        zoom) whose tiles leave out the dataset's features under
+        ``min_feature_px``, and its largest feature size (metres). The tiles
+        of those zooms are made one zoom at a time (_filtered_jobs); the
+        dataset's other zooms as before."""
+        cuts: Dict[str, Tuple[int, int, float]] = {}
+        if self.min_feature_px <= 0:
+            return cuts
+        for layer in members:
+            name = self._layer_name(layer)
+            low, high = self._layer_zoom_range(layer)
+            if name not in self.small_datasets or not self._drawn_small(name, max(low, high - 1)):
+                continue
+            sizes = self._size_range(layer) if high > low else None
+            if sizes is None or sizes[0] <= 0 and sizes[1] <= 0:
+                continue
+            smallest = max(sizes[0], 1e-9)
+            # The highest zoom where the smallest feature is under the limit.
+            last = math.ceil(math.log2(self.min_feature_px * self._PX0 / smallest)) - 1
+            last = min(high - 1, last)
+            if last >= low:
+                cuts[name] = (low, last, sizes[1])
+        return cuts
+
+    def _min_size(self, zoom: int) -> float:
+        """``min_feature_px`` in metres at ``zoom``."""
+        return self.min_feature_px * self._PX0 / 2 ** zoom
 
     def _write_layer_conf(self, conf_path: str, layers: Optional[List[QgsVectorLayer]] = None,
                           band: Optional[Tuple[int, int]] = None):
@@ -572,14 +686,32 @@ class GDALTilesGenerator:
             out.append((owner_id, export_cache.make_key("tiles", self._zooms, parts,
                                                         self._simplification(members),
                                                         _SIMPLIFICATION_MAX_ZOOM,
-                                                        self._buffer(members))
+                                                        self._buffer(members),
+                                                        *self._small_key(members))
                         if parts is not None else None, members))
         return out
+
+    def _small_key(self, members: List[QgsVectorLayer]) -> list:
+        """The part of a tile group's cache key for leaving out small
+        features: nothing (keys as before) when none can be."""
+        names = sorted(self._layer_name(m) for m in members
+                       if self._layer_name(m) in self.small_datasets)
+        return [self.min_feature_px, names] if names and self.min_feature_px > 0 else []
+
+    # SIMPLIFICATION (tile units, 8 a CSS px) of lighter tiles (with
+    # ``min_feature_px``): a quarter pixel at the tile's zoom, fewer points
+    # in the tiles of the zooms below a dataset's last (that one stays
+    # exact: SIMPLIFICATION_MAX_ZOOM). Neighbours simplified apart open
+    # cracks of up to half a pixel where the tile is magnified most, which
+    # MapLibre's antialiased fill edges cover.
+    _LIGHT_SIMPLIFICATION = 2
 
     def _simplification(self, members: List[QgsVectorLayer]) -> float:
         """SIMPLIFICATION of a tile group (see ``exact_datasets``)."""
         if members and all(self._layer_name(m) in self.exact_datasets for m in members):
             return 0
+        if self.min_feature_px > 0:
+            return self._LIGHT_SIMPLIFICATION
         return _SIMPLIFICATION
 
     def _generate_per_layer(self, output: str, min_zoom: int, max_zoom: int):
@@ -597,9 +729,14 @@ class GDALTilesGenerator:
             target = join(work, f"group_{number:04d}.mbtiles")
             vrt = join(work, f"group_{number:04d}.vrt")
             conf = join(work, f"group_{number:04d}.json")
+            cuts = self._small_cuts(members)
+            for layer in members:
+                name = self._layer_name(layer)
+                if name in cuts:  # the unfiltered tiles: the zooms after the cut
+                    self._zoom_override[name] = (cuts[name][1] + 1, self._layer_zoom_range(layer)[1])
             self._build_vrt(vrt, members)
             self._write_layer_conf(conf, members)
-            groups.append((key, target, vrt, conf, members, owner))
+            groups.append((key, target, vrt, conf, members, owner, cuts))
             parts.append(target)
         if self.feedback is not None and self.cache is not None:
             self.feedback.pushInfo(f"   Tiles: {len(parts) - len(groups)} of {len(parts)} layers "
@@ -609,10 +746,14 @@ class GDALTilesGenerator:
         cpu = self._cpu_num()
         target_cost = sum(self._job_cost(g[4]) for g in groups) / max(1, cpu) / 2
         jobs = []  # (group index, piece file, command, cost, owner)
-        for index, (key, target, vrt, conf, members, owner) in enumerate(groups):
+        for index, (key, target, vrt, conf, members, owner, cuts) in enumerate(groups):
             pieces = self._pieces(members, target_cost) if cpu > 1 else [(min_zoom, max_zoom, 0.0)]
             buffer = self._buffer(members)
             simplification = self._simplification(members)
+            filtered = self._filtered_jobs(index, target, members, cuts, owner, buffer, simplification)
+            jobs += filtered
+            if filtered:  # merged with them: not the group's file itself
+                target = f"{target[:-8]}_all.mbtiles"
             if len(pieces) == 1:
                 jobs.append((index, target, self._ogr2ogr_command(vrt, target, min_zoom, max_zoom, conf,
                                                                   buffer=buffer,
@@ -656,6 +797,34 @@ class GDALTilesGenerator:
             # Kept in the cache; not needed here (nor the pieces of a failed
             # or cancelled run).
             shutil.rmtree(work, ignore_errors=True)
+
+    def _filtered_jobs(self, index: int, target: str, members: List[QgsVectorLayer],
+                       cuts: Dict[str, Tuple[int, int, float]], owner: str, buffer: int,
+                       simplification: float) -> list:
+        """Jobs (as _generate_per_layer's) making the tiles of the zooms of
+        ``cuts``: one zoom each, the datasets' features under
+        ``min_feature_px`` there left out. Each zoom is simplified as one
+        below the datasets' last (not SIMPLIFICATION_MAX_ZOOM)."""
+        jobs = []
+        by_name = {self._layer_name(m): m for m in members}
+        zooms = sorted({z for low, last, _ in cuts.values() for z in range(low, last + 1)})
+        for zoom in zooms:
+            limit = self._min_size(zoom)
+            part = [by_name[name] for name, (low, last, largest) in cuts.items()
+                    if low <= zoom <= last and largest >= limit]
+            if not part:
+                continue  # every feature under the limit: none in these tiles
+            piece = f"{target[:-8]}_z{zoom:02d}.mbtiles"
+            piece_vrt, piece_conf = piece[:-8] + ".vrt", piece[:-8] + ".json"
+            self._build_vrt(piece_vrt, part, min_size=limit)
+            with open(piece_conf, "w", encoding="utf-8") as handle:
+                json.dump({self._layer_name(m): {"minzoom": zoom, "maxzoom": zoom} for m in part}, handle)
+            command = self._ogr2ogr_command(piece_vrt, piece, zoom, zoom, piece_conf,
+                                            top_simplification=simplification, buffer=buffer,
+                                            simplification=simplification)
+            cost = sum(self._job_cost([m]) for m in part) / max(1, len(zooms))
+            jobs.append((index, piece, command, cost, owner))
+        return jobs
 
     def _check_cancelled(self) -> None:
         if self.feedback is not None and self.feedback.isCanceled():
@@ -832,6 +1001,8 @@ class GDALTilesGenerator:
 
     def _layer_zoom_range(self, layer: QgsVectorLayer) -> Tuple[int, int]:
         name = self._layer_name(layer)
+        if name in self._zoom_override:
+            return self._zoom_override[name]
         if name in self.layer_zooms:
             low, high = self.layer_zooms[name]
         else:
@@ -872,6 +1043,10 @@ def _merged_tile(chunks: List[bytes]) -> bytes:
     if len(chunks) == 1 and chunks[0][:2] == b"\x1f\x8b":
         return chunks[0]
     return _gzip(b"".join(_tile_layers(data) for data in chunks))
+
+
+def _quoted(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 
 def merge_mbtiles(parts: List[str], output: str, min_zoom: int, max_zoom: int,

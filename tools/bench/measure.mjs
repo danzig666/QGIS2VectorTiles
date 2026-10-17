@@ -58,14 +58,45 @@ for (let i = 0; i < 10; i++) {
 }
 await page.waitForTimeout(3000);
 const browsed = await sample();
+// What the tiles hold (steadier than process sizes, which the allocator
+// and the garbage collector move by tens of MB): the GPU buffers of their
+// buckets, their raw tile data and their feature indexes, in MB.
 const tiles = await page.evaluate(() => {
   const managers = q2vtViewer.map.style.tileManagers || {};
-  let inView = 0, cached = 0;
+  let inView = 0, cached = 0, buffers = 0, raw = 0, buckets = 0;
+  const all = [];
   for (const m of Object.values(managers)) {
-    inView += m._inViewTiles?.getAllIds ? m._inViewTiles.getAllIds().length : 0;
-    cached += m._outOfViewCache?.order?.length || 0;
+    const ids = m._inViewTiles?.getAllIds ? m._inViewTiles.getAllIds() : [];
+    inView += ids.length;
+    for (const id of ids) all.push(m._inViewTiles.getTileById(id));
+    const cache = m._outOfViewCache;
+    cached += cache?.order?.length || 0;
+    for (const entries of Object.values(cache?.data || {})) for (const e of entries) all.push(e.value);
   }
-  return { inView, cached };
+  const seen = new Set();
+  const bufferBytes = (value, depth) => {
+    if (!value || typeof value !== "object" || seen.has(value) || depth > 3) return 0;
+    seen.add(value);
+    if (typeof WebGLBuffer !== "undefined" && value.buffer instanceof WebGLBuffer) {
+      // The buffer's own size (measured last: rebinding does not matter).
+      const gl = value.context?.gl;
+      if (!gl) return 0;
+      const target = value.itemSize !== undefined ? gl.ARRAY_BUFFER : gl.ELEMENT_ARRAY_BUFFER;
+      if (target === gl.ELEMENT_ARRAY_BUFFER) gl.bindVertexArray?.(null);
+      gl.bindBuffer(target, value.buffer);
+      return gl.getBufferParameter(target, gl.BUFFER_SIZE) || 0;
+    }
+    let sum = 0;
+    for (const v of Object.values(value)) sum += bufferBytes(v, depth + 1);
+    return sum;
+  };
+  for (const tile of all) {
+    if (!tile) continue;
+    raw += tile.latestRawTileData?.byteLength || 0;
+    for (const bucket of Object.values(tile.buckets || {})) { buckets++; buffers += bufferBytes(bucket, 0); }
+  }
+  const mb = (n) => Math.round(n / 104857.6) / 10;
+  return { inView, cached, buckets, bufferMB: mb(buffers), rawMB: mb(raw) };
 });
 await browser.close();
 process.stdout.write(JSON.stringify({ start, loaded, browsed, tiles }) + "\n");

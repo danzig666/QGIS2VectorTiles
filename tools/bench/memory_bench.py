@@ -135,6 +135,8 @@ def main(argv=None):
     parser.add_argument("--option", action="append", default=[],
                         help="profile setting, e.g. output.low_memory=false")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="measure this many times (fresh browser each), report each run")
     args = parser.parse_args(argv)
     app = bg.init_qgis()  # noqa: F841  keep a reference
     from qgis.core import QgsRectangle  # pylint: disable=import-outside-toplevel
@@ -166,13 +168,14 @@ def main(argv=None):
     with PreviewServer(os.path.dirname(result.publication_dir)) as server:
         url = server.url(f"{profile.slug}/index.html") + \
             f"#v=1&map={args.start_zoom:.2f}/{lonlat.y():.6f}/{lonlat.x():.6f}"
-        run = subprocess.run(["node", os.path.join(HERE, "measure.mjs"), url], capture_output=True,
-                             text=True, timeout=900, check=False)
-    if run.returncode:
-        raise SystemExit(run.stderr[-3000:])
-    measured = json.loads(run.stdout.strip().splitlines()[-1])
-    report = {"parcels": args.parcels, "archiveMB": round(archive / 1048576, 1), **measured}
-    print(json.dumps(report))
+        for _ in range(max(1, args.repeat)):
+            run = subprocess.run(["node", os.path.join(HERE, "measure.mjs"), url], capture_output=True,
+                                 text=True, timeout=900, check=False)
+            if run.returncode:
+                raise SystemExit(run.stderr[-3000:])
+            measured = json.loads(run.stdout.strip().splitlines()[-1])
+            report = {"parcels": args.parcels, "archiveMB": round(archive / 1048576, 1), **measured}
+            print(json.dumps(report), flush=True)
     if not args.keep:
         shutil.rmtree(out, ignore_errors=True)
 
