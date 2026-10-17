@@ -372,11 +372,11 @@ def test_compact_embed_mode_in_another_page(site, tmp_path):
     assert normal[0] == [False, False, False]  # the full map is unchanged
 
 
-def test_phone_search_is_a_magnifier_until_tapped(site, tmp_path):
-    """Phones: the search field took a whole row of the header. Now only a
-    magnifier until it is tapped; the field opens focused, and closes once a
-    result is chosen (the magnifier marks that a search is set). Wider
-    screens keep the field."""
+def test_search_is_a_magnifier_until_tapped(site, tmp_path):
+    """The search field took a whole row of the header. Now only a
+    magnifier until it is clicked (phones since 4.38.3, every screen since
+    4.48.2); the field opens focused, and closes once a result is chosen
+    (the magnifier marks that a search is set)."""
     state = """const box = document.getElementById('q2vt-searchbox'), toggle = document.querySelector('.q2vt-search-toggle');
                return { field: box.offsetHeight > 0, toggle: !!toggle && toggle.offsetHeight > 0,
                         focused: document.activeElement === document.getElementById('q2vt-search'),
@@ -395,5 +395,9 @@ def test_phone_search_is_a_magnifier_until_tapped(site, tmp_path):
     assert closed["toggle"] and not closed["field"], closed
     assert opened["field"] and opened["focused"] and opened["header"] > closed["header"] + 30, opened
     assert not chosen["field"] and chosen["marked"], chosen
-    (wide,) = _run(site["url"], [{"eval": state}], tmp_path)
-    assert wide["field"] and not wide["toggle"], wide
+    wide = _run(site["url"], [
+        {"eval": state},
+        {"eval": "document.querySelector('.q2vt-search-toggle').click(); await new Promise((r) => setTimeout(r, 100));" + state},
+    ], tmp_path)
+    assert wide[0]["toggle"] and not wide[0]["field"], wide
+    assert wide[1]["field"] and wide[1]["focused"], wide

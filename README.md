@@ -502,7 +502,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.48.1**. Newest first:
+This README describes QWebMap **4.48.2**. Newest first:
+
+**4.48.2** — search behind its magnifier
+- The web map's search field opens when its magnifier is clicked, on every screen (it was shown open on wider screens).
 
 **4.48.1** — fixes
 - A polygon outline no longer draws a line where the export extent cuts the polygons (since 4.47.0); thin hairlines are no longer half as wide in the overview map; marker images per zoom kept for data-defined markers; cached tiles redone when an outline gets wider.

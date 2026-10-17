@@ -48,10 +48,9 @@ export class Search {
     document.addEventListener("click", (e) => { if (!container.contains(e.target)) this.close(); });
   }
 
-  // Phones (styles.css, max-width 760px): only a magnifier in the header
-  // row; the field opens when it is tapped and closes again when left empty,
-  // with Escape, or once a result is chosen (the magnifier then shows that
-  // a search is set). Wider screens always show the field.
+  // Only a magnifier in the header row (styles.css); the field opens when
+  // it is clicked and closes again when left empty, with Escape, or once a
+  // result is chosen (the magnifier then shows that a search is set).
   collapsible(container, clear) {
     const header = container.closest("#q2vt-header");
     const row = header && header.querySelector(".q2vt-header-row");
