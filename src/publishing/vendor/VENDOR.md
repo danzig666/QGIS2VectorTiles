@@ -46,7 +46,7 @@ rules. Tests and `.dist-info` are not shipped; licences and notices are in
 
 | Component | Version | License | Files |
 |---|---|---|---|
-| MapLibre GL JS | 6.11.2 (unchanged from the existing viewer, not upgraded) | BSD-3-Clause | `resources/ml_viewer/maplibre-gl*.{mjs,css}`, `MAPLIBRE-LICENSE.txt` |
+| MapLibre GL JS | 6.14.0, built by `tools/maplibre` from the readable ES module build with the QWebMap patches | BSD-3-Clause | `resources/ml_viewer/maplibre-gl*.{mjs,css}`, `MAPLIBRE-LICENSE.txt` |
 | pmtiles (JavaScript) | 4.5.0 browser build `dist/pmtiles.js`, unmodified (SHA-256 `caf981bc46f6327ee7e65d5dc964d89d38a69f60edca2bd4c5c890c21b554c6c`) | BSD-3-Clause | `resources/web_viewer/vendor/pmtiles.js`, `PMTILES-LICENSE.txt` |
 
 Every web release copies these licences into `licenses/`. The go-pmtiles CLI that

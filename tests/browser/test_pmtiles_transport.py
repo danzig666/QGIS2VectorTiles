@@ -121,6 +121,8 @@ def test_stable_entry_routes_to_the_release_with_state(published):
     url = server.url(f"{rel}/index.html") + "?layers=a#v=1&map=14.00/47.481352/19.053267"
     state = _node("open_viewer.mjs", url, "", 800, 600)
     assert state["ready"] and not state["errors"], state
+    # No warning bar (e.g. a stale expected MapLibre version).
+    assert not state["warnings"], state["warnings"]
     # The entry loads the current release, which shows the stable address
     # again with the query and hash (4.7.2: reloads and shared links follow
     # the current release); the camera state is applied.
