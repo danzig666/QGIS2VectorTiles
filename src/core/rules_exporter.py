@@ -694,7 +694,9 @@ class RulesExporter:
         # Snapshot rule groups.
         rule_groups: List[_RuleGroupSnapshot] = []
         for output_dataset, flat_rules in rules_by_dataset.items():
-            primary = flat_rules[0]
+            # The rule whose geometry is exported (not an outline drawn from
+            # its fill's polygons).
+            primary = next((r for r in flat_rules if not r.shares_dataset), flat_rules[0])
 
             if primary.get_attr("t") == 1:
                 self._single_line_label_as_point(primary)

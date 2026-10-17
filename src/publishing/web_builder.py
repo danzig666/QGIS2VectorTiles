@@ -321,6 +321,7 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
             "limitToExtent": bool(profile.view.limit_to_extent),
             # "Hide labels smaller than": also the least a label shrinks to fit.
             "minLabelPx": float(profile.output.min_label_px or 0),
+            "lowMemory": bool(profile.output.low_memory),
         },
         "groups": bundle.groups, "layers": bundle.layers, "rules": bundle.rules,
         "components": bundle.components,

@@ -99,6 +99,12 @@ class FlattenedRule:
     # drawn per band of a zoom like the markers (materializer
     # _screen_dash_bands), so they stay in step.
     band_dashes: bool = False
+    # The outline of a simple fill (RulesFlattener._simple_fill_rules): a
+    # line rule on the polygon's rings.
+    fill_outline: bool = False
+    # Drawn from another rule's dataset (output_dataset is the fill's: the
+    # same polygons, once in the tiles); that rule's geometry is exported.
+    shares_dataset: bool = False
 
     def derive(self, rule=None) -> "FlattenedRule":
         """Copy of this flat rule (optionally with another rule object)."""
@@ -109,7 +115,7 @@ class FlattenedRule:
             self.point_group, self.translate, self.effect_role, self.inner_effect,
             self.z_order, self.feature_filter, self.scale_zoom, self.unbound_filter,
             self.label_filter, self.shift, self.visible_repeat, self.diagram,
-            self.band_dashes,
+            self.band_dashes, self.fill_outline, self.shares_dataset,
         )
 
     def evaluation_zoom(self) -> float:

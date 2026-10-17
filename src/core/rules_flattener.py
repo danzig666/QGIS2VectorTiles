@@ -187,7 +187,36 @@ class RulesFlattener:
             self._clone_rule_objects()
 
         self._remove_unusable_rules()
+        self._share_fill_datasets()
         return self.flattened_rules
+
+    # Rule fields that change the exported geometry or which features are
+    # exported: an outline shares its fill's dataset only where all agree.
+    _DATASET_FIELDS = ("visibility", "pre_generator", "merge", "point_group", "feature_filter",
+                       "shift", "scale_zoom", "z_order")
+
+    def _share_fill_datasets(self):
+        """A simple fill's outline drawn from the fill's polygons (MapLibre
+        strokes polygon rings with a line layer): one copy of the polygons
+        in the tiles instead of the polygons and their rings as lines (half
+        the tile data and browser memory of e.g. parcels)."""
+        fills = {}
+        for rule in self.flattened_rules:
+            if rule.get_attr("t") == 0 and rule.get_attr("c") == 2 and rule.recipe is None \
+                    and not rule.fill_outline:
+                fills.setdefault((rule.layer.id(), re.sub(r"c\d+", "c02", rule.output_dataset, count=1)), rule)
+        for rule in self.flattened_rules:
+            # An inverted polygon's rings include the export area's frame,
+            # which the outline does not draw: it keeps its own lines.
+            if not rule.fill_outline or rule.recipe is not None or rule.get_attr("c") != 1 \
+                    or rule.merge == "invert":
+                continue
+            fill = fills.get((rule.layer.id(), re.sub(r"c\d+", "c02", rule.output_dataset, count=1)))
+            if fill is None or fill.rule.filterExpression() != rule.rule.filterExpression() \
+                    or any(getattr(fill, name) != getattr(rule, name) for name in self._DATASET_FIELDS):
+                continue
+            rule.output_dataset = fill.output_dataset
+            rule.shares_dataset = True
 
     def _remove_unusable_rules(self):
         """Remove rules without a symbol (renderer) or label expression (labeling)."""
@@ -1759,6 +1788,7 @@ class RulesFlattener:
         if fill_layer.strokeStyle() != Qt.PenStyle.NoPen:
             outline_rule = rule_clone.derive()
             outline_rule.set_attr("c", 1)
+            outline_rule.fill_outline = True
             # No Python reference to the fill symbol may outlive
             # setSymbol() below, which deletes it: SIP would hand
             # that stale QgsFillSymbol wrapper back for the next

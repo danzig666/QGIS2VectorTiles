@@ -217,6 +217,9 @@ async function start() {
       bearing: 0,
       pitch: 0,
       maxPitch: 0,
+      // Low memory (the default): the tiles of about one zoom level are kept
+      // out of view (MapLibre: five); returning fetches them again (HTTP cache).
+      ...(view.lowMemory ? { maxTileCacheZoomLevels: 1 } : {}),
       dragRotate: false,
       pitchWithRotate: false,
       touchPitch: false,

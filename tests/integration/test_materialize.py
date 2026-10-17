@@ -49,7 +49,16 @@ def _export(plugin, layer, tmp_path):
     rendered = []
     for rule in rules:
         out = by_name[rule.output_dataset]
-        out.setRenderer(QgsSingleSymbolRenderer(rule.rule.symbol().clone()))
+        symbol = rule.rule.symbol().clone()
+        if rule.shares_dataset:
+            # An outline drawn from its fill's polygons: a layer of its own,
+            # the rings stroked by a fill symbol of its line layers.
+            from qgis.core import QgsVectorLayer  # pylint: disable=import-outside-toplevel
+            out = QgsVectorLayer(out.source(), out.name(), out.providerType())
+            rings = QgsFillSymbol([layer.clone() for layer in symbol.symbolLayers()])
+            rings.setOpacity(symbol.opacity())
+            symbol = rings
+        out.setRenderer(QgsSingleSymbolRenderer(symbol))
         rendered.append(out)
     return rendered, rules, diags
 
@@ -2857,8 +2866,10 @@ def test_generator_fill_stroke_is_a_line_on_the_generated_polygons(plugin, tmp_p
         if rule.get_attr("c") == 1:
             line = rule.rule.symbol().symbolLayer(0)
             assert (line.width(), line.widthUnit(), line.penStyle()) == (width, unit, pen)
-            # Drawn on the rings as the style draws it (a line symbol).
-            output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
+            # Drawn on the rings as the style draws it (a line symbol; drawn
+            # from the fill's polygons: its rings, see _export).
+            if not rule.shares_dataset:
+                output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
         else:
             assert rule.rule.symbol().symbolLayer(0).strokeStyle() == Qt.PenStyle.NoPen
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
@@ -2917,7 +2928,7 @@ def test_generator_fill_coerces_lines_to_polygons(plugin, tmp_path):
         if rule.get_attr("c") == 2:  # the closed polygon, not the line
             assert geometry.type() == Qgis.GeometryType.Polygon
             assert geometry.area() == pytest.approx(130 * 130 / 2)
-        else:
+        elif not rule.shares_dataset:  # (shared: its rings, see _export)
             line = rule.rule.symbol().symbolLayer(0)
             output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line.clone()])))
     assert mask_difference(reference, ink_mask(render(outputs, EXTENT, (240, 240)))) < 0.05
@@ -2961,7 +2972,7 @@ def _generator_fill(expression, stroke_width=2.0):
 def _draw_outlines_as_lines(outputs, rules):
     """The styler draws a split stroke (class 1) as a line on the rings."""
     for output, rule in zip(outputs, rules):
-        if rule.get_attr("c") == 1:
+        if rule.get_attr("c") == 1 and not rule.shares_dataset:  # (shared: rings, see _export)
             line = rule.rule.symbol().symbolLayer(0).clone()
             output.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
 
@@ -3098,7 +3109,8 @@ def test_polygon_broken_by_reprojection_is_repaired(plugin, tmp_path, monkeypatc
 
     monkeypatch.setattr(module.RulesExporter, "_run_alg_safe", reproject_badly)
     outputs, _, _ = _export(plugin, layer, tmp_path)
-    polygons = [f.geometry() for o in outputs for f in o.getFeatures()]
+    datasets = {o.source(): o for o in outputs}.values()  # (an outline shares its fill's)
+    polygons = [f.geometry() for o in datasets for f in o.getFeatures()]
     assert polygons and all(g.isGeosValid() for g in polygons)
     assert sum(g.area() for g in polygons) == pytest.approx(160 * 160 / 2, rel=0.01)
 

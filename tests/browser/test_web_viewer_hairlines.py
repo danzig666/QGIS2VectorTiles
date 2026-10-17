@@ -66,3 +66,12 @@ def test_hairlines_are_half_a_device_pixel_on_every_screen(site, tmp_path, monke
     dark = sum(1 for value in middle.getdata() if value < 200)
     assert dark > 100 * ratio, dark
     middle.save(tmp_path / f"middle_{ratio}.png")
+
+
+def test_low_memory_is_the_default(site, tmp_path):
+    """The browser keeps the tiles of about one zoom level out of view
+    (MapLibre's default: five); a city's parcels took over 1 GB."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    (levels,) = _run(site, [{"eval": "return q2vtViewer.map._maxTileCacheZoomLevels;"}], tmp_path)
+    assert levels == 1
