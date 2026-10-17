@@ -36,12 +36,27 @@ export function overviewStyle(map) {
   const out = { version: 8, sources: {}, layers: [] };
   for (const layer of styleLayers(map)) {
     if (!overviewLayer(map, layer)) continue;
-    out.layers.push(JSON.parse(JSON.stringify(layer.serialize())));
+    const def = JSON.parse(JSON.stringify(layer.serialize()));
+    // Thin hairlines are divided by the main map's pixel ratio
+    // (screenHairlines); the overview draws at ratio 1.
+    if (layer.metadata?.["q2vt:hairline"] && def.paint && def.paint["line-width"] !== undefined) {
+      def.paint["line-width"] = timesWidth(def.paint["line-width"], Math.max(1, map.getPixelRatio()));
+    }
+    out.layers.push(def);
     if (layer.source && !out.sources[layer.source]) {
       out.sources[layer.source] = JSON.parse(JSON.stringify(map.getSource(layer.source).serialize()));
     }
   }
   return out;
+}
+
+// A line-width (a number or a zoom interpolation) times ``factor``.
+function timesWidth(value, factor) {
+  if (typeof value === "number") return value * factor;
+  if (Array.isArray(value) && value[0] === "interpolate") {
+    return value.map((v, i) => (i > 3 && i % 2 === 0 && typeof v === "number" ? v * factor : v));
+  }
+  return value;
 }
 
 // [[w, s], [e, n]] of the main map's view as a closed ring.
