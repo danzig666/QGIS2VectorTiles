@@ -502,7 +502,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.45.2**. Newest first:
+This README describes QWebMap **4.46.0**. Newest first:
+
+**4.46.0** — the published area chosen explicitly
+- *Extent*: *Current map view* (the default, asked before each export with its size and tile count), *Extent of a layer*, or a *Fixed area* (drawn or frozen); *Show on map* outlines it. The view of the window's first opening is no longer kept as a fixed extent.
 
 **4.45.2** — fixes
 - Map-unit labels with a data-defined size are hidden at their exact scales (no copy per zoom); large map-unit markers no longer vanish before turning into shapes; "offset along line" of first/last vertex markers is measured in the project CRS; framed labels with a shadow are placed by their framed size; diagrams appear at once; search is quick with animated markers.
