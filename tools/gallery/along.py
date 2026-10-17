@@ -11,10 +11,11 @@ by the best shift of each stretch of ``window`` px (at most ``max_shift``
 px). Within a stretch everything slides together, so dashes against
 markers, the spacing, and anything missing or extra still count.
 
-Inside a polygon (its rings' inner half included), a fill pattern may sit
-at another origin: that ink is compared after the best 2D shift of each ``FILL_WINDOW``
-px square (at most ``FILL_MAX_SHIFT`` px each way): a pattern of another
-spacing, size or density still counts.
+Inside a polygon a fill pattern may sit at another origin: that ink is
+compared after the best 2D shift of each ``FILL_WINDOW`` px square (at most
+``FILL_MAX_SHIFT`` px each way): a pattern of another spacing, size or
+density still counts. A ring's ink inside the polygon
+matches either way (along the ring or with the fill's shift).
 
 Kept strict (compared in place): ink further from the line and outside a
 polygon, within ``end_margin`` px of an open line's ends (first and last
@@ -151,40 +152,53 @@ def _shifted(mask, dx, dy):
     return out
 
 
-def unmatched_fill(ink_a, ink_b, grow_a, grow_b, region, window=FILL_WINDOW,
-                   max_shift=FILL_MAX_SHIFT):
-    """Unmatched ink pixels within ``region`` (a fill's inside), the browser
-    image moved by the best shift of each ``window`` px square (at most
-    ``max_shift`` px each way): a pattern laid out from another origin
-    matches, one of another spacing, size or density does not."""
+def fill_misses(ink_a, ink_b, grow_a, grow_b, region, window=FILL_WINDOW,
+                max_shift=FILL_MAX_SHIFT):
+    """Ink of each image within ``region`` (a fill's inside) unmatched
+    (image masks: QGIS's, the browser's) when the browser image is moved by
+    the best shift of each ``window`` px square (at most ``max_shift`` px
+    each way): a pattern laid out from another origin matches, one of
+    another spacing, size or density does not."""
     a, b = ink_a & region, ink_b & region
-    if not a.any() and not b.any():
-        return 0
     h, w = region.shape
+    if not a.any() and not b.any():
+        return np.zeros_like(a), np.zeros_like(b)
     rows, cols = -(-h // window), -(-w // window)
 
     def window_sums(mask):
         padded = np.zeros((rows * window, cols * window), dtype=np.int32)
         padded[:h, :w] = mask
         return padded.reshape(rows, window, cols, window).sum(axis=(1, 3))
-    best = window_sums((a & ~grow_b) | (b & ~grow_a))  # unshifted (strict)
-    for dy in range(-max_shift, max_shift + 1):
-        for dx in range(-max_shift, max_shift + 1):
-            if dx == 0 and dy == 0:
-                continue
-            # QGIS ink looks for browser ink (dx, dy) away; browser ink back.
-            misses = (a & ~_shifted(grow_b, -dx, -dy)) | (b & ~_shifted(grow_a, dx, dy))
-            np.minimum(best, window_sums(misses), out=best)
-    return int(best.sum())
+
+    def misses(dx, dy):
+        # QGIS ink looks for browser ink (dx, dy) away; browser ink back.
+        return a & ~_shifted(grow_b, -dx, -dy), b & ~_shifted(grow_a, dx, dy)
+    shifts = [(0, 0)] + [(dx, dy) for dy in range(-max_shift, max_shift + 1)
+                         for dx in range(-max_shift, max_shift + 1) if dx or dy]
+    best = np.full((rows, cols), np.iinfo(np.int32).max, dtype=np.int64)
+    choice = np.zeros((rows, cols), dtype=int)
+    for index, (dx, dy) in enumerate(shifts):
+        miss_a, miss_b = misses(dx, dy)
+        sums = window_sums(miss_a) + window_sums(miss_b)
+        better = sums < best
+        best[better] = sums[better]
+        choice[better] = index
+    out_a, out_b = np.zeros_like(a), np.zeros_like(b)
+    for index in np.unique(choice):
+        miss_a, miss_b = misses(*shifts[index])
+        cells = np.kron(choice == index, np.ones((window, window), dtype=bool))[:h, :w]
+        out_a |= miss_a & cells
+        out_b |= miss_b & cells
+    return out_a, out_b
 
 
 def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window=WINDOW,
                     fill=None):
     """Unmatched ink pixels of both images (int) and their total, with the
     ink near ``paths`` [(points, closed), ...] compared along the line and
-    the ink in ``fill`` (a polygon's inside, image mask)
-    compared with the pattern's best 2D shift (unmatched_fill), its
-    rings' inner half included."""
+    the ink in ``fill`` (a polygon's inside, image mask) with the pattern's
+    best 2D shift (fill_misses); a ring's ink inside the fill matches
+    either way."""
     grow_a, grow_b = grow(ink_a), grow(ink_b)
     total = int(ink_a.sum() + ink_b.sum())
     paths = [_Path(pts, closed) for pts, closed in paths if len(pts) >= 2]
@@ -193,33 +207,19 @@ def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window
     yb, xb = np.nonzero(ink_b)
     centres = np.concatenate([np.stack([xa, ya], 1), np.stack([xb, yb], 1)]).astype(float) + 0.5
     side = np.concatenate([np.zeros(len(xa), dtype=bool), np.ones(len(xb), dtype=bool)])
-    strict_hit = np.concatenate([grow_b[ya, xa], grow_a[yb, xb]])
     if not len(centres):
         return 0, total
+    miss = ~np.concatenate([grow_b[ya, xa], grow_a[yb, xb]])  # strict
     if paths:
         which, s, t = _project(centres, paths, half_width)
     else:
         which, s, t = np.full(len(centres), -1), None, None
-    if fill is not None:
-        # Ink inside the fill, its rings' inner half included: by windows
-        # (below); the rings' outer half along them.
-        xi, yi = centres[:, 0].astype(int), centres[:, 1].astype(int)
-        in_fill = fill[yi, xi]
-        which = np.where(in_fill, -1, which)
-    rest = which < 0
-    if fill is not None:
-        rest &= ~in_fill
-        region = np.zeros_like(fill)
-        region[yi[in_fill], xi[in_fill]] = True
-    unmatched = int((~strict_hit[rest]).sum())
-    if fill is not None:
-        unmatched += unmatched_fill(ink_a, ink_b, grow_a, grow_b, region)
     h, w = ink_a.shape
     shifts = np.arange(-max_shift, max_shift + 1)
     shifts = shifts[np.argsort(np.abs(shifts), kind="stable")]  # ties: the smallest shift
     for p, path in enumerate(paths):
-        mine = which == p
-        if not mine.any():
+        mine = np.nonzero(which == p)[0]
+        if not len(mine):
             continue
         count = max(1, round(path.length / window))
         win = np.minimum((s[mine] / path.length * count).astype(int), count - 1)
@@ -237,8 +237,19 @@ def unmatched_along(ink_a, ink_b, paths, half_width, max_shift=MAX_SHIFT, window
         for k in range(count):
             in_win = win == k
             if in_win.any():
-                unmatched += int(misses[:, in_win].sum(axis=1).min())
-    return unmatched, total
+                best = misses[:, in_win].sum(axis=1).argmin()
+                miss[mine[in_win]] = misses[best, in_win]
+    if fill is not None:
+        xi, yi = centres[:, 0].astype(int), centres[:, 1].astype(int)
+        in_fill = fill[yi, xi]
+        region = np.zeros_like(fill)
+        region[yi[in_fill], xi[in_fill]] = True
+        fill_a, fill_b = fill_misses(ink_a, ink_b, grow_a, grow_b, region)
+        by_fill = np.where(side, fill_b[yi, xi], fill_a[yi, xi])
+        along_line = which >= 0
+        miss = np.where(in_fill & along_line, miss & by_fill,
+                        np.where(in_fill, by_fill, miss))
+    return int(miss.sum()), total
 
 
 def along_score(ink_a, ink_b, paths, geometry):
