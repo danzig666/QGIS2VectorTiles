@@ -3612,14 +3612,18 @@ class SymbolMaterializer:
             return QColor.fromRgbF(min(1.0, r / a), min(1.0, g / a), min(1.0, b / a), a)
         return color
 
-    def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True, color_of=None):
+    def _band_rules(self, flat_rule, layer, ramp, recipe_of, overlap_ok=True, color_of=None,
+                    max_bands=None):
         """One rule drawing every colour band of the fill: a solid fill whose
         colour is the band's (COLOR_FIELD), from one materialized dataset.
-        ``color_of``: ``t -> QColor`` (default ``ramp.color``)."""
+        ``color_of``: ``t -> QColor`` (default ``ramp.color``); ``max_bands``:
+        at most that many (bands narrower than a tile unit collapse)."""
         from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer  # pylint: disable=import-outside-toplevel
         color_of = color_of or ramp.color
         probe = [color_of(i / 64) for i in range(65)]
         bands = self._band_count(probe)
+        if max_bands:
+            bands = max(1, min(bands, int(max_bands)))
         colors = [color_of((i + 0.5) / bands) for i in range(bands)]
         # Nested bands only where every pixel ends up opaque: below 100 %
         # symbol or layer opacity they would show through each other.
@@ -3701,28 +3705,80 @@ class SymbolMaterializer:
     # (within +-9 % of QGIS's width), fewer when over the output budget.
     SHAPEBURST_ZOOM_STEPS = (4, 2, 1)
 
+    SHAPEBURST_MIN_BAND_PX = 2.0  # a blurred shapeburst's narrowest band
+
+    # QgsImageOperation::stackBlur: smoothing weight (of 16) per radius.
+    _STACK_BLUR_WEIGHTS = (14, 10, 8, 6, 5, 5, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2)
+
+    @classmethod
+    def _blurred_shapeburst(cls, ramp, distance_mm: float, radius: int):
+        """(distance in mm, colour of t) of a shapeburst fill whose image QGIS
+        blurs (QgsShapeburstFillSymbolLayer::renderPolygon): the ramp colour
+        at d / distance (colour 2 beyond it; colour 1 outside the polygon,
+        then cut to it), smoothed by a stack blur of ``radius`` pixels (a
+        two-sided exponential, QgsImageOperation::stackBlur) in premultiplied
+        colours across the edge. The bands then reach four blur scales past
+        the distance, t over that whole reach."""
+        weight = 1 if radius > 17 else cls._STACK_BLUR_WEIGHTS[max(1, radius) - 1]
+        scale = -1.0 / math.log(1.0 - weight / 16.0)  # px
+        px_per_mm = 96.0 / 25.4
+        reach = distance_mm * px_per_mm
+        total = reach + 4.0 * scale
+        step = 0.5
+        offsets = [k * step for k in range(-int(8 * scale / step), int(8 * scale / step) + 1)]
+        kernel = [math.exp(-abs(x) / scale) for x in offsets]
+        norm = sum(kernel)
+
+        def premultiplied(d):
+            c = ramp.color(min(1.0, max(0.0, d / reach)))
+            a = c.alphaF()
+            return (c.redF() * a, c.greenF() * a, c.blueF() * a, a)
+
+        def color_of(t):
+            d = t * total
+            acc = [0.0, 0.0, 0.0, 0.0]
+            for x, k in zip(offsets, kernel):
+                for i, v in enumerate(premultiplied(d + x)):
+                    acc[i] += v * k
+            r, g, b, a = (v / norm for v in acc)
+            if a <= 1e-6:
+                return QColor(0, 0, 0, 0)
+            return QColor.fromRgbF(min(1.0, r / a), min(1.0, g / a), min(1.0, b / a), min(1.0, a))
+        return total / px_per_mm, color_of
+
     def _shapeburst(self, flat_rule: FlattenedRule, layer) -> List[FlattenedRule]:
         """A shapeburst fill as inset bands from the edge (colour 1) inwards.
         A distance in screen units keeps its width on screen at every scale
         in QGIS: one band set per zoom step, the distance in map units at the
         middle of the step (96 dpi CSS pixels, the project CRS's units)."""
         whole = layer.useWholeShape()
-        if layer.blurRadius():
-            self._report("Q2VT_GRADIENT_APPROXIMATE",
-                         "Shapeburst blur is not applied (bands are already smooth steps).", flat_rule)
         crs = self.project_crs or flat_rule.layer.crs().authid()
         ramp = self._ramp_of(layer)
+        distance = layer.maxDistance()
+        mm = _to_mm(distance, layer.distanceUnit())
+        color_of = max_bands = None
+        if layer.blurRadius():
+            if whole or mm is None or mm <= 0:
+                self._report("Q2VT_GRADIENT_APPROXIMATE",
+                             "Shapeburst blur is applied only to a distance in screen units.",
+                             flat_rule)
+            else:
+                # The bands reach past the distance by the blur's width, in
+                # the blurred colours.
+                mm, color_of = self._blurred_shapeburst(ramp, mm, layer.blurRadius())
+                # Bands of 2 px and wider: narrower rings collapse in the
+                # tiles and cover their inside.
+                max_bands = mm * 96.0 / 25.4 / self.SHAPEBURST_MIN_BAND_PX
 
         def bands(rule, distance):
             def recipe(band, count, overlap):
                 return mat.shapeburst_band_recipe(distance, whole, layer.ignoreRings(), band, count, crs,
                                                   overlap)
-            return self._band_rules(rule, layer, ramp, recipe)
+            return self._band_rules(rule, layer, ramp, recipe, color_of=color_of,
+                                    max_bands=max_bands)
 
         if whole:
             return bands(flat_rule, 0.0)
-        distance = layer.maxDistance()
-        mm = _to_mm(distance, layer.distanceUnit())
         if mm is None:  # map units: one band set
             return bands(flat_rule, distance) if distance and distance > 0 else []
         if mm <= 0:

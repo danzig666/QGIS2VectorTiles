@@ -231,8 +231,9 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
                "Shading by distance to the boundary as inset colour bands (whole shape or a "
                "set distance, rings ignored when set).",
-               ("Smooth colour change becomes steps of about one level (up to 1024 bands); blur is "
-                "not applied.",
+               ("Smooth colour change becomes steps of about one level (up to 1024 bands); a "
+                "blur is in the band colours (QGIS's stack blur across the edge) for a distance "
+                "in screen units, not applied otherwise.",
                 "A distance in screen units is set per quarter zoom (within about 9 %).")),
     Capability("InterpolatedLine", "line", Strategy.MATERIALIZED,
                "Colour and width interpolated along each line between the per-feature start "
