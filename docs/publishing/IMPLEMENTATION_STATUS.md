@@ -1898,3 +1898,21 @@ SFTP servers (the non-atomic replace path is covered by unit tests of the batch 
 | Symbology / label integration selection (`-k "symbology or ddp or ... or style_library"`) | 514 passed |
 | `test_overzoom`, `test_end_to_end`, `test_publishing_pipeline`, `test_publish_scale_limits`, style tests, `tests/unit` | passed |
 | `test_web_viewer_parcel`, `test_web_viewer_features` (published sites) | 22 passed |
+
+## 4.47.0 — lighter tiles and browser memory
+
+Measured on a published city map (about 70 layers, 50 000 parcels, start view at zoom 10.6, 1600×900):
+the map page took ~590 MB and the GPU process ~235 MB after loading its 6 start tiles (~340 MB of
+it the tiles); browsing to zoom 19 added ~230 MB. The parcels were ~80 % of the heaviest tiles,
+each parcel twice: polygons for the fill, rings as lines for the outline.
+
+- **One dataset for a fill and its outline** (`RulesFlattener._share_fill_datasets`): a simple
+  fill's outline rule (`FlattenedRule.fill_outline`, line class 1) is pointed at its fill's
+  dataset (`shares_dataset`) where both export the same features (same filter, visibility,
+  generator, merge, shift; no recipe; not an inverted polygon, whose rings include the export
+  area's frame). The style's line layer strokes the polygon rings (MapLibre and QGIS's vector
+  tile renderer both draw line styles on polygon rings); the exporter exports the fill's
+  geometry (`primary` = the rule that does not share). Half the tile data of such layers.
+- **Low memory web map** (`output.lowMemory`, on; manifest `view.lowMemory`): the viewer's map
+  is created with `maxTileCacheZoomLevels: 1` (MapLibre: 5; the out-of-view cache holds about
+  one view's tiles); the overview map always.

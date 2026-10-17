@@ -321,6 +321,9 @@ class OutputConfig:
     # Hairlines (zero-width lines, e.g. parcel boundaries) thinner than
     # QGIS's one pixel, so dense ones do not run together.
     thin_hairlines: bool = True
+    # The browser keeps the tiles of about one zoom level away from the view
+    # (MapLibre: five): much less memory, tiles fetched again on return.
+    low_memory: bool = True
     # Labels with a size in map units are hidden where they are smaller than
     # this on screen (CSS px; 0: shown at every size).
     min_label_px: float = 6.0

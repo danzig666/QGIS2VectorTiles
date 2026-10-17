@@ -179,7 +179,8 @@ def test_else_skips_what_its_siblings_match_at_every_scale(flattener):
     else_labels = {zoom: sorted(i for r in _shown_at(rules, zoom, 1) if r.get_attr("r") == 2
                                 for i in _matches(r, labels)) for zoom in (5.0, 12.0)}
     assert else_labels == {5.0: ["A", "C", "D"], 12.0: ["C", "D"]}
-    assert len({r.output_dataset for r in rules}) == len(rules)
+    # One style layer id per rule (an outline shares its fill's dataset).
+    assert len({r.rule.description() for r in rules}) == len(rules)
     # Project ELSE rule untouched.
     project_else = layer.renderer().rootRule().children()[2]
     assert project_else.filterExpression() == "ELSE"
@@ -230,7 +231,8 @@ def test_a_label_else_excludes_unchecked_siblings_inside_their_scale_range(flatt
         [["B", "C", "D"], ["C", "D"]]
     assert labels[0].visibility.max_zoom == pytest.approx(10)
     assert labels[1].visibility.min_zoom == pytest.approx(10) and labels[1].visibility.max_zoom is None
-    assert len({r.output_dataset for r in rules}) == len(rules)
+    # One style layer id per rule (an outline shares its fill's dataset).
+    assert len({r.rule.description() for r in rules}) == len(rules)
 
 
 def test_label_else_variants_inside_one_zoom_get_their_own_datasets(flattener):
@@ -258,7 +260,8 @@ def test_label_else_variants_inside_one_zoom_get_their_own_datasets(flattener):
     assert [_matching_ids(layer, r.rule.filterExpression()) for r in labels] == \
         [["A", "B", "C", "D"], ["B", "C", "D"], ["A", "C", "D"], ["A", "B", "C", "D"]]
     assert [(r.get_attr("o"), r.get_attr("i")) for r in labels[1:3]] == [(15, 15), (15, 15)]
-    assert len({r.output_dataset for r in rules}) == len(rules)
+    # One style layer id per rule (an outline shares its fill's dataset).
+    assert len({r.rule.description() for r in rules}) == len(rules)
 
 
 def _draw_colors(rules):
@@ -451,8 +454,11 @@ def test_nested_rules_get_unique_ids(flattener):
     layer.setRenderer(QgsRuleBasedRenderer(root))
     reset_project(layer)
     rules, _ = flattener()
-    names = [r.output_dataset for r in rules]
+    names = [r.rule.description() for r in rules]  # the style layer ids
     assert len(rules) == 12 and len(set(names)) == len(names), names
+    # Each outline is drawn from its fill's polygons: six datasets.
+    assert len({r.output_dataset for r in rules}) == 6
+    assert all(r.shares_dataset for r in rules if r.get_attr("c") == 1)
 
 
 def test_a_repeated_style_layer_id_is_renamed_and_reported(plugin):

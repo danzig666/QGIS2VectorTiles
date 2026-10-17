@@ -1409,3 +1409,33 @@ def test_output_folder_with_shell_and_url_characters(plugin, tmp_path, monkeypat
         batch = handle.read()
     server = os.path.join(result, "utils", "tiles_server.py")
     assert f'"C:\\Q%%GIS%%\\pythonw3.exe" "{server}" --port' in batch, batch
+
+
+def test_a_fill_and_its_outline_share_one_dataset(export, tmp_path):
+    """A simple fill with an outline: the outline is a line layer drawn on
+    the fill's polygons, one copy of them in the tiles (it was the polygons
+    and their rings as lines: twice the tile data and browser memory)."""
+    import sqlite3
+    layer = zoning_layer(path=str(tmp_path / "zones.gpkg"))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+        {"color": "255,200,200", "outline_color": "0,0,0", "outline_width": "0.4"})))
+    exporter, result = export(layer)
+    style = json.load(open(os.path.join(result, "style", "style.json"), encoding="utf-8"))
+    own = [l for l in style["layers"] if l.get("source") == "q2vt_tiles"]
+    kinds = {l["type"]: l["source-layer"] for l in own}
+    assert set(kinds) == {"fill", "line"} and kinds["fill"] == kinds["line"]
+    with sqlite3.connect(os.path.join(result, "tiles.mbtiles")) as db:
+        names = json.loads(dict(db.execute("SELECT name, value FROM metadata"))["json"])["vector_layers"]
+    assert [n["id"] for n in names] == [kinds["fill"]]
+    # QGIS draws the result layer's line style on the polygons' rings too.
+    from qgis.core import QgsLayerDefinition, QgsProject
+    from q2vt_render import render  # pylint: disable=import-error
+    project = QgsProject.instance()
+    before = set(project.mapLayers())
+    assert QgsLayerDefinition.loadLayerDefinition(os.path.join(result, "style", "tiles.qlr"), project,
+                                                  project.layerTreeRoot())[0]
+    loaded = [layer for lid, layer in project.mapLayers().items() if lid not in before]
+    image = render(loaded, EXTENT, (400, 400))
+    dark = sum(1 for y in range(0, 400, 2) for x in range(0, 400, 2)
+               if max(image.pixelColor(x, y).getRgb()[:3]) < 80)
+    assert dark > 50, dark

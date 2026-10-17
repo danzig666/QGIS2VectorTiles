@@ -64,7 +64,7 @@ export class OverviewControl {
     const { map, maplibregl } = this;
     this.mini = new maplibregl.Map({
       container: this.box, style: overviewStyle(map.getStyle()), interactive: false,
-      attributionControl: false, renderWorldCopies: false, fadeDuration: 0,
+      attributionControl: false, renderWorldCopies: false, fadeDuration: 0, maxTileCacheZoomLevels: 1,
       center: map.getCenter(), zoom: Math.max(0, map.getZoom() - ZOOM_OUT),
     });
     this.mini.on("load", () => {

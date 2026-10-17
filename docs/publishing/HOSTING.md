@@ -102,6 +102,10 @@ tab shows sizes, not a bill).
   screen (divided by the screen's pixel ratio: a pixel cannot be thinner, so the line is
   lighter) at 70 % of their opacity, widening to 0.6 device px from zoom 14 to 20: about a third
   of the ink of QGIS's hairline. Dashed hairlines keep 1 px. Off: as in QGIS.
+* **Low memory web map** (*Output*, on by default): the browser keeps the tiles of about one
+  zoom level besides those on screen (MapLibre's default: five). A detailed map (a city's
+  parcels) took over 1 GB in the browser; with this option tiles are loaded again when you
+  return to a place (usually from the browser's cache).
 * **Network output folder** (a Windows share, a mapped network drive, an NFS/SMB mount): the
   work files and the export cache stay on this computer (system temp folder); only the
   finished release is written to the network folder, and the export log and fidelity report

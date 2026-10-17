@@ -204,6 +204,9 @@
         "minLabelPx": {
           "type": "number",
           "minimum": 0
+        },
+        "lowMemory": {
+          "type": "boolean"
         }
       }
     },
