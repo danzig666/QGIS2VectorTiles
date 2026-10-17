@@ -1411,6 +1411,28 @@ def test_output_folder_with_shell_and_url_characters(plugin, tmp_path, monkeypat
     assert f'"C:\\Q%%GIS%%\\pythonw3.exe" "{server}" --port' in batch, batch
 
 
+def test_shared_polygons_are_not_cut_at_the_export_extent():
+    """Polygons an outline is drawn on (a fill's shared dataset) reach out
+    of the export extent whole: cut, the outline stroked the cut as a line
+    along the extent. Others are still cut; those outside are left out."""
+    import types
+    from q2vt_plugin.src.core.rules_exporter import RulesExporter  # pylint: disable=import-error
+    owner = types.SimpleNamespace(extent=QgsRectangle(0, 0, 100, 100))
+    crossing = QgsGeometry.fromWkt("POLYGON((50 50, 150 50, 150 80, 50 80, 50 50))")
+    outside = QgsGeometry.fromWkt("POLYGON((200 200, 210 200, 210 210, 200 200))")
+
+    def clipped(geometry, cut):
+        context = QgsExpressionContext()
+        feature = QgsFeature()
+        feature.setGeometry(geometry)
+        context.setFeature(feature)
+        value = QgsExpression(RulesExporter._clip_to_extent(owner, "@geometry", cut)).evaluate(context)
+        return value if value is None else value.area()
+    assert clipped(crossing, False) == pytest.approx(3000)
+    assert clipped(crossing, True) == pytest.approx(1500)
+    assert clipped(outside, False) is None and clipped(outside, True) is None
+
+
 def test_a_fill_and_its_outline_share_one_dataset(export, tmp_path):
     """A simple fill with an outline: the outline is a line layer drawn on
     the fill's polygons, one copy of them in the tiles (it was the polygons
