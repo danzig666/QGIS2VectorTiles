@@ -49,6 +49,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 RESOURCES = os.path.join(ROOT, "resources")
 ML_VIEWER = os.path.join(RESOURCES, "ml_viewer")
 WEB_VIEWER = os.path.join(RESOURCES, "web_viewer")
+# The bundled build (tools/maplibre/package.json; EXPECTED_MAPLIBRE in app.mjs).
+MAPLIBRE_VERSION = "6.14.0"
 RELEASE_ID = re.compile(r"^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 LOCK_NAME = ".q2vt-lock"
 LOCK_STALE_S = 6 * 3600
@@ -317,6 +319,8 @@ def build_manifest(bundle: ExportBundle, profile: PublicationProfile, release_id
             "maxZoom": float(profile.view.max_view_zoom),
             "bounds": [round(float(v), 7) for v in bundle.bounds_wgs84],
             "limitToExtent": bool(profile.view.limit_to_extent),
+            # "Hide labels smaller than": also the least a label shrinks to fit.
+            "minLabelPx": float(profile.output.min_label_px or 0),
         },
         "groups": bundle.groups, "layers": bundle.layers, "rules": bundle.rules,
         "components": bundle.components,
@@ -460,7 +464,7 @@ def build_release(bundle: ExportBundle, profile: PublicationProfile, publication
                 "releaseId": release_id,
                 "createdAt": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "buildId": bundle.build_id, "configFingerprint": bundle.config_fingerprint,
-                "versions": {"plugin": plugin_version(), "maplibre": "6.11.2", "pmtilesJs": "4.5.0",
+                "versions": {"plugin": plugin_version(), "maplibre": MAPLIBRE_VERSION, "pmtilesJs": "4.5.0",
                              "pmtilesPython": "3.8.1", **{k: str(v) for k, v in
                                                           bundle.runtime_versions.items()}},
                 "files": items,

@@ -20,6 +20,7 @@ called on a main thread only (QgsMapSettings, CRS lookups). Not configured
 (tests, the Processing tool without an extent): an empty scope, as before.
 """
 
+import re
 from typing import Iterable, Optional, Set
 
 # Variables QGIS takes from the map settings, held for the starting view.
@@ -70,6 +71,25 @@ def configure(extent_3857, map_crs, layer_ids: Iterable[str] = ()) -> None:
 def state() -> Optional[dict]:
     """The configured view as plain (picklable) data, for workers and cache keys."""
     return dict(_STATE) if _STATE else None
+
+
+def used_state(used: Optional[str]) -> Optional[dict]:
+    """The parts of state() the expressions in ``used`` (text; None: all)
+    can read, for cache keys: a layer added to the export changes
+    @map_layer_ids, which redid every layer although none read it."""
+    if not _STATE or used is None:
+        return state()
+
+    def reads(names):
+        return any(re.search(rf"(?<![\w]){name}(?![\w])", used) for name in names)
+    parts = {}
+    if reads(EXTENT_VARIABLES):
+        parts.update(rect=_STATE["rect"], centre=_STATE["centre"])
+    if reads(VIEW_VARIABLES - EXTENT_VARIABLES - {"map_layer_ids", "map_layers", "map_id", "map_rotation"}):
+        parts.update(crs=_STATE["crs"], wkt=_STATE["wkt"])
+    if reads({"map_layer_ids", "map_layers"}):
+        parts["layer_ids"] = _STATE["layer_ids"]
+    return parts or None
 
 
 def restore(saved: Optional[dict]) -> None:

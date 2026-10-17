@@ -200,6 +200,10 @@
         },
         "limitToExtent": {
           "type": "boolean"
+        },
+        "minLabelPx": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },

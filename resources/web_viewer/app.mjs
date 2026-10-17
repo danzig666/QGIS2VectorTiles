@@ -14,7 +14,7 @@ import { fetchChecked, notice, showError, state as diagnostics, warn } from "./d
 import { installDiagrams } from "./diagrams.mjs";
 import { installShadows, prepareShadows } from "./label_shadows.mjs";
 
-export const EXPECTED_MAPLIBRE = "6.11.2";
+export const EXPECTED_MAPLIBRE = "6.14.0";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
 // Style layers end at zoom 24 (the style spec maximum) and MapLibre hides a
 // layer at exactly its maxzoom: the browser stops just short of it.
@@ -272,6 +272,7 @@ async function start() {
     }
     viewer.labels = enableVisibleLabels(map, maplibregl, sourceId, {
       always,
+      minTextPx: Number(manifest.view.minLabelPx) || 0,
       onUnsupported: (reason) => warn("error.labels", reason),
     });
     // Interactive controls (layer tree, legend, popups, search, filters,

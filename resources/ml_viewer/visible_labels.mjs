@@ -132,6 +132,8 @@ export function curvedOption(map, layout, zoom, perPx) {
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
 //     get a label (layer/rule toggles, attribute filters);
+//   minTextPx: "always" labels shrink to fit no smaller than this text size
+//     (CSS px; 0: down to half their size);
 //   onUnsupported(reason): MapLibre no longer exposes the tile fields this
 //     helper reads (_x/_y/_z/_vectorTileFeature) - labels stay static.
 // Returns {update, sync, groups, snapshot, setEligibility, pause, resume,
@@ -314,6 +316,8 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
         // placed labels stay; the final position once everything is there.
         freeze: map.isMoving() || !map.isSourceLoaded(sourceId),
         labelBox: labelBoxes(map, group, zoom, perPx, fonts),
+        minScale: options.minTextPx > 0 ? minTextScale(activeLayer(group, zoom).layout || {}, zoom, options.minTextPx)
+          : null,
         // Line, "around point" and "pole" labels keep clear of the point
         // labels MapLibre draws itself (a town name): drawn with text-overlap
         // "always", they would otherwise sit on top of them.
@@ -676,7 +680,10 @@ export function labelPoints(features, view, maplibregl, options = {}) {
     // along the polygon - no search (narrow strips, tiny parcels).
     let point;
     let slot;
-    const pre = options.always && label ? precomputedSpot(properties, label) : null;
+    // "Always label" shrinks no label below the smallest readable size
+    // (the export's "Hide labels smaller than"): there it may stick out.
+    const smallest = options.always && options.minScale ? options.minScale(properties) : 0;
+    const pre = options.always && label ? precomputedSpot(properties, label, smallest) : null;
     if (pre) {
       if (!within(reach, pre.point)) continue;
       const angle = options.orient === "free" && options.rotationField ? pre.angle : 0;
@@ -760,6 +767,7 @@ export function labelPoints(features, view, maplibregl, options = {}) {
           // Smaller until it fits; at worst the smallest size at the roomiest
           // point, along the polygon (a narrow strip) - never no label.
           for (const step of SHRINK_STEPS) {
+            if (step < smallest) break;
             scale = step;
             // Not even its height fits at the roomiest point: no spot will.
             if (label[1] * step > best.room) continue;
@@ -1103,7 +1111,7 @@ function centroidOf(rings) {
 // when the label cannot fit even there: {point (world units), angle (radians,
 // y down, along the polygon), scale}; else null (placed live).
 const MERCATOR_SIZE = 2 * 20037508.342789244;
-function precomputedSpot(properties, [hx, hy]) {
+function precomputedSpot(properties, [hx, hy], smallest = 0) {
   const x = Number(properties.q2vt_pole_x), y = Number(properties.q2vt_pole_y);
   const room = Number(properties.q2vt_pole_r) / MERCATOR_SIZE;
   if (!Number.isFinite(x) || !Number.isFinite(y) || !(room > 0) || hy <= room) return null;
@@ -1113,7 +1121,8 @@ function precomputedSpot(properties, [hx, hy]) {
   let angle = Math.atan2(-Math.cos(azimuth), Math.sin(azimuth));
   if (angle >= Math.PI / 2) angle -= Math.PI;
   if (angle < -Math.PI / 2) angle += Math.PI;
-  return { point, angle, scale: Math.max(SHRINK_STEPS[SHRINK_STEPS.length - 1], Math.min(1, room / hy)) };
+  const least = Math.min(1, Math.max(SHRINK_STEPS[SHRINK_STEPS.length - 1], smallest));
+  return { point, angle, scale: Math.max(least, Math.min(1, room / hy)) };
 }
 
 // ``text-size`` times the feature's LABEL_SCALE (1 when absent); a zoom
@@ -2114,6 +2123,14 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
+// The smallest shrink factor of a label that keeps its text ``minPx`` tall.
+function minTextScale(layout, zoom, minPx) {
+  return (properties) => {
+    const size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
+    return size > 0 ? Math.min(1, minPx / size) : 0;
+  };
+}
+
 function labelBoxes(map, group, zoom, perPx, fonts) {
   const layer = activeLayer(group, zoom);
   return layoutBoxes(layer.layout || {}, zoom, perPx, Number(layer.metadata?.["q2vt:char-width"]) || 0.6,

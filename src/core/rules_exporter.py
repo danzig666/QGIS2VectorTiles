@@ -1610,7 +1610,7 @@ class RulesExporter:
             "units": [int(getattr(self._distance_unit, "value", self._distance_unit)),
                       int(getattr(self._area_unit, "value", self._area_unit))],
             "variables": variables,
-            "view": map_view.state(),
+            "view": map_view.used_state(used),
             "operations": {f"{k[0]}>{k[1]}" if isinstance(k, tuple) else str(k): str(v)
                            for k, v in dict(operations).items()},
         }
