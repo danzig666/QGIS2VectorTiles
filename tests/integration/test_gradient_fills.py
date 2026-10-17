@@ -318,6 +318,9 @@ def test_line_glow_and_shadow_become_line_layers(plugin, tmp_path):
     assert shadow_paint["line-translate"][0] > 0 and shadow_paint["line-translate"][1] > 0  # down right
     assert glow_paint["line-color"] == "#ef2929" and glow_paint["line-blur"] > 0
     assert glow_paint["line-width"] > main["line-width"] and glow_paint["line-opacity"] == pytest.approx(0.5)
+    # Painted once per pixel, as QGIS's effect image (no darker wedge where
+    # MapLibre's segments overlap inside a sharp corner).
+    assert all(l["metadata"]["q2vt:max-blend"] for l in effects)
     report = json.load(open(os.path.join(result, "fidelity_report.json"), encoding="utf-8"))
     assert not [d for d in report["diagnostics"] if d["code"] == "Q2VT_UNSUPPORTED_EFFECT"]
 
@@ -403,3 +406,40 @@ def test_fewer_shapeburst_steps_are_reported(plugin, tmp_path, monkeypatch):
     diags = DiagnosticCollector()
     RulesFlattener(14, 15, str(tmp_path), QgsProcessingFeedback(), diags).flatten_all_rules()
     assert any("per zoom" in d.message for d in diags.by_code("Q2VT_GRADIENT_APPROXIMATE"))
+
+
+def test_blurred_shapeburst_bands_follow_qgis_blur(plugin):
+    """A shapeburst's blur (QgsImageOperation::stackBlur of the whole fill
+    image) is in the band colours: the fade from the edge matches QGIS's
+    across the blur's reach, past the distance (it was a sharp ramp)."""
+    from qgis.core import (QgsFeature, QgsMapRendererSequentialJob, QgsMapSettings, QgsRectangle,
+                           QgsShapeburstFillSymbolLayer, QgsVectorLayer)
+    from qgis.PyQt.QtCore import QSize
+    from q2vt_plugin.src.core.materializer import SymbolMaterializer  # pylint: disable=import-error
+    edge, inside = QColor(255, 255, 255, 0), QColor(255, 255, 255, 255)
+    burst = QgsShapeburstFillSymbolLayer(edge, inside)
+    burst.setUseWholeShape(False)
+    burst.setMaxDistance(11)
+    burst.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+    burst.setBlurRadius(18)
+    layer = QgsVectorLayer("Polygon?crs=EPSG:3857", "square", "memory")
+    feature = QgsFeature()
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 400 0, 400 400, 0 400, 0 0))"))
+    layer.dataProvider().addFeatures([feature])
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol([burst])))
+    settings = QgsMapSettings()
+    settings.setLayers([layer])
+    settings.setExtent(QgsRectangle(-20, -20, 420, 420))
+    settings.setOutputSize(QSize(440, 440))
+    settings.setOutputDpi(96)
+    settings.setBackgroundColor(QColor(0, 0, 0))
+    job = QgsMapRendererSequentialJob(settings)
+    job.start()
+    job.waitForFinished()
+    image = job.renderedImage()
+    total_mm, color_of = SymbolMaterializer._blurred_shapeburst(  # pylint: disable=protected-access
+        QgsGradientColorRamp(edge, inside), 11, 18)
+    total_px = total_mm * 96 / 25.4
+    for depth in (2, 10, 20, 40, 60):
+        expected = QColor(image.pixel(220, 20 + depth)).red()  # white over black: the alpha
+        assert abs(color_of(depth / total_px).alpha() - expected) < 18, depth

@@ -2805,8 +2805,11 @@ class QgisMapLibreStyleExporter:
         if sub is None or sub.symbolLayerCount() == 0 or self._active_ddp_names(symbol_layer):
             return None
         line = sub.symbolLayer(0)
+        # A custom dash pattern dashes the line whatever its pen style
+        # (QgsSimpleLineSymbolLayer::startRender).
         if sub.symbolLayerCount() != 1 or not isinstance(line, QgsSimpleLineSymbolLayer) or \
-                _enum_int(line.penStyle()) != 1 or self._effect_list(line):
+                _enum_int(line.penStyle()) != 1 or line.useCustomDashPattern() or \
+                self._effect_list(line):
             return self._register_drawn_line_pattern(symbol_layer)
         if self._active_ddp_names(line):
             return None
@@ -2861,7 +2864,8 @@ class QgisMapLibreStyleExporter:
             if isinstance(line, QgsTemplatedLineSymbolLayerBase) and \
                     _enum_int(line.placements()) & _enum_int(Qgis.MarkerLinePlacement.Interval):
                 repeats.append(self._texture_px(line.interval(), line.intervalUnit()))
-            elif isinstance(line, QgsSimpleLineSymbolLayer) and _enum_int(line.penStyle()) not in (0, 1):
+            elif isinstance(line, QgsSimpleLineSymbolLayer) and (
+                    line.useCustomDashPattern() or _enum_int(line.penStyle()) not in (0, 1)):
                 if line.useCustomDashPattern():
                     repeats.append(sum(self._texture_px(dash, line.customDashPatternUnit())
                                        for dash in line.customDashVector()))
@@ -3597,6 +3601,10 @@ class QgisMapLibreStyleExporter:
             self._exact_screen_texture = False
         if not stops:
             return None
+        if not screen_spacing:
+            # Stretched up to 2x until the next zoom: sharp from 2x pixels.
+            for _, name in stops:
+                self.pattern_images[name].retina_1x = True
         # The zoom whose pixels the last texture is drawn in (a whole one).
         self._last_pattern_zoom = stops[-1][0] if screen_spacing else math.floor(stops[-1][0])
         self.context.report(
@@ -5085,6 +5093,9 @@ class QgisMapLibreStyleExporter:
 
     # Paint effects a line can carry in the browser (see _line_effect_layers).
     LINE_EFFECTS = ("QgsOuterGlowEffect", "QgsDropShadowEffect")
+    # Style layer metadata: the line paints each pixel once, with its
+    # strongest coverage (tools/maplibre/patches/10_line_max_blend.py).
+    MAX_BLEND_FLAG = "q2vt:max-blend"
 
     @staticmethod
     def _effect_list(symbol_layer) -> list:
@@ -5113,6 +5124,37 @@ class QgisMapLibreStyleExporter:
         decay = 1.0 - weight / 16.0
         return -1.0 / math.log(decay) if 0 < decay < 1 else 0.0
 
+    @classmethod
+    def effect_sigma(cls, blur_px: float) -> float:
+        """Standard deviation (px) of a glow's or shadow's blur
+        (QgsGlowEffect / QgsShadowEffect::draw): a stack blur up to 16 px,
+        a two-sided exponential (blur_scale) of variance 2 scale^2; above, a
+        Gaussian of sigma radius / 3 (createGaussianKernel)."""
+        radius = int(round(blur_px))
+        if radius <= 0:
+            return 0.0
+        if radius > 16:
+            return radius / 3.0
+        decay = 1.0 - cls._STACK_BLUR_WEIGHTS[radius - 1] / 16.0
+        return math.sqrt(2.0) * -1.0 / math.log(decay)
+
+    @staticmethod
+    def blurred_line(width: float, spread: float, sigma: float):
+        """A MapLibre line profile (half-width, line-blur, opacity factor)
+        for a line of ``width`` px whose ink fades linearly over ``spread``
+        px (a glow's distance ramp, 0 for a shadow), then blurred by a
+        Gaussian of ``sigma``: the fade around the ramp's middle grows to
+        sqrt(spread^2 + 2 pi sigma^2) (a blurred step's slope), the ink
+        across the line is kept (a narrow line blurred wide gets fainter)."""
+        fade = math.sqrt(spread * spread + 2.0 * math.pi * sigma * sigma)
+        half = width / 2.0 + spread / 2.0 + fade / 2.0
+        if fade <= 1e-9:
+            return width / 2.0 + spread, 0.0, 1.0
+        if fade <= half:
+            return half, fade, 1.0
+        # MapLibre fades over the whole half-width: a triangle of the same ink.
+        return half, half, min(1.0, (width + spread) / half)
+
     def _line_blur(self, symbol_layer, layer_def: dict) -> None:
         """A simple line's blur effect (a glowing firefly line), as QGIS
         blurs the drawn line (QgsBlurEffect): a peaked profile fading over
@@ -5139,6 +5181,7 @@ class QgisMapLibreStyleExporter:
             paint["line-blur"] = round(half, 3)
             paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1),
                                            float(effect.opacity()) * min(1.0, width / half))
+            layer_def.setdefault("metadata", {})[self.MAX_BLEND_FLAG] = True
             return
 
     def _line_effect_layers(self, symbol_layer, layer_def: dict):
@@ -5161,15 +5204,24 @@ class QgisMapLibreStyleExporter:
             extra["id"] = f"{layer_def['id']}_fx{index}"
             paint = extra["paint"]
             paint.pop("line-dasharray", None)
-            blur = PropertyExtractor.static_pixels(effect.blurLevel(), effect.blurUnit())
-            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1), float(effect.opacity()))
+            sigma = self.effect_sigma(PropertyExtractor.static_pixels(effect.blurLevel(),
+                                                                      effect.blurUnit()))
+            width = max(PropertyExtractor.static_pixels(symbol_layer.width(),
+                                                        symbol_layer.widthUnit()), 1.0)
+            spread = PropertyExtractor.static_pixels(effect.spread(), effect.spreadUnit()) \
+                if name == "QgsOuterGlowEffect" else 0.0
+            half, fade, ink = self.blurred_line(width, spread, sigma)
+            paint["line-width"] = ex.add(paint["line-width"], 2 * half - width)
+            paint["line-blur"] = round(fade, 3)
+            paint["line-opacity"] = ex.mul(paint.get("line-opacity", 1),
+                                           round(float(effect.opacity()) * ink, 4))
+            # Each pixel painted once, as QGIS's effect image: MapLibre's
+            # segments overlap inside sharp corners (tools/maplibre patch 10).
+            extra.setdefault("metadata", {})[self.MAX_BLEND_FLAG] = True
             if name == "QgsOuterGlowEffect":
-                spread = PropertyExtractor.static_pixels(effect.spread(), effect.spreadUnit())
                 color = effect.color() if _enum_int(effect.colorType()) == 0 or effect.ramp() is None \
                     else effect.ramp().color(0.0)
                 paint["line-color"] = color.name()
-                paint["line-width"] = ex.add(paint["line-width"], 2 * spread)
-                paint["line-blur"] = spread + blur
             else:
                 angle = math.radians(effect.offsetAngle())
                 distance = PropertyExtractor.static_pixels(effect.offsetDistance(), effect.offsetUnit())
@@ -5179,7 +5231,6 @@ class QgisMapLibreStyleExporter:
                                            round(-distance * math.sin(angle + math.pi / 2), 3)]
                 paint["line-translate-anchor"] = "viewport"
                 paint["line-color"] = effect.color().name()
-                paint["line-blur"] = blur
             target.append(extra)
         return below, above
 

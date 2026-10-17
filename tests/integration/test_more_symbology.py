@@ -11,6 +11,7 @@ from qgis.core import (Qgis, QgsCoordinateReferenceSystem, QgsMapSettings, QgsMa
                        QgsProcessingFeedback, QgsPointClusterRenderer,
                        QgsPointDisplacementRenderer, QgsRectangle, QgsSingleSymbolRenderer)
 from qgis.PyQt.QtCore import QPointF, QSize
+from qgis.PyQt.QtGui import QColor
 
 from q2vt_render import ink_mask, mask_difference, render
 
@@ -638,3 +639,77 @@ def test_random_values_of_dense_marker_lines_stay_with_qgis(plugin):
     markers.setInterval(0.3)
     markers.setRotateSymbols(False)
     assert not dense_marker_line(markers)
+
+
+def test_hatch_line_with_custom_dashes_and_solid_style_is_dashed(plugin):
+    """A custom dash pattern dashes a simple line whatever its pen style
+    (QgsSimpleLineSymbolLayer::startRender): such a hatch line is QGIS's
+    dashed brush tile, not a plain solid hatch."""
+    import numpy as np
+    from qgis.core import QgsFillSymbol, QgsLinePatternFillSymbolLayer, QgsLineSymbol, QgsSimpleLineSymbolLayer
+    exporter = _converter()
+    exporter._exact_screen_texture = True
+    line = QgsSimpleLineSymbolLayer(QColor("blue"), 0.4)
+    line.setUseCustomDashPattern(True)
+    line.setCustomDashVector([3.0, 2.0])
+    hatch = QgsLinePatternFillSymbolLayer()
+    hatch.setDistance(2.0)
+    hatch.setLineAngle(0)
+    hatch.setSubSymbol(QgsLineSymbol([line]))
+    exporter._convert_symbol(QgsFillSymbol([hatch]), "s", "src", "q2vt", 14, 24)
+    image = exporter.pattern_images[exporter.style["layers"][0]["paint"]["fill-pattern"]].img_1x
+    alpha = np.asarray(image.getchannel("A"))
+    row = alpha[alpha.max(axis=1).argmax()]
+    assert row.min() < 50  # a gap in the line
+
+
+def _feature_values(layers):
+    values = []
+    for out in layers:
+        for feature in out.getFeatures():
+            values.append({f.name(): feature[f.name()] for f in out.fields()})
+    return values
+
+
+def test_trimmed_line_is_drawn_trimmed(plugin, tmp_path):
+    """Trim distances (map units) shorten every line at both ends."""
+    from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+    layer = _layer("LineString", ["LINESTRING(-100 0, 0 0, 0 100)"], str(tmp_path / "trim.gpkg"))
+    line = QgsSimpleLineSymbolLayer(QColor("black"), 2)
+    line.setTrimDistanceStart(30)
+    line.setTrimDistanceStartUnit(Qgis.RenderUnit.MapUnits)
+    line.setTrimDistanceEnd(20)
+    line.setTrimDistanceEndUnit(Qgis.RenderUnit.MapUnits)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    difference, _, rules, _ = _render_compare(layer, tmp_path)
+    assert any(rule.recipe is not None and rule.recipe.kind == "line_trim" for rule in rules)
+    assert difference < 0.05
+
+
+def test_vertex_markers_and_generator_parts_take_their_own_numbers(plugin, tmp_path):
+    """QGIS evaluates a vertex marker's values per vertex (@geometry_point_num)
+    and a generator sub-symbol's per part (@geometry_part_num, $currentfeature
+    the source feature): a course's control numbers, a measure at every node."""
+    from qgis.core import (QgsFontMarkerSymbolLayer, QgsGeometryGeneratorSymbolLayer, QgsLineSymbol,
+                           QgsMarkerLineSymbolLayer, QgsMarkerSymbol, QgsProperty, QgsSymbolLayer)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_materialize import _export_zooms  # pylint: disable=import-outside-toplevel
+    layer = _layer("LineString", ["LINESTRING(-100 0, 0 0, 0 100, 50 100)"], str(tmp_path / "num.gpkg"))
+    number = QgsFontMarkerSymbolLayer("Arial", "A", 4)
+    number.setDataDefinedProperty(QgsSymbolLayer.Property.PropertyCharacter,
+                                  QgsProperty.fromExpression("@geometry_point_num - 1"))
+    vertices = QgsMarkerLineSymbolLayer()
+    vertices.setPlacements(Qgis.MarkerLinePlacement.InnerVertices)
+    vertices.setSubSymbol(QgsMarkerSymbol([number]))
+    measure = QgsFontMarkerSymbolLayer("Arial", "A", 4)
+    measure.setDataDefinedProperty(
+        QgsSymbolLayer.Property.PropertyCharacter, QgsProperty.fromExpression(
+            "round(distance_to_vertex(geometry($currentfeature), @geometry_part_num - 1))"))
+    nodes = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "nodes_to_points($geometry)",
+                                                    "SymbolType": "Marker"})
+    nodes.setSubSymbol(QgsMarkerSymbol([measure]))
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([vertices, nodes])))
+    layers, _, _ = _export_zooms(plugin, layer, tmp_path, 14, 14, EXTENT)
+    texts = sorted(str(v) for values in _feature_values(layers)
+                   for name, v in values.items() if name.startswith("q2vt_property_char"))
+    assert texts == sorted(["1", "2", "0", "100", "200", "250"])

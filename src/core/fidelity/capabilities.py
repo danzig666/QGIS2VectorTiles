@@ -63,14 +63,18 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "QGIS's offset curves where MapLibre's line-offset would loop at corners "
                "(screen units: per eighth of a zoom up to the zoom where the corners allow "
                "it). Outer glow and drop shadow are blurred lines drawn from a copy "
-               "simplified at the effect's size; inner shadow and inner glow are strips "
-               "across the line coloured by QGIS's own rendering for the line's direction.",
+               "simplified at the effect's size, painting each pixel once as QGIS's effect "
+               "image does (no darker overlap inside sharp corners); inner shadow and inner "
+               "glow are strips across the line coloured by QGIS's own rendering for the "
+               "line's direction. Trimmed lines (trim distance at start / end) are exported "
+               "trimmed: map units and percentages once, screen units per quarter of a zoom.",
                ("Map-unit widths become exponential zoom curves.",
                 "Inner effects are computed for a straight line: where lines overlap or "
                 "nearly touch, QGIS shades their union, the web map each line.",
                 "Other dashes are MapLibre dash arrays: they restart where tiles clip a line.",
-                "Aligned or corner-tweaked dash patterns and trimmed lines use MapLibre "
-                "dash arrays."),
+                "Aligned or corner-tweaked dash patterns use MapLibre dash arrays.",
+                "A data-defined trim, or a trim with an offset or aligned dashes, is drawn "
+                "untrimmed."),
                ("tests/integration/test_converter.py", "tests/integration/test_materialize.py",
                 "tests/browser/test_browser_parity.py")),
     Capability("SimpleMarker", "marker", Strategy.SPRITE,
@@ -110,7 +114,10 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "intervals (with offset along the line; map units exactly, screen units per "
                "sixteenth of a zoom: spacing within ±2.2 %, which adds up along long lines) are "
                "exported as point features at the QGIS positions with the "
-               "line azimuth; polygon outline offsets buffer every ring like QGIS.",
+               "line azimuth; polygon outline offsets buffer every ring like QGIS. Vertex "
+               "markers' values computed per vertex (@geometry_point_num, "
+               "@geometry_point_count: a course's control numbers) are evaluated on every "
+               "vertex; such a data-defined offset in map units moves the point.",
                ("Data-defined intervals, and screen-unit intervals with Fast marker lines on, "
                 "are a native repeated symbol: start position differs and spacing is within "
                 "about ±41 % between integer zooms (reported).",
@@ -127,8 +134,9 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "head and arrow type, the vertex pairing of repeated and curved arrows), filled "
                "with the arrow's fill symbol; a fill's outline is a line on the polygons' "
                "edges (its width, dashes and join). Screen sizes per eighth of a zoom. Opaque "
-               "multi-layer fills (a drop shadow) keep QGIS's per-arrow drawing order; the "
-               "line keeps all its vertices.",
+               "multi-layer fills keep QGIS's per-arrow drawing order; the "
+               "line keeps all its vertices. A drop shadow effect is a blurred line under "
+               "the arrow, as wide as its body.",
                ("Sizes are within +-4.5 % between eighths of a zoom; beyond the archive's "
                 "last zoom the arrows scale with the map.",
                 "Outlines are drawn above all the arrows' fills: where repeated arrows overlap, "
@@ -208,7 +216,10 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
                "Generated geometry is materialized in the layer CRS and coerced to the "
                "sub-symbol type; nested generators are composed as QGIS evaluates them. "
                "Generators in screen units are evaluated per zoom (up to zoom 22) on the "
-               "geometry scaled to those units, y pointing down.",
+               "geometry scaled to those units, y pointing down. The sub-symbol's values "
+               "that read the geometry are evaluated on every part as QGIS does "
+               "(@geometry_part_num, $geometry the generated geometry, $currentfeature the "
+               "source feature).",
                ("Generators nested inside another generator are evaluated in its units.",)),
     Capability("GradientFill", "fill", Strategy.MATERIALIZED,
                "Linear, radial and conical gradients (two colours or a colour ramp, pad / "
@@ -220,8 +231,9 @@ _REGISTRY: Dict[str, Capability] = {c.qgis_type: c for c in [
     Capability("ShapeburstFill", "fill", Strategy.MATERIALIZED,
                "Shading by distance to the boundary as inset colour bands (whole shape or a "
                "set distance, rings ignored when set).",
-               ("Smooth colour change becomes steps of about one level (up to 1024 bands); blur is "
-                "not applied.",
+               ("Smooth colour change becomes steps of about one level (up to 1024 bands); a "
+                "blur is in the band colours (QGIS's stack blur across the edge) for a distance "
+                "in screen units, not applied otherwise.",
                 "A distance in screen units is set per quarter zoom (within about 9 %).")),
     Capability("InterpolatedLine", "line", Strategy.MATERIALIZED,
                "Colour and width interpolated along each line between the per-feature start "

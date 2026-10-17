@@ -98,6 +98,18 @@ def test_2x_sheet_is_rendered_at_double_resolution(sg, tmp_path):
     assert abs(two["width"] / 6 - one["width"] / 3) <= 1
 
 
+def test_retina_1x_pattern_uses_the_2x_pixels_in_both_sheets(sg, tmp_path):
+    from PIL import Image
+    small, big = Image.new("RGBA", (6, 6), "black"), Image.new("RGBA", (12, 12), "black")
+    gen = sg.SpriteGenerator({}, str(tmp_path), 1)
+    gen.pattern_images["p"] = sg.PatternImages(small, big, retina_1x=True)
+    gen.generate()
+    for ratio in (1, 2):
+        entry = gen.index[ratio]["p"]
+        # The same logical size (6 px) from 12 image pixels.
+        assert entry["pixelRatio"] == 2 and entry["width"] == 12
+
+
 def test_screen_unit_point_pattern_texture(plugin, tmp_path):
     from q2vt_plugin.src.core.maplibre_converter import QgisMapLibreStyleExporter
     from qgis.core import QgsPointPatternFillSymbolLayer, Qgis

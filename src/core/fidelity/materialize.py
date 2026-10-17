@@ -42,6 +42,9 @@ DIRECTION_FIELD = "q2vt_mat_dir"     # screen direction bucket of a line run (in
 # QGIS starts the pattern (see materializer.pattern_anchor_kind).
 PATTERN_ANCHOR_X_FIELD = "q2vt_pat_x"
 PATTERN_ANCHOR_Y_FIELD = "q2vt_pat_y"
+# Per-vertex values of vertex markers (materializer._vertex_values): fields
+# q2vt_mat_v0, q2vt_mat_v1...
+VERTEX_FIELD_PREFIX = "q2vt_mat_v"
 RUN_FIELD = "q2vt_mat_run"          # its ordinal along the lines (earlier runs' caps on top)
 
 VERTEX_PLACEMENTS = frozenset({"Vertex", "InnerVertices", "FirstVertex", "LastVertex",
@@ -196,6 +199,37 @@ def offset_line_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str
         f"distance(end_point(@q2vt_off), start_point(@q2vt_src)), "
         f"reverse(@q2vt_off), @q2vt_off)))"
     )
+    return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
+
+
+def trim_line_expression(recipe: Recipe, export_crs: str = "EPSG:3857") -> str:
+    """Lines (or a polygon's rings) shortened at both ends as QGIS trims a
+    simple line (``QgsSymbolLayerUtils::polylineSubstring``): by ``start`` /
+    ``end`` map units of the recipe CRS, or ``start_pct`` / ``end_pct`` per
+    cent of each line's length. A line no longer than a trim, or whose trims
+    meet, is not drawn."""
+    crs = recipe.param("crs") or export_crs
+    polygon = bool(recipe.param("polygon", False))
+    geom = "@geometry" if crs == export_crs else f"transform(@geometry, '{export_crs}', '{crs}')"
+    if polygon:
+        geom = f"boundary({geom})"
+
+    def amount(name):
+        pct = recipe.param(f"{name}_pct")
+        if pct is not None:
+            return f"({float(pct)!r} * 0.01 * @q2vt_len)"
+        return repr(float(recipe.param(name, 0.0) or 0.0))
+    line = "geometry_n(@q2vt_lines, @element)"
+    piece = (f"if(@q2vt_s >= @q2vt_len OR @q2vt_e <= @q2vt_s, NULL, "
+             f"line_substring({line}, @q2vt_s, @q2vt_e))")
+    piece = f"with_variable('q2vt_e', @q2vt_len - {amount('end')}, {piece})"
+    piece = f"with_variable('q2vt_s', {amount('start')}, {piece})"
+    piece = f"with_variable('q2vt_len', length({line}), {piece})"
+    pieces = f"array_foreach(generate_series(1, num_geometries(@q2vt_lines)), {piece})"
+    # geometry_n() reads parts of multi-geometries only.
+    geom = f"with_variable('q2vt_g', {geom}, if(is_multipart(@q2vt_g), @q2vt_g, collect_geometries(@q2vt_g)))"
+    body = (f"with_variable('q2vt_lines', {geom}, collect_geometries("
+            f"array_filter({pieces}, @element IS NOT NULL)))")
     return body if crs == export_crs else f"transform({body}, '{crs}', '{export_crs}')"
 
 

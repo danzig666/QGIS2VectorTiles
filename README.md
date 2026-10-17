@@ -500,7 +500,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.44.0**. Newest first:
+This README describes QWebMap **4.45.0**. Newest first:
+
+**4.45.0** — more QGIS styles drawn as in QGIS
+- Trimmed lines, values computed per vertex or per generated part (course control numbers, measures at nodes), soft glows, drop shadows and arrow shadows without dark corners, dashed hatch lines with a solid line style, and blurred shapeburst fills are drawn as QGIS draws them. Map-unit pattern fills stay sharp between whole zooms.
 
 **4.44.0** — markers along lines placed more exactly
 - Markers spaced in screen units (mm, points) along lines keep QGIS's spacing within ±2.2 % (was ±4.4 %), and a dashed line drawn with them is laid out alike, so letters and ticks stay in the dash gaps QGIS leaves for them (e.g. boundary lines with crosses, outlines with codes).
