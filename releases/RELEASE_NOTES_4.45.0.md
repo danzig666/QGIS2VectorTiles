@@ -12,3 +12,4 @@ This is the **generic** edition — the one to download. (A special Hungarian zo
 - **An arrow's drop shadow** is soft, as in QGIS (it was a hard grey copy).
 - **Hatch lines with a custom dash pattern** are dashed even when their line style is set to solid, as QGIS draws them.
 - **Shapeburst fills with a blur** fade as QGIS's blurred fill does (they faded with a sharp edge).
+- **Point and pattern fills in map units** stay sharp between whole zooms: the web map stretched the texture of the zoom below up to twice its size and blurred the dots into grey.

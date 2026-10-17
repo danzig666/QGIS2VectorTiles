@@ -657,6 +657,8 @@ def test_dense_map_unit_point_pattern_uses_per_zoom_textures(plugin, tmp_path):
     assert pattern[:2] == ["step", ["zoom"]] and pattern[3::2] == list(range(15, 23))
     cells = [exporter.pattern_images[name].img_1x for name in pattern[2::2]]
     assert all(cell.getbbox() is not None for cell in cells)
+    # Stretched up to 2x until the next zoom: the 1x sheet gets the 2x pixels.
+    assert all(exporter.pattern_images[name].retina_1x for name in pattern[2::2])
     # Map-unit textures keep MapLibre's tile-zoom scaling (no screen flag),
     # scaled with the map above the last one; they start at each feature's
     # anchor ("Align pattern to: Feature").

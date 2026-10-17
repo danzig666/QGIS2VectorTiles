@@ -3601,6 +3601,10 @@ class QgisMapLibreStyleExporter:
             self._exact_screen_texture = False
         if not stops:
             return None
+        if not screen_spacing:
+            # Stretched up to 2x until the next zoom: sharp from 2x pixels.
+            for _, name in stops:
+                self.pattern_images[name].retina_1x = True
         # The zoom whose pixels the last texture is drawn in (a whole one).
         self._last_pattern_zoom = stops[-1][0] if screen_spacing else math.floor(stops[-1][0])
         self.context.report(

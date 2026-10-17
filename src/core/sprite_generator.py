@@ -111,6 +111,10 @@ class PatternImages:
     # Image px per logical px of the 1x image (its declared pixelRatio; the
     # 2x image: twice it). A frame scaled up by icon-size keeps sharp edges.
     density: float = 1.0
+    # The 2x image in the 1x sheet too (declared at twice the density): a
+    # map-unit texture MapLibre stretches up to 2x until the next zoom stays
+    # sharp instead of blurring its 1x pixels.
+    retina_1x: bool = False
 
 
 def _pixels_to_millimeters(symbol: QgsSymbol) -> None:
@@ -440,6 +444,12 @@ class SpriteGenerator:
                 entries.append(entry)
         for name, images in self.pattern_images.items():
             density = images.density
+            if images.retina_1x:
+                entries.append(AtlasEntry(name, {
+                    1: (images.img_2x, self.lower_factor * density),
+                    self.lower_factor: (images.img_2x, self.lower_factor * density)},
+                    dict(images.metadata or {})))
+                continue
             entries.append(AtlasEntry(name, {1: (images.img_1x, density),
                                              self.lower_factor: (images.img_2x, self.lower_factor * density)},
                                       dict(images.metadata or {})))
