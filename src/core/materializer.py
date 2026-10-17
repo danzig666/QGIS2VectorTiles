@@ -1825,7 +1825,11 @@ class SymbolMaterializer:
         if start <= visible.min_zoom + 1e-9:
             return shapes
         sprite = flat_rule.derive()
-        sprite.set_attr("i", max(low, min(high, first - 1)))
+        # The tiles of zoom ``first`` carry the sprite too while it is shown
+        # there (from ``first`` up to a fractional ``start``, or beyond the
+        # last tile zoom): without them the marker vanished in between.
+        last = first if start > first + 1e-9 else first - 1
+        sprite.set_attr("i", max(low, min(high, last)))
         sprite.visibility = visible.intersect(ZoomInterval(visible.min_zoom, start))
         sprite._limits_split = True  # pylint: disable=protected-access
         return [sprite] + shapes

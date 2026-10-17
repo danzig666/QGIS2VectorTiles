@@ -736,6 +736,19 @@ def test_always_label_shrinks_no_smaller_than_the_least_readable_size():
     assert on[2][3] == pytest.approx(0.8)
 
 
+def test_a_label_group_reads_the_label_not_its_shadow_copy():
+    """A framed label with a text shadow: the shadow copy (no frame) comes
+    first in the style; the label's box was measured from it."""
+    group = {"layers": [{"def": {"id": "a_q2vt_shadow", "metadata": {"q2vt:shadow-of": "a"}}},
+                        {"def": {"id": "a", "metadata": {}}},
+                        {"def": {"id": "b_q2vt_shadow", "minzoom": 15, "metadata": {"q2vt:shadow-of": "b"}}},
+                        {"def": {"id": "b", "minzoom": 15, "metadata": {}}}]}
+    assert _js(f"m.activeLayer({json.dumps(group)}, 14).id") == "a"
+    assert _js(f"m.activeLayer({json.dumps(group)}, 16).id") == "a"
+    group["layers"][1]["def"]["maxzoom"] = 15
+    assert _js(f"m.activeLayer({json.dumps(group)}, 16).id") == "b"
+
+
 def test_scaled_text_size_keeps_a_dense_zoom_curve():
     size = _js('m.scaledTextSize(["interpolate", ["exponential", 2], ["zoom"], 0, 1, 24, 2 ** 24])')
     assert size[:3] == ["interpolate", ["exponential", 2], ["zoom"]]

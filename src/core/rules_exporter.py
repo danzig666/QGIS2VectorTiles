@@ -111,6 +111,7 @@ from qgis.core import (
     QgsRectangle,
     QgsRuleBasedRenderer,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -3615,6 +3616,37 @@ class RulesExporter:
         options.layerOptions = ["SPATIAL_INDEX=NO"]  # keep the drawing order
         writer = QgsVectorFileWriter.create(out, fields, QgsWkbTypes.Point, source.crs(),
                                             QgsProject.instance().transformContext(), options)
+        # "Offset along line" is in the recipe CRS's units (the project's):
+        # walked there, the position taken back to the lines' CRS.
+        along_crs = recipe.param("crs") if along and recipe is not None else None
+        to_crs = back = None
+        if along_crs and along_crs != source.crs().authid():
+            target = QgsCoordinateReferenceSystem(along_crs)
+            if target.isValid():
+                to_crs = QgsCoordinateTransform(source.crs(), target, QgsProject.instance())
+                back = QgsCoordinateTransform(target, source.crs(), QgsProject.instance())
+
+        def moved_along(xs, ys, placement):
+            if to_crs is None:
+                return marker_points.along_vertex_marker(xs, ys, placement, along)
+            try:
+                walked = [to_crs.transform(x, y) for x, y in zip(xs, ys)]
+                txs, tys = [p.x() for p in walked], [p.y() for p in walked]
+                moved = marker_points.along_vertex_marker(txs, tys, placement, along)
+                if moved is None:
+                    return None
+                point = back.transform(moved[0], moved[1])
+            except QgsCsException:
+                return marker_points.along_vertex_marker(xs, ys, placement, along)
+            # The angle on the drawn (EPSG:3857) line: the same walk scaled
+            # by the line's length ratio (the scale hardly changes along it).
+            length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(zip(xs, ys), zip(xs[1:], ys[1:])))
+            walked_length = sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                                for a, b in zip(zip(txs, tys), zip(txs[1:], tys[1:])))
+            ratio = length / walked_length if walked_length > 0 else 1.0
+            drawn = marker_points.along_vertex_marker(xs, ys, placement, along * ratio)
+            return point.x(), point.y(), drawn[2] if drawn is not None else moved[2]
+
         for feature in source.getFeatures():
             self._check_cancel()
             geometry = feature.geometry()
@@ -3631,7 +3663,7 @@ class RulesExporter:
                 for placement in placements:
                     if along and placement in ("FirstVertex", "LastVertex"):
                         # Moved along the line; none where the line is shorter.
-                        moved = marker_points.along_vertex_marker(xs, ys, placement, along)
+                        moved = moved_along(xs, ys, placement)
                         if moved is not None:
                             number = 1 if placement == "FirstVertex" else len(xs)
                             values, x, y = per_vertex(feature, number, len(xs), moved[0], moved[1],

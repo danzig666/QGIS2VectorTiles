@@ -132,8 +132,8 @@ export function curvedOption(map, layout, zoom, perPx) {
 // options (all optional):
 //   eligible(properties, polygonSourceLayer) -> boolean: only these polygons
 //     get a label (layer/rule toggles, attribute filters);
-//   minTextPx: "always" labels shrink to fit no smaller than this text size
-//     (CSS px; 0: down to half their size);
+//   minTextPx: "always" labels sized in map units shrink to fit no smaller
+//     than this text size (CSS px; 0: down to half their size);
 //   onUnsupported(reason): MapLibre no longer exposes the tile fields this
 //     helper reads (_x/_y/_z/_vectorTileFeature) - labels stay static.
 // Returns {update, sync, groups, snapshot, setEligibility, pause, resume,
@@ -2109,10 +2109,14 @@ export function evaluate(expression, zoom, properties = {}) {
   }
 }
 
-// The style layer of a group drawn at this zoom.
-function activeLayer(group, zoom) {
-  return (group.layers.find(({ def }) => (def.minzoom ?? 0) <= zoom && zoom < (def.maxzoom ?? 25))
-    || group.layers[0]).def;
+// The style layer of a group drawn at this zoom: the label itself, not its
+// shadow copy drawn before it (no background frame: framed labels were
+// placed and fitted as if unframed).
+export function activeLayer(group, zoom) {
+  const shown = ({ def }) => (def.minzoom ?? 0) <= zoom && zoom < (def.maxzoom ?? 25);
+  const label = ({ def }) => !def.metadata?.["q2vt:shadow-of"];
+  return (group.layers.find((l) => shown(l) && label(l)) || group.layers.find(shown)
+    || group.layers.find(label) || group.layers[0]).def;
 }
 
 function groupShown(map, group, zoom) {
@@ -2123,8 +2127,11 @@ function groupShown(map, group, zoom) {
 
 // properties -> [half width, half height] of a label's box in world units,
 // estimated from its text, text size and background padding.
-// The smallest shrink factor of a label that keeps its text ``minPx`` tall.
+// The smallest shrink factor of a label that keeps its text ``minPx`` tall;
+// only text sized in map units (a size growing with the zoom), as the
+// export's "Hide labels smaller than": screen sizes shrink down to half.
 function minTextScale(layout, zoom, minPx) {
+  if (!JSON.stringify(layout["text-size"] ?? 16).includes('"zoom"')) return () => 0;
   return (properties) => {
     const size = Number(evaluate(layout["text-size"] ?? 16, zoom, properties));
     return size > 0 ? Math.min(1, minPx / size) : 0;
