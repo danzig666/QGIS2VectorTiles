@@ -502,7 +502,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.46.0**. Newest first:
+This README describes QWebMap **4.47.0**. Newest first:
+
+**4.47.0** — less browser memory
+- A fill and its outline share one copy of the polygons in the tiles; *Low memory web map* (on by default) keeps the tiles of about one zoom level out of view instead of five.
 
 **4.46.0** — the published area chosen explicitly
 - *Extent*: *Current map view* (the default, asked before each export with its size and tile count), *Extent of a layer*, or a *Fixed area* (drawn or frozen); *Show on map* outlines it. The view of the window's first opening is no longer kept as a fixed extent.
