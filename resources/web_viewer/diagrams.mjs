@@ -166,7 +166,8 @@ export function renderDiagram(spec, size, values, ratio = 1, document_ = globalT
 export function installDiagrams(map, style) {
   const specs = diagramSpecs(style);
   if (!specs.size) return null;
-  const ratio = Math.min(Math.max(Math.ceil(window.devicePixelRatio || 1), 1), 3);
+  // The map's pixel ratio (capped in low memory), not the screen's.
+  const ratio = Math.min(Math.max(Math.ceil(map.getPixelRatio() || 1), 1), 3);
   const drawn = new Set();
   const draw = (id) => {
     const parsed = parseName(id);

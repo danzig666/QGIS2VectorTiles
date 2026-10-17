@@ -1916,3 +1916,39 @@ each parcel twice: polygons for the fill, rings as lines for the outline.
 - **Low memory web map** (`output.lowMemory`, on; manifest `view.lowMemory`): the viewer's map
   is created with `maxTileCacheZoomLevels: 1` (MapLibre: 5; the out-of-view cache holds about
   one view's tiles); the overview map always.
+
+## 4.48.0 — more memory savings
+
+Measured again on the published city map (re-exported with 4.47.0, start view at zoom 10.6,
+1600×900, Chromium): the page's memory (`measureUserAgentSpecificMemory`) was ~135 MB — 48 MB
+main-thread JavaScript, 14 MB worker, 70 MB canvas/WebGL — and the start tiles held only ~36 MB
+(buckets 10 MB, feature index 5 MB, raw tiles 1.5 MB, per-tile icon/pattern atlases 10 MB). The
+style had 809 layers, 445 of them per-zoom copies of map-unit marker layers.
+
+- **Small features left out at lower zooms** (`output.minFeaturePx`, 0.5 CSS px; Publish →
+  *Output* → *Lighter tiles when zoomed out*): for renderer datasets drawn only as fills and
+  lines at most 2 px wide (`GDALTilesGenerator._drawn_small`; not labels, recipes, inverted
+  polygons, heatmaps, clusters, diagrams, colour bands), the zooms below the dataset's last
+  where its smallest feature is under the limit are tiled one zoom per ogr2ogr run with the
+  VRT filtered by the bounding box (`_small_cuts`, `_filtered_jobs`); the last tile zoom keeps
+  every feature. The MVT writer already drops what collapses below 1/8 px.
+- **A quarter-pixel simplification below each dataset's last zoom** with the same option
+  (`SIMPLIFICATION=2` tile units; the last zoom stays exact).
+- **The visible-label loader builds no buckets**: the invisible fill that keeps label polygons
+  loaded has a filter that takes no feature (`querySourceFeatures` reads the tile's data); it
+  used to triangulate every label polygon in every tile. (Pointing it at a source layer no tile
+  has lost the polygons of overzoomed tiles.)
+- **Zoom-split layers joined** (`fidelity.layer_merge`): neighbouring `<id>_z<zoom>` pieces
+  that differ at most in a constant `icon-image` become one layer, the images a step on the
+  zoom (whole zooms only). The city map: 809 → 473 layers.
+- **Viewer** (low memory): pixel ratio capped at 2 (hairlines and diagrams follow
+  `map.getPixelRatio()`); no `getStyle()` copies on moves, layer switches or label updates
+  (`styleLayers`); out-of-view tiles released when the page is hidden or after 60 s idle
+  (`q2vtViewer.releaseTiles()`); the overview map keeps only background, raster, plain fills
+  and lines (no sprite, symbols, patterns or label loaders) at pixel ratio 1.
+- **Measured, not done**: a MapLibre patch dropping raw tile data / feature index entries of
+  layers nobody queries would save ~10 MB (1.5–2 %; querySourceFeatures, identify, snapping and
+  the legend's visible-only mode need most of it); label polygons sharing the fill's dataset,
+  popup fields kept out of the tiles, patterns on demand and pattern textures at low zooms each
+  concern a few MB of the 36 MB the start tiles hold.
+- `tools/bench`: tile buffer / raw data sizes, `--repeat`.

@@ -502,7 +502,10 @@ Documentation: [`docs/publishing/`](docs/publishing/), covering
 
 ## What's new
 
-This README describes QWebMap **4.47.0**. Newest first:
+This README describes QWebMap **4.48.0**. Newest first:
+
+**4.48.0** — still less browser memory
+- *Lighter tiles when zoomed out* (on by default): features under half a pixel are left out of the lower zooms' tiles, which are also simplified a little more; map-unit markers no longer get a style layer per zoom (a city map: 809 → 473 layers); in low memory the map draws at most at pixel ratio 2, releases out-of-view tiles when the tab is hidden or the map is idle, and the overview map draws only plain fills and lines.
 
 **4.47.0** — less browser memory
 - A fill and its outline share one copy of the polygons in the tiles; *Low memory web map* (on by default) keeps the tiles of about one zoom level out of view instead of five.

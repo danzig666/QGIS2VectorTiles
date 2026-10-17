@@ -40,6 +40,7 @@ from .fidelity import feature_order
 from .fidelity import html_labels
 from .fidelity import materialize as mat
 from .fidelity import zoom as fidelity_zoom
+from .fidelity import layer_merge
 from .fidelity.capabilities import SPRITE_FAMILIES, capability, classify
 from .fidelity.diagnostics import DiagnosticCollector, Severity
 from .fidelity.model import ExportProfile, Strategy, ZoomInterval
@@ -2279,6 +2280,7 @@ class QgisMapLibreStyleExporter:
                 self._convert_labeling_style(style)
 
         fidelity_zoom.note_tile_zooms(self.style, self.layer_zooms, self.source_name)
+        self.style["layers"] = layer_merge.join_zoom_split_layers(self.style["layers"])
         self.save_to_file()
         return self.style
 

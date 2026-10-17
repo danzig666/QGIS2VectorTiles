@@ -141,6 +141,7 @@ export function curvedOption(map, layout, zoom, perPx) {
 // (GeoJSON features) last written.
 export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", options = {}) {
   const groups = new Map(); // polygon source layer -> {source, layers: []}
+  // The one copy of the whole style (its label layers are moved below).
   const style = map.getStyle();
   const fonts = fontMetrics(style);
   const tileSource = style.sources[sourceId] || {};
@@ -190,10 +191,15 @@ export function enableVisibleLabels(map, maplibregl, sourceId = "q2vt_tiles", op
   const firstLayer = style.layers.length ? style.layers[0].id : undefined;
   for (const [polygons, group] of groups) {
     // MapLibre loads a source's tiles only for visible layers: an invisible
-    // fill keeps the polygons loaded whatever else is shown.
+    // fill keeps the polygons loaded whatever else is shown. Its filter
+    // takes no feature: querySourceFeatures reads the tile's data, and a
+    // fill of the polygons themselves would build their triangles in every
+    // tile (memory) only to draw nothing. (A source layer no tile has lost
+    // the polygons of overzoomed tiles.)
     const zooms = group.layers.map(({ def }) => [def.minzoom ?? 0, def.maxzoom ?? 24]);
     map.addLayer({
       id: LOADER_PREFIX + polygons, type: "fill", source: sourceId, "source-layer": polygons,
+      filter: ["==", ["literal", 1], 0],
       minzoom: Math.min(...zooms.map((z) => z[0])), maxzoom: Math.max(...zooms.map((z) => z[1])),
       paint: { "fill-opacity": 0 },
     }, firstLayer);
@@ -2144,6 +2150,14 @@ function labelBoxes(map, group, zoom, perPx, fonts) {
                      fonts?.get(layer.metadata?.["q2vt:font"]) || null);
 }
 
+// MapLibre's own style layers in drawing order (id, type, source, metadata,
+// minzoom, maxzoom; paint and layout by map.getPaintProperty and
+// map.getLayoutProperty): map.getStyle() copies the whole style each call,
+// and the boxes of MapLibre's labels are taken on every label update.
+export function styleLayers(map) {
+  return map.getLayersOrder().map((id) => map.getLayer(id)).filter((layer) => layer && layer.type !== "custom");
+}
+
 // The label fonts' advance per character and line height (em) measured at
 // export: style metadata["q2vt:font-metrics"] -> Map(font -> {advance:
 // Map(char -> em), height}); a style layer's metadata["q2vt:font"] names its font.
@@ -2261,8 +2275,8 @@ export function renderedLabelBoxes(map, maplibregl, groups, zoom, perPx, fonts) 
   for (const group of groups.values()) {
     for (const { def } of group.layers) ours.add(def.id).add(def.id + OVERLAP_SUFFIX);
   }
-  const defs = new Map(map.getStyle().layers.filter((l) => l.type === "symbol" && !ours.has(l.id)
-    && (l.layout || {})["text-field"] !== undefined).map((l) => [l.id, l]));
+  const defs = new Map(styleLayers(map).filter((l) => l.type === "symbol" && !ours.has(l.id)
+    && map.getLayoutProperty(l.id, "text-field") !== undefined).map((l) => [l.id, l]));
   const layers = [...defs.keys()];
   if (!layers.length) return [];
   const boxes = [];
@@ -2394,12 +2408,12 @@ function inside(rings, [x, y]) {  // even-odd over every ring
 // Labels placed by enableVisibleLabels are drawn where they are put.
 export function enableOverlapFallback(map) {
   const layers = [];
-  for (const layer of map.getStyle().layers) {
+  for (const layer of styleLayers(map)) {
     if (layer.type !== "symbol" || !(layer.metadata && layer.metadata["q2vt:overlap"] === "if-required")) continue;
-    const layout = layer.layout || {};
-    if (layout["text-overlap"] === "always") continue;  // placed by the viewer
-    if (layout["text-field"] !== undefined) map.setLayoutProperty(layer.id, "text-overlap", "cooperative");
-    if (layout["icon-image"] !== undefined) map.setLayoutProperty(layer.id, "icon-overlap", "cooperative");
+    const layout = (name) => map.getLayoutProperty(layer.id, name);
+    if (layout("text-overlap") === "always") continue;  // placed by the viewer
+    if (layout("text-field") !== undefined) map.setLayoutProperty(layer.id, "text-overlap", "cooperative");
+    if (layout("icon-image") !== undefined) map.setLayoutProperty(layer.id, "icon-overlap", "cooperative");
     layers.push(layer.id);
   }
   const noop = () => {};

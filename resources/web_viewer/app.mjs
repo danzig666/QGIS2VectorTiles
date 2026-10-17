@@ -13,12 +13,19 @@ import { loadLocale, t } from "./i18n.mjs";
 import { fetchChecked, notice, showError, state as diagnostics, warn } from "./diagnostics.mjs";
 import { installDiagrams } from "./diagrams.mjs";
 import { installShadows, prepareShadows } from "./label_shadows.mjs";
+import { styleLayers } from "./style_control.mjs";
 
 export const EXPECTED_MAPLIBRE = "6.14.0";
 const RELEASE_ID = /^r-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
 // Style layers end at zoom 24 (the style spec maximum) and MapLibre hides a
 // layer at exactly its maxzoom: the browser stops just short of it.
 const MAX_VIEW_ZOOM = 23.99;
+// Low memory: the map draws at most 2 device pixels per CSS pixel (a 3x
+// phone or a scaled 4K screen: 2.25x the pixels of 2x in every buffer).
+const MAX_PIXEL_RATIO = 2;
+// Low memory: the tiles kept out of view are let go after a minute without
+// moving the map (and while the page is hidden).
+const IDLE_RELEASE_MS = 60000;
 
 function validateManifest(manifest) {
   if (!manifest || typeof manifest !== "object") throw new ViewerError("Q2VT_PUB_MANIFEST", "manifest is not an object");
@@ -219,7 +226,8 @@ async function start() {
       maxPitch: 0,
       // Low memory (the default): the tiles of about one zoom level are kept
       // out of view (MapLibre: five); returning fetches them again (HTTP cache).
-      ...(view.lowMemory ? { maxTileCacheZoomLevels: 1 } : {}),
+      // The drawing buffer's pixel ratio is capped.
+      ...(view.lowMemory ? { maxTileCacheZoomLevels: 1, pixelRatio: cappedPixelRatio(MAX_PIXEL_RATIO) } : {}),
       dragRotate: false,
       pitchWithRotate: false,
       touchPitch: false,
@@ -263,6 +271,10 @@ async function start() {
       map.once("load", () => { map.off("error", failed); resolve(); });
     });
     document.body.classList.add("q2vt-loaded");
+    if (view.lowMemory) {
+      followScreen(map, MAX_PIXEL_RATIO);
+      viewer.releaseTiles = releaseIdleTiles(map, IDLE_RELEASE_MS);
+    }
     screenHairlines(map);
     const sourceId = manifest.sources[0].id;
     // Layers whose every feature keeps its label (shrunk where it does not fit).
@@ -295,31 +307,82 @@ async function start() {
 start();
 
 
+// The screen's pixel ratio, at most ``cap``.
+export function cappedPixelRatio(cap) {
+  return Math.min(window.devicePixelRatio || 1, cap);
+}
+
+// A pixel ratio given to MapLibre stays as given: when the window moves to
+// a screen of another pixel ratio, the capped ratio follows it (the map
+// resizes its canvas: "resize").
+export function followScreen(map, cap) {
+  const watch = () => matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+    .addEventListener("change", () => {
+      map.setPixelRatio(cappedPixelRatio(cap));
+      watch();
+    }, { once: true });
+  watch();
+}
+
+// Releases the tiles MapLibre keeps out of view (to show again when the map
+// comes back) while the page is hidden and after ``idle`` ms without moving
+// the map; coming back fetches them again (HTTP cache). MapLibre has no
+// public way: its tile managers' out-of-view cache (6.14), checked, so a
+// MapLibre without it keeps its tiles. Returns the release (tiles let go).
+export function releaseIdleTiles(map, idle) {
+  const release = () => {
+    let released = 0;
+    for (const manager of Object.values(map.style?.tileManagers || {})) {
+      const cache = manager && manager._outOfViewCache;
+      if (!cache || typeof cache.reset !== "function" || !Array.isArray(cache.order)) continue;
+      released += cache.order.length;
+      cache.reset();
+    }
+    return released;
+  };
+  let timer = null;
+  const wait = () => {
+    clearTimeout(timer);
+    timer = setTimeout(release, idle);
+  };
+  map.on("movestart", () => clearTimeout(timer));
+  map.on("moveend", wait);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") release();
+  });
+  wait();
+  return release;
+}
+
 // "Thin hairlines" (style metadata q2vt:hairline): the exported width is in
 // device pixels - half of one where lines crowd. A pixel cannot be thinner,
 // only lighter: at a 2x (4K) screen 0.5 CSS px was a whole device pixel,
-// QGIS's hairline. Divided by the screen's pixel ratio (again when the window
-// moves to another screen).
+// QGIS's hairline. Divided by the map's pixel ratio (the screen's, or less
+// in low memory: again when the window moves to another screen).
 export function screenHairlines(map) {
   const exported = new Map();
-  for (const layer of map.getStyle().layers || []) {
-    if (layer.metadata?.["q2vt:hairline"]) exported.set(layer.id, layer.paint?.["line-width"]);
+  for (const layer of styleLayers(map)) {
+    if (layer.metadata?.["q2vt:hairline"]) exported.set(layer.id, map.getPaintProperty(layer.id, "line-width"));
   }
   if (!exported.size) return;
   const scaled = (value, ratio) => (typeof value === "number" ? value / ratio
     : Array.isArray(value) && value[0] === "interpolate"
       ? value.map((v, i) => (i > 3 && i % 2 === 0 && typeof v === "number" ? v / ratio : v)) : value);
+  let applied = null;
   const apply = () => {
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    const ratio = Math.max(1, map.getPixelRatio());
+    if (ratio === applied) return;
+    applied = ratio;
     for (const [id, width] of exported) {
       if (map.getLayer(id)) map.setPaintProperty(id, "line-width", scaled(width, ratio));
     }
-    matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
-      .addEventListener("change", apply, { once: true });
   };
+  const watch = () => matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+    .addEventListener("change", () => { apply(); watch(); }, { once: true });
   apply();
+  watch();
+  map.on("resize", apply);  // a capped pixel ratio changed (followScreen)
 }
-
 
 // "Keep the web map on the extent": the map's centre cannot leave the
 // publication extent, and it zooms out at most one level beyond the zoom

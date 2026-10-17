@@ -2131,6 +2131,13 @@ class PublishDialog(QDialog):
             "The browser keeps the map tiles of about one zoom level besides those on screen (otherwise "
             "five): much less memory with detailed maps (a city's parcels), at the cost of loading tiles "
             "again when you return to a place (usually from the browser's cache)."))
+        self.o_light_tiles = QCheckBox(tr("Lighter tiles when zoomed out: leave out features under half a pixel"))
+        self.o_light_tiles.setToolTip(tr(
+            "Fills and thin lines smaller than half a pixel at a zoom level are left out of that zoom's "
+            "tiles, and the outlines in the tiles of the zoom levels below each layer's last are "
+            "simplified a little more (a quarter pixel). Detailed layers (parcels shown when zoomed out) "
+            "then need less memory and download in the browser. The last zoom level of each layer keeps "
+            "every feature and its exact shape. Off: every feature at every zoom, as QGIS draws them."))
         self.o_fast_markers = QCheckBox(tr("Fast marker lines: let the browser place screen-size line markers"))
         self.o_fast_markers.setToolTip(tr(
             "Marker lines whose spacing is set in screen units (points, millimetres, pixels) keep that "
@@ -2183,6 +2190,7 @@ class PublishDialog(QDialog):
         form.addRow("", self.o_fast_markers)
         form.addRow("", self.o_thin_hairlines)
         form.addRow("", self.o_low_memory)
+        form.addRow("", self.o_light_tiles)
         form.addRow("", small_row)
         form.addRow("", cache_row)
         form.addRow("", _note(tr("Vector layers are always published as vector tiles (MVT) in a "
@@ -2484,6 +2492,7 @@ class PublishDialog(QDialog):
         self.o_fast_markers.setChecked(profile.output.fast_markers)
         self.o_thin_hairlines.setChecked(profile.output.thin_hairlines)
         self.o_low_memory.setChecked(profile.output.low_memory)
+        self.o_light_tiles.setChecked(profile.output.min_feature_px > 0)
         self.o_small_labels.setChecked(profile.output.min_label_px > 0)
         self.o_small_label_px.setEnabled(profile.output.min_label_px > 0)
         if profile.output.min_label_px > 0:
@@ -2773,6 +2782,7 @@ class PublishDialog(QDialog):
         out.fast_markers = self.o_fast_markers.isChecked()
         out.thin_hairlines = self.o_thin_hairlines.isChecked()
         out.low_memory = self.o_low_memory.isChecked()
+        out.min_feature_px = (out.min_feature_px or 0.5) if self.o_light_tiles.isChecked() else 0.0
         out.min_label_px = self.o_small_label_px.value() if self.o_small_labels.isChecked() else 0.0
         out.reuse_unchanged = self.o_reuse.isChecked()
         out.local_versions = self.o_versions.isChecked()

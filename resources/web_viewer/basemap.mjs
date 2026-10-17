@@ -5,6 +5,7 @@
 // Only vector layers of the basemap's own source are accepted.
 // Web basemaps (XYZ tiles, manifest basemap.xyz) are raster tiles loaded by
 // the browser from their own servers (allowed by the page's policy).
+import { styleLayers } from "./style_control.mjs";
 import { ViewerError, checkRelative, registerPmtiles, resolveUrl } from "./transport.mjs";
 
 export const SOURCE_ID = "q2vt_basemap";
@@ -54,8 +55,8 @@ export class Basemap {
 
   // The project's own background colour (shown with no basemap).
   projectBackground() {
-    const layer = (this.map.getStyle()?.layers || []).find((l) => l.type === "background" && !l.id.startsWith(LAYER_PREFIX));
-    const color = layer && layer.paint && layer.paint["background-color"];
+    const layer = styleLayers(this.map).find((l) => l.type === "background" && !l.id.startsWith(LAYER_PREFIX));
+    const color = layer && this.map.getPaintProperty(layer.id, "background-color");
     return typeof color === "string" ? color : null;
   }
 
@@ -109,7 +110,7 @@ export class Basemap {
   // The first project layer that is not the project's own background.
   beforeId() {
     const own = new Set(this.layerIds);
-    for (const layer of this.map.getStyle().layers) {
+    for (const layer of styleLayers(this.map)) {
       if (own.has(layer.id) || layer.id.startsWith(LAYER_PREFIX)) continue;
       if (layer.type === "background") continue;
       return layer.id;
@@ -142,7 +143,7 @@ export class Basemap {
       this.map.addLayer(layer, before);
       this.layerIds.push(layer.id);
     }
-    for (const layer of this.map.getStyle().layers) {
+    for (const layer of styleLayers(this.map)) {
       if (layer.type === "background" && !layer.id.startsWith(LAYER_PREFIX)) {
         this.map.setLayoutProperty(layer.id, "visibility", id === "none" ? "visible" : "none");
       }

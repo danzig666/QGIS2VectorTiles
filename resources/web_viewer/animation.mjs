@@ -6,14 +6,14 @@
 // the symbols out again). It owns the icon-opacity of these layers, so the
 // layer opacity slider (StyleControl) is applied here. The first frame stays
 // when the visitor's system asks for reduced motion and while printing.
-import { scaleValue } from "./style_control.mjs";
+import { scaleValue, styleLayers } from "./style_control.mjs";
 
 export class Animator {
   constructor(map, control = null) {
     this.map = map;
     this.control = control;
     this.groups = new Map(); // group -> {fps, count, frames: [{id, opacity}], current}
-    for (const def of map.getStyle().layers || []) {
+    for (const def of styleLayers(map)) {
       const frame = def.metadata && def.metadata["q2vt:frame"];
       if (!frame || !(frame.count > 1) || !(frame.fps > 0)) continue;
       let group = this.groups.get(frame.group);

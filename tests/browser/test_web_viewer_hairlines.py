@@ -75,3 +75,86 @@ def test_low_memory_is_the_default(site, tmp_path):
     from test_web_viewer_views import _run  # pylint: disable=import-error
     (levels,) = _run(site, [{"eval": "return q2vtViewer.map._maxTileCacheZoomLevels;"}], tmp_path)
     assert levels == 1
+
+
+def test_low_memory_caps_the_pixel_ratio(site, tmp_path, monkeypatch):
+    """A 3x screen: the map draws at 2 device pixels per CSS pixel (its
+    drawing buffer 4/9 of the screen's) and the hairlines follow the map's
+    ratio (half of one of its pixels), again when that ratio changes."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    monkeypatch.setenv("Q2VT_DSF", "3")
+    out = _run(site, [{"eval": "const m = q2vtViewer.map; return [m.getPixelRatio(), m.getCanvas().width];"},
+                      {"eval": WIDTHS},
+                      {"eval": "q2vtViewer.map.setPixelRatio(1); return q2vtViewer.map.getCanvas().width;"},
+                      {"eval": WIDTHS}], tmp_path)
+    (ratio, canvas), before, canvas_1x, after = out
+    assert ratio == 2 and canvas == 1200 * 2 and canvas_1x == 1200
+    assert before and len(before) == len(after)
+    for (width, device), (later, _) in zip(before, after):
+        assert device == 3
+        assert json.loads(width)[4] == pytest.approx(0.35 / 2) and json.loads(later)[4] == pytest.approx(0.35)
+
+
+def test_moving_and_switching_layers_do_not_copy_the_style(site, tmp_path):
+    """map.getStyle() copies every style layer (823 of them in a city's
+    map): the viewer reads MapLibre's own layers instead while the map is
+    moved, layers are switched and features clicked, for the boxes of
+    MapLibre's own labels (every label update of line and "around point"
+    labels) and the original paint of the layer switches."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    (out,) = _run(site, [{"eval": """const v = q2vtViewer, m = v.map, s = v.controls.state;
+      const asset = (name) => import(new URL(`assets/${name}`, v.releaseUrl).href);
+      const [labels, styles, maplibregl] = await Promise.all(
+        ['visible_labels.mjs', 'style_control.mjs', 'maplibre-gl.mjs'].map(asset));
+      let copies = 0;
+      const own = m.getStyle;
+      m.getStyle = function (...args) { copies += 1; return own.apply(this, args); };
+      const settle = () => new Promise((r) => setTimeout(r, 700));
+      const id = v.manifest.layers[0].id, styleId = v.manifest.components[0].styleLayerIds[0];
+      const original = new styles.StyleControl(m, v.manifest).originals.get(styleId);
+      labels.renderedLabelBoxes(m, maplibregl, new Map(), m.getZoom(), 1e-6);
+      m.jumpTo({ center: m.getCenter(), zoom: m.getZoom() + 1 }); await settle();
+      s.setIn('layers', id, false); await settle();
+      const hidden = m.getLayoutProperty(styleId, 'visibility');
+      s.setIn('layers', id, true); await settle();
+      s.setIn('opacity', id, 0.5); await settle();
+      m.panBy([150, 80], { duration: 0 }); await settle();
+      m.fire('click', { point: m.project(m.getCenter()), lngLat: m.getCenter(), originalEvent: new MouseEvent('click') });
+      await settle();
+      m.getStyle = own;
+      const def = m.getStyle().layers.find((l) => l.id === styleId);
+      return { copies, hidden, type: original.type === def.type,
+               zooms: [original.minzoom, original.maxzoom], filter: JSON.stringify(original.filter ?? null) };"""}],
+                  tmp_path)
+    assert out["copies"] == 0 and out["hidden"] == "none" and out["type"], out
+    assert out["zooms"][0] < out["zooms"][1] and out["filter"] != "", out
+
+
+CACHED = """const cached = () => Object.values(q2vtViewer.map.style.tileManagers)
+  .reduce((n, manager) => n + manager._outOfViewCache.order.length, 0);"""
+
+
+def test_tiles_out_of_view_are_released_when_the_page_is_hidden(site, tmp_path):
+    """Low memory: the tiles MapLibre keeps out of view are let go while the
+    page is hidden (and after a minute without moving the map); the map
+    still draws when it comes back."""
+    sys.path.insert(0, HERE)
+    from test_web_viewer_views import _run  # pylint: disable=import-error
+    out = _run(site, [
+        {"eval": CACHED + """const m = q2vtViewer.map, start = { center: m.getCenter(), zoom: m.getZoom() };
+          const idle = () => new Promise((r) => { m.once('idle', r); m.triggerRepaint(); });
+          for (const zoom of [start.zoom + 1, start.zoom + 2, start.zoom]) { m.jumpTo({ zoom }); await idle(); }
+          m.jumpTo({ center: [start.center.lng + 0.01, start.center.lat], zoom: start.zoom + 2 }); await idle();
+          const before = cached();
+          Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+          document.dispatchEvent(new Event('visibilitychange'));
+          const hidden = cached();
+          delete document.visibilityState;
+          m.jumpTo(start); await idle();
+          return { before, hidden, release: typeof q2vtViewer.releaseTiles,
+                   loaded: m.loaded(), shown: m.queryRenderedFeatures().length > 0 };"""},
+    ], tmp_path)
+    assert out[0]["before"] > 0 and out[0]["hidden"] == 0, out
+    assert out[0]["release"] == "function" and out[0]["loaded"] and out[0]["shown"], out

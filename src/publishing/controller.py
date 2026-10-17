@@ -358,6 +358,7 @@ def export_local(project, profile: PublicationProfile, extent_3857, feedback=Non
         fast_markers=profile.output.fast_markers, thin_hairlines=profile.output.thin_hairlines,
         view_max_zoom=profile.view.max_view_zoom,
         min_label_px=profile.output.min_label_px,
+        min_feature_px=profile.output.min_feature_px,
         cap_tiles=True)
     progress.check()
     # The tiles are made in the background (ogr2ogr processes) while the
