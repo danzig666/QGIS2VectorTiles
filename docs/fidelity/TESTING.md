@@ -82,6 +82,17 @@ Every cell is centred on a z14 tile corner, so tile edges cross the shapes at ev
 and each style is rendered at several zooms (`--zooms`, default 14.6, 16.25, 17.8; the
 item score is the mean). The summary line gives the mean per geometry type.
 
+The mismatch is the share of ink (either image) with no ink of the other image within
+1 px. Lines and polygon outlines are ranked by the same measure taken *along the line*
+(`tools/gallery/along.py`): the ink within 32 px of a line (16 px of a polygon ring) may
+match after sliding along the line, by the best shift of each 128 px stretch (at most
+24 px). A marker or dash pattern that sits a few pixels further along the line, as the
+web map's spacing steps allow, then scores as equal, while a missing, extra or misspaced
+marker in the stretch still counts. Line ends, sharp vertices and everything further from
+the line are compared in place; the strict figure is shown next to it. After a change to
+the scoring, `python3 tools/gallery/rescore.py /tmp/gallery` scores an existing run (or a
+`batch_gallery.py` folder) again without exporting or rendering.
+
 Every run also writes `images/compare.html`, a self-contained page of the styles that
 differ: QGIS and browser renders side by side, an overlay (red: ink only QGIS draws,
 cyan: only the browser, grey: both), a swipe slider and a blink view, zoomable to 2x/4x

@@ -35,6 +35,9 @@ import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import along  # noqa: E402  pylint: disable=wrong-import-position
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CELL = 400.0            # map units (Web Mercator metres) per style cell
 GAP = 200.0
@@ -414,7 +417,29 @@ def qgis_render(layer, center, zoom, size, path):
     job.renderedImage().save(path)
 
 
-def score(qgis_png, browser_png):
+def layer_paths(layer):
+    """The lines and polygon rings of ``layer``'s features, in map units:
+    [(points, closed), ...]."""
+    out = []
+    for feature in layer.getFeatures():
+        geometry = feature.geometry()
+        for part in geometry.constParts():
+            rings = [part] if not hasattr(part, "exteriorRing") else \
+                [part.exteriorRing()] + [part.interiorRing(i) for i in range(part.numInteriorRings())]
+            for ring in rings:
+                points = [(v.x(), v.y()) for v in ring.vertices()]
+                closed = hasattr(part, "exteriorRing") or (
+                    len(points) > 2 and points[0] == points[-1])
+                out.append((points, closed))
+    return out
+
+
+def score(qgis_png, browser_png, paths=None, geometry=None):
+    """Shape mismatch (ink of one image not within 1 px of the other's), the
+    same along the lines (along.py: markers and dashes shifted along the
+    line forgiven) and colour mismatch. ``paths``: the view's lines and
+    rings in image pixels."""
+    import numpy as np
     from PIL import Image, ImageChops, ImageFilter
     a = Image.open(qgis_png).convert("RGB")
     b = Image.open(browser_png).convert("RGB")
@@ -430,10 +455,15 @@ def score(qgis_png, browser_png):
     unmatched = sum(1 for v in miss_a.getdata() if v) + sum(1 for v in miss_b.getdata() if v)
     diff = ImageChops.difference(a, b).convert("L")
     diff.save(qgis_png.replace("_qgis.png", "_diff.png"))
-    return {"shape": round(unmatched / total, 4) if total else 0.0,
-            "color": color_score(a, b),
-            "ink_qgis": sum(1 for v in ink_a.getdata() if v),
-            "ink_browser": sum(1 for v in ink_b.getdata() if v)}
+    result = {"shape": round(unmatched / total, 4) if total else 0.0,
+              "color": color_score(a, b),
+              "ink_qgis": sum(1 for v in ink_a.getdata() if v),
+              "ink_browser": sum(1 for v in ink_b.getdata() if v)}
+    along_value = along.along_score(np.asarray(ink_a) > 0, np.asarray(ink_b) > 0, paths or [],
+                                    geometry)
+    if along_value is not None:
+        result["along"] = min(along_value, result["shape"])
+    return result
 
 
 COLOR_TOLERANCE = 40  # levels (0-255) in any channel
@@ -464,24 +494,48 @@ def color_score(a, b) -> float:
     return round(float(bad.sum()) / total, 4)
 
 
+def mean_score(views) -> dict:
+    """A style's score: the mean of its views' (zooms') scores."""
+    result = dict(views[0]["score"])
+    for key in ("shape", "along"):
+        if all(key in v["score"] for v in views):
+            result[key] = round(sum(v["score"][key] for v in views) / len(views), 4)
+    return result
+
+
+def mismatch(score_: dict) -> float:
+    """The mismatch a style is ranked by: along the lines for lines and
+    polygons (markers and dashes shifted along the line forgiven), else the
+    strict shape mismatch."""
+    return score_.get("along", score_["shape"])
+
+
 def sort_cards(cards):
     """Worst first; styles with random values (no fixed answer) last."""
-    cards.sort(key=lambda c: (bool(c.get("random")), -c["score"]["shape"]))
+    cards.sort(key=lambda c: (bool(c.get("random")), -mismatch(c["score"])))
 
 
 def summarize(cards) -> str:
-    """Mean shape mismatch, overall and per geometry, of the styles without
+    """Mean mismatch (along the lines where measured, see mismatch()) and
+    strict shape mismatch, overall and per geometry, of the styles without
     random values."""
     fixed = [c for c in cards if not c.get("random")]
-    mean = sum(c["score"]["shape"] for c in fixed) / max(1, len(fixed))
+
+    def mean(values):
+        return sum(values) / max(1, len(values))
     by_geometry = []
     for geometry in ("Point", "LineString", "Polygon"):
-        values = [c["score"]["shape"] for c in fixed if c["geometry"] == geometry]
-        if values:
-            by_geometry.append(f"{geometry.lower()}s {sum(values) / len(values):.1%} "
-                               f"({len(values)})")
+        mine = [c for c in fixed if c["geometry"] == geometry]
+        if mine:
+            text = f"{geometry.lower()}s {mean([mismatch(c['score']) for c in mine]):.1%}"
+            if geometry != "Point":
+                text += f" (strict {mean([c['score']['shape'] for c in mine]):.1%})"
+            by_geometry.append(f"{text}, {len(mine)} styles")
     random_count = len(cards) - len(fixed)
-    return (f"mean shape mismatch {mean:.1%} ({'; '.join(by_geometry)})"
+    return (f"mean mismatch {mean([mismatch(c['score']) for c in fixed]):.1%}, strict "
+            f"{mean([c['score']['shape'] for c in fixed]):.1%} ({'; '.join(by_geometry)}; "
+            "lines and outlines are compared along the line: markers and dashes shifted "
+            "along it are not counted)"
             + (f", without the {random_count} styles with random values (listed last, marked "
                "random: they draw differently on every render)" if random_count else "")
             + ". Worst first.")
@@ -496,7 +550,7 @@ def write_html(out_dir, cards, summary):
         views = card.get("views") or [{"id": card["id"], "zoom": None, "score": card["score"]}]
         figures = []
         for view in views:
-            at = f" · z{view['zoom']:g} {view['score']['shape']:.1%}" if len(views) > 1 else ""
+            at = f" · z{view['zoom']:g} {mismatch(view['score']):.1%}" if len(views) > 1 else ""
             figures.append(f"""
   <div class="imgs">
     <figure><img src="{esc(view['id'])}_qgis.png" alt="QGIS render of {esc(card['name'])}"><figcaption>QGIS{esc(at)}</figcaption></figure>
@@ -505,7 +559,7 @@ def write_html(out_dir, cards, summary):
   </div>""")
         rows.append(f"""
 <section class="card">
-  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · {esc(card.get('geometry', ''))} · shape mismatch {card['score']['shape']:.1%}{' · random: ' + esc(card['random']) + ', not in the averages' if card.get('random') else ''}</small></h2>{''.join(figures)}
+  <h2>{esc(card['name'])} <small>{esc(card['kind'])} · {esc(card.get('geometry', ''))} · mismatch {mismatch(card['score']):.1%}{f" (strict {card['score']['shape']:.1%})" if 'along' in card['score'] else ''}{' · random: ' + esc(card['random']) + ', not in the averages' if card.get('random') else ''}</small></h2>{''.join(figures)}
   <ul class="diags">{diags or '<li class="ok">No diagnostics</li>'}</ul>
 </section>""")
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -656,7 +710,7 @@ def main():
             if isinstance(value, str):
                 image_owner[value] = style_layer["id"]
     cards = []
-    for item, layer in zip(items, layers):
+    for item, layer, center in zip(items, layers, centers):
         index = tree_index[layer.id()]
         prefix = f"l{index:02d}t"
 
@@ -670,13 +724,14 @@ def main():
                            "message": f"QGIS did not finish its reference render in {RENDER_TIMEOUT_S} s; "
                                       "the QGIS image is blank."})
         per_zoom = []
+        map_paths = layer_paths(layer)
         for k, zoom in enumerate(zooms):
+            paths = along.view_paths(map_paths, center, zoom, args.size, EARTH)
             result = score(os.path.join(img_dir, f"{view_id(item, k)}_qgis.png"),
-                           os.path.join(img_dir, f"{view_id(item, k)}_browser.png"))
+                           os.path.join(img_dir, f"{view_id(item, k)}_browser.png"),
+                           paths, item["geometry"])
             per_zoom.append({"id": view_id(item, k), "zoom": zoom, "score": result})
-        # The item's score is the mean over its zooms.
-        result = dict(per_zoom[0]["score"])
-        result["shape"] = round(sum(v["score"]["shape"] for v in per_zoom) / len(per_zoom), 4)
+        result = mean_score(per_zoom)
         cards.append({"id": item["id"], "name": item["name"], "kind": item["kind"],
                       "geometry": item["geometry"], "score": result, "diagnostics": own,
                       "views": per_zoom, "random": item.get("random", "")})
