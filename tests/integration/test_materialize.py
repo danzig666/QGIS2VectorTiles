@@ -3334,9 +3334,10 @@ def test_marker_values_read_the_whole_line(plugin, tmp_path):
     assert values == lengths
 
 
-def test_arrow_drop_shadow_is_a_shifted_fill(plugin, tmp_path):
-    """An arrow's drop shadow (drawn under it) is a fill of the shadow's
-    colour under the arrow, shifted as QGIS shifts it: it was dropped."""
+def test_arrow_drop_shadow_is_a_blurred_line(plugin, tmp_path):
+    """An arrow's drop shadow (drawn under it) is a line as wide as the
+    arrow's body under it, carrying the shadow effect (the converter blurs
+    and shifts it as QGIS): it was dropped, then a hard shifted copy."""
     from qgis.core import QgsArrowSymbolLayer, QgsDropShadowEffect, QgsEffectStack, QgsDrawSourceEffect
     layer = _layer("LineString", LINES, str(tmp_path / "shadow.gpkg"))
     arrow = QgsArrowSymbolLayer()
@@ -3348,8 +3349,14 @@ def test_arrow_drop_shadow_is_a_shifted_fill(plugin, tmp_path):
     arrow.setPaintEffect(stack)
     layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([arrow])))
     _, rules, diags = _export(plugin, layer, tmp_path)
-    fills = [r for r in rules if r.rule.symbol().type() == Qgis.SymbolType.Fill]
-    colors = {(r.rule.symbol().symbolLayer(0).color().alpha(), r.translate is not None)
-              for r in fills}
-    assert (128, True) in colors or (127, True) in colors
-    assert diags.by_code("Q2VT_UNSUPPORTED_EFFECT")
+    def shadow_line(rule):
+        layer = rule.rule.symbol().symbolLayer(0)
+        effect = layer.paintEffect() if rule.rule.symbol().type() == Qgis.SymbolType.Line else None
+        return effect is not None and effect.type() == "effectStack" and \
+            [e.type() for e in effect.effectList()] == ["dropShadow"]
+    shadows = [r for r in rules if shadow_line(r)]
+    assert len(shadows) == 1
+    line = shadows[0].rule.symbol().symbolLayer(0)
+    assert line.color().alpha() == 0
+    assert abs(line.width() - (arrow.arrowWidth() + arrow.arrowStartWidth()) / 2) < 1e-9
+    assert rules.index(shadows[0]) == 0  # under the arrow
